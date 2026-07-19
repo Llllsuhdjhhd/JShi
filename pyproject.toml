@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "jshi"
 version = "0.1.0"
-description = "A model-independent framework for a long-lived AI companion."
+description = "Subject-process experiment for a long-lived AI companion."
 readme = "doc/总体架构.md"
 requires-python = ">=3.11"
 dependencies = []

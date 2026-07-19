@@ -1,25 +1,5 @@
-"""跨子系统共享的稳定契约。"""
+"""跨模块共享的轻量契约。"""
 
-from .contracts import (
-    CandidateChange,
-    Event,
-    EventKind,
-    Plugin,
-    PluginContext,
-    PluginManifest,
-    Provenance,
-    SubjectState,
-    TruthStatus,
-)
+from .contracts import Provenance, SubjectState
 
-__all__ = [
-    "CandidateChange",
-    "Event",
-    "EventKind",
-    "Plugin",
-    "PluginContext",
-    "PluginManifest",
-    "Provenance",
-    "SubjectState",
-    "TruthStatus",
-]
+__all__ = ["Provenance", "SubjectState"]
