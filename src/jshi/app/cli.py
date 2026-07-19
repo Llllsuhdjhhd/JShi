@@ -4,18 +4,16 @@ import argparse
 import os
 from pathlib import Path
 
-from jshi.chance import NoChancePolicy
-from jshi.governance import GovernanceService
-from jshi.identity import (
-    IdentityProfile,
-    IdentityRepository,
-    SimpleSelfPort,
-)
-from jshi.infrastructure import PluginRegistry, SQLiteEventStore
-from jshi.inner import InnerActivity, InnerActivityKind
-from jshi.mind import default_mind_plugins
+from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import EchoModel, ModelPort, OpenAICompatibleModel
-from jshi.orchestration import Orchestrator
+from jshi.subject import (
+    EpistemicStatus,
+    HistoryKind,
+    PersonalKind,
+    PersonalStatus,
+    SubjectProcess,
+    SubjectRepository,
+)
 
 
 def _model_from_environment() -> ModelPort:
@@ -27,23 +25,17 @@ def _model_from_environment() -> ModelPort:
     return EchoModel()
 
 
-def _runtime(data_dir: Path) -> tuple[Orchestrator, IdentityRepository, SQLiteEventStore]:
+def _runtime(
+    data_dir: Path,
+) -> tuple[SubjectProcess, IdentityRepository, SubjectRepository]:
     identities = IdentityRepository(data_dir / "identities.json")
-    events = SQLiteEventStore(data_dir / "events.sqlite3")
-    orchestrator = Orchestrator(
-        event_store=events,
-        identities=identities,
-        self_port=SimpleSelfPort(),
-        plugins=PluginRegistry(default_mind_plugins()),
-        model=_model_from_environment(),
-        governance=GovernanceService(),
-        chance=NoChancePolicy(),
-    )
-    return orchestrator, identities, events
+    subjects = SubjectRepository(data_dir / "subject.sqlite3")
+    process = SubjectProcess(subjects, identities, _model_from_environment())
+    return process, identities, subjects
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="匠石主体框架")
+    parser = argparse.ArgumentParser(description="匠石主体过程实验框架")
     parser.add_argument(
         "--data-dir",
         type=Path,
@@ -56,32 +48,72 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--name", default="匠石")
     create.add_argument("--origin", default="基础型匠石")
 
-    chat = commands.add_parser("chat", help="进行一轮外部互动")
-    chat.add_argument("subject_id")
-    chat.add_argument("text")
-
-    inner = commands.add_parser("inner", help="触发一次内在活动")
-    inner.add_argument("subject_id")
-    inner.add_argument("prompt")
-    inner.add_argument(
-        "--kind",
-        choices=[kind.value for kind in InnerActivityKind],
-        default=InnerActivityKind.REFLECTION.value,
+    experience = commands.add_parser(
+        "experience", aliases=["chat"], help="进行一次外部活动"
     )
-    inner.add_argument("--imagine", action="store_true")
+    experience.add_argument("subject_id")
+    experience.add_argument("text")
 
-    events = commands.add_parser("events", help="查看事件")
-    events.add_argument("subject_id")
-    events.add_argument("--limit", type=int, default=20)
+    reflect = commands.add_parser(
+        "reflect", aliases=["inner"], help="进行一次内部反思"
+    )
+    reflect.add_argument("subject_id")
+    reflect.add_argument("prompt")
 
-    state = commands.add_parser("state", help="查看身份摘要")
+    add = commands.add_parser("add-personal", help="添加个人内容")
+    add.add_argument("subject_id")
+    add.add_argument("kind", choices=[kind.value for kind in PersonalKind])
+    add.add_argument("content")
+
+    close = commands.add_parser("close-personal", help="结束关切、承诺等个人内容")
+    close.add_argument("item_id")
+    close.add_argument(
+        "status",
+        choices=[
+            PersonalStatus.COMPLETED.value,
+            PersonalStatus.RELEASED.value,
+            PersonalStatus.SUPERSEDED.value,
+        ],
+    )
+    close.add_argument("reason")
+
+    transition = commands.add_parser("transition", help="改变一项认知的认识状态")
+    transition.add_argument("content_id")
+    transition.add_argument(
+        "status",
+        choices=[
+            EpistemicStatus.CONSIDERING.value,
+            EpistemicStatus.PROVISIONAL.value,
+            EpistemicStatus.ACCEPTED.value,
+            EpistemicStatus.REJECTED.value,
+            EpistemicStatus.SUSPENDED.value,
+            EpistemicStatus.REVISED.value,
+        ],
+    )
+    transition.add_argument("reason")
+
+    personal = commands.add_parser("personal", help="查看个人世界")
+    personal.add_argument("subject_id")
+    personal.add_argument(
+        "--kind", choices=[kind.value for kind in PersonalKind], default=None
+    )
+    personal.add_argument("--all", action="store_true")
+
+    history = commands.add_parser("history", help="查看事实或主体历史")
+    history.add_argument("subject_id")
+    history.add_argument(
+        "--kind", choices=[kind.value for kind in HistoryKind], default=None
+    )
+    history.add_argument("--limit", type=int, default=20)
+
+    state = commands.add_parser("state", help="查看身份和活跃个人内容")
     state.add_argument("subject_id")
     return parser
 
 
 def main() -> None:
     args = _parser().parse_args()
-    orchestrator, identities, events = _runtime(args.data_dir)
+    process, identities, subjects = _runtime(args.data_dir)
 
     if args.command == "create":
         identities.create(
@@ -93,30 +125,53 @@ def main() -> None:
             )
         )
         print(f"已创建：{args.subject_id}")
-    elif args.command == "chat":
-        result = orchestrator.interact(args.subject_id, args.text)
-        print(result.output_event.content["text"])
-    elif args.command == "inner":
-        activity = InnerActivity(
-            kind=InnerActivityKind(args.kind),
-            prompt=args.prompt,
-            allow_imagination=args.imagine,
+    elif args.command in {"experience", "chat"}:
+        result = process.experience(args.subject_id, args.text)
+        print(result.action_text)
+        print(f"[活动 {result.activity.id}；认知 {result.thought.id}]")
+    elif args.command in {"reflect", "inner"}:
+        result = process.reflect(args.subject_id, args.prompt)
+        print(result.content)
+        print(f"[认知 {result.id}；状态 {result.epistemic_status.value}]")
+    elif args.command == "add-personal":
+        item = process.add_personal_item(
+            args.subject_id, PersonalKind(args.kind), args.content
         )
-        result = orchestrator.run_inner(args.subject_id, activity)
-        print(result.output_event.content["text"])
-    elif args.command == "events":
-        for event in events.list_for_subject(args.subject_id, args.limit):
+        print(f"已添加：{item.id}")
+    elif args.command == "close-personal":
+        item = process.close_personal_item(
+            args.item_id, PersonalStatus(args.status), args.reason
+        )
+        print(f"已更新：{item.id} -> {item.status.value}")
+    elif args.command == "transition":
+        content = process.transition_cognition(
+            args.content_id, EpistemicStatus(args.status), args.reason
+        )
+        print(f"已更新：{content.id} -> {content.epistemic_status.value}")
+    elif args.command == "personal":
+        kind = PersonalKind(args.kind) if args.kind else None
+        for item in subjects.list_personal_items(
+            args.subject_id, kind=kind, active_only=not args.all
+        ):
             print(
-                f"{event.created_at.isoformat()} "
-                f"{event.kind.value}/{event.truth_status.value} {dict(event.content)}"
+                f"{item.id} {item.kind.value}/{item.status.value} "
+                f"r{item.revision} {item.content}"
+            )
+    elif args.command == "history":
+        kind = HistoryKind(args.kind) if args.kind else None
+        for record in subjects.list_history(args.subject_id, kind, args.limit):
+            print(
+                f"{record.created_at.isoformat()} "
+                f"{record.kind.value}/{record.event_type} {dict(record.content)}"
             )
     elif args.command == "state":
         profile = identities.get(args.subject_id)
+        items = subjects.list_personal_items(args.subject_id)
         print(
             f"{profile.name} ({profile.subject_id})\n"
             f"来源：{profile.origin}\n"
             f"叙事：{profile.narrative}\n"
-            f"修订：{profile.revision}"
+            f"活跃个人内容：{len(items)}"
         )
 
 

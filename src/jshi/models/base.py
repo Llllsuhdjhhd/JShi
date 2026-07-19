@@ -36,7 +36,7 @@ class EchoModel:
     name = "echo"
 
     def generate(self, request: ModelRequest) -> ModelResponse:
-        if request.purpose == "inner":
+        if request.purpose in {"inner", "reflection"}:
             text = f"我正在回顾：{request.input_text}"
         else:
             text = f"我听见了：{request.input_text}"
@@ -56,10 +56,18 @@ class OpenAICompatibleModel:
         return self._model
 
     def generate(self, request: ModelRequest) -> ModelResponse:
+        personal_context = json.dumps(
+            request.context, ensure_ascii=False, default=str
+        )
         system = (
             f"{request.subject_state.identity_summary}\n"
             f"当前立场：{request.subject_state.current_stance}\n"
             f"重要价值：{', '.join(request.subject_state.salient_values)}\n"
+            f"持续关切：{', '.join(request.subject_state.concerns)}\n"
+            f"已有承诺：{', '.join(request.subject_state.commitments)}\n"
+            f"相关个人世界：{personal_context}\n"
+            "这些内容属于当前匠石的个人历史和认知处境。"
+            "不要把推断或想象写成已经发生的事实。"
             "请区分事实、推断、反思和想象。"
         )
         payload = json.dumps(
