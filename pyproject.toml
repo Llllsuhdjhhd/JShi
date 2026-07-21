@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jshi"
+version = "0.1.0"
+description = "Subject-process experiment for a long-lived AI companion."
+readme = "doc/总体架构.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+jshi = "jshi.app.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jshi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
