@@ -41,13 +41,39 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
     assert result.activity.status is ActivityStatus.COMPLETED
     assert result.thought.epistemic_status is EpistemicStatus.CONSIDERING
     assert result.thought.model == "context-model"
+    assert result.current_state.open_matter_ids == ()
     facts = repository.list_history("stone", HistoryKind.FACT)
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
     assert [item.event_type for item in facts] == [
         "external_input",
         "language_action",
     ]
-    assert subject[-1].event_type == "cognitive_content_appeared"
+    assert [item.event_type for item in subject] == [
+        "current_state_assembled",
+        "cognitive_content_appeared",
+    ]
+
+
+def test_assemble_loads_existing_open_matter_only(tmp_path):
+    process, repository = runtime(tmp_path)
+    open_matter = process.propose_open_matter(
+        "stone",
+        "继续理解朋友最近的疲倦",
+        source_ids=("seed-source",),
+    )
+
+    assembled = process.assemble_current_state("stone", "今天先聊到这里")
+
+    assert open_matter.id in assembled.open_matter_ids
+    assert "继续理解朋友最近的疲倦" in assembled.subject_state.concerns
+    # Assembly must not create new personal items.
+    assert len(repository.list_personal_items("stone", PersonalKind.CONCERN)) == 1
+
+
+def test_propose_open_matter_requires_sources(tmp_path):
+    process, _repository = runtime(tmp_path)
+    with pytest.raises(ValueError, match="source_ids"):
+        process.propose_open_matter("stone", "无来源的跟进", source_ids=())
 
 
 def test_epistemic_transition_preserves_revision_history(tmp_path):
@@ -78,10 +104,12 @@ def test_epistemic_transition_preserves_revision_history(tmp_path):
         )
 
 
-def test_concern_and_commitment_persist_and_close_explicitly(tmp_path):
+def test_open_matter_and_commitment_persist_and_close_explicitly(tmp_path):
     process, repository = runtime(tmp_path)
-    concern = process.add_personal_item(
-        "stone", PersonalKind.CONCERN, "继续理解朋友最近的疲倦"
+    concern = process.propose_open_matter(
+        "stone",
+        "继续理解朋友最近的疲倦",
+        source_ids=("manual-seed",),
     )
     commitment = process.add_personal_item(
         "stone", PersonalKind.COMMITMENT, "下次继续询问他的近况"
@@ -91,14 +119,20 @@ def test_concern_and_commitment_persist_and_close_explicitly(tmp_path):
     assert concern.id in result.activity.active_concern_ids
     assert commitment.content in result.action_text
 
+    closed_open = process.close_personal_item(
+        concern.id, PersonalStatus.RELEASED, "暂时放下，改日再问"
+    )
     closed = process.close_personal_item(
         commitment.id, PersonalStatus.COMPLETED, "已经在后续交流中履行"
     )
+    assert closed_open.status is PersonalStatus.RELEASED
     assert closed.status is PersonalStatus.COMPLETED
-    assert repository.list_personal_items(
-        "stone", PersonalKind.COMMITMENT
-    ) == ()
+    assert repository.list_personal_items("stone", PersonalKind.COMMITMENT) == ()
+    assert repository.list_personal_items("stone", PersonalKind.CONCERN) == ()
     assert repository.list_transitions(commitment.id)[0].reason == "已经在后续交流中履行"
+
+    later = process.assemble_current_state("stone", "又见面了")
+    assert later.open_matter_ids == ()
 
 
 def test_same_cognition_forms_different_outputs_from_personal_world(tmp_path):
@@ -128,3 +162,17 @@ def test_reflection_is_internal_cognition_not_external_fact(tmp_path):
     assert repository.get_activity(reflection.activity_id).status is ActivityStatus.COMPLETED
     subject_history = repository.list_history("stone", HistoryKind.SUBJECT)
     assert subject_history[-1].event_type == "reflection"
+
+
+def test_propose_open_matter_after_experience_links_thought(tmp_path):
+    process, repository = runtime(tmp_path)
+    result = process.experience("stone", "他看起来很累")
+    open_matter = process.propose_open_matter(
+        "stone",
+        "继续关心他的疲倦",
+        source_ids=(result.thought.id,),
+    )
+    assert open_matter.source_ids == (result.thought.id,)
+    assert repository.list_history("stone", HistoryKind.SUBJECT)[-1].event_type == (
+        "personal_item_created"
+    )

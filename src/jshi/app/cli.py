@@ -65,6 +65,20 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("kind", choices=[kind.value for kind in PersonalKind])
     add.add_argument("content")
 
+    propose = commands.add_parser(
+        "propose-open",
+        help="在认知之后记录主体面未完成现实（必须带来源认知或事实标识）",
+    )
+    propose.add_argument("subject_id")
+    propose.add_argument("content")
+    propose.add_argument(
+        "--source",
+        action="append",
+        dest="sources",
+        required=True,
+        help="来源标识，可重复；通常为认知内容 id",
+    )
+
     close = commands.add_parser(
         "close-personal", help="结束未完成现实（主体面）、承诺等个人内容"
     )
@@ -110,6 +124,12 @@ def _parser() -> argparse.ArgumentParser:
 
     state = commands.add_parser("state", help="查看身份和活跃个人内容")
     state.add_argument("subject_id")
+
+    preview = commands.add_parser(
+        "preview-state", help="预览进模型前的当前状态组装（不调用模型）"
+    )
+    preview.add_argument("subject_id")
+    preview.add_argument("text")
     return parser
 
 
@@ -140,6 +160,13 @@ def main() -> None:
             args.subject_id, PersonalKind(args.kind), args.content
         )
         print(f"已添加：{item.id}")
+    elif args.command == "propose-open":
+        item = process.propose_open_matter(
+            args.subject_id,
+            args.content,
+            source_ids=tuple(args.sources),
+        )
+        print(f"已记录未完成现实（主体面）：{item.id}")
     elif args.command == "close-personal":
         item = process.close_personal_item(
             args.item_id, PersonalStatus(args.status), args.reason
@@ -175,6 +202,16 @@ def main() -> None:
             f"叙事：{profile.narrative}\n"
             f"活跃个人内容：{len(items)}"
         )
+    elif args.command == "preview-state":
+        assembled = process.assemble_current_state(args.subject_id, args.text)
+        print(f"输入：{assembled.input_text}")
+        print(f"价值：{list(assembled.subject_state.salient_values)}")
+        print(f"承诺：{list(assembled.subject_state.commitments)}")
+        print(f"未完成现实（主体面）：{list(assembled.subject_state.concerns)}")
+        print(f"开放事项 id：{list(assembled.open_matter_ids)}")
+        print("召回：")
+        for item in assembled.recalled:
+            print(f"  - {item.event_type}: {item.text}")
 
 
 if __name__ == "__main__":

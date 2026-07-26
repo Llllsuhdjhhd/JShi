@@ -5,6 +5,7 @@ from typing import Sequence
 
 from jshi.core import Provenance, SubjectState
 from jshi.identity import IdentityRepository
+from jshi.memory import InProcessHistoryMemory, MemoryPort, RecalledFragment
 from jshi.models import ModelPort, ModelRequest
 
 from .domain import (
@@ -27,25 +28,57 @@ from .repository import SubjectRepository
 
 
 @dataclass(frozen=True)
+class AssembledCurrentState:
+    """Pre-model working set. Never invents subject-facing open matter."""
+
+    input_text: str
+    subject_state: SubjectState
+    personal_items: tuple[PersonalItem, ...]
+    open_matter_ids: tuple[str, ...]
+    recalled: tuple[RecalledFragment, ...]
+
+
+@dataclass(frozen=True)
 class SubjectActivityResult:
     activity: Activity
     perception: CognitiveContent
     thought: CognitiveContent
     action_text: str
+    current_state: AssembledCurrentState
 
 
 class SubjectProcess:
-    """Minimal subject loop: experience, cognition, stance, action and history."""
+    """Minimal subject loop: assemble current state, cognize, act, record."""
 
     def __init__(
         self,
         repository: SubjectRepository,
         identities: IdentityRepository,
         cognition: ModelPort,
+        memory: MemoryPort | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
         self.cognition = cognition
+        self.memory = memory or InProcessHistoryMemory(repository)
+
+    def assemble_current_state(
+        self, subject_id: str, input_text: str
+    ) -> AssembledCurrentState:
+        """Build the pre-model current state from existing records only."""
+        personal = tuple(self._relevant_personal_world(subject_id))
+        open_matter = tuple(
+            item for item in personal if item.kind is PersonalKind.CONCERN
+        )
+        recalled = tuple(self.memory.recall(subject_id, input_text))
+        subject_state = self._subject_state(subject_id, personal)
+        return AssembledCurrentState(
+            input_text=input_text,
+            subject_state=subject_state,
+            personal_items=personal,
+            open_matter_ids=tuple(item.id for item in open_matter),
+            recalled=recalled,
+        )
 
     def experience(self, subject_id: str, text: str) -> SubjectActivityResult:
         fact = HistoryRecord(
@@ -56,14 +89,28 @@ class SubjectProcess:
         )
         self.repository.add_history(fact)
 
-        concerns = self.repository.list_personal_items(
-            subject_id, PersonalKind.CONCERN
+        current = self.assemble_current_state(subject_id, text)
+        self.repository.add_history(
+            HistoryRecord(
+                subject_id=subject_id,
+                kind=HistoryKind.SUBJECT,
+                event_type="current_state_assembled",
+                content={
+                    "input": text,
+                    "open_matter_ids": list(current.open_matter_ids),
+                    "value_count": len(current.subject_state.salient_values),
+                    "commitment_count": len(current.subject_state.commitments),
+                    "recalled_event_ids": [item.event_id for item in current.recalled],
+                },
+                source_ids=(fact.id, *current.open_matter_ids),
+            )
         )
+
         activity = Activity(
             subject_id=subject_id,
             kind=ActivityKind.EXTERNAL,
             trigger=fact.id,
-            active_concern_ids=tuple(item.id for item in concerns),
+            active_concern_ids=current.open_matter_ids,
         )
         self.repository.add_activity(activity)
 
@@ -78,21 +125,30 @@ class SubjectProcess:
         )
         self.repository.add_cognitive_content(perception)
 
-        personal = self._relevant_personal_world(subject_id)
+        model_context = tuple(
+            {
+                "id": item.id,
+                "kind": item.kind.value,
+                "content": item.content,
+                "status": item.status.value,
+            }
+            for item in current.personal_items
+        ) + tuple(
+            {
+                "id": item.event_id,
+                "kind": "recalled_fact",
+                "content": item.text,
+                "status": "active",
+                "event_type": item.event_type,
+            }
+            for item in current.recalled
+        )
         response = self.cognition.generate(
             ModelRequest(
                 purpose="subject_activity",
                 input_text=text,
-                subject_state=self._subject_state(subject_id, personal),
-                context=tuple(
-                    {
-                        "id": item.id,
-                        "kind": item.kind.value,
-                        "content": item.content,
-                        "status": item.status.value,
-                    }
-                    for item in personal
-                ),
+                subject_state=current.subject_state,
+                context=model_context,
             )
         )
         thought = CognitiveContent(
@@ -102,7 +158,11 @@ class SubjectProcess:
             content=response.text,
             epistemic_status=EpistemicStatus.CONSIDERING,
             evidence_kind=EvidenceKind.COGNITIVE_REASONING,
-            source_ids=(perception.id, *(item.id for item in personal)),
+            source_ids=(
+                perception.id,
+                *(item.id for item in current.personal_items),
+                *(item.event_id for item in current.recalled),
+            ),
             model=response.model,
         )
         self.repository.add_cognitive_content(thought)
@@ -137,23 +197,20 @@ class SubjectProcess:
         completed = self.repository.update_activity(
             activity.id, status=ActivityStatus.COMPLETED
         )
-        return SubjectActivityResult(completed, perception, thought, response.text)
+        return SubjectActivityResult(
+            completed, perception, thought, response.text, current
+        )
 
     def reflect(self, subject_id: str, prompt: str) -> CognitiveContent:
+        current = self.assemble_current_state(subject_id, prompt)
         recent_history = self.repository.list_history(subject_id, limit=20)
         activity = Activity(
             subject_id=subject_id,
             kind=ActivityKind.INTERNAL,
             trigger=prompt,
-            active_concern_ids=tuple(
-                item.id
-                for item in self.repository.list_personal_items(
-                    subject_id, PersonalKind.CONCERN
-                )
-            ),
+            active_concern_ids=current.open_matter_ids,
         )
         self.repository.add_activity(activity)
-        personal = self._relevant_personal_world(subject_id)
         history_text = "\n".join(
             f"{item.kind.value}:{item.event_type}:{dict(item.content)}"
             for item in recent_history
@@ -162,10 +219,10 @@ class SubjectProcess:
             ModelRequest(
                 purpose="reflection",
                 input_text=f"{prompt}\n近期历史：\n{history_text}",
-                subject_state=self._subject_state(subject_id, personal),
+                subject_state=current.subject_state,
                 context=tuple(
                     {"kind": item.kind.value, "content": item.content}
-                    for item in personal
+                    for item in current.personal_items
                 ),
             )
         )
@@ -267,6 +324,27 @@ class SubjectProcess:
         )
         return item
 
+    def propose_open_matter(
+        self,
+        subject_id: str,
+        content: str,
+        *,
+        source_ids: tuple[str, ...],
+    ) -> PersonalItem:
+        """Record subject-facing open matter after cognition, with required sources.
+
+        This is never called by assemble_current_state. Call it only once a
+        cognitive result (or human judgment) has identified unfinished follow-through.
+        """
+        if not source_ids:
+            raise ValueError(
+                "Subject-facing open matter requires source_ids "
+                "(cognitive content or fact ids)"
+            )
+        return self.add_personal_item(
+            subject_id, PersonalKind.CONCERN, content, source_ids=source_ids
+        )
+
     def close_personal_item(
         self, item_id: str, status: PersonalStatus, reason: str
     ) -> PersonalItem:
@@ -302,8 +380,8 @@ class SubjectProcess:
     def _relevant_personal_world(
         self, subject_id: str, limit: int = 50
     ) -> Sequence[PersonalItem]:
-        # First implementation is intentionally transparent. Retrieval may be replaced later.
-        items = self.repository.list_personal_items(subject_id)
+        # Active items only; transparent selection for the minimal experiment.
+        items = self.repository.list_personal_items(subject_id, active_only=True)
         return items[-limit:]
 
     def _subject_state(
@@ -326,5 +404,8 @@ class SubjectProcess:
             salient_values=values,
             commitments=commitments,
             concerns=concerns,
-            provenance=Provenance(source="subject_process"),
+            provenance=Provenance(
+                source="assembled_current_state",
+                method="load_existing_only",
+            ),
         )
