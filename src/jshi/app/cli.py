@@ -65,7 +65,9 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("kind", choices=[kind.value for kind in PersonalKind])
     add.add_argument("content")
 
-    close = commands.add_parser("close-personal", help="结束关切、承诺等个人内容")
+    close = commands.add_parser(
+        "close-personal", help="结束未完成现实（主体面）、承诺等个人内容"
+    )
     close.add_argument("item_id")
     close.add_argument(
         "status",
