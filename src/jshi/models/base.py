@@ -63,7 +63,7 @@ class OpenAICompatibleModel:
             f"{request.subject_state.identity_summary}\n"
             f"当前立场：{request.subject_state.current_stance}\n"
             f"重要价值：{', '.join(request.subject_state.salient_values)}\n"
-            f"持续关切：{', '.join(request.subject_state.concerns)}\n"
+            f"未完成现实（主体面）：{', '.join(request.subject_state.concerns)}\n"
             f"已有承诺：{', '.join(request.subject_state.commitments)}\n"
             f"相关个人世界：{personal_context}\n"
             "这些内容属于当前匠石的个人历史和认知处境。"

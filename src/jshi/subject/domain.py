@@ -20,6 +20,8 @@ class PersonalKind(StrEnum):
     VALUE = "value"
     RELATIONSHIP = "relationship"
     COMMITMENT = "commitment"
+    # Subject-facing open matter（未完成现实·主体面）. Legacy name: concern.
+    # Distinct from memory-facing unsealed/unclosed events.
     CONCERN = "concern"
     CAPABILITY = "capability"
     AESTHETIC = "aesthetic"

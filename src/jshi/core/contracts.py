@@ -19,7 +19,11 @@ class Provenance:
 
 @dataclass(frozen=True)
 class SubjectState:
-    """Snapshot passed to the cognitive model for one activity."""
+    """Snapshot passed to the cognitive model for one activity.
+
+    ``concerns`` holds subject-facing open matter texts already stored for this
+    subject (未完成现实·主体面). It must not be invented at assemble time.
+    """
 
     subject_id: str
     identity_summary: str
