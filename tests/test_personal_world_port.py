@@ -116,3 +116,22 @@ def test_subject_process_uses_injected_port(runtime):
     assembled = process.assemble_current_state("stone", "输入")
 
     assert [item.content for item in assembled.personal_items] == ["仅此一条"]
+
+
+def test_standing_constraints_returns_commitments_and_concerns(runtime):
+    repository, identities = runtime
+    process = SubjectProcess(repository, identities, FixedModel())
+    process.add_personal_item("stone", PersonalKind.VALUE, "价值甲")
+    commitment = process.add_personal_item(
+        "stone", PersonalKind.COMMITMENT, "始终履约"
+    )
+    concern = process.propose_open_matter(
+        "stone", "继续追问", source_ids=("seed",)
+    )
+
+    constraints = InProcessPersonalWorld(repository).standing_constraints("stone")
+
+    ids = {item.id for item in constraints}
+    assert commitment.id in ids
+    assert concern.id in ids
+    assert not any(item.kind is PersonalKind.VALUE for item in constraints)

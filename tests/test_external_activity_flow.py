@@ -80,7 +80,10 @@ def test_phase1_input_fact_is_recorded_first(runtime):
         "language_action",
     ]
     assert facts[0].kind is HistoryKind.FACT
-    assert facts[0].content == {"text": "今天有些疲倦", "source": "human"}
+    assert facts[0].content["text"] == "今天有些疲倦"
+    assert facts[0].content["source"] == "human"
+    assert facts[0].content["object_id"] is None
+    assert facts[0].content["object_status"] == "unknown"
     assert facts[0].source_ids == ()
 
 
@@ -270,13 +273,14 @@ def test_phase6_subject_history_records_assembly_and_cognition(runtime):
 
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
     assert [item.event_type for item in subject] == [
+        "input_attributed",
         "current_state_assembled",
         "cognitive_content_appeared",
     ]
     input_fact = repository.list_history("stone", HistoryKind.FACT)[0]
     assert input_fact.id in subject[0].source_ids
-    assert subject[1].content["cognitive_content_id"] == result.thought.id
-    assert subject[1].content["epistemic_status"] == "considering"
+    assert subject[2].content["cognitive_content_id"] == result.thought.id
+    assert subject[2].content["epistemic_status"] == "considering"
 
 
 def test_phase6_epistemic_transition_is_audited(runtime):

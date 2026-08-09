@@ -212,8 +212,18 @@ def main() -> None:
             f"活跃个人内容：{len(items)}"
         )
     elif args.command == "preview-state":
-        assembled = process.assemble_current_state(args.subject_id, args.text)
+        preview = process.preview_state(args.subject_id, args.text)
+        assembled = preview.assembled
         print(f"输入：{assembled.input_text}")
+        print(
+            f"说话人：{preview.speaker.label}（对象 {preview.speaker.object_id}，"
+            f"置信度 {preview.speaker.confidence}，状态 {preview.speaker.status}）"
+        )
+        print(
+            f"归属：{list(preview.attribution.concern_ids)}"
+            f"（{preview.attribution.status}，依据 {list(preview.attribution.basis)}）"
+        )
+        print(f"组装模式：{preview.mode}")
         print(f"价值：{list(assembled.subject_state.salient_values)}")
         print(f"承诺：{list(assembled.subject_state.commitments)}")
         print(f"未完成现实（主体面）：{list(assembled.subject_state.concerns)}")

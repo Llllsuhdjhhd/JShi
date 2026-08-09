@@ -49,6 +49,7 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
         "language_action",
     ]
     assert [item.event_type for item in subject] == [
+        "input_attributed",
         "current_state_assembled",
         "cognitive_content_appeared",
     ]

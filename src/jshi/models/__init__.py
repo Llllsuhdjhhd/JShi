@@ -1,4 +1,11 @@
-from .base import EchoModel, ModelPort, ModelRequest, ModelResponse, OpenAICompatibleModel
+from .base import (
+    EchoModel,
+    ModelPort,
+    ModelRequest,
+    ModelResponse,
+    OpenAICompatibleModel,
+    RecallRequest,
+)
 
 __all__ = [
     "EchoModel",
@@ -6,4 +13,5 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "OpenAICompatibleModel",
+    "RecallRequest",
 ]

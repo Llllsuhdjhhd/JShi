@@ -17,10 +17,21 @@ class ModelRequest:
 
 
 @dataclass(frozen=True)
+class RecallRequest:
+    """追加召回请求：认知活动发现一次装载不够时由模型结构化提出。"""
+
+    query: str
+    budget: int = 3
+    object_ids: tuple[str, ...] = ()
+    anchor_event_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ModelResponse:
     text: str
     model: str
     metadata: Mapping[str, Any] | None = None
+    recall_requests: tuple[RecallRequest, ...] = ()
 
 
 class ModelPort(Protocol):

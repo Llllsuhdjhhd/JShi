@@ -24,6 +24,10 @@ class PersonalWorldPort(Protocol):
         self, subject_id: str, query: str, *, budget: int = 20
     ) -> Sequence[PersonalItem]: ...
 
+    def standing_constraints(self, subject_id: str) -> Sequence[PersonalItem]:
+        """承诺与主体面未完成现实（常驻约束清单），供归属判断与始终装载。"""
+        ...
+
 
 class InProcessPersonalWorld:
     """最小实现：进程内按重要程度排序、预算内截断。"""
@@ -47,3 +51,9 @@ class InProcessPersonalWorld:
         )
         remain = max(budget - len(constraints), 0)
         return tuple(constraints + ranked[:remain])
+
+    def standing_constraints(self, subject_id: str) -> Sequence[PersonalItem]:
+        items = self._repository.list_personal_items(subject_id, active_only=True)
+        return tuple(
+            item for item in items if item.kind in self._constraint_kinds
+        )
