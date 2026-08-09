@@ -64,6 +64,12 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("subject_id")
     add.add_argument("kind", choices=[kind.value for kind in PersonalKind])
     add.add_argument("content")
+    add.add_argument(
+        "--importance",
+        type=float,
+        default=1.0,
+        help="重要程度（装载时按此排序、预算内截断）",
+    )
 
     propose = commands.add_parser(
         "propose-open",
@@ -157,7 +163,10 @@ def main() -> None:
         print(f"[认知 {result.id}；状态 {result.epistemic_status.value}]")
     elif args.command == "add-personal":
         item = process.add_personal_item(
-            args.subject_id, PersonalKind(args.kind), args.content
+            args.subject_id,
+            PersonalKind(args.kind),
+            args.content,
+            importance=args.importance,
         )
         print(f"已添加：{item.id}")
     elif args.command == "propose-open":

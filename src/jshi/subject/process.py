@@ -7,6 +7,7 @@ from jshi.core import Provenance, SubjectState
 from jshi.identity import IdentityRepository
 from jshi.memory import InProcessHistoryMemory, MemoryPort, RecalledFragment
 from jshi.models import ModelPort, ModelRequest
+from jshi.personalworld import InProcessPersonalWorld, PersonalWorldPort
 
 from .domain import (
     ALLOWED_EPISTEMIC_TRANSITIONS,
@@ -56,17 +57,19 @@ class SubjectProcess:
         identities: IdentityRepository,
         cognition: ModelPort,
         memory: MemoryPort | None = None,
+        personal_world: PersonalWorldPort | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
         self.cognition = cognition
         self.memory = memory or InProcessHistoryMemory(repository)
+        self.personal_world = personal_world or InProcessPersonalWorld(repository)
 
     def assemble_current_state(
         self, subject_id: str, input_text: str
     ) -> AssembledCurrentState:
         """Build the pre-model current state from existing records only."""
-        personal = tuple(self._relevant_personal_world(subject_id))
+        personal = tuple(self.personal_world.select(subject_id, input_text))
         open_matter = tuple(
             item for item in personal if item.kind is PersonalKind.CONCERN
         )
@@ -301,12 +304,17 @@ class SubjectProcess:
         kind: PersonalKind,
         content: str,
         source_ids: tuple[str, ...] = (),
+        importance: float = 1.0,
     ) -> PersonalItem:
+        metadata: dict[str, object] = {}
+        if importance != 1.0:
+            metadata["importance"] = importance
         item = PersonalItem(
             subject_id=subject_id,
             kind=kind,
             content=content,
             source_ids=source_ids,
+            metadata=metadata,
         )
         self.repository.add_personal_item(item)
         self.repository.add_history(
@@ -376,13 +384,6 @@ class SubjectProcess:
             )
         )
         return updated
-
-    def _relevant_personal_world(
-        self, subject_id: str, limit: int = 50
-    ) -> Sequence[PersonalItem]:
-        # Active items only; transparent selection for the minimal experiment.
-        items = self.repository.list_personal_items(subject_id, active_only=True)
-        return items[-limit:]
 
     def _subject_state(
         self, subject_id: str, personal: Sequence[PersonalItem]

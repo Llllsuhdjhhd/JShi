@@ -1,0 +1,351 @@
+"""外部活动完整参与图的逐阶段测试。
+
+目标流程（与"外部活动完整参与图"一一对应）：
+
+    阶段0  应用入口：CLI 触发 experience
+    阶段1  记录入口：事实历史 external_input
+    阶段2  当前状态组装：身份 + 个人世界 + 已有未完成现实 + 记忆召回
+    阶段3  活动建立：Activity 挂载开放事项/意图
+    阶段4  认知活动：感知（已接受）→ 模型推断（考虑中）→ 认识状态
+    阶段5  行动：语言行动 language_action
+    阶段6  收尾与沉淀：活动完成、双历史、状态迁移审计、新未完成现实
+
+测试使用确定性的 RecordingModel，断言每个阶段"哪些系统参与、
+产生什么记录、状态如何迁移"；虚线部分（意图填充、结果反馈、
+治理检验）以"锁定当前缺口"的断言记录现状。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from jshi.app import cli
+from jshi.identity import IdentityProfile, IdentityRepository
+from jshi.models import ModelRequest, ModelResponse
+from jshi.subject import (
+    ActivityKind,
+    ActivityStatus,
+    CognitiveKind,
+    EpistemicStatus,
+    EvidenceKind,
+    HistoryKind,
+    PersonalKind,
+    PersonalStatus,
+    SubjectProcess,
+    SubjectRepository,
+)
+
+
+class RecordingModel:
+    """记录每一次模型请求的确定性测试模型。"""
+
+    name = "recording-model"
+
+    def __init__(self) -> None:
+        self.requests: list[ModelRequest] = []
+
+    def generate(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        return ModelResponse(text="这是模型的回应。", model=self.name)
+
+
+@pytest.fixture
+def runtime(tmp_path):
+    identities = IdentityRepository(tmp_path / "identities.json")
+    identities.create(
+        IdentityProfile(
+            subject_id="stone",
+            name="匠石",
+            origin="测试基础型",
+            narrative="我是匠石，从共同基础出发。",
+        )
+    )
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    model = RecordingModel()
+    process = SubjectProcess(repository, identities, model)
+    return process, repository, model, identities
+
+
+# 阶段1：记录入口 -----------------------------------------------------------
+
+
+def test_phase1_input_fact_is_recorded_first(runtime):
+    process, repository, _model, _identities = runtime
+
+    process.experience("stone", "今天有些疲倦")
+
+    facts = repository.list_history("stone", HistoryKind.FACT)
+    assert [item.event_type for item in facts] == [
+        "external_input",
+        "language_action",
+    ]
+    assert facts[0].kind is HistoryKind.FACT
+    assert facts[0].content == {"text": "今天有些疲倦", "source": "human"}
+    assert facts[0].source_ids == ()
+
+
+# 阶段2：当前状态组装 -------------------------------------------------------
+
+
+def test_phase2_assembly_loads_all_personal_world_systems(runtime):
+    process, repository, _model, _identities = runtime
+    process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
+    process.add_personal_item("stone", PersonalKind.COMMITMENT, "下次继续询问近况")
+    process.add_personal_item("stone", PersonalKind.RELATIONSHIP, "与朋友的信任在加深")
+    process.add_personal_item("stone", PersonalKind.CAPABILITY, "能耐心倾听")
+    process.add_personal_item("stone", PersonalKind.AESTHETIC, "喜欢朴素真诚的表达")
+    process.add_personal_item(
+        "stone", PersonalKind.SELF_UNDERSTANDING, "还在学习如何拒绝"
+    )
+    concern = process.propose_open_matter(
+        "stone", "继续理解朋友的疲倦", source_ids=("seed",)
+    )
+    process.experience("stone", "先打个招呼")  # 为召回预置一段事实历史
+
+    result = process.experience("stone", "今天又见面了")
+    assembled = result.current_state
+    state = assembled.subject_state
+
+    # 身份系统
+    assert state.subject_id == "stone"
+    assert "匠石" in state.identity_summary
+    assert "测试基础型" in state.identity_summary
+    assert state.current_stance == "我是匠石，从共同基础出发。"
+    # 个人世界系统
+    assert "优先坦率表达" in state.salient_values
+    assert "下次继续询问近况" in state.commitments
+    assert "继续理解朋友的疲倦" in state.concerns
+    assert len(assembled.personal_items) == 7
+    # 未完成现实系统：只装载已有主体面，不新增
+    assert concern.id in assembled.open_matter_ids
+    assert len(repository.list_personal_items("stone", PersonalKind.CONCERN)) == 1
+    # 记忆系统：召回参与组装（返回的片段来自该匠石的事实历史）
+    assert len(assembled.recalled) > 0
+    assert all(item.kind == "fact" for item in assembled.recalled)
+
+
+def test_phase2_recall_returns_relevant_past_facts(runtime):
+    process, _repository, _model, _identities = runtime
+    result = process.experience("stone", "今天有些疲倦")
+
+    assembled = process.assemble_current_state("stone", "今天有些疲倦")
+
+    # 查询与既往输入完全一致（子串匹配），应能召回该输入事实
+    ids = {item.event_id for item in assembled.recalled}
+    assert result.activity.trigger in ids
+    assert all(item.kind == "fact" for item in assembled.recalled)
+
+
+def test_phase2_assembly_provenance_marks_source(runtime):
+    process, _repository, _model, _identities = runtime
+
+    assembled = process.assemble_current_state("stone", "今天有些疲倦")
+
+    provenance = assembled.subject_state.provenance
+    assert provenance.source == "assembled_current_state"
+    assert provenance.method == "load_existing_only"
+    assert assembled.subject_state.uncertainties == ()
+
+
+# 阶段3：活动建立 -----------------------------------------------------------
+
+
+def test_phase3_activity_is_external_mounted_and_completed(runtime):
+    process, repository, _model, _identities = runtime
+    concern = process.propose_open_matter(
+        "stone", "继续理解朋友的疲倦", source_ids=("seed",)
+    )
+
+    result = process.experience("stone", "今天有些疲倦")
+
+    activity = result.activity
+    assert activity.kind is ActivityKind.EXTERNAL
+    assert activity.status is ActivityStatus.COMPLETED
+    assert concern.id in activity.active_concern_ids
+    # 意图系统：字段存在但当前未填充（虚线缺口，锁定现状）
+    assert activity.intention_ids == ()
+    # 触发源指向阶段1的输入事实
+    input_fact = repository.list_history("stone", HistoryKind.FACT)[0]
+    assert activity.trigger == input_fact.id
+
+    stored = repository.get_activity(activity.id)
+    assert stored.status is ActivityStatus.COMPLETED
+    assert stored.active_concern_ids == activity.active_concern_ids
+
+
+# 阶段4：认知活动 -----------------------------------------------------------
+
+
+def test_phase4_perception_is_accepted_report(runtime):
+    process, _repository, _model, _identities = runtime
+
+    result = process.experience("stone", "今天有些疲倦")
+
+    perception = result.perception
+    assert perception.kind is CognitiveKind.PERCEPTION
+    assert perception.epistemic_status is EpistemicStatus.ACCEPTED
+    assert perception.evidence_kind is EvidenceKind.REPORT
+    assert perception.activity_id == result.activity.id
+    assert perception.content == "对方表达：今天有些疲倦"
+    assert len(perception.source_ids) == 1  # 感知以输入事实为来源
+
+
+def test_phase4_thought_is_considering_inference(runtime):
+    process, repository, _model, _identities = runtime
+
+    result = process.experience("stone", "今天有些疲倦")
+
+    thought = result.thought
+    assert thought.kind is CognitiveKind.INFERENCE
+    assert thought.epistemic_status is EpistemicStatus.CONSIDERING
+    assert thought.evidence_kind is EvidenceKind.COGNITIVE_REASONING
+    assert thought.model == "recording-model"
+    # 来源链：感知 → 推断
+    assert result.perception.id in thought.source_ids
+    stored = repository.get_cognitive_content(thought.id)
+    assert stored.epistemic_status is EpistemicStatus.CONSIDERING
+
+
+def test_phase4_model_request_receives_subject_state_and_context(runtime):
+    process, _repository, model, _identities = runtime
+    process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
+    process.add_personal_item("stone", PersonalKind.COMMITMENT, "下次继续询问近况")
+    process.add_personal_item("stone", PersonalKind.AESTHETIC, "喜欢朴素真诚的表达")
+    concern = process.propose_open_matter(
+        "stone", "继续理解朋友的疲倦", source_ids=("seed",)
+    )
+    process.experience("stone", "先打个招呼")  # 预置召回
+
+    result = process.experience("stone", "今天有些疲倦")
+    request = model.requests[-1]
+
+    assert request.purpose == "subject_activity"
+    assert request.input_text == "今天有些疲倦"
+    assert request.subject_state.subject_id == "stone"
+    assert "优先坦率表达" in request.subject_state.salient_values
+    assert concern.id in result.current_state.open_matter_ids
+
+    kinds = {item["kind"] for item in request.context}
+    assert {"value", "commitment", "concern", "aesthetic"} <= kinds
+    assert any(item["kind"] == "recalled_fact" for item in request.context)
+
+
+# 阶段5：行动与结果 ---------------------------------------------------------
+
+
+def test_phase5_language_action_recorded_in_fact_history(runtime):
+    process, repository, model, _identities = runtime
+
+    result = process.experience("stone", "今天有些疲倦")
+
+    facts = repository.list_history("stone", HistoryKind.FACT)
+    action = facts[-1]
+    assert action.event_type == "language_action"
+    assert action.kind is HistoryKind.FACT
+    assert action.content["text"] == "这是模型的回应。"
+    assert action.content["model"] == model.name
+    assert action.content["activity_id"] == result.activity.id
+    assert result.action_text == "这是模型的回应。"
+
+
+def test_phase5_external_result_feedback_is_not_yet_implemented(runtime):
+    """锁定当前缺口：行动结果反馈尚未实现（图中虚线部分）。"""
+    process, repository, _model, _identities = runtime
+
+    process.experience("stone", "今天有些疲倦")
+
+    event_types = {
+        item.event_type for item in repository.list_history("stone", HistoryKind.FACT)
+    }
+    assert "external_result" not in event_types
+
+
+# 阶段6：收尾与沉淀 ---------------------------------------------------------
+
+
+def test_phase6_subject_history_records_assembly_and_cognition(runtime):
+    process, repository, _model, _identities = runtime
+
+    result = process.experience("stone", "今天有些疲倦")
+
+    subject = repository.list_history("stone", HistoryKind.SUBJECT)
+    assert [item.event_type for item in subject] == [
+        "current_state_assembled",
+        "cognitive_content_appeared",
+    ]
+    input_fact = repository.list_history("stone", HistoryKind.FACT)[0]
+    assert input_fact.id in subject[0].source_ids
+    assert subject[1].content["cognitive_content_id"] == result.thought.id
+    assert subject[1].content["epistemic_status"] == "considering"
+
+
+def test_phase6_epistemic_transition_is_audited(runtime):
+    process, repository, _model, _identities = runtime
+    result = process.experience("stone", "今天有些疲倦")
+
+    updated = process.transition_cognition(
+        result.thought.id,
+        EpistemicStatus.PROVISIONAL,
+        "目前证据有限，先暂时接受",
+    )
+
+    assert updated.epistemic_status is EpistemicStatus.PROVISIONAL
+    transitions = repository.list_transitions(result.thought.id)
+    assert [(t.from_state, t.to_state, t.reason) for t in transitions] == [
+        ("considering", "provisional", "目前证据有限，先暂时接受")
+    ]
+    assert repository.list_history("stone", HistoryKind.SUBJECT)[-1].event_type == (
+        "epistemic_transition"
+    )
+
+
+def test_phase6_proposed_open_matter_persists_into_next_activity(runtime):
+    process, repository, _model, _identities = runtime
+    result = process.experience("stone", "他看起来很累")
+    concern = process.propose_open_matter(
+        "stone", "继续关心他的疲倦", source_ids=(result.thought.id,)
+    )
+
+    later = process.experience("stone", "又见面了")
+    assert concern.id in later.activity.active_concern_ids
+    assert concern.id in later.current_state.open_matter_ids
+    assert "继续关心他的疲倦" in later.current_state.subject_state.concerns
+
+    # 显式关闭后不再进入后续活动
+    process.close_personal_item(concern.id, PersonalStatus.RELEASED, "暂时放下")
+    final = process.experience("stone", "改天再聊")
+    assert final.current_state.open_matter_ids == ()
+
+
+# 阶段0：应用入口 -----------------------------------------------------------
+
+
+def test_phase0_cli_experience_triggers_full_flow(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("JSHI_MODEL_ENDPOINT", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_NAME", raising=False)
+    data_dir = tmp_path / "cli-data"
+
+    monkeypatch.setattr(
+        "sys.argv", ["jshi", "--data-dir", str(data_dir), "create", "stone"]
+    )
+    cli.main()
+    assert "已创建：stone" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["jshi", "--data-dir", str(data_dir), "experience", "stone", "你好"],
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "我听见了：你好" in out
+    assert "[活动" in out
+
+    identities = IdentityRepository(data_dir / "identities.json")
+    subjects = SubjectRepository(data_dir / "subject.sqlite3")
+    facts = subjects.list_history("stone", HistoryKind.FACT)
+    assert [item.event_type for item in facts] == ["external_input", "language_action"]
+    activities = subjects.list_activities("stone")
+    assert len(activities) == 1
+    assert activities[0].kind is ActivityKind.EXTERNAL
+    assert activities[0].status is ActivityStatus.COMPLETED

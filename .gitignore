@@ -3,5 +3,14 @@ __pycache__/
 .pytest_cache/
 .venv/
 .jshi/
+.jshi-*/
+.jshi-try/
 dist/
 build/
+
+# 《白痴》测试：本地详细报告（样例可放 reports/archive/）
+tests/idiot/reports/*
+!tests/idiot/reports/README.md
+!tests/idiot/reports/_template.md
+!tests/idiot/reports/archive/
+!tests/idiot/reports/archive/**
