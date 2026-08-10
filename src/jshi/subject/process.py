@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Sequence
 
 from jshi.attention import ChancePort, PlaceholderChance
@@ -15,11 +15,14 @@ from jshi.governance import (
 from jshi.identity import IdentityRepository
 from jshi.intent import IntentPort, PlaceholderIntent
 from jshi.memory import InProcessHistoryMemory, MemoryPort, RecalledFragment
-from jshi.models import ModelPort, ModelRequest, RecallRequest
+from jshi.models import ModelPort, ModelRequest, ObjectAssessment, RecallRequest
 from jshi.personalworld import InProcessPersonalWorld, PersonalWorldPort
 from jshi.recognition import (
+    MIN_OBJECT_CONFIDENCE,
+    ObjectProfile,
+    ObjectProfileRepository,
     ObjectRecognitionPort,
-    PlaceholderObjectRecognition,
+    ProfileObjectRecognition,
     SpeakerCandidate,
 )
 from jshi.reflection import PlaceholderReflection, ReflectionPort
@@ -107,7 +110,8 @@ class SubjectProcess:
         self.cognition = cognition
         self.memory = memory or InProcessHistoryMemory(repository)
         self.personal_world = personal_world or InProcessPersonalWorld(repository)
-        self.recognition = recognition or PlaceholderObjectRecognition()
+        self.profiles = ObjectProfileRepository(repository.path)
+        self.recognition = recognition or ProfileObjectRecognition(self.profiles)
         self.attribution = attribution or PlaceholderAttribution()
         self.intent = intent or PlaceholderIntent()
         self.feedback = feedback or PlaceholderResultFeedback()
@@ -180,9 +184,17 @@ class SubjectProcess:
         )
         return self.chance.apply("assemble", assembled)
 
-    def preview_state(self, subject_id: str, input_text: str) -> SubjectPreview:
+    def preview_state(
+        self,
+        subject_id: str,
+        input_text: str,
+        *,
+        object_ref: str | None = None,
+        channel: str | None = None,
+    ) -> SubjectPreview:
         """预览进模型前的当前状态（只读，不落库、不调用模型）。"""
-        speaker = self.recognition.identify(subject_id, input_text)
+        self._require_object_source(object_ref, channel)
+        speaker = self.recognition.resolve(subject_id, input_text, object_ref, channel)
         attribution, _ = self._judge_attribution(subject_id, input_text)
         if attribution.concern_ids:
             assembled = self._assemble_concern_centric(
@@ -226,9 +238,37 @@ class SubjectProcess:
     # 外部活动主流程
     # ------------------------------------------------------------------
 
-    def experience(self, subject_id: str, text: str) -> SubjectActivityResult:
-        # 阶段① 身份系统识别 + 落位（原文永不改写，携带对象标识）
-        speaker = self.recognition.identify(subject_id, text)
+    def experience(
+        self,
+        subject_id: str,
+        text: str,
+        *,
+        object_ref: str | None = None,
+        channel: str | None = None,
+    ) -> SubjectActivityResult:
+        # 阶段① 对象必填校验 → 对象解析 → 置信度门禁 → 落位
+        self._require_object_source(object_ref, channel)
+        speaker = self.recognition.resolve(subject_id, text, object_ref, channel)
+        if speaker.confidence < MIN_OBJECT_CONFIDENCE:
+            self.repository.add_history(
+                HistoryRecord(
+                    subject_id=subject_id,
+                    kind=HistoryKind.SUBJECT,
+                    event_type="object_rejected",
+                    content={
+                        "object_ref": object_ref,
+                        "confidence": speaker.confidence,
+                        "reason": (
+                            f"object confidence {speaker.confidence:.2f} "
+                            f"below threshold {MIN_OBJECT_CONFIDENCE}"
+                        ),
+                    },
+                    source_ids=(),
+                )
+            )
+            raise ValueError(
+                f"object confidence too low: {speaker.confidence:.2f}"
+            )
         fact = HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.FACT,
@@ -239,9 +279,35 @@ class SubjectProcess:
                 "object_id": speaker.object_id,
                 "object_status": speaker.status,
                 "object_confidence": speaker.confidence,
+                "object_ref": object_ref,
             },
         )
         self.repository.add_history(fact)
+
+        # 新对象落库（通过门禁后）：暂定档案，来源 = 输入事实 id
+        if speaker.object_id is not None and self.profiles.get(speaker.object_id) is None:
+            self.profiles.create(
+                ObjectProfile(
+                    object_id=speaker.object_id,
+                    label=speaker.label,
+                    source=fact.id,
+                    status="provisional",
+                )
+            )
+            self.repository.add_history(
+                HistoryRecord(
+                    subject_id=subject_id,
+                    kind=HistoryKind.SUBJECT,
+                    event_type="object_resolved",
+                    content={
+                        "object_id": speaker.object_id,
+                        "label": speaker.label,
+                        "source": fact.id,
+                        "status": "provisional",
+                    },
+                    source_ids=(fact.id,),
+                )
+            )
 
         # 阶段② 归属判断（结果暂定，可修正）
         attribution, _ = self._judge_attribution(subject_id, text)
@@ -318,9 +384,13 @@ class SubjectProcess:
         self.repository.add_cognitive_content(perception)
 
         # 阶段⑤ 认知活动（多轮，可追加召回）
-        thought = self._cognize(
+        thought, response = self._cognize(
             subject_id, activity, current, perception
         )
+        if response.object_assessment is not None:
+            speaker = self._apply_object_assessment(
+                subject_id, speaker, fact, thought, response.object_assessment
+            )
 
         # 阶段⑥ 行动与结果
         self.repository.add_history(
@@ -378,7 +448,7 @@ class SubjectProcess:
         activity: Activity,
         current: AssembledCurrentState,
         perception: CognitiveContent,
-    ) -> CognitiveContent:
+    ) -> tuple[CognitiveContent, object]:
         """认知活动：模型可提出追加召回请求，程序执行后继续认知，直至产出或预算耗尽。"""
         working_personal = current.personal_items
         working_recalled: list[RecalledFragment] = list(current.recalled)
@@ -463,7 +533,53 @@ class SubjectProcess:
                 source_ids=thought.source_ids,
             )
         )
-        return thought
+        return thought, response
+
+    def _apply_object_assessment(
+        self,
+        subject_id: str,
+        speaker: SpeakerCandidate,
+        fact: HistoryRecord,
+        thought: CognitiveContent,
+        assessment: ObjectAssessment,
+    ) -> SpeakerCandidate:
+        """认知确认：记录判定并更新对象档案状态（追加记录，不改写事实原文）。"""
+        self.repository.add_history(
+            HistoryRecord(
+                subject_id=subject_id,
+                kind=HistoryKind.SUBJECT,
+                event_type="object_identity_assessed",
+                content={
+                    "candidate_label": assessment.label or speaker.label,
+                    "object_id": assessment.object_id or speaker.object_id,
+                    "conclusion": assessment.conclusion,
+                    "reason": assessment.reason,
+                    "cognitive_content_id": thought.id,
+                    "epistemic_status": thought.epistemic_status.value,
+                },
+                source_ids=(thought.id,),
+            )
+        )
+        updated = speaker
+        if speaker.object_id is not None:
+            if assessment.conclusion == "confirm":
+                self.profiles.update_status(speaker.object_id, "confirmed")
+                updated = replace(
+                    speaker, status="confirmed", confidence=max(speaker.confidence, 0.85)
+                )
+            elif assessment.conclusion == "deny":
+                self.profiles.update_status(speaker.object_id, "rejected")
+                updated = replace(speaker, status="rejected", confidence=0.0)
+        return updated
+
+    @staticmethod
+    def _require_object_source(
+        object_ref: str | None, channel: str | None
+    ) -> None:
+        if not (object_ref and object_ref.strip()) and not channel:
+            raise ValueError(
+                "external input requires an object reference (object_ref or channel)"
+            )
 
     @staticmethod
     def _model_context(

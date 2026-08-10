@@ -6,6 +6,7 @@ from pathlib import Path
 
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import EchoModel, ModelPort, OpenAICompatibleModel
+from jshi.recognition import ObjectProfile, new_object_id
 from jshi.subject import (
     EpistemicStatus,
     HistoryKind,
@@ -53,6 +54,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     experience.add_argument("subject_id")
     experience.add_argument("text")
+    experience.add_argument(
+        "--speaker",
+        default=None,
+        help="说话人名字或对象标识（渠道未提供对象时必填）",
+    )
+    experience.add_argument("--channel", default=None, help="渠道标识（可选）")
 
     reflect = commands.add_parser(
         "reflect", aliases=["inner"], help="进行一次内部反思"
@@ -136,6 +143,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     preview.add_argument("subject_id")
     preview.add_argument("text")
+    preview.add_argument(
+        "--speaker",
+        default=None,
+        help="说话人名字或对象标识（渠道未提供对象时必填）",
+    )
+    preview.add_argument("--channel", default=None, help="渠道标识（可选）")
+
+    add_object = commands.add_parser("add-object", help="预注册对话对象档案")
+    add_object.add_argument("label", help="显示名")
+    add_object.add_argument("--aliases", default="", help="别名，逗号分隔")
+    add_object.add_argument("--channel", default=None, help="渠道标识（可选）")
+    add_object.add_argument("--source", default="cli-import", help="导入来源")
     return parser
 
 
@@ -154,7 +173,16 @@ def main() -> None:
         )
         print(f"已创建：{args.subject_id}")
     elif args.command in {"experience", "chat"}:
-        result = process.experience(args.subject_id, args.text)
+        try:
+            result = process.experience(
+                args.subject_id,
+                args.text,
+                object_ref=args.speaker,
+                channel=args.channel,
+            )
+        except ValueError as exc:
+            print(f"错误：{exc}")
+            return
         print(result.action_text)
         print(f"[活动 {result.activity.id}；认知 {result.thought.id}]")
     elif args.command in {"reflect", "inner"}:
@@ -212,7 +240,16 @@ def main() -> None:
             f"活跃个人内容：{len(items)}"
         )
     elif args.command == "preview-state":
-        preview = process.preview_state(args.subject_id, args.text)
+        try:
+            preview = process.preview_state(
+                args.subject_id,
+                args.text,
+                object_ref=args.speaker,
+                channel=args.channel,
+            )
+        except ValueError as exc:
+            print(f"错误：{exc}")
+            return
         assembled = preview.assembled
         print(f"输入：{assembled.input_text}")
         print(
@@ -231,6 +268,21 @@ def main() -> None:
         print("召回：")
         for item in assembled.recalled:
             print(f"  - {item.event_type}: {item.text}")
+    elif args.command == "add-object":
+        aliases = tuple(
+            alias.strip() for alias in args.aliases.split(",") if alias.strip()
+        )
+        profile = process.profiles.create(
+            ObjectProfile(
+                object_id=new_object_id(),
+                label=args.label,
+                aliases=aliases,
+                channel=args.channel,
+                source=args.source,
+                status="confirmed",
+            )
+        )
+        print(f"已注册对象：{profile.object_id}（{profile.label}）")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,19 @@
-"""身份系统识别（对象识别）：输入边界识别说话人。占位系统。"""
+"""身份识别（对象解析）：输入边界确定外部输入来自谁。占位系统。"""
 
-from .port import ObjectRecognitionPort, PlaceholderObjectRecognition, SpeakerCandidate
+from .port import (
+    MIN_OBJECT_CONFIDENCE,
+    ObjectRecognitionPort,
+    ProfileObjectRecognition,
+    SpeakerCandidate,
+)
+from .profile import ObjectProfile, ObjectProfileRepository, new_object_id
 
-__all__ = ["ObjectRecognitionPort", "PlaceholderObjectRecognition", "SpeakerCandidate"]
+__all__ = [
+    "MIN_OBJECT_CONFIDENCE",
+    "ObjectProfile",
+    "ObjectProfileRepository",
+    "ObjectRecognitionPort",
+    "ProfileObjectRecognition",
+    "SpeakerCandidate",
+    "new_object_id",
+]

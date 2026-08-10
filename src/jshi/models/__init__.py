@@ -3,6 +3,7 @@ from .base import (
     ModelPort,
     ModelRequest,
     ModelResponse,
+    ObjectAssessment,
     OpenAICompatibleModel,
     RecallRequest,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "ModelPort",
     "ModelRequest",
     "ModelResponse",
+    "ObjectAssessment",
     "OpenAICompatibleModel",
     "RecallRequest",
 ]

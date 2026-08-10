@@ -10,7 +10,7 @@ from jshi.attribution import AttributionResult
 from jshi.governance import ContinuityFinding
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import ModelRequest, ModelResponse, RecallRequest
-from jshi.recognition import SpeakerCandidate
+from jshi.recognition import ObjectProfile, SpeakerCandidate
 from jshi.subject import (
     HistoryKind,
     SubjectProcess,
@@ -33,18 +33,30 @@ def runtime(tmp_path, model=None):
     )
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
     process = SubjectProcess(repository, identities, model or FixedModel())
+    process.profiles.create(
+        ObjectProfile(
+            object_id="OBJ-USER", label="user", source="test", status="confirmed"
+        )
+    )
     return process, repository
 
 
 class NamedRecognition:
     name = "test-recognition"
 
-    def identify(self, subject_id: str, input_text: str) -> SpeakerCandidate:
+    def resolve(
+        self,
+        subject_id: str,
+        input_text: str,
+        object_ref: str | None,
+        channel: str | None = None,
+    ) -> SpeakerCandidate:
         return SpeakerCandidate(
             label="张三",
             object_id="OBJ-1",
             confidence=0.8,
             status="provisional",
+            object_ref=object_ref,
         )
 
 
@@ -52,7 +64,7 @@ def test_recognition_carries_object_info_into_fact(tmp_path):
     process, repository = runtime(tmp_path)
     process.recognition = NamedRecognition()
 
-    result = process.experience("stone", "你好")
+    result = process.experience("stone", "你好", object_ref="user")
 
     fact = repository.list_history("stone", HistoryKind.FACT)[0]
     assert fact.content["source"] == "张三"
@@ -68,7 +80,7 @@ def test_attribution_single_concern_continuation(tmp_path):
         "stone", "继续理解朋友的疲倦", source_ids=("seed",)
     )
 
-    result = process.experience("stone", "继续")
+    result = process.experience("stone", "继续", object_ref="user")
 
     assert result.attribution.concern_ids == (concern.id,)
     assert concern.id in result.activity.active_concern_ids
@@ -92,7 +104,7 @@ def test_attribution_single_concern_continuation(tmp_path):
 def test_full_assembly_when_no_concern(tmp_path):
     process, repository = runtime(tmp_path)
 
-    process.experience("stone", "今天有些疲倦")
+    process.experience("stone", "今天有些疲倦", object_ref="user")
 
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
     assembled = [
@@ -129,7 +141,7 @@ def test_followup_recall_extends_working_set(tmp_path):
         "stone", "external_input", "朋友上周很忙"
     )
 
-    result = process.experience("stone", "他最近怎么样")
+    result = process.experience("stone", "他最近怎么样", object_ref="user")
 
     assert result.thought.content == "最终回应"
     assert model.calls == 2
@@ -162,7 +174,7 @@ def test_followup_recall_rounds_are_bounded(tmp_path):
     model = AlwaysRecallModel()
     process, _repository = runtime(tmp_path, model=model)
 
-    result = process.experience("stone", "你好")
+    result = process.experience("stone", "你好", object_ref="user")
 
     assert model.calls == FOLLOWUP_RECALL_MAX_ROUNDS + 1
     assert result.thought.content == "还要更多"
@@ -194,7 +206,7 @@ def test_placeholder_feedback_and_governance_hooks(tmp_path):
     process.feedback = feedback
     process.governance = governance
 
-    result = process.experience("stone", "你好")
+    result = process.experience("stone", "你好", object_ref="user")
 
     assert feedback.calls and feedback.calls[0][0] == "stone"
     assert feedback.calls[0][1] == result.activity.id
@@ -210,9 +222,9 @@ def test_placeholder_feedback_and_governance_hooks(tmp_path):
 def test_preview_is_read_only(tmp_path):
     process, repository = runtime(tmp_path)
 
-    preview = process.preview_state("stone", "你好")
+    preview = process.preview_state("stone", "你好", object_ref="user")
 
-    assert preview.speaker.status == "unknown"
+    assert preview.speaker.status == "confirmed"
     assert preview.attribution == AttributionResult()
     assert preview.mode == "full"
     assert repository.list_history("stone") == ()

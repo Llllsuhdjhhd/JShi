@@ -22,6 +22,7 @@ import pytest
 from jshi.app import cli
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import ModelRequest, ModelResponse
+from jshi.recognition import ObjectProfile
 from jshi.subject import (
     ActivityKind,
     ActivityStatus,
@@ -63,6 +64,11 @@ def runtime(tmp_path):
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
     model = RecordingModel()
     process = SubjectProcess(repository, identities, model)
+    process.profiles.create(
+        ObjectProfile(
+            object_id="OBJ-USER", label="user", source="test", status="confirmed"
+        )
+    )
     return process, repository, model, identities
 
 
@@ -72,7 +78,7 @@ def runtime(tmp_path):
 def test_phase1_input_fact_is_recorded_first(runtime):
     process, repository, _model, _identities = runtime
 
-    process.experience("stone", "今天有些疲倦")
+    process.experience("stone", "今天有些疲倦", object_ref="user")
 
     facts = repository.list_history("stone", HistoryKind.FACT)
     assert [item.event_type for item in facts] == [
@@ -81,9 +87,10 @@ def test_phase1_input_fact_is_recorded_first(runtime):
     ]
     assert facts[0].kind is HistoryKind.FACT
     assert facts[0].content["text"] == "今天有些疲倦"
-    assert facts[0].content["source"] == "human"
-    assert facts[0].content["object_id"] is None
-    assert facts[0].content["object_status"] == "unknown"
+    assert facts[0].content["source"] == "user"
+    assert facts[0].content["object_id"] == "OBJ-USER"
+    assert facts[0].content["object_status"] == "confirmed"
+    assert facts[0].content["object_ref"] == "user"
     assert facts[0].source_ids == ()
 
 
@@ -103,9 +110,9 @@ def test_phase2_assembly_loads_all_personal_world_systems(runtime):
     concern = process.propose_open_matter(
         "stone", "继续理解朋友的疲倦", source_ids=("seed",)
     )
-    process.experience("stone", "先打个招呼")  # 为召回预置一段事实历史
+    process.experience("stone", "先打个招呼", object_ref="user")  # 为召回预置一段事实历史
 
-    result = process.experience("stone", "今天又见面了")
+    result = process.experience("stone", "今天又见面了", object_ref="user")
     assembled = result.current_state
     state = assembled.subject_state
 
@@ -129,7 +136,7 @@ def test_phase2_assembly_loads_all_personal_world_systems(runtime):
 
 def test_phase2_recall_returns_relevant_past_facts(runtime):
     process, _repository, _model, _identities = runtime
-    result = process.experience("stone", "今天有些疲倦")
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
     assembled = process.assemble_current_state("stone", "今天有些疲倦")
 
@@ -159,7 +166,7 @@ def test_phase3_activity_is_external_mounted_and_completed(runtime):
         "stone", "继续理解朋友的疲倦", source_ids=("seed",)
     )
 
-    result = process.experience("stone", "今天有些疲倦")
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
     activity = result.activity
     assert activity.kind is ActivityKind.EXTERNAL
@@ -182,7 +189,7 @@ def test_phase3_activity_is_external_mounted_and_completed(runtime):
 def test_phase4_perception_is_accepted_report(runtime):
     process, _repository, _model, _identities = runtime
 
-    result = process.experience("stone", "今天有些疲倦")
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
     perception = result.perception
     assert perception.kind is CognitiveKind.PERCEPTION
@@ -196,7 +203,7 @@ def test_phase4_perception_is_accepted_report(runtime):
 def test_phase4_thought_is_considering_inference(runtime):
     process, repository, _model, _identities = runtime
 
-    result = process.experience("stone", "今天有些疲倦")
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
     thought = result.thought
     assert thought.kind is CognitiveKind.INFERENCE
@@ -217,9 +224,9 @@ def test_phase4_model_request_receives_subject_state_and_context(runtime):
     concern = process.propose_open_matter(
         "stone", "继续理解朋友的疲倦", source_ids=("seed",)
     )
-    process.experience("stone", "先打个招呼")  # 预置召回
+    process.experience("stone", "先打个招呼", object_ref="user")  # 预置召回
 
-    result = process.experience("stone", "今天有些疲倦")
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
     request = model.requests[-1]
 
     assert request.purpose == "subject_activity"
@@ -239,7 +246,7 @@ def test_phase4_model_request_receives_subject_state_and_context(runtime):
 def test_phase5_language_action_recorded_in_fact_history(runtime):
     process, repository, model, _identities = runtime
 
-    result = process.experience("stone", "今天有些疲倦")
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
     facts = repository.list_history("stone", HistoryKind.FACT)
     action = facts[-1]
@@ -255,7 +262,7 @@ def test_phase5_external_result_feedback_is_not_yet_implemented(runtime):
     """锁定当前缺口：行动结果反馈尚未实现（图中虚线部分）。"""
     process, repository, _model, _identities = runtime
 
-    process.experience("stone", "今天有些疲倦")
+    process.experience("stone", "今天有些疲倦", object_ref="user")
 
     event_types = {
         item.event_type for item in repository.list_history("stone", HistoryKind.FACT)
@@ -269,7 +276,7 @@ def test_phase5_external_result_feedback_is_not_yet_implemented(runtime):
 def test_phase6_subject_history_records_assembly_and_cognition(runtime):
     process, repository, _model, _identities = runtime
 
-    result = process.experience("stone", "今天有些疲倦")
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
     assert [item.event_type for item in subject] == [
@@ -285,7 +292,7 @@ def test_phase6_subject_history_records_assembly_and_cognition(runtime):
 
 def test_phase6_epistemic_transition_is_audited(runtime):
     process, repository, _model, _identities = runtime
-    result = process.experience("stone", "今天有些疲倦")
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
     updated = process.transition_cognition(
         result.thought.id,
@@ -305,19 +312,19 @@ def test_phase6_epistemic_transition_is_audited(runtime):
 
 def test_phase6_proposed_open_matter_persists_into_next_activity(runtime):
     process, repository, _model, _identities = runtime
-    result = process.experience("stone", "他看起来很累")
+    result = process.experience("stone", "他看起来很累", object_ref="user")
     concern = process.propose_open_matter(
         "stone", "继续关心他的疲倦", source_ids=(result.thought.id,)
     )
 
-    later = process.experience("stone", "又见面了")
+    later = process.experience("stone", "又见面了", object_ref="user")
     assert concern.id in later.activity.active_concern_ids
     assert concern.id in later.current_state.open_matter_ids
     assert "继续关心他的疲倦" in later.current_state.subject_state.concerns
 
     # 显式关闭后不再进入后续活动
     process.close_personal_item(concern.id, PersonalStatus.RELEASED, "暂时放下")
-    final = process.experience("stone", "改天再聊")
+    final = process.experience("stone", "改天再聊", object_ref="user")
     assert final.current_state.open_matter_ids == ()
 
 
@@ -338,7 +345,16 @@ def test_phase0_cli_experience_triggers_full_flow(tmp_path, monkeypatch, capsys)
 
     monkeypatch.setattr(
         "sys.argv",
-        ["jshi", "--data-dir", str(data_dir), "experience", "stone", "你好"],
+        [
+            "jshi",
+            "--data-dir",
+            str(data_dir),
+            "experience",
+            "stone",
+            "你好",
+            "--speaker",
+            "user",
+        ],
     )
     cli.main()
     out = capsys.readouterr().out

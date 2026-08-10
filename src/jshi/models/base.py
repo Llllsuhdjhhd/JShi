@@ -27,11 +27,22 @@ class RecallRequest:
 
 
 @dataclass(frozen=True)
+class ObjectAssessment:
+    """认知阶段（阶段⑤）对说话人候选的判定。"""
+
+    conclusion: str  # confirm | deny | uncertain
+    object_id: str | None = None
+    label: str | None = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class ModelResponse:
     text: str
     model: str
     metadata: Mapping[str, Any] | None = None
     recall_requests: tuple[RecallRequest, ...] = ()
+    object_assessment: ObjectAssessment | None = None
 
 
 class ModelPort(Protocol):
