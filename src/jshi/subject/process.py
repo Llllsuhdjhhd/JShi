@@ -18,6 +18,7 @@ from jshi.memory import InProcessHistoryMemory, MemoryPort, RecalledFragment
 from jshi.models import ModelPort, ModelRequest, ObjectAssessment, RecallRequest
 from jshi.personalworld import InProcessPersonalWorld, PersonalWorldPort
 from jshi.recognition import (
+    CarrierEntry,
     MIN_OBJECT_CONFIDENCE,
     ObjectProfile,
     ObjectProfileRepository,
@@ -111,7 +112,9 @@ class SubjectProcess:
         self.memory = memory or InProcessHistoryMemory(repository)
         self.personal_world = personal_world or InProcessPersonalWorld(repository)
         self.profiles = ObjectProfileRepository(repository.path)
-        self.recognition = recognition or ProfileObjectRecognition(self.profiles)
+        self.recognition = recognition or ProfileObjectRecognition(
+            self.profiles, memory_matcher=self._match_object_by_memory
+        )
         self.attribution = attribution or PlaceholderAttribution()
         self.intent = intent or PlaceholderIntent()
         self.feedback = feedback or PlaceholderResultFeedback()
@@ -191,10 +194,13 @@ class SubjectProcess:
         *,
         object_ref: str | None = None,
         channel: str | None = None,
+        carriers: tuple[CarrierEntry, ...] = (),
     ) -> SubjectPreview:
         """预览进模型前的当前状态（只读，不落库、不调用模型）。"""
-        self._require_object_source(object_ref, channel)
-        speaker = self.recognition.resolve(subject_id, input_text, object_ref, channel)
+        self._require_object_source(object_ref, channel, carriers)
+        speaker = self.recognition.resolve(
+            subject_id, input_text, object_ref, channel, carriers
+        )
         attribution, _ = self._judge_attribution(subject_id, input_text)
         if attribution.concern_ids:
             assembled = self._assemble_concern_centric(
@@ -245,10 +251,15 @@ class SubjectProcess:
         *,
         object_ref: str | None = None,
         channel: str | None = None,
+        carriers: tuple[CarrierEntry, ...] = (),
     ) -> SubjectActivityResult:
         # 阶段① 对象必填校验 → 对象解析 → 置信度门禁 → 落位
-        self._require_object_source(object_ref, channel)
-        speaker = self.recognition.resolve(subject_id, text, object_ref, channel)
+        self._require_object_source(object_ref, channel, carriers)
+        speaker = self.recognition.resolve(
+            subject_id, text, object_ref, channel, carriers
+        )
+        if not speaker.object_id:
+            raise ValueError("object candidate must be referenceable (object_id)")
         if speaker.confidence < MIN_OBJECT_CONFIDENCE:
             self.repository.add_history(
                 HistoryRecord(
@@ -258,7 +269,8 @@ class SubjectProcess:
                     content={
                         "object_ref": object_ref,
                         "confidence": speaker.confidence,
-                        "reason": (
+                        "reason": speaker.reason
+                        or (
                             f"object confidence {speaker.confidence:.2f} "
                             f"below threshold {MIN_OBJECT_CONFIDENCE}"
                         ),
@@ -280,16 +292,18 @@ class SubjectProcess:
                 "object_status": speaker.status,
                 "object_confidence": speaker.confidence,
                 "object_ref": object_ref,
+                "channel": channel,
             },
         )
         self.repository.add_history(fact)
 
         # 新对象落库（通过门禁后）：暂定档案，来源 = 输入事实 id
-        if speaker.object_id is not None and self.profiles.get(speaker.object_id) is None:
+        if self.profiles.get(speaker.object_id) is None:
             self.profiles.create(
                 ObjectProfile(
                     object_id=speaker.object_id,
                     label=speaker.label,
+                    carriers=speaker.carriers,
                     source=fact.id,
                     status="provisional",
                 )
@@ -561,24 +575,60 @@ class SubjectProcess:
             )
         )
         updated = speaker
-        if speaker.object_id is not None:
-            if assessment.conclusion == "confirm":
-                self.profiles.update_status(speaker.object_id, "confirmed")
-                updated = replace(
-                    speaker, status="confirmed", confidence=max(speaker.confidence, 0.85)
-                )
-            elif assessment.conclusion == "deny":
-                self.profiles.update_status(speaker.object_id, "rejected")
-                updated = replace(speaker, status="rejected", confidence=0.0)
+        if assessment.conclusion == "confirm":
+            self.profiles.update_status(speaker.object_id, "confirmed")
+            updated = replace(
+                speaker, status="confirmed", confidence=max(speaker.confidence, 0.85)
+            )
+        elif assessment.conclusion == "deny":
+            self.profiles.update_status(speaker.object_id, "rejected")
+            updated = replace(speaker, status="rejected", confidence=0.0)
         return updated
+
+    def _match_object_by_memory(
+        self,
+        subject_id: str,
+        text: str,
+        candidates: tuple[ObjectProfile, ...],
+    ) -> tuple[ObjectProfile, float] | None:
+        """重名消歧占位：按对象过滤事实历史，与输入做词重叠打分，返回最高者。"""
+        facts = self.repository.list_history(subject_id, kind=HistoryKind.FACT)
+        bigrams = {
+            text.lower()[index : index + 2]
+            for index in range(len(text) - 1)
+        }
+        best: ObjectProfile | None = None
+        best_score = 0.0
+        for candidate in candidates:
+            related = [
+                record
+                for record in facts
+                if record.content.get("object_id") == candidate.object_id
+            ]
+            hay = " ".join(
+                str(record.content.get("text", "")) for record in related
+            ).lower()
+            score = sum(1 for gram in bigrams if gram in hay)
+            if score > best_score:
+                best, best_score = candidate, float(score)
+        if best is not None and best_score > 0:
+            return best, best_score
+        return None
 
     @staticmethod
     def _require_object_source(
-        object_ref: str | None, channel: str | None
+        object_ref: str | None,
+        channel: str | None,
+        carriers: tuple[CarrierEntry, ...] = (),
     ) -> None:
-        if not (object_ref and object_ref.strip()) and not channel:
+        if (
+            not (object_ref and object_ref.strip())
+            and not channel
+            and not carriers
+        ):
             raise ValueError(
-                "external input requires an object reference (object_ref or channel)"
+                "invalid input envelope: external input requires an object "
+                "reference (object_ref / channel / carriers)"
             )
 
     @staticmethod

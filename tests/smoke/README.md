@@ -22,11 +22,14 @@ $dir="tests/smoke/01-身份识别"
 
 python -m jshi.app.cli --data-dir $dir create stone
 python -m jshi.app.cli --data-dir $dir add-object 张三 --aliases 阿三
+python -m jshi.app.cli --data-dir $dir add-object 声纹好友 --carrier voiceprint:vp-9
 python -m jshi.app.cli --data-dir $dir experience stone "你好，老朋友" --speaker 张三
+python -m jshi.app.cli --data-dir $dir experience stone "你好" --carrier voiceprint:vp-9   # 模式一：载体命中 → 直接给对象名
 python -m jshi.app.cli --data-dir $dir preview-state stone "继续" --speaker 李四
 python -m jshi.app.cli --data-dir $dir experience stone "又见面了" --speaker 李四
 python -m jshi.app.cli --data-dir $dir experience stone "你好" --speaker 李四
-python -m jshi.app.cli --data-dir $dir experience stone "你好" --channel unknown-device  # 预期报错，留下 object_rejected 记录
+python -m jshi.app.cli --data-dir $dir experience stone "设备问候" --channel dev-7       # 渠道引用未匹配 → 新建暂定对象（0.70）
+python -m jshi.app.cli --data-dir $dir experience stone "你好"                           # 预期报错：invalid input envelope（无对象引用）
 ```
 
 ## 查看

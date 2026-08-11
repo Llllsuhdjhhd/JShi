@@ -18,15 +18,25 @@ def new_object_id() -> str:
 
 
 @dataclass(frozen=True)
+class CarrierEntry:
+    """识别载体条目（占位）：只存引用或标识，不存原始生物数据。"""
+
+    kind: str  # voiceprint | face | device | account | session
+    value: str  # 特征引用 / 设备标识 / 账号 id
+    source: str = ""
+
+
+@dataclass(frozen=True)
 class ObjectProfile:
     """对话对象档案：身份本体 + 确认状态（不存单次置信度）。"""
 
     object_id: str
     label: str
     aliases: tuple[str, ...] = ()
+    carriers: tuple[CarrierEntry, ...] = ()
     channel: str | None = None
     source: str = ""
-    status: str = "provisional"  # unknown | provisional | confirmed | rejected
+    status: str = "provisional"  # provisional | confirmed | rejected
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 
@@ -52,6 +62,7 @@ class ObjectProfileRepository:
                     object_id TEXT PRIMARY KEY,
                     label TEXT NOT NULL,
                     aliases TEXT NOT NULL,
+                    carriers TEXT NOT NULL,
                     channel TEXT,
                     source TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -66,13 +77,14 @@ class ObjectProfileRepository:
             connection.execute(
                 """
                 INSERT INTO object_profiles
-                (object_id, label, aliases, channel, source, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (object_id, label, aliases, carriers, channel, source, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     profile.object_id,
                     profile.label,
                     json.dumps(list(profile.aliases), ensure_ascii=False),
+                    _dump_carriers(profile.carriers),
                     profile.channel,
                     profile.source,
                     profile.status,
@@ -89,18 +101,38 @@ class ObjectProfileRepository:
             ).fetchone()
         return _profile(row) if row else None
 
-    def find_by_name(self, name: str) -> ObjectProfile | None:
-        """按 label 或别名精确匹配（忽略大小写）。"""
+    def find_by_names(self, name: str) -> tuple[ObjectProfile, ...]:
+        """按 label 或别名精确匹配（忽略大小写），返回候选集（重名合法）。"""
         key = name.strip().casefold()
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM object_profiles").fetchall()
+        hits: list[ObjectProfile] = []
         for row in rows:
             profile = _profile(row)
             if profile.label.casefold() == key:
-                return profile
+                hits.append(profile)
+                continue
             if any(alias.casefold() == key for alias in profile.aliases):
-                return profile
-        return None
+                hits.append(profile)
+        return tuple(hits)
+
+    def find_by_carrier(self, kind: str, value: str) -> ObjectProfile | None:
+        """按识别载体引用匹配；载体引用唯一，多个匹配视为数据错误。"""
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM object_profiles").fetchall()
+        hits = [
+            _profile(row)
+            for row in rows
+            if any(
+                carrier.kind == kind and carrier.value == value
+                for carrier in _profile(row).carriers
+            )
+        ]
+        if len(hits) > 1:
+            raise ValueError(
+                f"carrier collision: {kind}:{value} maps to multiple objects"
+            )
+        return hits[0] if hits else None
 
     def find_by_channel(self, channel: str) -> ObjectProfile | None:
         with self._connect() as connection:
@@ -138,9 +170,31 @@ def _profile(row: sqlite3.Row) -> ObjectProfile:
         object_id=row["object_id"],
         label=row["label"],
         aliases=tuple(json.loads(row["aliases"])),
+        carriers=_load_carriers(row["carriers"]),
         channel=row["channel"],
         source=row["source"],
         status=row["status"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
+
+
+def _dump_carriers(carriers: Sequence[CarrierEntry]) -> str:
+    return json.dumps(
+        [
+            {"kind": carrier.kind, "value": carrier.value, "source": carrier.source}
+            for carrier in carriers
+        ],
+        ensure_ascii=False,
+    )
+
+
+def _load_carriers(raw: str) -> tuple[CarrierEntry, ...]:
+    return tuple(
+        CarrierEntry(
+            kind=item["kind"],
+            value=item["value"],
+            source=item.get("source", ""),
+        )
+        for item in json.loads(raw)
     )

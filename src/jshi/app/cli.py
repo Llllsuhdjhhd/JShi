@@ -6,7 +6,7 @@ from pathlib import Path
 
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import EchoModel, ModelPort, OpenAICompatibleModel
-from jshi.recognition import ObjectProfile, new_object_id
+from jshi.recognition import CarrierEntry, ObjectProfile, new_object_id
 from jshi.subject import (
     EpistemicStatus,
     HistoryKind,
@@ -60,6 +60,12 @@ def _parser() -> argparse.ArgumentParser:
         help="说话人名字或对象标识（渠道未提供对象时必填）",
     )
     experience.add_argument("--channel", default=None, help="渠道标识（可选）")
+    experience.add_argument(
+        "--carrier",
+        action="append",
+        default=[],
+        help="识别载体，格式 kind:value，可重复（如 voiceprint:vp-1）",
+    )
 
     reflect = commands.add_parser(
         "reflect", aliases=["inner"], help="进行一次内部反思"
@@ -149,12 +155,24 @@ def _parser() -> argparse.ArgumentParser:
         help="说话人名字或对象标识（渠道未提供对象时必填）",
     )
     preview.add_argument("--channel", default=None, help="渠道标识（可选）")
+    preview.add_argument(
+        "--carrier",
+        action="append",
+        default=[],
+        help="识别载体，格式 kind:value，可重复（如 voiceprint:vp-1）",
+    )
 
     add_object = commands.add_parser("add-object", help="预注册对话对象档案")
     add_object.add_argument("label", help="显示名")
     add_object.add_argument("--aliases", default="", help="别名，逗号分隔")
     add_object.add_argument("--channel", default=None, help="渠道标识（可选）")
     add_object.add_argument("--source", default="cli-import", help="导入来源")
+    add_object.add_argument(
+        "--carrier",
+        action="append",
+        default=[],
+        help="识别载体，格式 kind:value，可重复（如 voiceprint:vp-1）",
+    )
     return parser
 
 
@@ -174,11 +192,13 @@ def main() -> None:
         print(f"已创建：{args.subject_id}")
     elif args.command in {"experience", "chat"}:
         try:
+            carriers = tuple(_parse_carrier(item) for item in args.carrier)
             result = process.experience(
                 args.subject_id,
                 args.text,
                 object_ref=args.speaker,
                 channel=args.channel,
+                carriers=carriers,
             )
         except ValueError as exc:
             print(f"错误：{exc}")
@@ -241,11 +261,13 @@ def main() -> None:
         )
     elif args.command == "preview-state":
         try:
+            carriers = tuple(_parse_carrier(item) for item in args.carrier)
             preview = process.preview_state(
                 args.subject_id,
                 args.text,
                 object_ref=args.speaker,
                 channel=args.channel,
+                carriers=carriers,
             )
         except ValueError as exc:
             print(f"错误：{exc}")
@@ -272,17 +294,26 @@ def main() -> None:
         aliases = tuple(
             alias.strip() for alias in args.aliases.split(",") if alias.strip()
         )
+        carriers = tuple(_parse_carrier(item) for item in args.carrier)
         profile = process.profiles.create(
             ObjectProfile(
                 object_id=new_object_id(),
                 label=args.label,
                 aliases=aliases,
+                carriers=carriers,
                 channel=args.channel,
                 source=args.source,
                 status="confirmed",
             )
         )
         print(f"已注册对象：{profile.object_id}（{profile.label}）")
+
+
+def _parse_carrier(raw: str) -> CarrierEntry:
+    kind, _, value = raw.partition(":")
+    if not kind.strip() or not value.strip():
+        raise ValueError(f"invalid carrier format: {raw!r} (expected kind:value)")
+    return CarrierEntry(kind=kind.strip(), value=value.strip())
 
 
 if __name__ == "__main__":

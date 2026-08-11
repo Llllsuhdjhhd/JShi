@@ -10,11 +10,12 @@ import pytest
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import ModelRequest, ModelResponse, ObjectAssessment
 from jshi.recognition import (
+    CarrierEntry,
     ObjectProfile,
     ObjectProfileRepository,
     ProfileObjectRecognition,
 )
-from jshi.subject import HistoryKind, SubjectProcess, SubjectRepository
+from jshi.subject import HistoryKind, HistoryRecord, SubjectProcess, SubjectRepository
 
 
 class FixedModel:
@@ -38,13 +39,19 @@ def test_repository_roundtrip(tmp_path):
     repo = ObjectProfileRepository(tmp_path / "subject.sqlite3")
     repo.create(
         ObjectProfile(
-            object_id="OBJ-A", label="张三", aliases=("阿三",), source="test"
+            object_id="OBJ-A",
+            label="张三",
+            aliases=("阿三",),
+            carriers=(CarrierEntry(kind="voiceprint", value="vp-1"),),
+            source="test",
         )
     )
 
     assert repo.get("OBJ-A").label == "张三"
-    assert repo.find_by_name("阿三").object_id == "OBJ-A"
-    assert repo.find_by_name("李四") is None
+    assert [item.object_id for item in repo.find_by_names("阿三")] == ["OBJ-A"]
+    assert repo.find_by_names("李四") == ()
+    assert repo.find_by_carrier("voiceprint", "vp-1").object_id == "OBJ-A"
+    assert repo.find_by_carrier("face", "f-1") is None
     updated = repo.update_status("OBJ-A", "confirmed")
     assert updated.status == "confirmed"
     assert repo.get("OBJ-A").status == "confirmed"
@@ -98,19 +105,19 @@ def test_new_name_creates_provisional_profile_on_landing(tmp_path):
     assert "object_resolved" in event_types
 
 
-def test_low_confidence_is_blocked(tmp_path):
+def test_channel_without_profile_creates_provisional(tmp_path):
     process, repository = runtime(tmp_path)
 
-    with pytest.raises(ValueError, match="confidence too low"):
-        process.experience("stone", "你好", channel="unknown-device")
+    result = process.experience("stone", "你好", channel="dev-7")
 
-    assert repository.list_history("stone", HistoryKind.FACT) == ()
-    event_types = [
-        item.event_type
-        for item in repository.list_history("stone", HistoryKind.SUBJECT)
-    ]
-    assert event_types == ["object_rejected"]
-    assert process.profiles.list() == ()
+    assert result.speaker.status == "provisional"
+    assert result.speaker.confidence == 0.70
+    assert result.speaker.object_id
+    profile = process.profiles.list()[0]
+    assert profile.status == "provisional"
+    fact = repository.list_history("stone", HistoryKind.FACT)[0]
+    assert fact.content["object_id"] == profile.object_id
+    assert fact.content["channel"] == "dev-7"
 
 
 def test_channel_match_is_strong_signal(tmp_path):
@@ -131,6 +138,97 @@ def test_channel_match_is_strong_signal(tmp_path):
 
     assert result.speaker.object_id == "OBJ-DEV"
     assert result.speaker.confidence == 0.95
+
+
+def test_carrier_match_gives_object_name(tmp_path):
+    process, _repository = runtime(tmp_path)
+    process.profiles.create(
+        ObjectProfile(
+            object_id="OBJ-VP",
+            label="声纹好友",
+            carriers=(CarrierEntry(kind="voiceprint", value="vp-9"),),
+            source="test",
+            status="confirmed",
+        )
+    )
+
+    result = process.experience(
+        "stone",
+        "你好",
+        object_ref="随便",
+        carriers=(CarrierEntry(kind="voiceprint", value="vp-9"),),
+    )
+
+    assert result.speaker.object_id == "OBJ-VP"
+    assert result.speaker.label == "声纹好友"
+    assert result.speaker.confidence == 0.95
+    assert result.speaker.reason == "carrier_match"
+
+
+def test_carrier_unmatched_creates_provisional_with_carrier(tmp_path):
+    process, repository = runtime(tmp_path)
+
+    result = process.experience(
+        "stone",
+        "你好",
+        carriers=(CarrierEntry(kind="voiceprint", value="vp-new"),),
+    )
+
+    profile = process.profiles.list()[0]
+    assert profile.status == "provisional"
+    assert profile.carriers == (CarrierEntry(kind="voiceprint", value="vp-new"),)
+    assert result.speaker.confidence == 0.70
+    fact = repository.list_history("stone", HistoryKind.FACT)[0]
+    assert fact.content["object_id"] == profile.object_id
+
+
+def _register_duplicates(process):
+    process.profiles.create(
+        ObjectProfile(
+            object_id="OBJ-Z1", label="张三", source="test", status="confirmed"
+        )
+    )
+    process.profiles.create(
+        ObjectProfile(
+            object_id="OBJ-Z2", label="张三", source="test", status="confirmed"
+        )
+    )
+
+
+def test_duplicate_names_resolved_by_memory(tmp_path):
+    process, repository = runtime(tmp_path)
+    _register_duplicates(process)
+    # 给 OBJ-Z2 预置一条带对象标识的相关事实
+    process.repository.add_history(
+        HistoryRecord(
+            subject_id="stone",
+            kind=HistoryKind.FACT,
+            event_type="external_input",
+            content={"text": "张三喜欢围棋", "object_id": "OBJ-Z2"},
+        )
+    )
+
+    result = process.experience("stone", "你说围棋怎么样", object_ref="张三")
+
+    assert result.speaker.object_id == "OBJ-Z2"
+    assert result.speaker.confidence == 0.60
+    assert result.speaker.reason.startswith("memory_match")
+
+
+def test_duplicate_names_without_memory_are_blocked(tmp_path):
+    process, repository = runtime(tmp_path)
+    _register_duplicates(process)
+
+    with pytest.raises(ValueError, match="confidence too low"):
+        process.experience("stone", "你好", object_ref="张三")
+
+    assert repository.list_history("stone", HistoryKind.FACT) == ()
+    event_types = [
+        item.event_type
+        for item in repository.list_history("stone", HistoryKind.SUBJECT)
+    ]
+    assert event_types == ["object_rejected"]
+    assert len(process.profiles.list()) == 2  # 阻断不落库
 
 
 class ConfirmModel:
@@ -223,6 +321,9 @@ def test_resolver_rules(tmp_path):
     hit2 = resolver.resolve("stone", "你好", "李四")
     assert hit2.confidence == 0.85
 
-    unknown = resolver.resolve("stone", "你好", None, channel="dev-x")
-    assert unknown.confidence == 0.0
-    assert unknown.status == "unknown"
+    with pytest.raises(ValueError, match="object reference"):
+        resolver.resolve("stone", "你好", None)
+    channel_new = resolver.resolve("stone", "你好", None, channel="dev-x")
+    assert channel_new.status == "provisional"
+    assert channel_new.confidence == 0.70
+    assert channel_new.object_id

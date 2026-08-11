@@ -6,10 +6,11 @@ from .port import (
     ProfileObjectRecognition,
     SpeakerCandidate,
 )
-from .profile import ObjectProfile, ObjectProfileRepository, new_object_id
+from .profile import CarrierEntry, ObjectProfile, ObjectProfileRepository, new_object_id
 
 __all__ = [
     "MIN_OBJECT_CONFIDENCE",
+    "CarrierEntry",
     "ObjectProfile",
     "ObjectProfileRepository",
     "ObjectRecognitionPort",

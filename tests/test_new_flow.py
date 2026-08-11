@@ -50,6 +50,7 @@ class NamedRecognition:
         input_text: str,
         object_ref: str | None,
         channel: str | None = None,
+        carriers: tuple = (),
     ) -> SpeakerCandidate:
         return SpeakerCandidate(
             label="张三",
