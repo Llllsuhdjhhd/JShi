@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
+from jshi.textutil import query_terms
 from jshi.subject.domain import HistoryKind, HistoryRecord
 from jshi.subject.repository import SubjectRepository
 
@@ -15,6 +16,9 @@ class RecalledFragment:
     event_type: str
     text: str
     kind: str = "fact"
+    object_id: str | None = None
+    source_ids: tuple[str, ...] = ()
+    score: float = 0.0
 
 
 class MemoryPort(Protocol):
@@ -31,7 +35,12 @@ class MemoryPort(Protocol):
         """Persist a factual fragment; return its id."""
 
     def recall(
-        self, subject_id: str, query: str, *, limit: int = 8
+        self,
+        subject_id: str,
+        query: str,
+        *,
+        limit: int = 8,
+        object_id: str | None = None,
     ) -> Sequence[RecalledFragment]:
         """Return a bounded working set of related past fragments."""
 
@@ -56,30 +65,54 @@ class InProcessHistoryMemory:
         return record.id
 
     def recall(
-        self, subject_id: str, query: str, *, limit: int = 8
+        self,
+        subject_id: str,
+        query: str,
+        *,
+        limit: int = 8,
+        object_id: str | None = None,
     ) -> Sequence[RecalledFragment]:
-        # Transparent first implementation: recent facts, lightly filtered by overlap.
+        # Transparent first implementation: recent facts, lightly filtered by
+        # token/bigram overlap and, when available, object identity.
         recent = self._repository.list_history(
             subject_id, kind=HistoryKind.FACT, limit=max(limit * 3, limit)
         )
-        tokens = {token for token in query.lower().split() if token}
-        scored: list[tuple[int, HistoryRecord]] = []
+        if object_id:
+            recent = [
+                record
+                for record in recent
+                if str(record.content.get("object_id", "")) == object_id
+            ]
+        tokens = query_terms(query)
+        scored: list[tuple[float, HistoryRecord]] = []
         for record in recent:
             text = str(record.content.get("text", ""))
             hay = text.lower()
-            score = sum(1 for token in tokens if token in hay) if tokens else 0
+            score = float(
+                sum(1 for token in tokens if token in hay) if tokens else 0
+            )
             # Keep chronological presence even without lexical hit.
             scored.append((score, record))
-        scored.sort(key=lambda item: (item[0], item[1].created_at), reverse=True)
+        scored.sort(
+            key=lambda item: (item[0], item[1].created_at), reverse=True
+        )
         chosen = [record for score, record in scored if score > 0][:limit]
         if not chosen:
             chosen = [record for _, record in scored[:limit]]
+        scores_by_id = {record.id: score for score, record in scored}
         return tuple(
             RecalledFragment(
                 event_id=record.id,
                 event_type=record.event_type,
                 text=str(record.content.get("text", "")),
                 kind=record.kind.value,
+                object_id=(
+                    str(record.content["object_id"])
+                    if record.content.get("object_id") is not None
+                    else None
+                ),
+                source_ids=(record.id, *record.source_ids),
+                score=scores_by_id.get(record.id, 0.0),
             )
             for record in chosen
         )

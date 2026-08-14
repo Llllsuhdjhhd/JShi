@@ -145,7 +145,7 @@ class SubjectProcess:
                 IdentitySource(self.identities),
                 EventSource(),
                 PersonalWorldSource(self.personal_world),
-                MemorySource(repository),
+                MemorySource(repository, memory=self.memory),
                 EpistemicSource(),
                 ObjectSource(),
             ),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol, Sequence
 
+from jshi.textutil import query_terms
 from jshi.subject.domain import PersonalItem, PersonalKind
 from jshi.subject.repository import SubjectRepository
 
@@ -44,9 +45,10 @@ class InProcessPersonalWorld:
         constraints = [
             item for item in items if item.kind in self._constraint_kinds
         ]
+        terms = query_terms(query)
         ranked = sorted(
             (item for item in items if item.kind not in self._constraint_kinds),
-            key=item_importance,
+            key=lambda item: _selection_score(item, terms),
             reverse=True,
         )
         remain = max(budget - len(constraints), 0)
@@ -57,3 +59,20 @@ class InProcessPersonalWorld:
         return tuple(
             item for item in items if item.kind in self._constraint_kinds
         )
+
+
+def _selection_score(item: PersonalItem, terms: frozenset[str]) -> tuple[float, float]:
+    """Rank non-constraint items by persisted importance, then relevance.
+
+    The tuple keeps deterministic ordering: importance first, then query
+    relevance. Importance remains the stable long-term signal; relevance only
+    breaks ties inside one importance band, so a single query cannot silently
+    reorder the subject's values.
+    """
+
+    hay = item.content.lower()
+    relevance = sum(1 for term in terms if term in hay) if terms else 0.0
+    return (
+        item_importance(item),
+        relevance,
+    )

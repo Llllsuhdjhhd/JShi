@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from .port import AssemblyContext, AssemblyFragment, LoadResult
 
 if TYPE_CHECKING:
+    from jshi.memory import MemoryPort
     from jshi.identity import IdentityRepository
     from jshi.personalworld import PersonalWorldPort
     from jshi.subject.repository import SubjectRepository
@@ -120,8 +121,13 @@ class MemorySource:
     name = "memory"
     status = "implemented"
 
-    def __init__(self, repository: SubjectRepository) -> None:
+    def __init__(
+        self,
+        repository: SubjectRepository,
+        memory: MemoryPort | None = None,
+    ) -> None:
         self._repository = repository
+        self._memory = memory
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
         if not ctx.object_id:
@@ -132,6 +138,28 @@ class MemorySource:
             limit = 5
         else:
             limit = 8
+        if self._memory is not None:
+            recalled = self._memory.recall(
+                ctx.subject_id,
+                ctx.input_text,
+                limit=limit,
+                object_id=ctx.object_id,
+            )
+            return LoadResult(
+                fragments=tuple(
+                    AssemblyFragment(
+                        source="memory",
+                        id=item.event_id,
+                        content=item.text,
+                        kind=item.kind or "fact",
+                        status="active",
+                        importance=0.5,
+                        source_ids=(item.event_id, *item.source_ids),
+                        always=False,
+                    )
+                    for item in recalled
+                )
+            )
         records = self._repository.list_history(
             ctx.subject_id, limit=max(limit * 4, 64)
         )

@@ -135,3 +135,33 @@ def test_standing_constraints_returns_commitments_and_concerns(runtime):
     assert commitment.id in ids
     assert concern.id in ids
     assert not any(item.kind is PersonalKind.VALUE for item in constraints)
+
+
+def test_query_relevance_breaks_ties_within_same_importance(runtime):
+    repository, identities = runtime
+    world = InProcessPersonalWorld(repository)
+    process = SubjectProcess(repository, identities, FixedModel(), personal_world=world)
+    process.add_personal_item("stone", PersonalKind.AESTHETIC, "普通审美")
+    process.add_personal_item("stone", PersonalKind.VALUE, "朋友相关价值")
+
+    selected = world.select("stone", "朋友")
+
+    contents = [item.content for item in selected]
+    assert contents.index("朋友相关价值") < contents.index("普通审美")
+
+
+def test_importance_dominates_query_relevance(runtime):
+    repository, identities = runtime
+    world = InProcessPersonalWorld(repository)
+    process = SubjectProcess(repository, identities, FixedModel(), personal_world=world)
+    process.add_personal_item(
+        "stone", PersonalKind.AESTHETIC, "朋友相关但低重要", importance=0.2
+    )
+    process.add_personal_item(
+        "stone", PersonalKind.VALUE, "高重要普通内容", importance=0.9
+    )
+
+    selected = world.select("stone", "朋友")
+
+    contents = [item.content for item in selected]
+    assert contents.index("高重要普通内容") < contents.index("朋友相关但低重要")
