@@ -33,6 +33,7 @@ class ActiveZoneEvent:
     status: str  # unfinished | completed
     updated_at: datetime
     metadata: Mapping[str, object] = field(default_factory=dict)
+    source_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_personal_item(cls, item: PersonalItem) -> "ActiveZoneEvent":
@@ -45,6 +46,7 @@ class ActiveZoneEvent:
             status=status,
             updated_at=item.updated_at,
             metadata=dict(item.metadata),
+            source_ids=item.source_ids,
         )
 
 

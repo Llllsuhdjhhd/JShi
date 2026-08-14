@@ -282,12 +282,14 @@ def test_phase6_subject_history_records_assembly_and_cognition(runtime):
     assert [item.event_type for item in subject] == [
         "event_loaded",
         "current_state_assembled",
+        "activity_created",
         "cognitive_content_appeared",
+        "activity_completed",
     ]
     input_fact = repository.list_history("stone", HistoryKind.FACT)[0]
     assert input_fact.id in subject[0].source_ids
-    assert subject[2].content["cognitive_content_id"] == result.thought.id
-    assert subject[2].content["epistemic_status"] == "considering"
+    assert subject[3].content["cognitive_content_id"] == result.thought.id
+    assert subject[3].content["epistemic_status"] == "considering"
 
 
 def test_phase6_epistemic_transition_is_audited(runtime):

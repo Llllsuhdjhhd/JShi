@@ -253,6 +253,7 @@ class SubjectRepository:
         status: ActivityStatus | None = None,
         active_concern_ids: tuple[str, ...] | None = None,
         intention_ids: tuple[str, ...] | None = None,
+        reason: str = "",
     ) -> Activity:
         current = self.get_activity(activity_id)
         updated = replace(
@@ -283,6 +284,16 @@ class SubjectRepository:
                     activity_id,
                 ),
             )
+        if updated.status != current.status:
+            transition = StateTransition(
+                subject_id=updated.subject_id,
+                target_type="activity",
+                target_id=activity_id,
+                from_state=current.status.value,
+                to_state=updated.status.value,
+                reason=reason,
+            )
+            self.add_transition(transition)
         return updated
 
     def list_activities(

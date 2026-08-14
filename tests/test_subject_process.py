@@ -58,7 +58,9 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
     assert [item.event_type for item in subject] == [
         "event_loaded",
         "current_state_assembled",
+        "activity_created",
         "cognitive_content_appeared",
+        "activity_completed",
     ]
 
 
@@ -170,7 +172,11 @@ def test_reflection_is_internal_cognition_not_external_fact(tmp_path):
     assert reflection.epistemic_status is EpistemicStatus.CONSIDERING
     assert repository.get_activity(reflection.activity_id).status is ActivityStatus.COMPLETED
     subject_history = repository.list_history("stone", HistoryKind.SUBJECT)
-    assert subject_history[-1].event_type == "reflection"
+    reflections = [
+        item for item in subject_history if item.event_type == "reflection"
+    ]
+    assert reflections
+    assert reflections[-1].content["cognitive_content_id"] == reflection.id
 
 
 def test_propose_open_matter_after_experience_links_thought(tmp_path):

@@ -4,13 +4,24 @@ from dataclasses import dataclass, field, replace
 from typing import Sequence
 
 from jshi.activezone import (
-    ActiveZoneEvent,
     ActiveZonePort,
     ActiveZoneView,
     InProcessActiveZone,
 )
+from jshi.assembly import (
+    AssemblyContext,
+    AssemblyFragment,
+    CurrentStateAssembler,
+    EpistemicSource,
+    EventSource,
+    IdentitySource,
+    MemorySource,
+    ObjectSource,
+    PersonalWorldSource,
+    SourceLoadReport,
+)
 from jshi.attention import ChancePort, PlaceholderChance
-from jshi.core import Provenance, SubjectState
+from jshi.core import SubjectState
 from jshi.feedback import PlaceholderResultFeedback, ResultFeedbackPort
 from jshi.governance import (
     ContinuityCheckPort,
@@ -67,6 +78,8 @@ class AssembledCurrentState:
     active_zone: ActiveZoneView
     active_event_ids: tuple[str, ...]
     recalled: tuple[RecalledFragment, ...]
+    fragments: tuple[AssemblyFragment, ...] = ()
+    source_report: tuple[SourceLoadReport, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -111,6 +124,7 @@ class SubjectProcess:
         governance: ContinuityCheckPort | None = None,
         chance: ChancePort | None = None,
         reflection: ReflectionPort | None = None,
+        assembler: CurrentStateAssembler | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
@@ -126,6 +140,17 @@ class SubjectProcess:
         self.feedback = feedback or PlaceholderResultFeedback()
         self.governance = governance or PlaceholderContinuityCheck()
         self.chance = chance or PlaceholderChance()
+        self.assembler = assembler or CurrentStateAssembler(
+            sources=(
+                IdentitySource(self.identities),
+                EventSource(),
+                PersonalWorldSource(self.personal_world),
+                MemorySource(repository),
+                EpistemicSource(),
+                ObjectSource(),
+            ),
+            chance=self.chance,
+        )
         self.reflection = reflection or PlaceholderReflection(self)
 
     # ------------------------------------------------------------------
@@ -137,28 +162,33 @@ class SubjectProcess:
         subject_id: str,
         input_text: str,
         view: ActiveZoneView | None = None,
+        *,
+        object_id: str | None = None,
     ) -> AssembledCurrentState:
         """单一路径组装（只读已有记录）：
-        活跃区事件 + 承诺 + 个人世界 + 当前输入；不调用模型、不进行文本召回。
+        委托组装器收集各装载源，合并去重、预算截断、生成快照与报告；
+        不调用模型、不写长期记录。
         """
         view = view or self.active_zone.load(subject_id, input_text)
-        selected = tuple(self.personal_world.select(subject_id, input_text))
-        personal = tuple(
-            item for item in selected if item.kind is not PersonalKind.CONCERN
-        )
-        unfinished = tuple(
-            event for event in view.events if event.status == "unfinished"
-        )
-        subject_state = self._subject_state(subject_id, personal, unfinished)
-        assembled = AssembledCurrentState(
+        ctx = AssemblyContext(
+            subject_id=subject_id,
             input_text=input_text,
-            subject_state=subject_state,
-            personal_items=personal,
+            object_id=object_id,
             active_zone=view,
-            active_event_ids=tuple(event.event_id for event in view.events),
-            recalled=(),
+            budget_extra=max(1, view.budget // 2),
+            recall_level=1,
         )
-        return self.chance.apply("assemble", assembled)
+        working_set = self.assembler.assemble(ctx)
+        return AssembledCurrentState(
+            input_text=input_text,
+            subject_state=working_set.subject_state,
+            personal_items=tuple(working_set.personal_items),
+            active_zone=view,
+            active_event_ids=working_set.active_event_ids,
+            recalled=(),
+            fragments=working_set.fragments,
+            source_report=working_set.report,
+        )
 
     def recall_events(
         self, subject_id: str, event_ids: Sequence[str]
@@ -200,35 +230,10 @@ class SubjectProcess:
             subject_id, input_text, object_ref, channel, carriers
         )
         view = self.active_zone.load(subject_id, input_text)
-        assembled = self.assemble_current_state(subject_id, input_text, view)
+        assembled = self.assemble_current_state(
+            subject_id, input_text, view, object_id=speaker.object_id
+        )
         return SubjectPreview(speaker=speaker, active_zone=view, assembled=assembled)
-
-    def _subject_state(
-        self,
-        subject_id: str,
-        personal: Sequence[PersonalItem],
-        unfinished_events: Sequence[ActiveZoneEvent],
-    ) -> SubjectState:
-        identity = self.identities.get(subject_id)
-        values = tuple(
-            item.content for item in personal if item.kind is PersonalKind.VALUE
-        )
-        commitments = tuple(
-            item.content for item in personal if item.kind is PersonalKind.COMMITMENT
-        )
-        concerns = tuple(event.content for event in unfinished_events)
-        return SubjectState(
-            subject_id=subject_id,
-            identity_summary=f"{identity.name}；来源：{identity.origin}",
-            current_stance=identity.narrative,
-            salient_values=values,
-            commitments=commitments,
-            concerns=concerns,
-            provenance=Provenance(
-                source="assembled_current_state",
-                method="load_existing_only",
-            ),
-        )
 
     # ------------------------------------------------------------------
     # 外部活动主流程
@@ -340,7 +345,9 @@ class SubjectProcess:
         )
 
         # 阶段③ 当前状态组装（单一路径，只读已有记录）
-        current = self.assemble_current_state(subject_id, text, view)
+        current = self.assemble_current_state(
+            subject_id, text, view, object_id=speaker.object_id
+        )
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -355,6 +362,18 @@ class SubjectProcess:
                     "recalled_event_ids": [
                         item.event_id for item in current.recalled
                     ],
+                    "sources": [
+                        {
+                            "source": report.source,
+                            "status": report.status,
+                            "count": len(report.loaded_ids),
+                            "budget": report.budget,
+                            "ids": list(report.loaded_ids),
+                            "skipped": list(report.skipped_ids),
+                            "error": report.error,
+                        }
+                        for report in current.source_report
+                    ],
                 },
                 source_ids=(fact.id, *current.active_event_ids),
             )
@@ -368,6 +387,20 @@ class SubjectProcess:
             active_concern_ids=(),
         )
         self.repository.add_activity(activity)
+        self.repository.add_history(
+            HistoryRecord(
+                subject_id=subject_id,
+                kind=HistoryKind.SUBJECT,
+                event_type="activity_created",
+                content={
+                    "activity_id": activity.id,
+                    "kind": activity.kind.value,
+                    "trigger": activity.trigger,
+                    "status": activity.status.value,
+                },
+                source_ids=(fact.id,),
+            )
+        )
         self.intent.begin(activity)
         intent_ids = self.intent.resolve(activity, text, ())
         if intent_ids:
@@ -434,7 +467,22 @@ class SubjectProcess:
                 )
             )
         completed = self.repository.update_activity(
-            activity.id, status=ActivityStatus.COMPLETED
+            activity.id,
+            status=ActivityStatus.COMPLETED,
+            reason="external_activity_finished_after_action",
+        )
+        self.repository.add_history(
+            HistoryRecord(
+                subject_id=subject_id,
+                kind=HistoryKind.SUBJECT,
+                event_type="activity_completed",
+                content={
+                    "activity_id": completed.id,
+                    "to": completed.status.value,
+                    "reason": "external_activity_finished_after_action",
+                },
+                source_ids=(fact.id,),
+            )
         )
         findings = self.governance.check(subject_id, completed, fact, None)
         if findings:
@@ -481,11 +529,11 @@ class SubjectProcess:
             )
         }
         valid = tuple(dict.fromkeys(id_ for id_ in event_ids if id_ in existing))
-        if not valid:
-            return activity
-        activity = self.repository.update_activity(
-            activity.id, active_concern_ids=valid
-        )
+        invalid = tuple(dict.fromkeys(id_ for id_ in event_ids if id_ not in existing))
+        if valid:
+            activity = self.repository.update_activity(
+                activity.id, active_concern_ids=valid
+            )
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -494,6 +542,7 @@ class SubjectProcess:
                 content={
                     "activity_id": activity.id,
                     "event_ids": list(valid),
+                    "invalid_event_ids": list(invalid),
                     "basis": "model_focus",
                 },
                 source_ids=valid,
@@ -509,7 +558,6 @@ class SubjectProcess:
         perception: CognitiveContent,
     ) -> tuple[CognitiveContent, object]:
         """认知活动：模型可提出追加召回请求，程序执行后继续认知，直至产出或预算耗尽。"""
-        working_personal = current.personal_items
         working_recalled: list[RecalledFragment] = list(current.recalled)
         response = None
         rounds = 0
@@ -520,9 +568,8 @@ class SubjectProcess:
                     input_text=current.input_text,
                     subject_state=current.subject_state,
                     context=self._model_context(
-                        working_personal,
                         working_recalled,
-                        current.active_zone.events,
+                        current.fragments,
                     ),
                 )
             )
@@ -576,8 +623,11 @@ class SubjectProcess:
             evidence_kind=EvidenceKind.COGNITIVE_REASONING,
             source_ids=(
                 perception.id,
-                *(item.id for item in working_personal),
-                *(event.event_id for event in current.active_zone.events),
+                *(
+                    source_id
+                    for fragment in current.fragments
+                    for source_id in fragment.source_ids
+                ),
                 *(item.event_id for item in working_recalled),
             ),
             model=response.model,
@@ -683,26 +733,18 @@ class SubjectProcess:
 
     @staticmethod
     def _model_context(
-        personal: Sequence[PersonalItem],
         recalled: Sequence[RecalledFragment],
-        active_events: Sequence[ActiveZoneEvent] = (),
+        fragments: Sequence[AssemblyFragment],
     ) -> tuple[dict[str, object], ...]:
         return tuple(
             {
-                "id": event.event_id,
-                "kind": "event",
-                "content": event.content,
-                "status": event.status,
+                "id": fragment.id,
+                "kind": fragment.kind,
+                "content": fragment.content,
+                "status": fragment.status,
+                "source": fragment.source,
             }
-            for event in active_events
-        ) + tuple(
-            {
-                "id": item.id,
-                "kind": item.kind.value,
-                "content": item.content,
-                "status": item.status.value,
-            }
-            for item in personal
+            for fragment in fragments
         ) + tuple(
             {
                 "id": item.event_id,
@@ -731,6 +773,20 @@ class SubjectProcess:
             active_concern_ids=current.active_event_ids,
         )
         self.repository.add_activity(activity)
+        self.repository.add_history(
+            HistoryRecord(
+                subject_id=subject_id,
+                kind=HistoryKind.SUBJECT,
+                event_type="activity_created",
+                content={
+                    "activity_id": activity.id,
+                    "kind": activity.kind.value,
+                    "trigger": activity.trigger,
+                    "status": activity.status.value,
+                },
+                source_ids=(),
+            )
+        )
         history_text = "\n".join(
             f"{item.kind.value}:{item.event_type}:{dict(item.content)}"
             for item in recent_history
@@ -771,7 +827,24 @@ class SubjectProcess:
                 source_ids=reflection.source_ids,
             )
         )
-        self.repository.update_activity(activity.id, status=ActivityStatus.COMPLETED)
+        self.repository.update_activity(
+            activity.id,
+            status=ActivityStatus.COMPLETED,
+            reason="internal_activity_finished",
+        )
+        self.repository.add_history(
+            HistoryRecord(
+                subject_id=subject_id,
+                kind=HistoryKind.SUBJECT,
+                event_type="activity_completed",
+                content={
+                    "activity_id": activity.id,
+                    "to": ActivityStatus.COMPLETED.value,
+                    "reason": "internal_activity_finished",
+                },
+                source_ids=(),
+            )
+        )
         return reflection
 
     # ------------------------------------------------------------------

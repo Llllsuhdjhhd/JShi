@@ -285,6 +285,14 @@ def main() -> None:
         print(f"承诺：{list(assembled.subject_state.commitments)}")
         print(f"未完成现实（主体面）：{list(assembled.subject_state.concerns)}")
         print(f"活跃区事件 id：{list(assembled.active_event_ids)}")
+        print("装载报告：")
+        for report in assembled.source_report:
+            line = f"  - {report.source}: {len(report.loaded_ids)} 条（{report.status}）"
+            if report.skipped_ids:
+                line += f"，跳过 {len(report.skipped_ids)}"
+            if report.error:
+                line += f"，错误：{report.error}"
+            print(line)
         if assembled.recalled:
             print("追加召回：")
             for item in assembled.recalled:
