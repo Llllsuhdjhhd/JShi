@@ -278,18 +278,19 @@ def main() -> None:
             f"说话人：{preview.speaker.label}（对象 {preview.speaker.object_id}，"
             f"置信度 {preview.speaker.confidence}，状态 {preview.speaker.status}）"
         )
-        print(
-            f"归属：{list(preview.attribution.concern_ids)}"
-            f"（{preview.attribution.status}，依据 {list(preview.attribution.basis)}）"
-        )
-        print(f"组装模式：{preview.mode}")
+        print(f"活跃区（预算 {preview.active_zone.budget}）：")
+        for event in preview.active_zone.events:
+            print(f"  - {event.event_id} [{event.status}] {event.content}")
         print(f"价值：{list(assembled.subject_state.salient_values)}")
         print(f"承诺：{list(assembled.subject_state.commitments)}")
         print(f"未完成现实（主体面）：{list(assembled.subject_state.concerns)}")
-        print(f"开放事项 id：{list(assembled.open_matter_ids)}")
-        print("召回：")
-        for item in assembled.recalled:
-            print(f"  - {item.event_type}: {item.text}")
+        print(f"活跃区事件 id：{list(assembled.active_event_ids)}")
+        if assembled.recalled:
+            print("追加召回：")
+            for item in assembled.recalled:
+                print(f"  - {item.event_type}: {item.text}")
+        else:
+            print("追加召回：无")
     elif args.command == "add-object":
         aliases = tuple(
             alias.strip() for alias in args.aliases.split(",") if alias.strip()

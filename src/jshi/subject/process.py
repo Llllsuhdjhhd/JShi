@@ -3,8 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Sequence
 
+from jshi.activezone import (
+    ActiveZoneEvent,
+    ActiveZonePort,
+    ActiveZoneView,
+    InProcessActiveZone,
+)
 from jshi.attention import ChancePort, PlaceholderChance
-from jshi.attribution import AttributionPort, AttributionResult, PlaceholderAttribution
 from jshi.core import Provenance, SubjectState
 from jshi.feedback import PlaceholderResultFeedback, ResultFeedbackPort
 from jshi.governance import (
@@ -59,17 +64,17 @@ class AssembledCurrentState:
     input_text: str
     subject_state: SubjectState
     personal_items: tuple[PersonalItem, ...]
-    open_matter_ids: tuple[str, ...]
+    active_zone: ActiveZoneView
+    active_event_ids: tuple[str, ...]
     recalled: tuple[RecalledFragment, ...]
 
 
 @dataclass(frozen=True)
 class SubjectPreview:
-    """preview-state 输出：身份识别 + 归属判断 + 组装快照（只读，不落库）。"""
+    """preview-state 输出：对象解析 + 活跃区装载 + 组装快照（只读，不落库）。"""
 
     speaker: SpeakerCandidate
-    attribution: AttributionResult
-    mode: str  # concern_centric | full
+    active_zone: ActiveZoneView
     assembled: AssembledCurrentState
 
 
@@ -81,14 +86,14 @@ class SubjectActivityResult:
     action_text: str
     current_state: AssembledCurrentState
     speaker: SpeakerCandidate = field(default_factory=SpeakerCandidate)
-    attribution: AttributionResult = field(default_factory=AttributionResult)
 
 
 class SubjectProcess:
-    """最小主体循环：识别→落位→归属→组装→活动→认知(可追加召回)→行动→收尾。
+    """最小主体循环：识别→落位→活跃区装载→组装→活动→认知(可追加召回)→行动→收尾。
 
-    每个系统都是占位接口：身份识别、归属判断、意图、受约束偶然性、结果反馈、
+    每个系统都是占位接口：身份识别、活跃区、意图、受约束偶然性、结果反馈、
     治理检验、反思。各系统可独立替换为真实实现，不改主流程顺序。
+    归属判断已废弃（02 起不再接线），事件聚焦由模型在认知阶段完成。
     """
 
     def __init__(
@@ -99,7 +104,8 @@ class SubjectProcess:
         memory: MemoryPort | None = None,
         personal_world: PersonalWorldPort | None = None,
         recognition: ObjectRecognitionPort | None = None,
-        attribution: AttributionPort | None = None,
+        attribution: object | None = None,  # 已废弃：仅保留位置兼容，主流程不再使用
+        active_zone: ActiveZonePort | None = None,
         intent: IntentPort | None = None,
         feedback: ResultFeedbackPort | None = None,
         governance: ContinuityCheckPort | None = None,
@@ -115,7 +121,7 @@ class SubjectProcess:
         self.recognition = recognition or ProfileObjectRecognition(
             self.profiles, memory_matcher=self._match_object_by_memory
         )
-        self.attribution = attribution or PlaceholderAttribution()
+        self.active_zone = active_zone or InProcessActiveZone(repository)
         self.intent = intent or PlaceholderIntent()
         self.feedback = feedback or PlaceholderResultFeedback()
         self.governance = governance or PlaceholderContinuityCheck()
@@ -123,69 +129,61 @@ class SubjectProcess:
         self.reflection = reflection or PlaceholderReflection(self)
 
     # ------------------------------------------------------------------
-    # 阶段②/③ 前置：常驻约束、归属判断、双路组装
+    # 阶段②/③ 前置：活跃区装载与单一路径组装
     # ------------------------------------------------------------------
 
-    def _standing_constraints(self, subject_id: str) -> tuple[PersonalItem, ...]:
-        """常驻约束清单：承诺 + 主体面未完成现实（供归属判断与始终装载）。"""
-        return tuple(self.personal_world.standing_constraints(subject_id))
-
-    def _recent_activity(self, subject_id: str) -> Activity | None:
-        activities = self.repository.list_activities(subject_id)
-        return activities[-1] if activities else None
-
-    def _judge_attribution(
-        self, subject_id: str, input_text: str
-    ) -> tuple[AttributionResult, tuple[PersonalItem, ...]]:
-        standing = self._standing_constraints(subject_id)
-        result = self.attribution.judge(
-            subject_id, input_text, standing, self._recent_activity(subject_id)
-        )
-        return result, standing
-
     def assemble_current_state(
-        self, subject_id: str, input_text: str
+        self,
+        subject_id: str,
+        input_text: str,
+        view: ActiveZoneView | None = None,
     ) -> AssembledCurrentState:
-        """全量组装（未命中关切）：身份 + 个人世界 + 开放事项清单 + 记忆召回。"""
-        personal = tuple(self.personal_world.select(subject_id, input_text))
-        open_matter = tuple(
-            item for item in personal if item.kind is PersonalKind.CONCERN
+        """单一路径组装（只读已有记录）：
+        活跃区事件 + 承诺 + 个人世界 + 当前输入；不调用模型、不进行文本召回。
+        """
+        view = view or self.active_zone.load(subject_id, input_text)
+        selected = tuple(self.personal_world.select(subject_id, input_text))
+        personal = tuple(
+            item for item in selected if item.kind is not PersonalKind.CONCERN
         )
-        recalled = tuple(self.memory.recall(subject_id, input_text))
-        subject_state = self._subject_state(subject_id, personal)
+        unfinished = tuple(
+            event for event in view.events if event.status == "unfinished"
+        )
+        subject_state = self._subject_state(subject_id, personal, unfinished)
         assembled = AssembledCurrentState(
             input_text=input_text,
             subject_state=subject_state,
             personal_items=personal,
-            open_matter_ids=tuple(item.id for item in open_matter),
-            recalled=recalled,
+            active_zone=view,
+            active_event_ids=tuple(event.event_id for event in view.events),
+            recalled=(),
         )
         return self.chance.apply("assemble", assembled)
 
-    def _assemble_concern_centric(
-        self, subject_id: str, input_text: str, concern_ids: tuple[str, ...]
-    ) -> AssembledCurrentState:
-        """关切中心组装（命中关切）：焦点关切来源与推进史 + 承诺 + 截断的个人世界。"""
-        standing = self._standing_constraints(subject_id)
-        focus = tuple(
-            item
-            for item in standing
-            if item.id in concern_ids and item.kind is PersonalKind.CONCERN
-        )
-        query = " ".join(
-            [input_text, *(item.content for item in focus)]
-        ).strip()
-        personal = tuple(self.personal_world.select(subject_id, query))
-        recalled = tuple(self.memory.recall(subject_id, query))
-        subject_state = self._subject_state(subject_id, personal)
-        assembled = AssembledCurrentState(
-            input_text=input_text,
-            subject_state=subject_state,
-            personal_items=personal,
-            open_matter_ids=tuple(item.id for item in focus),
-            recalled=recalled,
-        )
-        return self.chance.apply("assemble", assembled)
+    def recall_events(
+        self, subject_id: str, event_ids: Sequence[str]
+    ) -> tuple[RecalledFragment, ...]:
+        """显式事件 id 直接装载/召回（程序侧窄接口），并记账 event_recalled。
+
+        事件 id 由输入信封或活动上下文显式携带（未来）；本期 CLI 未暴露，
+        接口保留给后续输入契约扩展。
+        """
+        if not event_ids:
+            return ()
+        fragments = self.active_zone.recall_by_ids(subject_id, event_ids)
+        if fragments:
+            self.repository.add_history(
+                HistoryRecord(
+                    subject_id=subject_id,
+                    kind=HistoryKind.SUBJECT,
+                    event_type="event_recalled",
+                    content={
+                        "event_ids": [item.event_id for item in fragments],
+                    },
+                    source_ids=tuple(item.event_id for item in fragments),
+                )
+            )
+        return fragments
 
     def preview_state(
         self,
@@ -201,32 +199,24 @@ class SubjectProcess:
         speaker = self.recognition.resolve(
             subject_id, input_text, object_ref, channel, carriers
         )
-        attribution, _ = self._judge_attribution(subject_id, input_text)
-        if attribution.concern_ids:
-            assembled = self._assemble_concern_centric(
-                subject_id, input_text, attribution.concern_ids
-            )
-            mode = "concern_centric"
-        else:
-            assembled = self.assemble_current_state(subject_id, input_text)
-            mode = "full"
-        return SubjectPreview(
-            speaker=speaker, attribution=attribution, mode=mode, assembled=assembled
-        )
+        view = self.active_zone.load(subject_id, input_text)
+        assembled = self.assemble_current_state(subject_id, input_text, view)
+        return SubjectPreview(speaker=speaker, active_zone=view, assembled=assembled)
 
     def _subject_state(
-        self, subject_id: str, personal: Sequence[PersonalItem]
+        self,
+        subject_id: str,
+        personal: Sequence[PersonalItem],
+        unfinished_events: Sequence[ActiveZoneEvent],
     ) -> SubjectState:
         identity = self.identities.get(subject_id)
         values = tuple(
             item.content for item in personal if item.kind is PersonalKind.VALUE
         )
-        concerns = tuple(
-            item.content for item in personal if item.kind is PersonalKind.CONCERN
-        )
         commitments = tuple(
             item.content for item in personal if item.kind is PersonalKind.COMMITMENT
         )
+        concerns = tuple(event.content for event in unfinished_events)
         return SubjectState(
             subject_id=subject_id,
             identity_summary=f"{identity.name}；来源：{identity.origin}",
@@ -323,33 +313,34 @@ class SubjectProcess:
                 )
             )
 
-        # 阶段② 归属判断（结果暂定，可修正）
-        attribution, _ = self._judge_attribution(subject_id, text)
+        # 阶段② 活跃区装载（只装载，不调整；不调用模型）
+        view = self.active_zone.load(subject_id, text)
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
                 kind=HistoryKind.SUBJECT,
-                event_type="input_attributed",
+                event_type="event_loaded",
                 content={
                     "input": text,
-                    "concern_ids": list(attribution.concern_ids),
-                    "confidence": attribution.confidence,
-                    "basis": list(attribution.basis),
-                    "status": attribution.status,
+                    "event_ids": [event.event_id for event in view.events],
+                    "unfinished_ids": [
+                        event.event_id
+                        for event in view.events
+                        if event.status == "unfinished"
+                    ],
+                    "completed_ids": [
+                        event.event_id
+                        for event in view.events
+                        if event.status == "completed"
+                    ],
+                    "budget": view.budget,
                 },
-                source_ids=(fact.id, *attribution.concern_ids),
+                source_ids=(fact.id, *(event.event_id for event in view.events)),
             )
         )
 
-        # 阶段③ 当前状态组装（两条支路，均只读已有记录）
-        if attribution.concern_ids:
-            current = self._assemble_concern_centric(
-                subject_id, text, attribution.concern_ids
-            )
-            mode = "concern_centric"
-        else:
-            current = self.assemble_current_state(subject_id, text)
-            mode = "full"
+        # 阶段③ 当前状态组装（单一路径，只读已有记录）
+        current = self.assemble_current_state(subject_id, text, view)
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -357,29 +348,28 @@ class SubjectProcess:
                 event_type="current_state_assembled",
                 content={
                     "input": text,
-                    "mode": mode,
-                    "attributed_concern_ids": list(attribution.concern_ids),
-                    "open_matter_ids": list(current.open_matter_ids),
+                    "event_ids": list(current.active_event_ids),
+                    "budget": view.budget,
                     "value_count": len(current.subject_state.salient_values),
                     "commitment_count": len(current.subject_state.commitments),
                     "recalled_event_ids": [
                         item.event_id for item in current.recalled
                     ],
                 },
-                source_ids=(fact.id, *attribution.concern_ids),
+                source_ids=(fact.id, *current.active_event_ids),
             )
         )
 
-        # 阶段④ 活动建立（挂载命中的关切 id）
+        # 阶段④ 活动建立（事件挂载在认知后由模型聚焦回填）
         activity = Activity(
             subject_id=subject_id,
             kind=ActivityKind.EXTERNAL,
             trigger=fact.id,
-            active_concern_ids=attribution.concern_ids,
+            active_concern_ids=(),
         )
         self.repository.add_activity(activity)
         self.intent.begin(activity)
-        intent_ids = self.intent.resolve(activity, text, attribution.concern_ids)
+        intent_ids = self.intent.resolve(activity, text, ())
         if intent_ids:
             activity = self.repository.update_activity(
                 activity.id, intention_ids=intent_ids
@@ -397,13 +387,17 @@ class SubjectProcess:
         )
         self.repository.add_cognitive_content(perception)
 
-        # 阶段⑤ 认知活动（多轮，可追加召回）
+        # 阶段⑤ 认知活动（多轮，可追加召回；模型聚焦事件）
         thought, response = self._cognize(
             subject_id, activity, current, perception
         )
         if response.object_assessment is not None:
             speaker = self._apply_object_assessment(
                 subject_id, speaker, fact, thought, response.object_assessment
+            )
+        if response.focused_event_ids:
+            activity = self._attach_focused_events(
+                subject_id, activity, response.focused_event_ids
             )
 
         # 阶段⑥ 行动与结果
@@ -422,11 +416,27 @@ class SubjectProcess:
         )
         self.feedback.ingest_result(subject_id, activity.id, thought.content)
 
-        # 阶段⑦ 收尾与沉淀
+        # 阶段⑦ 收尾与沉淀：活跃区调整（剔除）→ 活动完成 → 治理
+        evicted = self.active_zone.evict_overflow(subject_id, view)
+        for event in evicted:
+            self.repository.add_history(
+                HistoryRecord(
+                    subject_id=subject_id,
+                    kind=HistoryKind.SUBJECT,
+                    event_type="event_evicted",
+                    content={
+                        "event_id": event.event_id,
+                        "content": event.content,
+                        "status": event.status,
+                        "reason": "budget_overflow",
+                    },
+                    source_ids=(event.event_id,),
+                )
+            )
         completed = self.repository.update_activity(
             activity.id, status=ActivityStatus.COMPLETED
         )
-        findings = self.governance.check(subject_id, completed, fact, attribution)
+        findings = self.governance.check(subject_id, completed, fact, None)
         if findings:
             self.repository.add_history(
                 HistoryRecord(
@@ -453,8 +463,43 @@ class SubjectProcess:
             thought.content,
             current,
             speaker=speaker,
-            attribution=attribution,
         )
+
+    def _attach_focused_events(
+        self,
+        subject_id: str,
+        activity: Activity,
+        event_ids: Sequence[str],
+    ) -> Activity:
+        """认知后回填活动挂载的事件 id（只接受库中存在的事件）。"""
+        existing = {
+            item.id
+            for item in self.repository.list_personal_items(
+                subject_id,
+                kind=PersonalKind.CONCERN,
+                active_only=False,
+            )
+        }
+        valid = tuple(dict.fromkeys(id_ for id_ in event_ids if id_ in existing))
+        if not valid:
+            return activity
+        activity = self.repository.update_activity(
+            activity.id, active_concern_ids=valid
+        )
+        self.repository.add_history(
+            HistoryRecord(
+                subject_id=subject_id,
+                kind=HistoryKind.SUBJECT,
+                event_type="activity_events_attached",
+                content={
+                    "activity_id": activity.id,
+                    "event_ids": list(valid),
+                    "basis": "model_focus",
+                },
+                source_ids=valid,
+            )
+        )
+        return activity
 
     def _cognize(
         self,
@@ -474,7 +519,11 @@ class SubjectProcess:
                     purpose="subject_activity",
                     input_text=current.input_text,
                     subject_state=current.subject_state,
-                    context=self._model_context(working_personal, working_recalled),
+                    context=self._model_context(
+                        working_personal,
+                        working_recalled,
+                        current.active_zone.events,
+                    ),
                 )
             )
             requests: tuple[RecallRequest, ...] = response.recall_requests or ()
@@ -528,6 +577,7 @@ class SubjectProcess:
             source_ids=(
                 perception.id,
                 *(item.id for item in working_personal),
+                *(event.event_id for event in current.active_zone.events),
                 *(item.event_id for item in working_recalled),
             ),
             model=response.model,
@@ -635,8 +685,17 @@ class SubjectProcess:
     def _model_context(
         personal: Sequence[PersonalItem],
         recalled: Sequence[RecalledFragment],
+        active_events: Sequence[ActiveZoneEvent] = (),
     ) -> tuple[dict[str, object], ...]:
         return tuple(
+            {
+                "id": event.event_id,
+                "kind": "event",
+                "content": event.content,
+                "status": event.status,
+            }
+            for event in active_events
+        ) + tuple(
             {
                 "id": item.id,
                 "kind": item.kind.value,
@@ -669,7 +728,7 @@ class SubjectProcess:
             subject_id=subject_id,
             kind=ActivityKind.INTERNAL,
             trigger=prompt,
-            active_concern_ids=current.open_matter_ids,
+            active_concern_ids=current.active_event_ids,
         )
         self.repository.add_activity(activity)
         history_text = "\n".join(

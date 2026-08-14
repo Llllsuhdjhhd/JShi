@@ -24,7 +24,7 @@ class ContinuityCheckPort(Protocol):
         subject_id: str,
         activity: Activity,
         fact: HistoryRecord,
-        attribution: object,
+        attribution: object | None,
     ) -> tuple[ContinuityFinding, ...]: ...
 
 
@@ -38,6 +38,6 @@ class PlaceholderContinuityCheck:
         subject_id: str,
         activity: Activity,
         fact: HistoryRecord,
-        attribution: object,
+        attribution: object | None,
     ) -> tuple[ContinuityFinding, ...]:
         return ()

@@ -48,7 +48,7 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
     assert result.activity.status is ActivityStatus.COMPLETED
     assert result.thought.epistemic_status is EpistemicStatus.CONSIDERING
     assert result.thought.model == "context-model"
-    assert result.current_state.open_matter_ids == ()
+    assert result.current_state.active_event_ids == ()
     facts = repository.list_history("stone", HistoryKind.FACT)
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
     assert [item.event_type for item in facts] == [
@@ -56,7 +56,7 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
         "language_action",
     ]
     assert [item.event_type for item in subject] == [
-        "input_attributed",
+        "event_loaded",
         "current_state_assembled",
         "cognitive_content_appeared",
     ]
@@ -72,7 +72,7 @@ def test_assemble_loads_existing_open_matter_only(tmp_path):
 
     assembled = process.assemble_current_state("stone", "今天先聊到这里")
 
-    assert open_matter.id in assembled.open_matter_ids
+    assert open_matter.id in assembled.active_event_ids
     assert "继续理解朋友最近的疲倦" in assembled.subject_state.concerns
     # Assembly must not create new personal items.
     assert len(repository.list_personal_items("stone", PersonalKind.CONCERN)) == 1
@@ -124,7 +124,7 @@ def test_open_matter_and_commitment_persist_and_close_explicitly(tmp_path):
     )
 
     result = process.experience("stone", "今天先聊到这里", object_ref="user")
-    assert concern.id in result.activity.active_concern_ids
+    assert result.activity.active_concern_ids == ()
     assert commitment.content in result.action_text
 
     closed_open = process.close_personal_item(
@@ -140,7 +140,8 @@ def test_open_matter_and_commitment_persist_and_close_explicitly(tmp_path):
     assert repository.list_transitions(commitment.id)[0].reason == "已经在后续交流中履行"
 
     later = process.assemble_current_state("stone", "又见面了")
-    assert later.open_matter_ids == ()
+    # 关闭后不再作为未完成现实进入主体状态（完成事件可作为背景保留）
+    assert later.subject_state.concerns == ()
 
 
 def test_same_cognition_forms_different_outputs_from_personal_world(tmp_path):

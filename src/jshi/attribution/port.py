@@ -7,6 +7,10 @@ if TYPE_CHECKING:
     from jshi.subject.domain import Activity, PersonalItem
 
 
+# 已废弃（02 起不再接线）：归属判断由活跃区与事件装载取代。
+# 保留本文件供旧测试与回退参考，待 07 统一清理。
+
+
 @dataclass(frozen=True)
 class AttributionResult:
     """归属判断结果：本输入归属到哪些已有主体面关切。"""

@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from .domain import (
     Activity,
@@ -179,6 +179,40 @@ class SubjectRepository:
                 """,
                 (
                     updated.status.value,
+                    updated.revision,
+                    updated.updated_at.isoformat(),
+                    item_id,
+                ),
+            )
+        return updated
+
+    def update_personal_metadata(
+        self, item_id: str, metadata: Mapping[str, Any]
+    ) -> PersonalItem:
+        """合并更新个人条目 metadata；值为 None 的键表示删除。
+
+        活跃区剔除/恢复使用该通道（zone_state / evicted_at），
+        不改变事件本体内容与 status。
+        """
+        current = self.get_personal_item(item_id)
+        merged = dict(current.metadata)
+        merged.update(metadata)
+        cleaned = {key: value for key, value in merged.items() if value is not None}
+        updated = replace(
+            current,
+            metadata=cleaned,
+            revision=current.revision + 1,
+            updated_at=utc_now(),
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE personal_items
+                SET metadata = ?, revision = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(cleaned, ensure_ascii=False),
                     updated.revision,
                     updated.updated_at.isoformat(),
                     item_id,

@@ -1,12 +1,12 @@
 """最新主体流程的系统占位测试。
 
-覆盖：阶段① 身份识别携带对象信息、阶段② 归属判断（单关切延续/未命中）、
-阶段⑤ 追加召回子循环（含轮次上限）、反馈/治理占位钩子、preview 只读。
+覆盖：阶段① 身份识别携带对象信息、阶段② 活跃区装载（空/有事件，
+输入不做归属判断）、阶段⑤ 追加召回子循环（含轮次上限）、
+反馈/治理占位钩子、preview 只读。
 """
 
 from __future__ import annotations
 
-from jshi.attribution import AttributionResult
 from jshi.governance import ContinuityFinding
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import ModelRequest, ModelResponse, RecallRequest
@@ -75,7 +75,7 @@ def test_recognition_carries_object_info_into_fact(tmp_path):
     assert result.speaker.object_id == "OBJ-1"
 
 
-def test_attribution_single_concern_continuation(tmp_path):
+def test_active_zone_loads_unfinished_event_without_attribution(tmp_path):
     process, repository = runtime(tmp_path)
     concern = process.propose_open_matter(
         "stone", "继续理解朋友的疲倦", source_ids=("seed",)
@@ -83,39 +83,44 @@ def test_attribution_single_concern_continuation(tmp_path):
 
     result = process.experience("stone", "继续", object_ref="user")
 
-    assert result.attribution.concern_ids == (concern.id,)
-    assert concern.id in result.activity.active_concern_ids
+    # 输入不做归属判断：占位模型不聚焦，活动挂载为空
+    assert result.activity.active_concern_ids == ()
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
-    attributed = [
+    loaded = [
         item
         for item in subject
-        if item.event_type == "input_attributed"
+        if item.event_type == "event_loaded"
     ]
-    assert len(attributed) == 1
-    assert attributed[0].content["concern_ids"] == [concern.id]
+    assert len(loaded) == 1
+    assert loaded[0].content["event_ids"] == [concern.id]
+    assert loaded[0].content["unfinished_ids"] == [concern.id]
     assembled = [
         item
         for item in subject
         if item.event_type == "current_state_assembled"
     ]
-    assert assembled[0].content["mode"] == "concern_centric"
-    assert assembled[0].content["attributed_concern_ids"] == [concern.id]
+    assert assembled[0].content["event_ids"] == [concern.id]
+    assert concern.id in result.current_state.active_event_ids
 
 
-def test_full_assembly_when_no_concern(tmp_path):
+def test_first_input_empty_active_zone(tmp_path):
     process, repository = runtime(tmp_path)
 
     process.experience("stone", "今天有些疲倦", object_ref="user")
 
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
+    loaded = [
+        item
+        for item in subject
+        if item.event_type == "event_loaded"
+    ]
+    assert loaded[0].content["event_ids"] == []
     assembled = [
         item
         for item in subject
         if item.event_type == "current_state_assembled"
     ]
-    assert assembled[0].content["mode"] == "full"
-    assert assembled[0].content["attributed_concern_ids"] == []
-    assert assembled[0].content["open_matter_ids"] == []
+    assert assembled[0].content["event_ids"] == []
 
 
 class FollowupModel:
@@ -226,6 +231,6 @@ def test_preview_is_read_only(tmp_path):
     preview = process.preview_state("stone", "你好", object_ref="user")
 
     assert preview.speaker.status == "confirmed"
-    assert preview.attribution == AttributionResult()
-    assert preview.mode == "full"
+    assert preview.active_zone.events == ()
+    assert preview.assembled.active_event_ids == ()
     assert repository.list_history("stone") == ()
