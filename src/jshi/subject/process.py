@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field, replace
 from typing import Sequence
 
@@ -63,9 +65,23 @@ from .domain import (
 from .repository import SubjectRepository
 
 
-# 追加召回占位预算：每活动最多轮次、每轮默认片段数。
-FOLLOWUP_RECALL_MAX_ROUNDS = 2
+logger = logging.getLogger(__name__)
+
+
+# 追加召回占位预算：最多追加一轮、每轮默认片段数。
+FOLLOWUP_RECALL_MAX_ROUNDS = 1
 FOLLOWUP_RECALL_DEFAULT_LIMIT = 3
+
+
+@dataclass(frozen=True)
+class _RecallMetricsEntry:
+    """一轮追加召回的指标（写入 recall_metrics 前暂存）。"""
+
+    round: int
+    request: dict[str, object]
+    duration_ms: float
+    returned_count: int
+    fresh_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -557,10 +573,11 @@ class SubjectProcess:
         current: AssembledCurrentState,
         perception: CognitiveContent,
     ) -> tuple[CognitiveContent, object]:
-        """认知活动：模型可提出追加召回请求，程序执行后继续认知，直至产出或预算耗尽。"""
+        """认知活动：模型可提出追加召回（最多一轮），程序执行后继续认知，直至产出。"""
         working_recalled: list[RecalledFragment] = list(current.recalled)
         response = None
         rounds = 0
+        pending: list[_RecallMetricsEntry] = []
         while True:
             response = self.cognition.generate(
                 ModelRequest(
@@ -575,6 +592,7 @@ class SubjectProcess:
             )
             requests: tuple[RecallRequest, ...] = response.recall_requests or ()
             if requests and rounds < FOLLOWUP_RECALL_MAX_ROUNDS:
+                start = time.perf_counter()
                 for request in requests:
                     fragments = self.memory.recall(
                         subject_id,
@@ -610,9 +628,83 @@ class SubjectProcess:
                                 ),
                             )
                         )
+                duration_ms = round((time.perf_counter() - start) * 1000, 3)
+                first = requests[0]
+                pending.append(
+                    _RecallMetricsEntry(
+                        round=rounds + 1,
+                        request={
+                            "query": first.query,
+                            "budget": first.budget,
+                            "level": first.level,
+                            "object_ids": list(first.object_ids),
+                            "anchor_event_ids": list(first.anchor_event_ids),
+                        },
+                        duration_ms=duration_ms,
+                        returned_count=len(fragments),
+                        fresh_ids=tuple(item.event_id for item in fresh),
+                    )
+                )
+                logger.info(
+                    "recall_round=%s query=%r returned=%s fresh=%s duration_ms=%s",
+                    rounds + 1,
+                    first.query,
+                    len(fragments),
+                    len(fresh),
+                    duration_ms,
+                )
                 rounds += 1
                 continue
             break
+
+        truncated = bool(
+            pending
+            and response is not None
+            and bool(response.recall_requests)
+            and rounds >= FOLLOWUP_RECALL_MAX_ROUNDS
+        )
+        metrics_ids: list[str] = []
+        for entry in pending:
+            record = HistoryRecord(
+                subject_id=subject_id,
+                kind=HistoryKind.SUBJECT,
+                event_type="recall_metrics",
+                content={
+                    "activity_id": activity.id,
+                    "round": entry.round,
+                    "request": entry.request,
+                    "duration_ms": entry.duration_ms,
+                    "returned_count": entry.returned_count,
+                    "truncated": truncated and entry.round == rounds,
+                },
+                source_ids=entry.fresh_ids,
+            )
+            self.repository.add_history(record)
+            metrics_ids.append(record.id)
+
+        if (
+            pending
+            and response is not None
+            and response.recall_evaluation is not None
+        ):
+            evaluation = response.recall_evaluation
+            self.repository.add_history(
+                HistoryRecord(
+                    subject_id=subject_id,
+                    kind=HistoryKind.SUBJECT,
+                    event_type="recall_evaluated",
+                    content={
+                        "activity_id": activity.id,
+                        "round": rounds,
+                        "usefulness": evaluation.usefulness,
+                        "redundant": evaluation.redundant,
+                        "need_more": evaluation.need_more,
+                        "level_feedback": evaluation.level_feedback,
+                        "note": evaluation.note,
+                    },
+                    source_ids=(metrics_ids[-1],) if metrics_ids else (),
+                )
+            )
 
         thought = CognitiveContent(
             subject_id=subject_id,
@@ -647,6 +739,31 @@ class SubjectProcess:
                 source_ids=thought.source_ids,
             )
         )
+
+        added_ids = tuple(
+            event_id
+            for entry in pending
+            for event_id in entry.fresh_ids
+        )
+        if added_ids:
+            referenced = [
+                event_id for event_id in added_ids if event_id in thought.source_ids
+            ]
+            self.repository.add_history(
+                HistoryRecord(
+                    subject_id=subject_id,
+                    kind=HistoryKind.SUBJECT,
+                    event_type="recall_reference",
+                    content={
+                        "activity_id": activity.id,
+                        "recalled_event_ids": list(added_ids),
+                        "referenced_ids": referenced,
+                        "reference_count": len(referenced),
+                        "rate": round(len(referenced) / len(added_ids), 3),
+                    },
+                    source_ids=added_ids,
+                )
+            )
         return thought, response
 
     def _apply_object_assessment(

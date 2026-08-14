@@ -16,7 +16,6 @@ from jshi.subject import (
     SubjectProcess,
     SubjectRepository,
 )
-from jshi.subject.process import FOLLOWUP_RECALL_MAX_ROUNDS
 
 
 class FixedModel:
@@ -176,14 +175,21 @@ class AlwaysRecallModel:
         )
 
 
-def test_followup_recall_rounds_are_bounded(tmp_path):
+def test_followup_recall_is_truncated_after_one_round(tmp_path):
     model = AlwaysRecallModel()
-    process, _repository = runtime(tmp_path, model=model)
+    process, repository = runtime(tmp_path, model=model)
 
     result = process.experience("stone", "你好", object_ref="user")
 
-    assert model.calls == FOLLOWUP_RECALL_MAX_ROUNDS + 1
+    assert model.calls == 2
     assert result.thought.content == "还要更多"
+    metrics = [
+        item
+        for item in repository.list_history("stone", HistoryKind.SUBJECT)
+        if item.event_type == "recall_metrics"
+    ]
+    assert len(metrics) == 1
+    assert metrics[0].content["truncated"] is True
 
 
 class RecordingFeedback:

@@ -24,6 +24,7 @@ class RecallRequest:
     budget: int = 3
     object_ids: tuple[str, ...] = ()
     anchor_event_ids: tuple[str, ...] = ()
+    level: int = 1  # 回忆档位 1–9（09 未实现档位语义，本期占位记录）
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,17 @@ class ObjectAssessment:
 
 
 @dataclass(frozen=True)
+class RecallEvaluation:
+    """追加召回后、下一轮响应中对上一轮回忆的评价（程序容忍缺失）。"""
+
+    usefulness: str  # related | partial | unrelated
+    redundant: bool = False
+    need_more: bool = False
+    level_feedback: str = "ok"  # too_low | ok | too_high
+    note: str = ""
+
+
+@dataclass(frozen=True)
 class ModelResponse:
     text: str
     model: str
@@ -44,6 +56,7 @@ class ModelResponse:
     recall_requests: tuple[RecallRequest, ...] = ()
     object_assessment: ObjectAssessment | None = None
     focused_event_ids: tuple[str, ...] = ()
+    recall_evaluation: RecallEvaluation | None = None
 
 
 class ModelPort(Protocol):

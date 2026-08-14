@@ -5,6 +5,7 @@ from .base import (
     ModelResponse,
     ObjectAssessment,
     OpenAICompatibleModel,
+    RecallEvaluation,
     RecallRequest,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "ModelResponse",
     "ObjectAssessment",
     "OpenAICompatibleModel",
+    "RecallEvaluation",
     "RecallRequest",
 ]
