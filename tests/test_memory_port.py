@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from jshi.app import cli
 from jshi.identity import IdentityProfile, IdentityRepository
-from jshi.memory import InProcessHistoryMemory, RecalledFragment
+from jshi.memory import InProcessHistoryMemory, RecalledFragment, recall_level_limit
 from jshi.models import ModelRequest, ModelResponse
 from jshi.recognition import ObjectProfile
 from jshi.subject import (
@@ -87,7 +87,16 @@ def test_subject_process_wires_injected_memory_into_assembly(tmp_path):
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
 
     class FixedMemory:
-        def recall(self, subject_id, query, *, limit=8, object_id=None):
+        def recall(
+            self,
+            subject_id,
+            query,
+            *,
+            limit=None,
+            object_id=None,
+            level=1,
+            anchor_event_ids=(),
+        ):
             return (
                 RecalledFragment(
                     event_id="memory-injected",
@@ -161,3 +170,48 @@ def test_cli_recall_uses_memory_port(tmp_path, monkeypatch, capsys):
     cli.main()
 
     assert "external_input" in capsys.readouterr().out
+
+
+def test_recall_level_limit_mapping():
+    assert recall_level_limit(1) == 3
+    assert recall_level_limit(3) == 3
+    assert recall_level_limit(4) == 5
+    assert recall_level_limit(6) == 5
+    assert recall_level_limit(7) == 8
+    assert recall_level_limit(9) == 8
+    assert recall_level_limit(0) == 3
+    assert recall_level_limit(10) == 8
+
+
+def test_recall_default_limit_follows_level(tmp_path):
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    memory = InProcessHistoryMemory(repository)
+    for index in range(8):
+        repository.add_history(
+            HistoryRecord(
+                subject_id="stone",
+                kind=HistoryKind.FACT,
+                event_type="external_input",
+                content={"text": f"朋友的第{index}条"},
+            )
+        )
+
+    assert len(memory.recall("stone", "朋友")) == 3  # 默认档位 1
+    assert len(memory.recall("stone", "朋友", level=5)) == 5
+    assert len(memory.recall("stone", "朋友", level=9)) == 8
+
+
+def test_recall_explicit_limit_overrides_level(tmp_path):
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    memory = InProcessHistoryMemory(repository)
+    for index in range(8):
+        repository.add_history(
+            HistoryRecord(
+                subject_id="stone",
+                kind=HistoryKind.FACT,
+                event_type="external_input",
+                content={"text": f"朋友的第{index}条"},
+            )
+        )
+
+    assert len(memory.recall("stone", "朋友", limit=2, level=9)) == 2

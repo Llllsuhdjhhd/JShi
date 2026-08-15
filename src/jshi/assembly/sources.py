@@ -115,11 +115,7 @@ class PersonalWorldSource:
 
 
 class MemorySource:
-    """记忆源（09）占位：对象过滤 + 近因优先 + 低档截断。
-
-    09 未实现原生回忆档位与对象过滤，本适配器直读事实历史占位；
-    09 接入后改为透传，并把 status 更新为 implemented。
-    """
+    """记忆源（09）：透传记忆端口，对象过滤 + 近因优先 + 档位语义由 09 实现。"""
 
     name = "memory"
     status = "implemented"
@@ -129,71 +125,35 @@ class MemorySource:
         repository: SubjectRepository,
         memory: MemoryPort | None = None,
     ) -> None:
-        self._repository = repository
-        self._memory = memory
+        # 始终走 09 端口；未注入时使用最小进程内实现，避免 03 直读事实历史。
+        from jshi.memory import InProcessHistoryMemory
+
+        self._memory = memory or InProcessHistoryMemory(repository)
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
         if not ctx.object_id:
             return LoadResult()
-        if ctx.recall_level <= 3:
-            limit = 3
-        elif ctx.recall_level <= 6:
-            limit = 5
-        else:
-            limit = 8
-        if self._memory is not None:
-            recalled = self._memory.recall(
-                ctx.subject_id,
-                ctx.input_text,
-                limit=limit,
-                object_id=ctx.object_id,
-            )
-            return LoadResult(
-                fragments=tuple(
-                    AssemblyFragment(
-                        source="memory",
-                        id=item.event_id,
-                        content=item.text,
-                        kind=item.kind or "fact",
-                        status="active",
-                        importance=0.5,
-                        source_ids=(item.event_id, *item.source_ids),
-                        always=False,
-                    )
-                    for item in recalled
+        recalled = self._memory.recall(
+            ctx.subject_id,
+            ctx.input_text,
+            object_id=ctx.object_id,
+            level=ctx.recall_level,
+        )
+        return LoadResult(
+            fragments=tuple(
+                AssemblyFragment(
+                    source="memory",
+                    id=item.event_id,
+                    content=item.text,
+                    kind=item.kind or "fact",
+                    status="active",
+                    importance=0.5,
+                    source_ids=(item.event_id, *item.source_ids),
+                    always=False,
                 )
+                for item in recalled
             )
-        records = self._repository.list_history(
-            ctx.subject_id, limit=max(limit * 4, 64)
         )
-        related = [
-            record
-            for record in records
-            if record.kind.value == "fact"
-            and str(record.content.get("object_id", "")) == ctx.object_id
-        ]
-        tokens = [token for token in ctx.input_text.lower().split() if token]
-
-        def score(record) -> tuple[int, object]:
-            text = str(record.content.get("text", "")).lower()
-            hits = sum(1 for token in tokens if token in text) if tokens else 0
-            return (hits, record.created_at)
-
-        chosen = sorted(related, key=score)[-limit:]
-        fragments = tuple(
-            AssemblyFragment(
-                source="memory",
-                id=record.id,
-                content=str(record.content.get("text", "")),
-                kind="fact",
-                status="active",
-                importance=0.5,
-                source_ids=(record.id,),
-                always=False,
-            )
-            for record in chosen
-        )
-        return LoadResult(fragments=fragments)
 
 
 class EpistemicSource:

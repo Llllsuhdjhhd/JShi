@@ -598,6 +598,11 @@ class SubjectProcess:
                         subject_id,
                         request.query,
                         limit=request.budget or FOLLOWUP_RECALL_DEFAULT_LIMIT,
+                        object_id=(
+                            request.object_ids[0] if request.object_ids else None
+                        ),
+                        level=request.level,
+                        anchor_event_ids=request.anchor_event_ids,
                     )
                     known = {item.event_id for item in working_recalled}
                     fresh = [item for item in fragments if item.event_id not in known]
