@@ -144,8 +144,14 @@ def _parser() -> argparse.ArgumentParser:
     recall = commands.add_parser("recall", help="查询当前记忆端口的相关片段")
     recall.add_argument("subject_id")
     recall.add_argument("query")
-    recall.add_argument("--limit", type=int, default=8)
+    recall.add_argument("--limit", type=int, default=None)
     recall.add_argument("--object-id", default=None, help="按对话对象过滤记忆")
+    recall.add_argument(
+        "--level",
+        type=int,
+        default=1,
+        help="回忆档位 1–9；未指定 --limit 时决定默认返回条数",
+    )
 
     state = commands.add_parser("state", help="查看身份和活跃个人内容")
     state.add_argument("subject_id")
@@ -262,6 +268,7 @@ def main() -> None:
             args.query,
             limit=args.limit,
             object_id=args.object_id,
+            level=args.level,
         )
         for fragment in fragments:
             print(

@@ -8,6 +8,21 @@ from jshi.subject.domain import HistoryKind, HistoryRecord
 from jshi.subject.repository import SubjectRepository
 
 
+def recall_level_limit(level: int) -> int:
+    """把 1–9 回忆档位映射为最小实现的返回片段上限（占位）。
+
+    1–3 线索级 → 3；4–6 情境级 → 5；7–9 深挖级 → 8。
+    越界档位收敛到最近的合法档位。
+    """
+
+    bounded = max(1, min(9, int(level)))
+    if bounded <= 3:
+        return 3
+    if bounded <= 6:
+        return 5
+    return 8
+
+
 @dataclass(frozen=True)
 class RecalledFragment:
     """One recalled past fragment shown in the current-state working set."""
@@ -39,8 +54,10 @@ class MemoryPort(Protocol):
         subject_id: str,
         query: str,
         *,
-        limit: int = 8,
+        limit: int | None = None,
         object_id: str | None = None,
+        level: int = 1,
+        anchor_event_ids: tuple[str, ...] = (),
     ) -> Sequence[RecalledFragment]:
         """Return a bounded working set of related past fragments."""
 
@@ -69,13 +86,17 @@ class InProcessHistoryMemory:
         subject_id: str,
         query: str,
         *,
-        limit: int = 8,
+        limit: int | None = None,
         object_id: str | None = None,
+        level: int = 1,
+        anchor_event_ids: tuple[str, ...] = (),
     ) -> Sequence[RecalledFragment]:
         # Transparent first implementation: recent facts, lightly filtered by
         # token/bigram overlap and, when available, object identity.
+        cap = limit if limit is not None else recall_level_limit(level)
+        # anchor_event_ids 仅供 05 协议兼容；07 事件本体独立前不参与过滤。
         recent = self._repository.list_history(
-            subject_id, kind=HistoryKind.FACT, limit=max(limit * 3, limit)
+            subject_id, kind=HistoryKind.FACT, limit=max(cap * 3, cap)
         )
         if object_id:
             recent = [
@@ -96,9 +117,9 @@ class InProcessHistoryMemory:
         scored.sort(
             key=lambda item: (item[0], item[1].created_at), reverse=True
         )
-        chosen = [record for score, record in scored if score > 0][:limit]
+        chosen = [record for score, record in scored if score > 0][:cap]
         if not chosen:
-            chosen = [record for _, record in scored[:limit]]
+            chosen = [record for _, record in scored[:cap]]
         scores_by_id = {record.id: score for score, record in scored}
         return tuple(
             RecalledFragment(
