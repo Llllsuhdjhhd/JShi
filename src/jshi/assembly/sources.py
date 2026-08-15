@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from jshi.personalworld.values import is_binding, is_boundary
+
 from .port import AssemblyContext, AssemblyFragment, LoadResult
 
 if TYPE_CHECKING:
@@ -76,7 +78,7 @@ class EventSource:
 
 
 class PersonalWorldSource:
-    """个人世界源（08）：承诺常驻；其余按重要程度与预算；跳过 concern。"""
+    """个人世界源（08）：承诺与 binding 边界常驻；其余按预算；跳过 concern。"""
 
     name = "personal"
     status = "implemented"
@@ -89,8 +91,8 @@ class PersonalWorldSource:
             self._personal_world.select(
                 ctx.subject_id,
                 ctx.input_text,
-                # 08 的预算语义是"总数（含常驻）"：这里给足候选，
-                # 最终非常驻截断由 03 组装器统一控制。
+                # 08 的 budget 只作用于普通条目；约束与边界始终由 select 返回。
+                # 这里给足候选，最终非常驻截断由 03 组装器统一控制。
                 budget=max(ctx.budget_extra + 16, 20),
             )
         )
@@ -100,11 +102,12 @@ class PersonalWorldSource:
                 source="personal",
                 id=item.id,
                 content=item.content,
-                kind=item.kind.value,
+                kind="boundary" if is_boundary(item) else item.kind.value,
                 status=item.status.value,
                 importance=float(item.metadata.get("importance", 1.0)),
                 source_ids=item.source_ids,
-                always=item.kind.value == "commitment",
+                always=item.kind.value == "commitment"
+                or (is_boundary(item) and is_binding(item)),
             )
             for item in raw
         )

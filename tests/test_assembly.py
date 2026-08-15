@@ -25,6 +25,7 @@ from jshi.recognition import ObjectProfile
 from jshi.subject import (
     HistoryKind,
     HistoryRecord,
+    PersonalItem,
     PersonalKind,
     SubjectProcess,
     SubjectRepository,
@@ -318,3 +319,31 @@ def test_preview_state_reports_sources_and_stays_read_only(tmp_path):
 
     assert len(preview.assembled.source_report) == 6
     assert repository.list_history("stone") == ()
+
+
+def test_personal_world_source_marks_binding_boundary_always(tmp_path):
+    process, repository, _identities = runtime(tmp_path)
+    boundary = PersonalItem(
+        subject_id="stone",
+        kind=PersonalKind.VALUE,
+        content="不可编造事实",
+        metadata={"role": "boundary", "binding": True},
+    )
+    repository.add_personal_item(boundary)
+    process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达", importance=0.9)
+
+    result = process.experience("stone", "你好", object_ref="user")
+
+    boundary_fragments = [
+        fragment
+        for fragment in result.current_state.fragments
+        if fragment.id == boundary.id
+    ]
+    assert boundary_fragments
+    assert boundary_fragments[0].kind == "boundary"
+    assert boundary_fragments[0].always is True
+    assert "优先坦率表达" in {
+        fragment.content
+        for fragment in result.current_state.fragments
+        if fragment.source == "personal"
+    }

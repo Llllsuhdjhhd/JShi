@@ -71,7 +71,7 @@ def test_budget_truncates_ranked_items_but_keeps_constraints(runtime):
         "stone", "继续追问", source_ids=("seed",)
     )
 
-    selected = world.select("stone", "任意输入", budget=3)
+    selected = world.select("stone", "任意输入", budget=1)
 
     ids = {item.id for item in selected}
     assert commitment.id in ids
@@ -165,3 +165,32 @@ def test_importance_dominates_query_relevance(runtime):
 
     contents = [item.content for item in selected]
     assert contents.index("高重要普通内容") < contents.index("朋友相关但低重要")
+
+
+def test_select_and_standing_constraints_include_boundaries(runtime):
+    repository, _identities = runtime
+    world = InProcessPersonalWorld(repository)
+    repository.add_personal_item(
+        PersonalItem(
+            subject_id="stone",
+            kind=PersonalKind.VALUE,
+            content="优先坦率表达",
+            metadata={"importance": 0.9},
+        )
+    )
+    boundary = PersonalItem(
+        subject_id="stone",
+        kind=PersonalKind.VALUE,
+        content="不可编造事实",
+        metadata={"role": "boundary", "binding": True},
+    )
+    repository.add_personal_item(boundary)
+
+    selected = world.select("stone", "任意输入", budget=1)
+
+    assert boundary.id in {item.id for item in selected}
+    assert "优先坦率表达" in {item.content for item in selected}
+
+    constraints = world.standing_constraints("stone")
+    assert boundary.id in {item.id for item in constraints}
+    assert world.select_boundaries("stone") == (boundary,)
