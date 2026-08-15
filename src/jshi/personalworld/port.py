@@ -3,10 +3,15 @@ from __future__ import annotations
 from typing import Protocol, Sequence
 
 from jshi.textutil import query_terms
-from jshi.subject.domain import PersonalItem, PersonalKind
+from jshi.subject.domain import PersonalItem, PersonalKind, PersonalStatus
 from jshi.subject.repository import SubjectRepository
 
-from .values import InProcessValues, ValuesPort, item_importance
+from .values import (
+    InProcessValues,
+    ValuesPort,
+    is_loadable_value,
+    item_importance,
+)
 
 
 class PersonalWorldPort(Protocol):
@@ -48,9 +53,12 @@ class InProcessPersonalWorld:
     def select(
         self, subject_id: str, query: str, *, budget: int = 20
     ) -> Sequence[PersonalItem]:
-        items = self._repository.list_personal_items(subject_id, active_only=True)
+        items = self._repository.list_personal_items(subject_id, active_only=False)
         constraints = tuple(
-            item for item in items if item.kind in self._constraint_kinds
+            item
+            for item in items
+            if item.kind in self._constraint_kinds
+            and item.status is PersonalStatus.ACTIVE
         )
         boundaries = tuple(self._values.select_boundaries(subject_id))
         boundary_ids = {item.id for item in boundaries}
@@ -61,6 +69,7 @@ class InProcessPersonalWorld:
                 for item in items
                 if item.kind not in self._constraint_kinds
                 and item.id not in boundary_ids
+                and _ordinary_loadable(item)
             ),
             key=lambda item: _selection_score(item, terms),
             reverse=True,
@@ -82,3 +91,10 @@ def _selection_score(item: PersonalItem, terms: frozenset[str]) -> tuple[float, 
     hay = item.content.lower()
     relevance = sum(1 for term in terms if term in hay) if terms else 0.0
     return (item_importance(item), relevance)
+
+
+def _ordinary_loadable(item: PersonalItem) -> bool:
+    """非约束普通条目是否可装载；价值走 100 状态，其余走 active。"""
+    if item.kind is PersonalKind.VALUE:
+        return is_loadable_value(item)
+    return item.status is PersonalStatus.ACTIVE

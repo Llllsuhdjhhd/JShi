@@ -30,9 +30,13 @@ class PersonalKind(StrEnum):
 
 class PersonalStatus(StrEnum):
     ACTIVE = "active"
+    CANDIDATE = "candidate"
+    ACCEPTED = "accepted"
+    LOCKED = "locked"
     COMPLETED = "completed"
     RELEASED = "released"
     SUPERSEDED = "superseded"
+    REJECTED = "rejected"
 
 
 class CognitiveKind(StrEnum):
