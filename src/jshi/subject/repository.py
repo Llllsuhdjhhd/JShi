@@ -63,6 +63,7 @@ class SubjectRepository:
                     status TEXT NOT NULL,
                     active_concern_ids TEXT NOT NULL,
                     intention_ids TEXT NOT NULL,
+                    response_statuses TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -110,6 +111,16 @@ class SubjectRepository:
                     ON histories(subject_id, kind, sequence);
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(activities)"
+                ).fetchall()
+            }
+            if "response_statuses" not in columns:
+                connection.execute(
+                    "ALTER TABLE activities ADD COLUMN response_statuses TEXT NOT NULL DEFAULT '[]'"
+                )
 
     def add_personal_item(self, item: PersonalItem) -> None:
         with self._connect() as connection:
@@ -223,7 +234,7 @@ class SubjectRepository:
     def add_activity(self, activity: Activity) -> None:
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO activities VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO activities VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     activity.id,
                     activity.subject_id,
@@ -232,6 +243,7 @@ class SubjectRepository:
                     activity.status.value,
                     _dump_ids(activity.active_concern_ids),
                     _dump_ids(activity.intention_ids),
+                    _dump_ids(activity.response_statuses),
                     activity.created_at.isoformat(),
                     activity.updated_at.isoformat(),
                 ),
@@ -253,6 +265,7 @@ class SubjectRepository:
         status: ActivityStatus | None = None,
         active_concern_ids: tuple[str, ...] | None = None,
         intention_ids: tuple[str, ...] | None = None,
+        response_statuses: tuple[str, ...] | None = None,
         reason: str = "",
     ) -> Activity:
         current = self.get_activity(activity_id)
@@ -267,19 +280,25 @@ class SubjectRepository:
             intention_ids=(
                 intention_ids if intention_ids is not None else current.intention_ids
             ),
+            response_statuses=(
+                response_statuses
+                if response_statuses is not None
+                else current.response_statuses
+            ),
             updated_at=utc_now(),
         )
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE activities
-                SET status = ?, active_concern_ids = ?, intention_ids = ?, updated_at = ?
+                SET status = ?, active_concern_ids = ?, intention_ids = ?, response_statuses = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     updated.status.value,
                     _dump_ids(updated.active_concern_ids),
                     _dump_ids(updated.intention_ids),
+                    _dump_ids(updated.response_statuses),
                     updated.updated_at.isoformat(),
                     activity_id,
                 ),
@@ -461,6 +480,7 @@ def _activity(row: sqlite3.Row) -> Activity:
         status=ActivityStatus(row["status"]),
         active_concern_ids=_load_ids(row["active_concern_ids"]),
         intention_ids=_load_ids(row["intention_ids"]),
+        response_statuses=_load_ids(row["response_statuses"]),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )

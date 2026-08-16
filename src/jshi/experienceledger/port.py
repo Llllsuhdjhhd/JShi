@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -42,7 +42,7 @@ class OutputKind(StrEnum):
 
 
 @dataclass(frozen=True)
-class ActivitySegment:
+class ExperienceSegment:
     segment_id: str
     sequence: int
     subject_id: str
@@ -64,9 +64,10 @@ class MemoryBatch:
     subject_id: str
     external_object_id: str | None
     object_ids: tuple[str, ...]
+    object_sources: Mapping[str, tuple[str, ...]]
     from_sequence: int
     to_sequence: int
-    segments: tuple[ActivitySegment, ...]
+    segments: tuple[ExperienceSegment, ...]
     source_ids: tuple[str, ...]
     created_at: datetime = field(default_factory=utc_now)
 
@@ -84,7 +85,7 @@ class MemoryIngestLedgerEntry:
     archived_at: datetime | None = None
 
 
-class ActivityLedgerPort(Protocol):
+class ExperienceLedgerPort(Protocol):
     def append_external(
         self,
         subject_id: str,
@@ -94,7 +95,7 @@ class ActivityLedgerPort(Protocol):
         mentioned_object_ids: Sequence[str] = (),
         source_ids: Sequence[str] = (),
         occurred_at: datetime | None = None,
-    ) -> ActivitySegment: ...
+    ) -> ExperienceSegment: ...
 
     def append_subject_reply(
         self,
@@ -106,7 +107,7 @@ class ActivityLedgerPort(Protocol):
         state_delta: Mapping[str, object] | None = None,
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
-    ) -> ActivitySegment: ...
+    ) -> ExperienceSegment: ...
 
     def append_subject_state(
         self,
@@ -117,7 +118,7 @@ class ActivityLedgerPort(Protocol):
         mentioned_object_ids: Sequence[str] = (),
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
-    ) -> ActivitySegment: ...
+    ) -> ExperienceSegment: ...
 
     def append_subject_silent(
         self,
@@ -127,7 +128,7 @@ class ActivityLedgerPort(Protocol):
         mentioned_object_ids: Sequence[str] = (),
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
-    ) -> ActivitySegment: ...
+    ) -> ExperienceSegment: ...
 
     def append_internal(
         self,
@@ -138,14 +139,14 @@ class ActivityLedgerPort(Protocol):
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         occurred_at: datetime | None = None,
-    ) -> ActivitySegment: ...
+    ) -> ExperienceSegment: ...
 
     def active_window(
         self,
         subject_id: str,
         *,
         limit_chars: int | None = None,
-    ) -> tuple[ActivitySegment, ...]: ...
+    ) -> tuple[ExperienceSegment, ...]: ...
 
     def build_memory_batch(
         self,

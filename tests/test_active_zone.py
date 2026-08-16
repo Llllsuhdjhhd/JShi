@@ -1,9 +1,9 @@
-"""02 活跃区与活动窗口测试：不包含事件语义。"""
+﻿"""02 活跃区与活动窗口测试：不包含事件语义。"""
 
 from __future__ import annotations
 
 from jshi.activezone import InProcessActiveZone
-from jshi.activityledger import InProcessActivityLedger, OutputKind
+from jshi.experienceledger import InProcessExperienceLedger, OutputKind
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import ModelRequest, ModelResponse
 from jshi.recognition import ObjectProfile
@@ -85,7 +85,7 @@ def test_active_zone_does_not_produce_event_records(tmp_path):
 
 
 def test_in_process_active_zone_uses_ledger_window():
-    ledger = InProcessActivityLedger()
+    ledger = InProcessExperienceLedger()
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
     ledger.append_subject_reply("stone", text_raw="reply")
 

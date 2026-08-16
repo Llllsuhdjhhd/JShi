@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Mapping, Protocol, Sequence
 
-from jshi.activityledger import ActivityLedgerPort, MemoryBatch
+from jshi.experienceledger import ExperienceLedgerPort, MemoryBatch
 
 
 def utc_now() -> datetime:

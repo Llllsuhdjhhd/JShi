@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Mapping, Protocol, Sequence
 
-from jshi.activityledger import MemoryBatch
+from jshi.experienceledger import MemoryBatch
 from jshi.memorycontrol import MemoryIngestResult
 
 if TYPE_CHECKING:

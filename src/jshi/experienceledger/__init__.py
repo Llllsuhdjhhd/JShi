@@ -1,7 +1,7 @@
-from .inprocess import InProcessActivityLedger
+﻿from .inprocess import InProcessExperienceLedger
 from .port import (
-    ActivityLedgerPort,
-    ActivitySegment,
+    ExperienceLedgerPort,
+    ExperienceSegment,
     ActorKind,
     ConsumerKind,
     MemoryBatch,
@@ -11,11 +11,11 @@ from .port import (
 )
 
 __all__ = [
-    "ActivityLedgerPort",
-    "ActivitySegment",
+    "ExperienceLedgerPort",
+    "ExperienceSegment",
     "ActorKind",
     "ConsumerKind",
-    "InProcessActivityLedger",
+    "InProcessExperienceLedger",
     "MemoryBatch",
     "MemoryIngestLedgerEntry",
     "OutputKind",

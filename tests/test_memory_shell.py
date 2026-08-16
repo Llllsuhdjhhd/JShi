@@ -1,6 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from jshi.activityledger import InProcessActivityLedger
+from jshi.experienceledger import InProcessExperienceLedger
 from jshi.memory import InProcessMemoryBackend, MemoryShell
 from jshi.subject import HistoryKind, SubjectRepository
 
@@ -9,7 +9,7 @@ def test_memory_shell_ingests_batch_without_creating_objects(tmp_path):
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
     backend = InProcessMemoryBackend(repository)
     shell = MemoryShell(backend)
-    ledger = InProcessActivityLedger(memory_batch_segments=2)
+    ledger = InProcessExperienceLedger(memory_batch_segments=2)
     ledger.append_external(
         "stone",
         actor_object_id="OBJ-A",

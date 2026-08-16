@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from jshi.activityledger import (
-    ActivityLedgerPort,
+from jshi.experienceledger import (
+    ExperienceLedgerPort,
     ConsumerKind,
     MemoryBatch,
 )
@@ -30,7 +30,7 @@ class InProcessMemoryControl(MemoryControlPort):
 
     def __init__(
         self,
-        ledger: ActivityLedgerPort,
+        ledger: ExperienceLedgerPort,
         memory: MemoryBatchIngestPort,
         *,
         max_retry: int = 3,

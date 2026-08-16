@@ -1,15 +1,15 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from jshi.activityledger import (
+from jshi.experienceledger import (
     ActorKind,
     ConsumerKind,
-    InProcessActivityLedger,
+    InProcessExperienceLedger,
     OutputKind,
 )
 
 
 def test_append_external_sequence_and_head():
-    ledger = InProcessActivityLedger()
+    ledger = InProcessExperienceLedger()
     first = ledger.append_external(
         "stone",
         actor_object_id="OBJ-A",
@@ -30,7 +30,7 @@ def test_append_external_sequence_and_head():
 
 
 def test_active_window_uses_active_zone_start_not_head():
-    ledger = InProcessActivityLedger()
+    ledger = InProcessExperienceLedger()
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="two")
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="three")
@@ -44,7 +44,7 @@ def test_active_window_uses_active_zone_start_not_head():
 
 
 def test_memory_batch_not_built_below_threshold():
-    ledger = InProcessActivityLedger(
+    ledger = InProcessExperienceLedger(
         memory_batch_chars=1000,
         memory_batch_segments=3,
     )
@@ -55,7 +55,7 @@ def test_memory_batch_not_built_below_threshold():
 
 
 def test_memory_batch_covers_only_new_segments():
-    ledger = InProcessActivityLedger(
+    ledger = InProcessExperienceLedger(
         memory_batch_chars=1000,
         memory_batch_segments=2,
     )
@@ -71,7 +71,7 @@ def test_memory_batch_covers_only_new_segments():
 
 
 def test_memory_batch_advance_then_next_batch_is_incremental():
-    ledger = InProcessActivityLedger(
+    ledger = InProcessExperienceLedger(
         memory_batch_chars=1000,
         memory_batch_segments=2,
     )
@@ -94,7 +94,7 @@ def test_memory_batch_advance_then_next_batch_is_incremental():
 
 
 def test_object_ids_are_external_plus_mentioned_not_subject():
-    ledger = InProcessActivityLedger(
+    ledger = InProcessExperienceLedger(
         memory_batch_chars=10,
         memory_batch_segments=1,
     )
@@ -113,7 +113,7 @@ def test_object_ids_are_external_plus_mentioned_not_subject():
 
 
 def test_safe_trim_point_is_min_cursor():
-    ledger = InProcessActivityLedger()
+    ledger = InProcessExperienceLedger()
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="two")
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="three")
@@ -133,7 +133,7 @@ def test_safe_trim_point_is_min_cursor():
 
 
 def test_ingest_ledger_state_machine():
-    ledger = InProcessActivityLedger(memory_batch_segments=1)
+    ledger = InProcessExperienceLedger(memory_batch_segments=1)
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
     batch = ledger.build_memory_batch("stone")
     assert batch is not None
@@ -155,7 +155,7 @@ def test_ingest_ledger_state_machine():
 
 
 def test_subject_reply_is_appended_to_same_log():
-    ledger = InProcessActivityLedger()
+    ledger = InProcessExperienceLedger()
     incoming = ledger.append_external(
         "stone",
         actor_object_id="OBJ-A",
@@ -175,7 +175,7 @@ def test_subject_reply_is_appended_to_same_log():
 
 
 def test_subject_state_without_text_is_logged():
-    ledger = InProcessActivityLedger()
+    ledger = InProcessExperienceLedger()
     state = ledger.append_subject_state(
         "stone",
         state_delta={
@@ -193,7 +193,7 @@ def test_subject_state_without_text_is_logged():
 
 
 def test_subject_silent_is_logged():
-    ledger = InProcessActivityLedger()
+    ledger = InProcessExperienceLedger()
     silent = ledger.append_subject_silent(
         "stone",
         source_ids=("activity-1",),
@@ -206,7 +206,7 @@ def test_subject_silent_is_logged():
 
 
 def test_memory_batch_includes_reply_state_and_keeps_subject_out_of_objects():
-    ledger = InProcessActivityLedger(
+    ledger = InProcessExperienceLedger(
         memory_batch_chars=10,
         memory_batch_segments=3,
     )

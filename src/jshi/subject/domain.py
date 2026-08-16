@@ -106,6 +106,7 @@ class Activity:
     status: ActivityStatus = ActivityStatus.OPEN
     active_concern_ids: tuple[str, ...] = ()
     intention_ids: tuple[str, ...] = ()
+    response_statuses: tuple[str, ...] = ()
     id: str = field(default_factory=new_id)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)

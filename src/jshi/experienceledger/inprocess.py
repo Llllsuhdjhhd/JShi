@@ -1,12 +1,12 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Mapping, Sequence
 
 from .port import (
-    ActivityLedgerPort,
-    ActivitySegment,
+    ExperienceLedgerPort,
+    ExperienceSegment,
     ActorKind,
     ConsumerKind,
     MemoryBatch,
@@ -20,12 +20,12 @@ from .port import (
 
 @dataclass
 class _SubjectLedgerState:
-    segments: list[ActivitySegment] = field(default_factory=list)
+    segments: list[ExperienceSegment] = field(default_factory=list)
     cursors: dict[ConsumerKind, int] = field(default_factory=dict)
     ingest_entries: list[MemoryIngestLedgerEntry] = field(default_factory=list)
 
 
-class InProcessActivityLedger(ActivityLedgerPort):
+class InProcessExperienceLedger(ExperienceLedgerPort):
     """最小活动日志：外部输入、主体回复、内部活动都按时间顺序追加。"""
 
     def __init__(
@@ -64,7 +64,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
         mentioned_object_ids: Sequence[str] = (),
         source_ids: Sequence[str] = (),
         occurred_at: datetime | None = None,
-    ) -> ActivitySegment:
+    ) -> ExperienceSegment:
         return self._append(
             subject_id=subject_id,
             actor_kind=ActorKind.EXTERNAL,
@@ -88,7 +88,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
         state_delta: Mapping[str, object] | None = None,
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
-    ) -> ActivitySegment:
+    ) -> ExperienceSegment:
         return self._append(
             subject_id=subject_id,
             actor_kind=ActorKind.SUBJECT,
@@ -111,7 +111,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
         mentioned_object_ids: Sequence[str] = (),
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
-    ) -> ActivitySegment:
+    ) -> ExperienceSegment:
         return self._append(
             subject_id=subject_id,
             actor_kind=ActorKind.SUBJECT,
@@ -133,7 +133,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
         mentioned_object_ids: Sequence[str] = (),
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
-    ) -> ActivitySegment:
+    ) -> ExperienceSegment:
         return self._append(
             subject_id=subject_id,
             actor_kind=ActorKind.SUBJECT,
@@ -156,7 +156,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         occurred_at: datetime | None = None,
-    ) -> ActivitySegment:
+    ) -> ExperienceSegment:
         return self._append(
             subject_id=subject_id,
             actor_kind=ActorKind.SYSTEM,
@@ -183,10 +183,10 @@ class InProcessActivityLedger(ActivityLedgerPort):
         mentioned_object_ids: Sequence[str],
         source_ids: Sequence[str],
         occurred_at: datetime | None,
-    ) -> ActivitySegment:
+    ) -> ExperienceSegment:
         state = self._state(subject_id)
         sequence = self.head_sequence(subject_id) + 1
-        segment = ActivitySegment(
+        segment = ExperienceSegment(
             segment_id=new_id(),
             sequence=sequence,
             subject_id=subject_id,
@@ -208,10 +208,10 @@ class InProcessActivityLedger(ActivityLedgerPort):
         subject_id: str,
         *,
         limit_chars: int | None = None,
-    ) -> tuple[ActivitySegment, ...]:
+    ) -> tuple[ExperienceSegment, ...]:
         state = self._state(subject_id)
         start = state.cursors.get(ConsumerKind.ACTIVE_ZONE, 0)
-        selected: list[ActivitySegment] = []
+        selected: list[ExperienceSegment] = []
         used = 0
         cap = limit_chars if limit_chars is not None else self.active_window_chars
         for segment in state.segments:
@@ -283,6 +283,15 @@ class InProcessActivityLedger(ActivityLedgerPort):
                 if object_id
             )
         )
+        object_sources: dict[str, tuple[str, ...]] = {}
+        for segment in pending:
+            candidate_ids = []
+            if segment.actor_kind == ActorKind.EXTERNAL and segment.actor_object_id:
+                candidate_ids.append(segment.actor_object_id)
+            candidate_ids.extend(segment.mentioned_object_ids)
+            for object_id in dict.fromkeys(candidate_ids):
+                object_sources.setdefault(object_id, [])
+                object_sources[object_id].append(segment.segment_id)
         source_ids = tuple(
             dict.fromkeys(
                 source_id
@@ -295,6 +304,10 @@ class InProcessActivityLedger(ActivityLedgerPort):
             subject_id=subject_id,
             external_object_id=first_external,
             object_ids=object_ids,
+            object_sources={
+                object_id: tuple(dict.fromkeys(segment_ids))
+                for object_id, segment_ids in object_sources.items()
+            },
             from_sequence=oldest.sequence,
             to_sequence=pending[-1].sequence,
             segments=tuple(pending),

@@ -1,6 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from jshi.activityledger import ConsumerKind, InProcessActivityLedger
+from jshi.experienceledger import ConsumerKind, InProcessExperienceLedger
 from jshi.memorycontrol import (
     InProcessMemoryControl,
     MemoryIngestResult,
@@ -26,7 +26,7 @@ class RecordingMemory:
 
 
 def test_insufficient_data_is_skipped():
-    ledger = InProcessActivityLedger(memory_batch_segments=2)
+    ledger = InProcessExperienceLedger(memory_batch_segments=2)
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
     memory = RecordingMemory()
     control = InProcessMemoryControl(ledger, memory)
@@ -41,7 +41,7 @@ def test_insufficient_data_is_skipped():
 
 
 def test_success_advances_memory_cursor():
-    ledger = InProcessActivityLedger(memory_batch_segments=2)
+    ledger = InProcessExperienceLedger(memory_batch_segments=2)
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="two")
     memory = RecordingMemory()
@@ -62,7 +62,7 @@ def test_success_advances_memory_cursor():
 
 
 def test_failure_is_retryable_and_does_not_advance_cursor():
-    ledger = InProcessActivityLedger(memory_batch_segments=2)
+    ledger = InProcessExperienceLedger(memory_batch_segments=2)
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="two")
     memory = RecordingMemory(fail_times=1)
@@ -81,7 +81,7 @@ def test_failure_is_retryable_and_does_not_advance_cursor():
 
 
 def test_max_retry_blocks_new_trigger():
-    ledger = InProcessActivityLedger(memory_batch_segments=1)
+    ledger = InProcessExperienceLedger(memory_batch_segments=1)
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
     memory = RecordingMemory(fail_times=10)
     control = InProcessMemoryControl(ledger, memory, max_retry=2)

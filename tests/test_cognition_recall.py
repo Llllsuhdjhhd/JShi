@@ -7,11 +7,9 @@
 from __future__ import annotations
 
 from jshi.identity import IdentityProfile, IdentityRepository
-from jshi.memory import RecallEvaluatorPort, RecallExecution
 from jshi.models import (
     ModelRequest,
     ModelResponse,
-    RecallEvaluation,
     RecallRequest,
 )
 from jshi.recognition import ObjectProfile
@@ -64,37 +62,7 @@ class AlwaysRecallModel:
         )
 
 
-class NoEvaluation:
-    def evaluate(
-        self,
-        *,
-        subject_id: str,
-        activity_id: str,
-        execution: RecallExecution,
-        thought,
-    ) -> RecallEvaluation | None:
-        return None
-
-
-class RelatedEvaluation:
-    def evaluate(
-        self,
-        *,
-        subject_id: str,
-        activity_id: str,
-        execution: RecallExecution,
-        thought,
-    ) -> RecallEvaluation:
-        return RecallEvaluation(
-            usefulness="related",
-            redundant=False,
-            need_more=False,
-            level_feedback="ok",
-            note="独立过程评价",
-        )
-
-
-def runtime(tmp_path, model=None, evaluator=None):
+def runtime(tmp_path, model=None):
     identities = IdentityRepository(tmp_path / "identities.json")
     identities.create(
         IdentityProfile("stone", "匠石", "测试基础型", "我是匠石。")
@@ -104,7 +72,6 @@ def runtime(tmp_path, model=None, evaluator=None):
         repository,
         identities,
         model or FixedModel(),
-        recall_evaluator=evaluator,
     )
     process.profiles.create(
         ObjectProfile(
@@ -165,31 +132,12 @@ def test_recall_is_truncated_after_one_round(tmp_path):
     assert len(subject_events(repository, "recall_extended")) == 1
 
 
-def test_independent_evaluator_records_evaluation(tmp_path):
+def test_evaluation_is_not_run_inline(tmp_path):
     model = FollowupModel()
-    evaluator = RelatedEvaluation()
-    process, repository = runtime(tmp_path, model=model, evaluator=evaluator)
+    process, repository = runtime(tmp_path, model=model)
 
     process.experience("stone", "他最近怎么样", object_ref="user")
 
-    evaluated = subject_events(repository, "recall_evaluated")
-    assert len(evaluated) == 1
-    content = evaluated[0].content
-    assert content["usefulness"] == "related"
-    assert content["redundant"] is False
-    assert content["level_feedback"] == "ok"
-    assert content["note"] == "独立过程评价"
-    metrics = subject_events(repository, "recall_metrics")
-    assert evaluated[0].source_ids == (metrics[0].id,)
-
-
-def test_evaluation_unavailable_does_not_block(tmp_path):
-    model = FollowupModel()
-    process, repository = runtime(tmp_path, model=model, evaluator=NoEvaluation())
-
-    result = process.experience("stone", "他最近怎么样", object_ref="user")
-
-    assert result.thought.content == "最终回应"
     assert subject_events(repository, "recall_evaluated") == []
     assert len(subject_events(repository, "recall_metrics")) == 1
 

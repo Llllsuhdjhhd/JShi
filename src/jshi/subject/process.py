@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
@@ -9,7 +9,7 @@ from jshi.activezone import (
     ActiveZoneView,
     InProcessActiveZone,
 )
-from jshi.activityledger import ActivityLedgerPort, InProcessActivityLedger
+from jshi.experienceledger import ExperienceLedgerPort, InProcessExperienceLedger
 from jshi.assembly import (
     ActivityWindowSource,
     AssemblyContext,
@@ -43,6 +43,7 @@ from jshi.memory import (
     RecalledFragment,
     RuleBasedRecallEvaluator,
 )
+from jshi.memorycontrol import InProcessMemoryControl
 from jshi.models import ModelPort, ModelRequest, ObjectAssessment
 from jshi.recognition import (
     CarrierEntry,
@@ -82,6 +83,7 @@ logger = logging.getLogger(__name__)
 
 # 上下文补充策略：当前占位为最多一轮；执行与记忆侧指标归 09。
 FOLLOWUP_RECALL_MAX_ROUNDS = 1
+RESPONSE_STATUSES = frozenset({"verbal", "embodied", "think", "ignore", "wait"})
 
 
 @dataclass(frozen=True)
@@ -149,7 +151,7 @@ class SubjectProcess:
         reflection: ReflectionPort | None = None,
         assembler: CurrentStateAssembler | None = None,
         recall_evaluator: RecallEvaluatorPort | None = None,
-        activity_ledger: ActivityLedgerPort | None = None,
+        activity_ledger: ExperienceLedgerPort | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
@@ -157,7 +159,11 @@ class SubjectProcess:
         self.memory = memory or MemoryShell(InProcessMemoryBackend(repository))
         self.recall_coordinator = RecallCoordinator(repository, self.memory)
         self.recall_evaluator = recall_evaluator or RuleBasedRecallEvaluator()
-        self.activity_ledger = activity_ledger or InProcessActivityLedger()
+        self.activity_ledger = activity_ledger or InProcessExperienceLedger()
+        self.memory_control = InProcessMemoryControl(
+            self.activity_ledger,
+            self.memory,
+        )
         if personal_world is None:
             from jshi.personalworld import InProcessPersonalWorld
 
@@ -432,6 +438,11 @@ class SubjectProcess:
         thought, response = self._cognize(
             subject_id, activity, current, perception
         )
+        activity, final_statuses, _ = self.mark_activity_response_status(
+            subject_id,
+            activity,
+            response.response_statuses,
+        )
         if response.object_assessment is not None:
             speaker = self._apply_object_assessment(
                 subject_id, speaker, fact, thought, response.object_assessment
@@ -454,7 +465,7 @@ class SubjectProcess:
             subject_id,
             text_raw=thought.content,
             source_ids=(thought.id, action.id),
-            response_statuses=response.response_statuses,
+            response_statuses=final_statuses,
         )
         self.feedback.ingest_result(subject_id, activity.id, thought.content)
 
@@ -480,6 +491,7 @@ class SubjectProcess:
                 source_ids=(fact.id,),
             )
         )
+        self.memory_control.run_once(subject_id)
         findings = self.governance.check(subject_id, completed, fact, None)
         if findings:
             self.repository.add_history(
@@ -645,21 +657,45 @@ class SubjectProcess:
                 added_ids=added_ids,
                 thought_source_ids=thought.source_ids,
             )
-        if executions:
-            evaluation = self.recall_evaluator.evaluate(
-                subject_id=subject_id,
-                activity_id=activity.id,
-                execution=executions[-1],
-                thought=thought,
-            )
-            if evaluation is not None:
-                self.recall_coordinator.record_evaluation(
-                    subject_id=subject_id,
-                    activity_id=activity.id,
-                    execution=executions[-1],
-                    evaluation=evaluation,
-                )
         return thought, response
+
+    def mark_activity_response_status(
+        self,
+        subject_id: str,
+        activity: Activity,
+        recommended_statuses: Sequence[str],
+        *,
+        human_override: Sequence[str] | None = None,
+    ) -> tuple[Activity, tuple[str, ...], tuple[str, ...]]:
+        """06：校验模型推荐的回复状态并标记到活动。"""
+        recommended = tuple(dict.fromkeys(recommended_statuses))
+        valid = tuple(status for status in recommended if status in RESPONSE_STATUSES)
+        unknown = tuple(status for status in recommended if status not in RESPONSE_STATUSES)
+        final = (
+            tuple(dict.fromkeys(human_override))
+            if human_override is not None
+            else valid
+        )
+        updated = self.repository.update_activity(
+            activity.id,
+            response_statuses=final,
+        )
+        self.repository.add_history(
+            HistoryRecord(
+                subject_id=subject_id,
+                kind=HistoryKind.SUBJECT,
+                event_type="activity_response_state",
+                content={
+                    "activity_id": updated.id,
+                    "recommended": list(recommended),
+                    "final": list(final),
+                    "unknown_statuses": list(unknown),
+                    "source": "human_overridden" if human_override is not None else "model_recommended",
+                },
+                source_ids=(updated.id,),
+            )
+        )
+        return updated, final, unknown
 
     def _apply_object_assessment(
         self,

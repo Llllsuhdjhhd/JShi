@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol
 
-from jshi.activityledger import ActivityLedgerPort, ActivitySegment, ConsumerKind
+from jshi.experienceledger import ExperienceLedgerPort, ExperienceSegment, ConsumerKind
 
 
 # 活跃区长度：占位字符数；未来可由 14 按模型上下文 token 动态调整。
@@ -19,14 +19,14 @@ def utc_now() -> datetime:
 class ActiveZoneView:
     """阶段② 装载结果：原始活动窗口，不含事件概念。"""
 
-    segments: tuple[ActivitySegment, ...]
+    segments: tuple[ExperienceSegment, ...]
     start_sequence: int
     budget_chars: int
     loaded_at: datetime = field(default_factory=utc_now)
 
 
 class ActiveZonePort(Protocol):
-    """活跃区系统：只取 ActivityLedger 的原始活动窗口并控制长度。"""
+    """活跃区系统：只取 ExperienceLedger 的原始活动窗口并控制长度。"""
 
     def load(
         self,
@@ -46,13 +46,13 @@ class ActiveZonePort(Protocol):
 
 
 class InProcessActiveZone:
-    """最小实现：直接消费 ActivityLedger，不做事件识别与筛选。"""
+    """最小实现：直接消费 ExperienceLedger，不做事件识别与筛选。"""
 
     name = "in-process-active-zone"
 
     def __init__(
         self,
-        ledger: ActivityLedgerPort,
+        ledger: ExperienceLedgerPort,
         *,
         default_chars: int = ACTIVE_ZONE_DEFAULT_CHARS,
     ) -> None:

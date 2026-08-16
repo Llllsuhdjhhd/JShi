@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Sequence
 
-from jshi.activityledger import MemoryBatch
+from jshi.experienceledger import MemoryBatch
 from jshi.memorycontrol import MemoryIngestResult
 
 from .backend import MemoryBackendPort
