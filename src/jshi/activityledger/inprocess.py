@@ -72,6 +72,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
             actor_object_id=actor_object_id,
             text_raw=text_raw,
             state_delta=None,
+            response_statuses=(),
             mentioned_object_ids=mentioned_object_ids,
             source_ids=source_ids,
             occurred_at=occurred_at,
@@ -84,6 +85,8 @@ class InProcessActivityLedger(ActivityLedgerPort):
         text_raw: str,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
+        state_delta: Mapping[str, object] | None = None,
+        response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ActivitySegment:
         return self._append(
@@ -92,7 +95,8 @@ class InProcessActivityLedger(ActivityLedgerPort):
             output_kind=OutputKind.SUBJECT_REPLY,
             actor_object_id=None,
             text_raw=text_raw,
-            state_delta=None,
+            state_delta=dict(state_delta) if state_delta else None,
+            response_statuses=tuple(dict.fromkeys(response_statuses)),
             mentioned_object_ids=mentioned_object_ids,
             source_ids=source_ids,
             occurred_at=occurred_at,
@@ -105,6 +109,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
         state_delta: Mapping[str, object],
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
+        response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ActivitySegment:
         return self._append(
@@ -114,6 +119,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
             actor_object_id=None,
             text_raw=None,
             state_delta=dict(state_delta),
+            response_statuses=tuple(dict.fromkeys(response_statuses)),
             mentioned_object_ids=mentioned_object_ids,
             source_ids=source_ids,
             occurred_at=occurred_at,
@@ -125,6 +131,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
         *,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
+        response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ActivitySegment:
         return self._append(
@@ -134,6 +141,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
             actor_object_id=None,
             text_raw=None,
             state_delta=None,
+            response_statuses=tuple(dict.fromkeys(response_statuses)),
             mentioned_object_ids=mentioned_object_ids,
             source_ids=source_ids,
             occurred_at=occurred_at,
@@ -156,6 +164,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
             actor_object_id=None,
             text_raw=text_raw,
             state_delta=dict(state_delta) if state_delta else None,
+            response_statuses=(),
             mentioned_object_ids=mentioned_object_ids,
             source_ids=source_ids,
             occurred_at=occurred_at,
@@ -170,6 +179,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
         actor_object_id: str | None,
         text_raw: str | None,
         state_delta: Mapping[str, object] | None,
+        response_statuses: Sequence[str],
         mentioned_object_ids: Sequence[str],
         source_ids: Sequence[str],
         occurred_at: datetime | None,
@@ -186,6 +196,7 @@ class InProcessActivityLedger(ActivityLedgerPort):
             mentioned_object_ids=tuple(dict.fromkeys(mentioned_object_ids)),
             text_raw=text_raw,
             state_delta=state_delta,
+            response_statuses=tuple(dict.fromkeys(response_statuses)),
             source_ids=tuple(dict.fromkeys(source_ids)),
             occurred_at=occurred_at or utc_now(),
         )

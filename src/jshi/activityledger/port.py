@@ -52,6 +52,7 @@ class ActivitySegment:
     mentioned_object_ids: tuple[str, ...]
     text_raw: str | None
     state_delta: Mapping[str, object] | None
+    response_statuses: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     occurred_at: datetime = field(default_factory=utc_now)
     status: SegmentStatus = SegmentStatus.ACCEPTED
@@ -102,6 +103,8 @@ class ActivityLedgerPort(Protocol):
         text_raw: str,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
+        state_delta: Mapping[str, object] | None = None,
+        response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ActivitySegment: ...
 
@@ -112,6 +115,7 @@ class ActivityLedgerPort(Protocol):
         state_delta: Mapping[str, object],
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
+        response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ActivitySegment: ...
 
@@ -121,6 +125,7 @@ class ActivityLedgerPort(Protocol):
         *,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
+        response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ActivitySegment: ...
 

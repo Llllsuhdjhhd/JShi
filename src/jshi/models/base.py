@@ -53,6 +53,7 @@ class ModelResponse:
     text: str
     model: str
     metadata: Mapping[str, Any] | None = None
+    response_statuses: tuple[str, ...] = ()
     recall_requests: tuple[RecallRequest, ...] = ()
     object_assessment: ObjectAssessment | None = None
 

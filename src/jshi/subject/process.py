@@ -34,7 +34,9 @@ from jshi.identity import IdentityRepository
 from jshi.intent import IntentPort, PlaceholderIntent
 from jshi.memory import (
     InProcessHistoryMemory,
+    InProcessMemoryBackend,
     MemoryPort,
+    MemoryShell,
     RecallCoordinator,
     RecallEvaluatorPort,
     RecallExecution,
@@ -152,7 +154,7 @@ class SubjectProcess:
         self.repository = repository
         self.identities = identities
         self.cognition = cognition
-        self.memory = memory or InProcessHistoryMemory(repository)
+        self.memory = memory or MemoryShell(InProcessMemoryBackend(repository))
         self.recall_coordinator = RecallCoordinator(repository, self.memory)
         self.recall_evaluator = recall_evaluator or RuleBasedRecallEvaluator()
         self.activity_ledger = activity_ledger or InProcessActivityLedger()
@@ -452,6 +454,7 @@ class SubjectProcess:
             subject_id,
             text_raw=thought.content,
             source_ids=(thought.id, action.id),
+            response_statuses=response.response_statuses,
         )
         self.feedback.ingest_result(subject_id, activity.id, thought.content)
 

@@ -6,10 +6,15 @@ from .port import (
 )
 from .coordinator import RecallCoordinator, RecallExecution
 from .evaluator import RecallEvaluatorPort, RuleBasedRecallEvaluator
+from .backend import InProcessMemoryBackend, MemoryBackendPort
+from .shell import MemoryShell
 
 __all__ = [
     "InProcessHistoryMemory",
+    "InProcessMemoryBackend",
+    "MemoryBackendPort",
     "MemoryPort",
+    "MemoryShell",
     "RecallCoordinator",
     "RecallExecution",
     "RecallEvaluatorPort",
