@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from jshi.personalworld.values import is_binding, is_boundary
-
 from .port import AssemblyContext, AssemblyFragment, LoadResult
 
 if TYPE_CHECKING:
@@ -51,10 +49,10 @@ class IdentitySource:
         )
 
 
-class EventSource:
-    """事件源（07 视图来自 02）：未完成常驻，完成按活跃区预算。"""
+class ActivityWindowSource:
+    """活跃区源（02）：原始活动窗口，不含事件概念，按长度控制。"""
 
-    name = "event"
+    name = "activity"
     status = "implemented"
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
@@ -63,16 +61,20 @@ class EventSource:
             return LoadResult()
         fragments = tuple(
             AssemblyFragment(
-                source="event",
-                id=event.event_id,
-                content=event.content,
-                kind="event",
-                status=event.status,
+                source="activity",
+                id=segment.segment_id,
+                content=segment.text_raw or "",
+                kind=(
+                    "external_input"
+                    if segment.actor_kind.value == "external"
+                    else "subject_activity"
+                ),
+                status="active",
                 importance=1.0,
-                source_ids=event.source_ids,
-                always=event.status == "unfinished",
+                source_ids=(segment.segment_id, *segment.source_ids),
+                always=False,
             )
-            for event in view.events
+            for segment in view.segments
         )
         return LoadResult(fragments=fragments)
 
@@ -87,6 +89,8 @@ class PersonalWorldSource:
         self._personal_world = personal_world
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
+        from jshi.personalworld.values import is_binding, is_boundary
+
         selected = tuple(
             self._personal_world.select(
                 ctx.subject_id,

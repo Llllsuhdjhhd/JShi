@@ -52,8 +52,9 @@ class NamedRecognition:
         carriers: tuple = (),
     ) -> SpeakerCandidate:
         return SpeakerCandidate(
+            subject_id=subject_id,
+            actor_object_id="OBJ-1",
             label="张三",
-            object_id="OBJ-1",
             confidence=0.8,
             status="provisional",
             object_ref=object_ref,
@@ -74,35 +75,31 @@ def test_recognition_carries_object_info_into_fact(tmp_path):
     assert result.speaker.object_id == "OBJ-1"
 
 
-def test_active_zone_loads_unfinished_event_without_attribution(tmp_path):
+def test_active_zone_loads_raw_window_without_attribution(tmp_path):
     process, repository = runtime(tmp_path)
-    concern = process.propose_open_matter(
-        "stone", "继续理解朋友的疲倦", source_ids=("seed",)
-    )
 
     result = process.experience("stone", "继续", object_ref="user")
 
-    # 输入不做归属判断：占位模型不聚焦，活动挂载为空
+    # 输入不做归属判断：活动挂载为空
     assert result.activity.active_concern_ids == ()
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
     loaded = [
         item
         for item in subject
-        if item.event_type == "event_loaded"
+        if item.event_type == "context_window_loaded"
     ]
     assert len(loaded) == 1
-    assert loaded[0].content["event_ids"] == [concern.id]
-    assert loaded[0].content["unfinished_ids"] == [concern.id]
+    assert loaded[0].content["segment_ids"]
     assembled = [
         item
         for item in subject
         if item.event_type == "current_state_assembled"
     ]
-    assert assembled[0].content["event_ids"] == [concern.id]
-    assert concern.id in result.current_state.active_event_ids
+    assert assembled[0].content["segment_ids"]
+    assert result.current_state.active_segment_ids
 
 
-def test_first_input_empty_active_zone(tmp_path):
+def test_first_input_window_contains_current_segment(tmp_path):
     process, repository = runtime(tmp_path)
 
     process.experience("stone", "今天有些疲倦", object_ref="user")
@@ -111,15 +108,15 @@ def test_first_input_empty_active_zone(tmp_path):
     loaded = [
         item
         for item in subject
-        if item.event_type == "event_loaded"
+        if item.event_type == "context_window_loaded"
     ]
-    assert loaded[0].content["event_ids"] == []
+    assert loaded[0].content["segment_ids"]
     assembled = [
         item
         for item in subject
         if item.event_type == "current_state_assembled"
     ]
-    assert assembled[0].content["event_ids"] == []
+    assert assembled[0].content["segment_ids"]
 
 
 class FollowupModel:
@@ -237,6 +234,6 @@ def test_preview_is_read_only(tmp_path):
     preview = process.preview_state("stone", "你好", object_ref="user")
 
     assert preview.speaker.status == "confirmed"
-    assert preview.active_zone.events == ()
-    assert preview.assembled.active_event_ids == ()
+    assert preview.active_zone.segments == ()
+    assert preview.assembled.active_segment_ids == ()
     assert repository.list_history("stone") == ()

@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field, replace
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 from jshi.activezone import (
     ActiveZonePort,
     ActiveZoneView,
     InProcessActiveZone,
 )
+from jshi.activityledger import ActivityLedgerPort, InProcessActivityLedger
 from jshi.assembly import (
+    ActivityWindowSource,
     AssemblyContext,
     AssemblyFragment,
     CurrentStateAssembler,
     EpistemicSource,
-    EventSource,
     IdentitySource,
     MemorySource,
     ObjectSource,
@@ -32,9 +32,16 @@ from jshi.governance import (
 )
 from jshi.identity import IdentityRepository
 from jshi.intent import IntentPort, PlaceholderIntent
-from jshi.memory import InProcessHistoryMemory, MemoryPort, RecalledFragment
-from jshi.models import ModelPort, ModelRequest, ObjectAssessment, RecallRequest
-from jshi.personalworld import InProcessPersonalWorld, PersonalWorldPort
+from jshi.memory import (
+    InProcessHistoryMemory,
+    MemoryPort,
+    RecallCoordinator,
+    RecallEvaluatorPort,
+    RecallExecution,
+    RecalledFragment,
+    RuleBasedRecallEvaluator,
+)
+from jshi.models import ModelPort, ModelRequest, ObjectAssessment
 from jshi.recognition import (
     CarrierEntry,
     MIN_OBJECT_CONFIDENCE,
@@ -64,24 +71,15 @@ from .domain import (
 )
 from .repository import SubjectRepository
 
+if TYPE_CHECKING:
+    from jshi.personalworld import PersonalWorldPort
+
 
 logger = logging.getLogger(__name__)
 
 
-# 追加召回占位预算：最多追加一轮、每轮默认片段数。
+# 上下文补充策略：当前占位为最多一轮；执行与记忆侧指标归 09。
 FOLLOWUP_RECALL_MAX_ROUNDS = 1
-FOLLOWUP_RECALL_DEFAULT_LIMIT = 3
-
-
-@dataclass(frozen=True)
-class _RecallMetricsEntry:
-    """一轮追加召回的指标（写入 recall_metrics 前暂存）。"""
-
-    round: int
-    request: dict[str, object]
-    duration_ms: float
-    returned_count: int
-    fresh_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -92,10 +90,15 @@ class AssembledCurrentState:
     subject_state: SubjectState
     personal_items: tuple[PersonalItem, ...]
     active_zone: ActiveZoneView
-    active_event_ids: tuple[str, ...]
+    active_segment_ids: tuple[str, ...]
     recalled: tuple[RecalledFragment, ...]
     fragments: tuple[AssemblyFragment, ...] = ()
     source_report: tuple[SourceLoadReport, ...] = ()
+
+    @property
+    def active_event_ids(self) -> tuple[str, ...]:
+        """兼容旧名称：实际是活动段 id。"""
+        return self.active_segment_ids
 
 
 @dataclass(frozen=True)
@@ -114,7 +117,9 @@ class SubjectActivityResult:
     thought: CognitiveContent
     action_text: str
     current_state: AssembledCurrentState
-    speaker: SpeakerCandidate = field(default_factory=SpeakerCandidate)
+    speaker: SpeakerCandidate = field(
+        default_factory=lambda: SpeakerCandidate(subject_id="", actor_object_id="")
+    )
 
 
 class SubjectProcess:
@@ -122,7 +127,7 @@ class SubjectProcess:
 
     每个系统都是占位接口：身份识别、活跃区、意图、受约束偶然性、结果反馈、
     治理检验、反思。各系统可独立替换为真实实现，不改主流程顺序。
-    归属判断已废弃（02 起不再接线），事件聚焦由模型在认知阶段完成。
+    归属判断已废弃；事件与记忆侧边界归 07/09，不在主流程活动窗口处理。
     """
 
     def __init__(
@@ -141,17 +146,26 @@ class SubjectProcess:
         chance: ChancePort | None = None,
         reflection: ReflectionPort | None = None,
         assembler: CurrentStateAssembler | None = None,
+        recall_evaluator: RecallEvaluatorPort | None = None,
+        activity_ledger: ActivityLedgerPort | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
         self.cognition = cognition
         self.memory = memory or InProcessHistoryMemory(repository)
-        self.personal_world = personal_world or InProcessPersonalWorld(repository)
+        self.recall_coordinator = RecallCoordinator(repository, self.memory)
+        self.recall_evaluator = recall_evaluator or RuleBasedRecallEvaluator()
+        self.activity_ledger = activity_ledger or InProcessActivityLedger()
+        if personal_world is None:
+            from jshi.personalworld import InProcessPersonalWorld
+
+            personal_world = InProcessPersonalWorld(repository)
+        self.personal_world = personal_world
         self.profiles = ObjectProfileRepository(repository.path)
         self.recognition = recognition or ProfileObjectRecognition(
             self.profiles, memory_matcher=self._match_object_by_memory
         )
-        self.active_zone = active_zone or InProcessActiveZone(repository)
+        self.active_zone = active_zone or InProcessActiveZone(self.activity_ledger)
         self.intent = intent or PlaceholderIntent()
         self.feedback = feedback or PlaceholderResultFeedback()
         self.governance = governance or PlaceholderContinuityCheck()
@@ -159,7 +173,7 @@ class SubjectProcess:
         self.assembler = assembler or CurrentStateAssembler(
             sources=(
                 IdentitySource(self.identities),
-                EventSource(),
+                ActivityWindowSource(),
                 PersonalWorldSource(self.personal_world),
                 MemorySource(repository, memory=self.memory),
                 EpistemicSource(),
@@ -191,7 +205,7 @@ class SubjectProcess:
             input_text=input_text,
             object_id=object_id,
             active_zone=view,
-            budget_extra=max(1, view.budget // 2),
+            budget_extra=4,
             recall_level=1,
         )
         working_set = self.assembler.assemble(ctx)
@@ -200,36 +214,11 @@ class SubjectProcess:
             subject_state=working_set.subject_state,
             personal_items=tuple(working_set.personal_items),
             active_zone=view,
-            active_event_ids=working_set.active_event_ids,
+            active_segment_ids=working_set.active_segment_ids,
             recalled=(),
             fragments=working_set.fragments,
             source_report=working_set.report,
         )
-
-    def recall_events(
-        self, subject_id: str, event_ids: Sequence[str]
-    ) -> tuple[RecalledFragment, ...]:
-        """显式事件 id 直接装载/召回（程序侧窄接口），并记账 event_recalled。
-
-        事件 id 由输入信封或活动上下文显式携带（未来）；本期 CLI 未暴露，
-        接口保留给后续输入契约扩展。
-        """
-        if not event_ids:
-            return ()
-        fragments = self.active_zone.recall_by_ids(subject_id, event_ids)
-        if fragments:
-            self.repository.add_history(
-                HistoryRecord(
-                    subject_id=subject_id,
-                    kind=HistoryKind.SUBJECT,
-                    event_type="event_recalled",
-                    content={
-                        "event_ids": [item.event_id for item in fragments],
-                    },
-                    source_ids=tuple(item.event_id for item in fragments),
-                )
-            )
-        return fragments
 
     def preview_state(
         self,
@@ -307,6 +296,13 @@ class SubjectProcess:
             },
         )
         self.repository.add_history(fact)
+        self.activity_ledger.append_external(
+            subject_id,
+            actor_object_id=speaker.actor_object_id,
+            text_raw=text,
+            source_ids=(fact.id,),
+            mentioned_object_ids=speaker.mentioned_object_ids,
+        )
 
         # 新对象落库（通过门禁后）：暂定档案，来源 = 输入事实 id
         if self.profiles.get(speaker.object_id) is None:
@@ -334,29 +330,23 @@ class SubjectProcess:
                 )
             )
 
-        # 阶段② 活跃区装载（只装载，不调整；不调用模型）
+        # 阶段② 活跃区装载：只取原始活动窗口，不识别事件
         view = self.active_zone.load(subject_id, text)
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
                 kind=HistoryKind.SUBJECT,
-                event_type="event_loaded",
+                event_type="context_window_loaded",
                 content={
                     "input": text,
-                    "event_ids": [event.event_id for event in view.events],
-                    "unfinished_ids": [
-                        event.event_id
-                        for event in view.events
-                        if event.status == "unfinished"
-                    ],
-                    "completed_ids": [
-                        event.event_id
-                        for event in view.events
-                        if event.status == "completed"
-                    ],
-                    "budget": view.budget,
+                    "segment_ids": [segment.segment_id for segment in view.segments],
+                    "start_sequence": view.start_sequence,
+                    "budget_chars": view.budget_chars,
                 },
-                source_ids=(fact.id, *(event.event_id for event in view.events)),
+                source_ids=(
+                    fact.id,
+                    *(segment.segment_id for segment in view.segments),
+                ),
             )
         )
 
@@ -371,8 +361,8 @@ class SubjectProcess:
                 event_type="current_state_assembled",
                 content={
                     "input": text,
-                    "event_ids": list(current.active_event_ids),
-                    "budget": view.budget,
+                    "segment_ids": list(current.active_segment_ids),
+                    "budget_chars": view.budget_chars,
                     "value_count": len(current.subject_state.salient_values),
                     "commitment_count": len(current.subject_state.commitments),
                     "recalled_event_ids": [
@@ -391,7 +381,7 @@ class SubjectProcess:
                         for report in current.source_report
                     ],
                 },
-                source_ids=(fact.id, *current.active_event_ids),
+                source_ids=(fact.id, *current.active_segment_ids),
             )
         )
 
@@ -444,44 +434,31 @@ class SubjectProcess:
             speaker = self._apply_object_assessment(
                 subject_id, speaker, fact, thought, response.object_assessment
             )
-        if response.focused_event_ids:
-            activity = self._attach_focused_events(
-                subject_id, activity, response.focused_event_ids
-            )
 
         # 阶段⑥ 行动与结果
-        self.repository.add_history(
-            HistoryRecord(
-                subject_id=subject_id,
-                kind=HistoryKind.FACT,
-                event_type="language_action",
-                content={
-                    "activity_id": activity.id,
-                    "text": thought.content,
-                    "model": thought.model,
-                },
-                source_ids=(thought.id,),
-            )
+        action = HistoryRecord(
+            subject_id=subject_id,
+            kind=HistoryKind.FACT,
+            event_type="language_action",
+            content={
+                "activity_id": activity.id,
+                "text": thought.content,
+                "model": thought.model,
+            },
+            source_ids=(thought.id,),
+        )
+        self.repository.add_history(action)
+        self.activity_ledger.append_subject_reply(
+            subject_id,
+            text_raw=thought.content,
+            source_ids=(thought.id, action.id),
         )
         self.feedback.ingest_result(subject_id, activity.id, thought.content)
 
-        # 阶段⑦ 收尾与沉淀：活跃区调整（剔除）→ 活动完成 → 治理
-        evicted = self.active_zone.evict_overflow(subject_id, view)
-        for event in evicted:
-            self.repository.add_history(
-                HistoryRecord(
-                    subject_id=subject_id,
-                    kind=HistoryKind.SUBJECT,
-                    event_type="event_evicted",
-                    content={
-                        "event_id": event.event_id,
-                        "content": event.content,
-                        "status": event.status,
-                        "reason": "budget_overflow",
-                    },
-                    source_ids=(event.event_id,),
-                )
-            )
+        # 阶段⑦ 收尾：推进活跃区窗口起点，不再做事件剔除
+        active_through = self.activity_ledger.head_sequence(subject_id)
+        if active_through:
+            self.active_zone.advance(subject_id, active_through)
         completed = self.repository.update_activity(
             activity.id,
             status=ActivityStatus.COMPLETED,
@@ -529,188 +506,33 @@ class SubjectProcess:
             speaker=speaker,
         )
 
-    def _attach_focused_events(
+    def _cognize_once(
         self,
-        subject_id: str,
-        activity: Activity,
-        event_ids: Sequence[str],
-    ) -> Activity:
-        """认知后回填活动挂载的事件 id（只接受库中存在的事件）。"""
-        existing = {
-            item.id
-            for item in self.repository.list_personal_items(
-                subject_id,
-                kind=PersonalKind.CONCERN,
-                active_only=False,
-            )
-        }
-        valid = tuple(dict.fromkeys(id_ for id_ in event_ids if id_ in existing))
-        invalid = tuple(dict.fromkeys(id_ for id_ in event_ids if id_ not in existing))
-        if valid:
-            activity = self.repository.update_activity(
-                activity.id, active_concern_ids=valid
-            )
-        self.repository.add_history(
-            HistoryRecord(
-                subject_id=subject_id,
-                kind=HistoryKind.SUBJECT,
-                event_type="activity_events_attached",
-                content={
-                    "activity_id": activity.id,
-                    "event_ids": list(valid),
-                    "invalid_event_ids": list(invalid),
-                    "basis": "model_focus",
-                },
-                source_ids=valid,
+        current: AssembledCurrentState,
+        working_recalled: Sequence[RecalledFragment],
+    ) -> object:
+        """05 认知层：一次模型调用，只产出回应与上下文候选，不执行记忆。"""
+        return self.cognition.generate(
+            ModelRequest(
+                purpose="subject_activity",
+                input_text=current.input_text,
+                subject_state=current.subject_state,
+                context=self._model_context(
+                    working_recalled,
+                    current.fragments,
+                ),
             )
         )
-        return activity
 
-    def _cognize(
+    def _materialize_thought(
         self,
         subject_id: str,
         activity: Activity,
         current: AssembledCurrentState,
         perception: CognitiveContent,
-    ) -> tuple[CognitiveContent, object]:
-        """认知活动：模型可提出追加召回（最多一轮），程序执行后继续认知，直至产出。"""
-        working_recalled: list[RecalledFragment] = list(current.recalled)
-        response = None
-        rounds = 0
-        pending: list[_RecallMetricsEntry] = []
-        while True:
-            response = self.cognition.generate(
-                ModelRequest(
-                    purpose="subject_activity",
-                    input_text=current.input_text,
-                    subject_state=current.subject_state,
-                    context=self._model_context(
-                        working_recalled,
-                        current.fragments,
-                    ),
-                )
-            )
-            requests: tuple[RecallRequest, ...] = response.recall_requests or ()
-            if requests and rounds < FOLLOWUP_RECALL_MAX_ROUNDS:
-                start = time.perf_counter()
-                for request in requests:
-                    fragments = self.memory.recall(
-                        subject_id,
-                        request.query,
-                        limit=request.budget or FOLLOWUP_RECALL_DEFAULT_LIMIT,
-                        object_id=(
-                            request.object_ids[0] if request.object_ids else None
-                        ),
-                        level=request.level,
-                        anchor_event_ids=request.anchor_event_ids,
-                    )
-                    known = {item.event_id for item in working_recalled}
-                    fresh = [item for item in fragments if item.event_id not in known]
-                    if fresh:
-                        working_recalled.extend(fresh)
-                        self.repository.add_history(
-                            HistoryRecord(
-                                subject_id=subject_id,
-                                kind=HistoryKind.SUBJECT,
-                                event_type="recall_extended",
-                                content={
-                                    "activity_id": activity.id,
-                                    "request": {
-                                        "query": request.query,
-                                        "budget": request.budget,
-                                        "object_ids": list(request.object_ids),
-                                        "anchor_event_ids": list(
-                                            request.anchor_event_ids
-                                        ),
-                                    },
-                                    "recalled_event_ids": [
-                                        item.event_id for item in fresh
-                                    ],
-                                },
-                                source_ids=(
-                                    perception.id,
-                                    *(item.event_id for item in fresh),
-                                ),
-                            )
-                        )
-                duration_ms = round((time.perf_counter() - start) * 1000, 3)
-                first = requests[0]
-                pending.append(
-                    _RecallMetricsEntry(
-                        round=rounds + 1,
-                        request={
-                            "query": first.query,
-                            "budget": first.budget,
-                            "level": first.level,
-                            "object_ids": list(first.object_ids),
-                            "anchor_event_ids": list(first.anchor_event_ids),
-                        },
-                        duration_ms=duration_ms,
-                        returned_count=len(fragments),
-                        fresh_ids=tuple(item.event_id for item in fresh),
-                    )
-                )
-                logger.info(
-                    "recall_round=%s query=%r returned=%s fresh=%s duration_ms=%s",
-                    rounds + 1,
-                    first.query,
-                    len(fragments),
-                    len(fresh),
-                    duration_ms,
-                )
-                rounds += 1
-                continue
-            break
-
-        truncated = bool(
-            pending
-            and response is not None
-            and bool(response.recall_requests)
-            and rounds >= FOLLOWUP_RECALL_MAX_ROUNDS
-        )
-        metrics_ids: list[str] = []
-        for entry in pending:
-            record = HistoryRecord(
-                subject_id=subject_id,
-                kind=HistoryKind.SUBJECT,
-                event_type="recall_metrics",
-                content={
-                    "activity_id": activity.id,
-                    "round": entry.round,
-                    "request": entry.request,
-                    "duration_ms": entry.duration_ms,
-                    "returned_count": entry.returned_count,
-                    "truncated": truncated and entry.round == rounds,
-                },
-                source_ids=entry.fresh_ids,
-            )
-            self.repository.add_history(record)
-            metrics_ids.append(record.id)
-
-        if (
-            pending
-            and response is not None
-            and response.recall_evaluation is not None
-        ):
-            evaluation = response.recall_evaluation
-            self.repository.add_history(
-                HistoryRecord(
-                    subject_id=subject_id,
-                    kind=HistoryKind.SUBJECT,
-                    event_type="recall_evaluated",
-                    content={
-                        "activity_id": activity.id,
-                        "round": rounds,
-                        "usefulness": evaluation.usefulness,
-                        "redundant": evaluation.redundant,
-                        "need_more": evaluation.need_more,
-                        "level_feedback": evaluation.level_feedback,
-                        "note": evaluation.note,
-                    },
-                    source_ids=(metrics_ids[-1],) if metrics_ids else (),
-                )
-            )
-
+        working_recalled: Sequence[RecalledFragment],
+        response: object,
+    ) -> CognitiveContent:
         thought = CognitiveContent(
             subject_id=subject_id,
             activity_id=activity.id,
@@ -744,31 +566,96 @@ class SubjectProcess:
                 source_ids=thought.source_ids,
             )
         )
+        return thought
+
+    def _cognize(
+        self,
+        subject_id: str,
+        activity: Activity,
+        current: AssembledCurrentState,
+        perception: CognitiveContent,
+    ) -> tuple[CognitiveContent, object]:
+        """主流程认知编排：05 产出候选，09 协调器执行记忆补充，再继续认知。"""
+        working_recalled: list[RecalledFragment] = list(current.recalled)
+        known_ids = {item.event_id for item in working_recalled}
+        response = self._cognize_once(current, working_recalled)
+        rounds = 0
+        executions: list[RecallExecution] = []
+
+        while (
+            response.recall_requests
+            and rounds < FOLLOWUP_RECALL_MAX_ROUNDS
+        ):
+            rounds += 1
+            execution = self.recall_coordinator.execute_round(
+                subject_id=subject_id,
+                activity_id=activity.id,
+                perception_id=perception.id,
+                round_number=rounds,
+                requests=response.recall_requests,
+                known_ids=known_ids,
+            )
+            executions.append(execution)
+            working_recalled.extend(execution.fresh)
+            logger.info(
+                "recall_round=%s query=%r returned=%s fresh=%s duration_ms=%s",
+                rounds,
+                execution.request["query"],
+                execution.returned_count,
+                len(execution.fresh_ids),
+                execution.duration_ms,
+            )
+            response = self._cognize_once(current, working_recalled)
+
+        truncated = bool(
+            executions
+            and response.recall_requests
+            and rounds >= FOLLOWUP_RECALL_MAX_ROUNDS
+        )
+        executions = list(
+            self.recall_coordinator.commit_metrics(
+                subject_id=subject_id,
+                activity_id=activity.id,
+                executions=executions,
+                truncated=truncated,
+            )
+        )
+
+        thought = self._materialize_thought(
+            subject_id,
+            activity,
+            current,
+            perception,
+            working_recalled,
+            response,
+        )
 
         added_ids = tuple(
             event_id
-            for entry in pending
+            for entry in executions
             for event_id in entry.fresh_ids
         )
         if added_ids:
-            referenced = [
-                event_id for event_id in added_ids if event_id in thought.source_ids
-            ]
-            self.repository.add_history(
-                HistoryRecord(
-                    subject_id=subject_id,
-                    kind=HistoryKind.SUBJECT,
-                    event_type="recall_reference",
-                    content={
-                        "activity_id": activity.id,
-                        "recalled_event_ids": list(added_ids),
-                        "referenced_ids": referenced,
-                        "reference_count": len(referenced),
-                        "rate": round(len(referenced) / len(added_ids), 3),
-                    },
-                    source_ids=added_ids,
-                )
+            self.recall_coordinator.record_reference(
+                subject_id=subject_id,
+                activity_id=activity.id,
+                added_ids=added_ids,
+                thought_source_ids=thought.source_ids,
             )
+        if executions:
+            evaluation = self.recall_evaluator.evaluate(
+                subject_id=subject_id,
+                activity_id=activity.id,
+                execution=executions[-1],
+                thought=thought,
+            )
+            if evaluation is not None:
+                self.recall_coordinator.record_evaluation(
+                    subject_id=subject_id,
+                    activity_id=activity.id,
+                    execution=executions[-1],
+                    evaluation=evaluation,
+                )
         return thought, response
 
     def _apply_object_assessment(
@@ -892,7 +779,7 @@ class SubjectProcess:
             subject_id=subject_id,
             kind=ActivityKind.INTERNAL,
             trigger=prompt,
-            active_concern_ids=current.active_event_ids,
+            active_concern_ids=(),
         )
         self.repository.add_activity(activity)
         self.repository.add_history(
@@ -1011,6 +898,16 @@ class SubjectProcess:
                 },
                 source_ids=(transition.id, *source_ids),
             )
+        )
+        self.activity_ledger.append_subject_state(
+            current.subject_id,
+            state_delta={
+                "cognitive_content_id": content_id,
+                "from": transition.from_state,
+                "to": transition.to_state,
+                "reason": reason,
+            },
+            source_ids=(transition.id, *source_ids),
         )
         return updated
 

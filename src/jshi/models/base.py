@@ -55,8 +55,6 @@ class ModelResponse:
     metadata: Mapping[str, Any] | None = None
     recall_requests: tuple[RecallRequest, ...] = ()
     object_assessment: ObjectAssessment | None = None
-    focused_event_ids: tuple[str, ...] = ()
-    recall_evaluation: RecallEvaluation | None = None
 
 
 class ModelPort(Protocol):

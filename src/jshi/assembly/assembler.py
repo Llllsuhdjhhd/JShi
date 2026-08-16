@@ -23,9 +23,14 @@ class AssembledWorkingSet:
     subject_state: SubjectState
     fragments: tuple[AssemblyFragment, ...]
     active_zone: ActiveZoneView | None = None
-    active_event_ids: tuple[str, ...] = ()
+    active_segment_ids: tuple[str, ...] = ()
     personal_items: tuple[object, ...] = ()
     report: tuple[SourceLoadReport, ...] = ()
+
+    @property
+    def active_event_ids(self) -> tuple[str, ...]:
+        """兼容旧名称：当前实际是活跃区活动段 id，不再是事件 id。"""
+        return self.active_segment_ids
 
 
 class CurrentStateAssembler:
@@ -58,19 +63,19 @@ class CurrentStateAssembler:
                 errors[source.name] = str(exc)
 
         # 去重：保留第一个出现的片段；源注册顺序即优先级
-        # （事件先于个人世界，个人世界先于记忆）。
+        # （活动窗口先于个人世界，个人世界先于记忆）。
         deduped: dict[str, AssemblyFragment] = {}
         for fragment in collected:
             deduped.setdefault(fragment.id, fragment)
         fragments = tuple(deduped.values())
 
-        # 预算截断：常驻与事件源不占组装额外预算（事件已由活跃区预算）；
+        # 预算截断：常驻与活跃区源不占组装额外预算（活跃区已自行控制长度）；
         # 其余按 个人世界 > 记忆 > 其他 的注册顺序截断。
         kept: list[AssemblyFragment] = []
         skipped_by_source: dict[str, list[str]] = {}
         budget_used = 0
         for fragment in fragments:
-            if fragment.always or fragment.source == "event":
+            if fragment.always or fragment.source == "activity":
                 kept.append(fragment)
                 continue
             if budget_used < ctx.budget_extra:
@@ -107,10 +112,10 @@ class CurrentStateAssembler:
             subject_state=self._subject_state(ctx.subject_id, kept_fragments),
             fragments=kept_fragments,
             active_zone=ctx.active_zone,
-            active_event_ids=tuple(
+            active_segment_ids=tuple(
                 fragment.id
                 for fragment in kept_fragments
-                if fragment.source == "event"
+                if fragment.source == "activity"
             ),
             personal_items=tuple(raw_items),
             report=reports,
@@ -143,12 +148,7 @@ class CurrentStateAssembler:
                 if fragment.source == "personal"
                 and fragment.kind == "commitment"
             ),
-            concerns=tuple(
-                fragment.content
-                for fragment in fragments
-                if fragment.source == "event"
-                and fragment.status == "unfinished"
-            ),
+            concerns=(),
             provenance=Provenance(
                 source="assembled_current_state",
                 method="load_existing_only",

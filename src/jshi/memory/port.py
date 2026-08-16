@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import TYPE_CHECKING, Protocol, Sequence
 
 from jshi.textutil import query_terms
-from jshi.subject.domain import HistoryKind, HistoryRecord
-from jshi.subject.repository import SubjectRepository
+
+if TYPE_CHECKING:
+    from jshi.subject.domain import HistoryKind, HistoryRecord
+    from jshi.subject.repository import SubjectRepository
 
 
 def recall_level_limit(level: int) -> int:
@@ -71,6 +73,8 @@ class InProcessHistoryMemory:
     def remember_fact(
         self, subject_id: str, event_type: str, text: str, source_ids: tuple[str, ...] = ()
     ) -> str:
+        from jshi.subject.domain import HistoryKind, HistoryRecord
+
         record = HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.FACT,
@@ -91,6 +95,8 @@ class InProcessHistoryMemory:
         level: int = 1,
         anchor_event_ids: tuple[str, ...] = (),
     ) -> Sequence[RecalledFragment]:
+        from jshi.subject.domain import HistoryKind
+
         # Transparent first implementation: recent facts, lightly filtered by
         # token/bigram overlap and, when available, object identity.
         cap = limit if limit is not None else recall_level_limit(level)

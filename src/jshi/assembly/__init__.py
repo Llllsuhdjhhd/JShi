@@ -7,8 +7,8 @@ from .port import (
     SourceLoadReport,
 )
 from .sources import (
+    ActivityWindowSource,
     EpistemicSource,
-    EventSource,
     IdentitySource,
     MemorySource,
     ObjectSource,
@@ -20,9 +20,9 @@ __all__ = [
     "AssemblyFragment",
     "AssemblySourcePort",
     "AssembledWorkingSet",
+    "ActivityWindowSource",
     "CurrentStateAssembler",
     "EpistemicSource",
-    "EventSource",
     "IdentitySource",
     "LoadResult",
     "MemorySource",

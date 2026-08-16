@@ -1,12 +1,13 @@
-"""05 认知与追加召回测试。
+"""05 认知与上下文统筹测试。
 
-覆盖：追加最多一轮、指标记账（recall_metrics）、回忆评价消费
-（recall_evaluated）、引用率（recall_reference）、档位记录、无追加无指标。
+覆盖：05 单次认知产出、主流程编排补充召回、记忆侧指标由 09 协调器写、
+独立评价过程被触发、评价不可用不阻塞。
 """
 
 from __future__ import annotations
 
 from jshi.identity import IdentityProfile, IdentityRepository
+from jshi.memory import RecallEvaluatorPort, RecallExecution
 from jshi.models import (
     ModelRequest,
     ModelResponse,
@@ -31,10 +32,9 @@ class FixedModel:
 class FollowupModel:
     name = "followup-model"
 
-    def __init__(self, *, level: int = 1, evaluate: bool = False) -> None:
+    def __init__(self, *, level: int = 1) -> None:
         self.calls = 0
         self.level = level
-        self.evaluate = evaluate
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         self.calls += 1
@@ -46,22 +46,7 @@ class FollowupModel:
                     RecallRequest(query="朋友", level=self.level),
                 ),
             )
-        evaluation = (
-            RecallEvaluation(
-                usefulness="related",
-                redundant=False,
-                need_more=False,
-                level_feedback="ok",
-                note="够用",
-            )
-            if self.evaluate
-            else None
-        )
-        return ModelResponse(
-            text="最终回应",
-            model=self.name,
-            recall_evaluation=evaluation,
-        )
+        return ModelResponse(text="最终回应", model=self.name)
 
 
 class AlwaysRecallModel:
@@ -79,13 +64,48 @@ class AlwaysRecallModel:
         )
 
 
-def runtime(tmp_path, model=None):
+class NoEvaluation:
+    def evaluate(
+        self,
+        *,
+        subject_id: str,
+        activity_id: str,
+        execution: RecallExecution,
+        thought,
+    ) -> RecallEvaluation | None:
+        return None
+
+
+class RelatedEvaluation:
+    def evaluate(
+        self,
+        *,
+        subject_id: str,
+        activity_id: str,
+        execution: RecallExecution,
+        thought,
+    ) -> RecallEvaluation:
+        return RecallEvaluation(
+            usefulness="related",
+            redundant=False,
+            need_more=False,
+            level_feedback="ok",
+            note="独立过程评价",
+        )
+
+
+def runtime(tmp_path, model=None, evaluator=None):
     identities = IdentityRepository(tmp_path / "identities.json")
     identities.create(
         IdentityProfile("stone", "匠石", "测试基础型", "我是匠石。")
     )
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
-    process = SubjectProcess(repository, identities, model or FixedModel())
+    process = SubjectProcess(
+        repository,
+        identities,
+        model or FixedModel(),
+        recall_evaluator=evaluator,
+    )
     process.profiles.create(
         ObjectProfile(
             object_id="OBJ-USER", label="user", source="test", status="confirmed"
@@ -137,18 +157,18 @@ def test_recall_is_truncated_after_one_round(tmp_path):
 
     result = process.experience("stone", "你好", object_ref="user")
 
-    assert model.calls == 2  # 首次 + 追加后一次响应，不再执行第二轮
+    assert model.calls == 2
     assert result.thought.content == "还要更多"
     metrics = subject_events(repository, "recall_metrics")
     assert len(metrics) == 1
     assert metrics[0].content["truncated"] is True
-    # 只执行了一次追加
     assert len(subject_events(repository, "recall_extended")) == 1
 
 
-def test_recall_evaluation_recorded(tmp_path):
-    model = FollowupModel(evaluate=True)
-    process, repository = runtime(tmp_path, model=model)
+def test_independent_evaluator_records_evaluation(tmp_path):
+    model = FollowupModel()
+    evaluator = RelatedEvaluation()
+    process, repository = runtime(tmp_path, model=model, evaluator=evaluator)
 
     process.experience("stone", "他最近怎么样", object_ref="user")
 
@@ -158,14 +178,14 @@ def test_recall_evaluation_recorded(tmp_path):
     assert content["usefulness"] == "related"
     assert content["redundant"] is False
     assert content["level_feedback"] == "ok"
-    assert content["note"] == "够用"
+    assert content["note"] == "独立过程评价"
     metrics = subject_events(repository, "recall_metrics")
     assert evaluated[0].source_ids == (metrics[0].id,)
 
 
-def test_recall_evaluation_missing_does_not_block(tmp_path):
-    model = FollowupModel(evaluate=False)
-    process, repository = runtime(tmp_path, model=model)
+def test_evaluation_unavailable_does_not_block(tmp_path):
+    model = FollowupModel()
+    process, repository = runtime(tmp_path, model=model, evaluator=NoEvaluation())
 
     result = process.experience("stone", "他最近怎么样", object_ref="user")
 
@@ -174,7 +194,7 @@ def test_recall_evaluation_missing_does_not_block(tmp_path):
     assert len(subject_events(repository, "recall_metrics")) == 1
 
 
-def test_no_recall_no_metrics(tmp_path):
+def test_no_recall_no_metrics_or_evaluation(tmp_path):
     process, repository = runtime(tmp_path)
 
     process.experience("stone", "你好", object_ref="user")

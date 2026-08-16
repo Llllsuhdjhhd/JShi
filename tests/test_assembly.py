@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from jshi.activezone import ActiveZoneView
 from jshi.assembly import (
+    ActivityWindowSource,
     AssemblyContext,
     CurrentStateAssembler,
     EpistemicSource,
-    EventSource,
     IdentitySource,
     MemorySource,
     ObjectSource,
@@ -71,12 +71,7 @@ def test_process_assembly_builds_fragments_and_report(tmp_path):
         and fragment.always
         for fragment in fragments
     )
-    assert any(
-        fragment.source == "event"
-        and fragment.status == "unfinished"
-        and fragment.always
-        for fragment in fragments
-    )
+    assert any(fragment.source == "activity" for fragment in fragments)
     assert any(
         fragment.source == "personal" and fragment.kind == "commitment"
         for fragment in fragments
@@ -84,7 +79,7 @@ def test_process_assembly_builds_fragments_and_report(tmp_path):
     report = {item.source: item for item in result.current_state.source_report}
     assert set(report) == {
         "identity",
-        "event",
+        "activity",
         "personal",
         "memory",
         "epistemic",
@@ -95,25 +90,22 @@ def test_process_assembly_builds_fragments_and_report(tmp_path):
     assert report["memory"].status == "implemented"
 
 
-def test_dedup_event_not_in_personal(tmp_path):
+def test_activity_window_not_in_personal(tmp_path):
     process, _repository, _identities = runtime(tmp_path)
-    concern = process.propose_open_matter(
-        "stone", "继续理解朋友的疲倦", source_ids=("seed",)
-    )
 
     result = process.experience("stone", "你好", object_ref="user")
 
-    event_ids = [
+    activity_ids = [
         fragment.id
         for fragment in result.current_state.fragments
-        if fragment.source == "event"
+        if fragment.source == "activity"
     ]
     personal_kinds = {
         fragment.kind
         for fragment in result.current_state.fragments
         if fragment.source == "personal"
     }
-    assert concern.id in event_ids
+    assert activity_ids
     assert "concern" not in personal_kinds
 
 
@@ -127,7 +119,7 @@ def test_budget_truncation_keeps_always_and_reports_skipped(tmp_path):
     assembler = CurrentStateAssembler(
         sources=(
             IdentitySource(identities),
-            EventSource(),
+            ActivityWindowSource(),
             PersonalWorldSource(personal_world),
             EpistemicSource(),
             ObjectSource(),
@@ -148,7 +140,7 @@ def test_budget_truncation_keeps_always_and_reports_skipped(tmp_path):
         subject_id="stone",
         input_text="你好",
         object_id="OBJ-USER",
-        active_zone=ActiveZoneView(events=(), budget=8),
+        active_zone=ActiveZoneView(segments=(), start_sequence=0, budget_chars=2000),
         budget_extra=1,
     )
     ws = assembler.assemble(ctx)
@@ -211,7 +203,7 @@ def test_memory_source_filters_by_object_and_recency(tmp_path):
         subject_id="stone",
         input_text="随便聊聊",
         object_id="OBJ-A",
-        active_zone=ActiveZoneView(events=(), budget=8),
+        active_zone=ActiveZoneView(segments=(), start_sequence=0, budget_chars=2000),
         budget_extra=4,
         recall_level=1,
     )
@@ -226,7 +218,7 @@ def test_memory_source_filters_by_object_and_recency(tmp_path):
             subject_id="stone",
             input_text="随便聊聊",
             object_id="OBJ-A",
-            active_zone=ActiveZoneView(events=(), budget=8),
+            active_zone=ActiveZoneView(segments=(), start_sequence=0, budget_chars=2000),
             budget_extra=4,
             recall_level=8,
         )
@@ -246,7 +238,7 @@ def test_memory_source_skips_without_object_id(tmp_path):
         subject_id="stone",
         input_text="你好",
         object_id=None,
-        active_zone=ActiveZoneView(events=(), budget=8),
+        active_zone=ActiveZoneView(segments=(), start_sequence=0, budget_chars=2000),
         budget_extra=4,
     )
     assert source.load(ctx).fragments == ()
@@ -276,7 +268,7 @@ def test_single_source_failure_is_isolated(tmp_path):
         AssemblyContext(
             subject_id="stone",
             input_text="你好",
-            active_zone=ActiveZoneView(events=(), budget=8),
+            active_zone=ActiveZoneView(segments=(), start_sequence=0, budget_chars=2000),
             budget_extra=4,
         )
     )
@@ -303,7 +295,7 @@ def test_current_state_assembled_records_sources(tmp_path):
     source_names = {item["source"] for item in sources}
     assert source_names == {
         "identity",
-        "event",
+        "activity",
         "personal",
         "memory",
         "epistemic",
