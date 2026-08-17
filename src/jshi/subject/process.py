@@ -9,7 +9,10 @@ from jshi.activezone import (
     ActiveZoneView,
     InProcessActiveZone,
 )
+from jshi.action import InProcessActionRouter, PlaceholderRobotAction
+from jshi.activityclose import InProcessActivityClose
 from jshi.experienceledger import ExperienceLedgerPort, InProcessExperienceLedger
+from jshi.evaluation import EvaluationEvent, InProcessEvaluationSystem, new_id
 from jshi.assembly import (
     ActivityWindowSource,
     AssemblyContext,
@@ -44,6 +47,7 @@ from jshi.memory import (
     RuleBasedRecallEvaluator,
 )
 from jshi.memorycontrol import InProcessMemoryControl
+from jshi.objects import InProcessObjectSystem, ObjectSystemPort
 from jshi.models import ModelPort, ModelRequest, ObjectAssessment
 from jshi.recognition import (
     CarrierEntry,
@@ -152,6 +156,7 @@ class SubjectProcess:
         assembler: CurrentStateAssembler | None = None,
         recall_evaluator: RecallEvaluatorPort | None = None,
         activity_ledger: ExperienceLedgerPort | None = None,
+        object_system: ObjectSystemPort | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
@@ -160,6 +165,12 @@ class SubjectProcess:
         self.recall_coordinator = RecallCoordinator(repository, self.memory)
         self.recall_evaluator = recall_evaluator or RuleBasedRecallEvaluator()
         self.activity_ledger = activity_ledger or InProcessExperienceLedger()
+        self.activity_close = InProcessActivityClose(repository)
+        self.action_router = InProcessActionRouter(
+            repository,
+            PlaceholderRobotAction(),
+        )
+        self.evaluation = InProcessEvaluationSystem()
         self.memory_control = InProcessMemoryControl(
             self.activity_ledger,
             self.memory,
@@ -170,6 +181,7 @@ class SubjectProcess:
             personal_world = InProcessPersonalWorld(repository)
         self.personal_world = personal_world
         self.profiles = ObjectProfileRepository(repository.path)
+        self.object_system = object_system or InProcessObjectSystem(self.profiles)
         self.recognition = recognition or ProfileObjectRecognition(
             self.profiles, memory_matcher=self._match_object_by_memory
         )
@@ -314,14 +326,11 @@ class SubjectProcess:
 
         # 新对象落库（通过门禁后）：暂定档案，来源 = 输入事实 id
         if self.profiles.get(speaker.object_id) is None:
-            self.profiles.create(
-                ObjectProfile(
-                    object_id=speaker.object_id,
-                    label=speaker.label,
-                    carriers=speaker.carriers,
-                    source=fact.id,
-                    status="provisional",
-                )
+            self.object_system.ensure_provisional(
+                object_id=speaker.object_id,
+                label=speaker.label,
+                source=fact.id,
+                carriers=speaker.carriers,
             )
             self.repository.add_history(
                 HistoryRecord(
@@ -443,28 +452,48 @@ class SubjectProcess:
             activity,
             response.response_statuses,
         )
+        self.evaluation.emit(
+            EvaluationEvent(
+                event_id=f"eval-response-{activity.id}",
+                subject_id=subject_id,
+                activity_id=activity.id,
+                event_type="activity_response_marked",
+                payload={"response_statuses": list(final_statuses)},
+                source_ids=(activity.id,),
+            )
+        )
         if response.object_assessment is not None:
             speaker = self._apply_object_assessment(
                 subject_id, speaker, fact, thought, response.object_assessment
             )
 
         # 阶段⑥ 行动与结果
-        action = HistoryRecord(
+        action_result = self.action_router.dispatch(
             subject_id=subject_id,
-            kind=HistoryKind.FACT,
-            event_type="language_action",
-            content={
-                "activity_id": activity.id,
-                "text": thought.content,
-                "model": thought.model,
-            },
-            source_ids=(thought.id,),
+            activity_id=activity.id,
+            action_text=thought.content,
+            model=thought.model,
+            source_id=thought.id,
+            response_statuses=final_statuses,
         )
-        self.repository.add_history(action)
+        action_id = action_result.action_id
+        self.evaluation.emit(
+            EvaluationEvent(
+                event_id=f"eval-action-{action_id}",
+                subject_id=subject_id,
+                activity_id=activity.id,
+                event_type="language_action_recorded",
+                payload={
+                    "action_id": action_id,
+                    "robot_action_triggered": action_result.robot_action_triggered,
+                },
+                source_ids=(action_id,),
+            )
+        )
         self.activity_ledger.append_subject_reply(
             subject_id,
             text_raw=thought.content,
-            source_ids=(thought.id, action.id),
+            source_ids=(thought.id, action_id),
             response_statuses=final_statuses,
         )
         self.feedback.ingest_result(subject_id, activity.id, thought.content)
@@ -473,25 +502,30 @@ class SubjectProcess:
         active_through = self.activity_ledger.head_sequence(subject_id)
         if active_through:
             self.active_zone.advance(subject_id, active_through)
-        completed = self.repository.update_activity(
+        close_result = self.activity_close.close(
+            subject_id,
             activity.id,
-            status=ActivityStatus.COMPLETED,
+            final_response_statuses=final_statuses,
+            thought_id=thought.id,
+            action_id=action_id,
             reason="external_activity_finished_after_action",
         )
-        self.repository.add_history(
-            HistoryRecord(
+        completed = self.repository.get_activity(close_result.activity_id)
+        memory_result = self.memory_control.run_once(subject_id)
+        self.evaluation.emit(
+            EvaluationEvent(
+                event_id=f"eval-memory-{activity.id}",
                 subject_id=subject_id,
-                kind=HistoryKind.SUBJECT,
-                event_type="activity_completed",
-                content={
-                    "activity_id": completed.id,
-                    "to": completed.status.value,
-                    "reason": "external_activity_finished_after_action",
+                activity_id=activity.id,
+                event_type="memory_control_attempted",
+                payload={
+                    "status": memory_result.status,
+                    "ingest_id": memory_result.ingest_id,
+                    "error": memory_result.error,
                 },
-                source_ids=(fact.id,),
+                source_ids=(activity.id,),
             )
         )
-        self.memory_control.run_once(subject_id)
         findings = self.governance.check(subject_id, completed, fact, None)
         if findings:
             self.repository.add_history(
@@ -612,6 +646,20 @@ class SubjectProcess:
             )
             executions.append(execution)
             working_recalled.extend(execution.fresh)
+            self.evaluation.emit(
+                EvaluationEvent(
+                    event_id=new_id(),
+                    subject_id=subject_id,
+                    activity_id=activity.id,
+                    event_type="recall_executed",
+                    payload={
+                        "round": rounds,
+                        "returned_count": execution.returned_count,
+                        "fresh_ids": list(execution.fresh_ids),
+                    },
+                    source_ids=execution.fresh_ids,
+                )
+            )
             logger.info(
                 "recall_round=%s query=%r returned=%s fresh=%s duration_ms=%s",
                 rounds,
@@ -643,6 +691,16 @@ class SubjectProcess:
             perception,
             working_recalled,
             response,
+        )
+        self.evaluation.emit(
+            EvaluationEvent(
+                event_id=new_id(),
+                subject_id=subject_id,
+                activity_id=activity.id,
+                event_type="thought_materialized",
+                payload={"cognitive_content_id": thought.id},
+                source_ids=(thought.id,),
+            )
         )
 
         added_ids = tuple(
@@ -724,12 +782,12 @@ class SubjectProcess:
         )
         updated = speaker
         if assessment.conclusion == "confirm":
-            self.profiles.update_status(speaker.object_id, "confirmed")
+            self.object_system.confirm(speaker.object_id)
             updated = replace(
                 speaker, status="confirmed", confidence=max(speaker.confidence, 0.85)
             )
         elif assessment.conclusion == "deny":
-            self.profiles.update_status(speaker.object_id, "rejected")
+            self.object_system.deny(speaker.object_id)
             updated = replace(speaker, status="rejected", confidence=0.0)
         return updated
 
