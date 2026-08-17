@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
+from jshi.models import ResponsePlan
+
 
 @dataclass(frozen=True)
 class ActionDispatchResult:
@@ -30,5 +32,5 @@ class ActionPort(Protocol):
         action_text: str,
         model: str | None,
         source_id: str,
-        response_statuses: Sequence[str],
+        response_plan: ResponsePlan,
     ) -> ActionDispatchResult: ...

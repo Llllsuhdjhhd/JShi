@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Sequence
 
+from jshi.models import ResponsePlan
+
 from .port import ActionDispatchResult, ActionPort, RobotActionPort
 
 if TYPE_CHECKING:
@@ -37,7 +39,7 @@ class InProcessActionRouter(ActionPort):
         action_text: str,
         model: str | None,
         source_id: str,
-        response_statuses: Sequence[str],
+        response_plan: ResponsePlan,
     ) -> ActionDispatchResult:
         from jshi.subject.domain import HistoryKind, HistoryRecord
 
@@ -49,18 +51,23 @@ class InProcessActionRouter(ActionPort):
                 "activity_id": activity_id,
                 "text": action_text,
                 "model": model,
-                "response_statuses": list(response_statuses),
+                "response_statuses": [response_plan.mode],
+                "reason": response_plan.reason,
             },
             source_ids=(source_id,),
         )
         self.repository.add_history(action)
-        robot_triggered = "embodied" in response_statuses
+        robot_triggered = any(
+            item.channel == "embodied" for item in response_plan.items
+        )
         if robot_triggered:
             self.robot.trigger_embodied_action(
                 subject_id=subject_id,
                 activity_id=activity_id,
-                action_text=action_text,
-                response_statuses=response_statuses,
+                action_text=next(
+                    item.text for item in response_plan.items if item.channel == "embodied"
+                ),
+                response_statuses=(response_plan.mode, "embodied"),
             )
         return ActionDispatchResult(
             action_id=action.id,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from jshi.action import InProcessActionRouter, PlaceholderRobotAction
 from jshi.activityclose import InProcessActivityClose
 from jshi.evaluation import EvaluationEvent, InProcessEvaluationSystem
+from jshi.models import ResponseItem, ResponsePlan
 from jshi.objects import InProcessObjectSystem
 from jshi.recognition import CarrierEntry, ObjectProfileRepository
 from jshi.subject import Activity, ActivityKind, ActivityStatus, HistoryKind, SubjectRepository
@@ -72,7 +73,10 @@ def test_action_router_triggers_robot_for_embodied(tmp_path):
         action_text="点头",
         model="m",
         source_id="thought-1",
-        response_statuses=("embodied",),
+        response_plan=ResponsePlan(
+            mode="respond",
+            items=(ResponseItem(channel="embodied", text="点头"),),
+        ),
     )
 
     assert result.robot_action_triggered is True

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 from urllib.request import Request, urlopen
 
@@ -28,6 +28,19 @@ class RecallRequest:
 
 
 @dataclass(frozen=True)
+class ResponseItem:
+    channel: str  # verbal | embodied
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class ResponsePlan:
+    mode: str  # respond | think | ignore | wait
+    reason: str = ""
+    items: tuple[ResponseItem, ...] = ()
+
+
+@dataclass(frozen=True)
 class ObjectAssessment:
     """认知阶段（阶段⑤）对说话人候选的判定。"""
 
@@ -48,14 +61,56 @@ class RecallEvaluation:
     note: str = ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ModelResponse:
-    text: str
     model: str
     metadata: Mapping[str, Any] | None = None
-    response_statuses: tuple[str, ...] = ()
+    response_plan: ResponsePlan = field(default_factory=lambda: ResponsePlan(mode="respond"))
     recall_requests: tuple[RecallRequest, ...] = ()
     object_assessment: ObjectAssessment | None = None
+
+    @property
+    def text(self) -> str:
+        for item in self.response_plan.items:
+            if item.channel == "verbal":
+                return item.text
+        return ""
+
+    @property
+    def response_statuses(self) -> tuple[str, ...]:
+        statuses = [self.response_plan.mode]
+        for item in self.response_plan.items:
+            if item.channel not in statuses:
+                statuses.append(item.channel)
+        return tuple(statuses)
+
+    def __init__(
+        self,
+        model: str,
+        metadata: Mapping[str, Any] | None = None,
+        response_plan: ResponsePlan | None = None,
+        recall_requests: tuple[RecallRequest, ...] = (),
+        object_assessment: ObjectAssessment | None = None,
+        *,
+        text: str | None = None,
+        response_statuses: tuple[str, ...] = (),
+    ) -> None:
+        if response_plan is None:
+            items: list[ResponseItem] = []
+            if text:
+                items.append(ResponseItem(channel="verbal", text=text))
+            if "embodied" in response_statuses and not any(
+                item.channel == "embodied" for item in items
+            ):
+                items.append(ResponseItem(channel="embodied", text=""))
+            mode = "respond" if items else "think"
+            response_plan = ResponsePlan(mode=mode, items=tuple(items))
+
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "metadata", metadata)
+        object.__setattr__(self, "response_plan", response_plan)
+        object.__setattr__(self, "recall_requests", recall_requests)
+        object.__setattr__(self, "object_assessment", object_assessment)
 
 
 class ModelPort(Protocol):

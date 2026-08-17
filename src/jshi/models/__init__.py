@@ -7,6 +7,8 @@ from .base import (
     OpenAICompatibleModel,
     RecallEvaluation,
     RecallRequest,
+    ResponseItem,
+    ResponsePlan,
 )
 
 __all__ = [
@@ -18,4 +20,6 @@ __all__ = [
     "OpenAICompatibleModel",
     "RecallEvaluation",
     "RecallRequest",
+    "ResponseItem",
+    "ResponsePlan",
 ]

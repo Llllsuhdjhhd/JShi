@@ -48,7 +48,7 @@ from jshi.memory import (
 )
 from jshi.memorycontrol import InProcessMemoryControl
 from jshi.objects import InProcessObjectSystem, ObjectSystemPort
-from jshi.models import ModelPort, ModelRequest, ObjectAssessment
+from jshi.models import ModelPort, ModelRequest, ObjectAssessment, ResponsePlan
 from jshi.recognition import (
     CarrierEntry,
     MIN_OBJECT_CONFIDENCE,
@@ -87,7 +87,9 @@ logger = logging.getLogger(__name__)
 
 # 上下文补充策略：当前占位为最多一轮；执行与记忆侧指标归 09。
 FOLLOWUP_RECALL_MAX_ROUNDS = 1
-RESPONSE_STATUSES = frozenset({"verbal", "embodied", "think", "ignore", "wait"})
+RESPONSE_STATUSES = frozenset(
+    {"respond", "verbal", "embodied", "think", "ignore", "wait"}
+)
 
 
 @dataclass(frozen=True)
@@ -450,7 +452,7 @@ class SubjectProcess:
         activity, final_statuses, _ = self.mark_activity_response_status(
             subject_id,
             activity,
-            response.response_statuses,
+            response.response_plan,
         )
         self.evaluation.emit(
             EvaluationEvent(
@@ -474,7 +476,7 @@ class SubjectProcess:
             action_text=thought.content,
             model=thought.model,
             source_id=thought.id,
-            response_statuses=final_statuses,
+            response_plan=response.response_plan,
         )
         action_id = action_result.action_id
         self.evaluation.emit(
@@ -721,12 +723,19 @@ class SubjectProcess:
         self,
         subject_id: str,
         activity: Activity,
-        recommended_statuses: Sequence[str],
+        response_plan: ResponsePlan,
         *,
         human_override: Sequence[str] | None = None,
     ) -> tuple[Activity, tuple[str, ...], tuple[str, ...]]:
         """06：校验模型推荐的回复状态并标记到活动。"""
-        recommended = tuple(dict.fromkeys(recommended_statuses))
+        recommended = tuple(
+            dict.fromkeys(
+                [
+                    response_plan.mode,
+                    *(item.channel for item in response_plan.items),
+                ]
+            )
+        )
         valid = tuple(status for status in recommended if status in RESPONSE_STATUSES)
         unknown = tuple(status for status in recommended if status not in RESPONSE_STATUSES)
         final = (
@@ -748,6 +757,11 @@ class SubjectProcess:
                     "recommended": list(recommended),
                     "final": list(final),
                     "unknown_statuses": list(unknown),
+                    "reason": response_plan.reason,
+                    "items": [
+                        {"channel": item.channel, "text": item.text}
+                        for item in response_plan.items
+                    ],
                     "source": "human_overridden" if human_override is not None else "model_recommended",
                 },
                 source_ids=(updated.id,),
