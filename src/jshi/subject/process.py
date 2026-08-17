@@ -90,6 +90,16 @@ FOLLOWUP_RECALL_MAX_ROUNDS = 1
 RESPONSE_STATUSES = frozenset(
     {"respond", "verbal", "embodied", "think", "ignore", "wait"}
 )
+SILENT_MODES = frozenset({"think", "ignore", "wait"})
+
+
+def should_emit_language_action(plan: ResponsePlan) -> bool:
+    """对外说话才落 language_action。think/ignore/wait 都结束本活动，但不说话。"""
+    if plan.mode in SILENT_MODES:
+        return False
+    return any(
+        item.channel == "verbal" and item.text.strip() for item in plan.items
+    )
 
 
 @dataclass(frozen=True)
@@ -469,38 +479,53 @@ class SubjectProcess:
                 subject_id, speaker, fact, thought, response.object_assessment
             )
 
-        # 阶段⑥ 行动与结果
-        action_result = self.action_router.dispatch(
-            subject_id=subject_id,
-            activity_id=activity.id,
-            action_text=thought.content,
-            model=thought.model,
-            source_id=thought.id,
-            response_plan=response.response_plan,
-        )
-        action_id = action_result.action_id
-        self.evaluation.emit(
-            EvaluationEvent(
-                event_id=f"eval-action-{action_id}",
+        # 阶段⑥ 行动：仅 verbal 落语言行动。think/ignore/wait 不说话，活动仍结束。
+        # wait ≠ think：wait 是本轮等后续输入或外部结果；think 是本轮不对外说。
+        # 下一轮外部输入创建新活动，不把同一 Activity 挂起。embodied 仍占位。
+        action_id = ""
+        spoke = should_emit_language_action(response.response_plan)
+        if spoke:
+            action_result = self.action_router.dispatch(
                 subject_id=subject_id,
                 activity_id=activity.id,
-                event_type="language_action_recorded",
-                payload={
-                    "action_id": action_id,
-                    "robot_action_triggered": action_result.robot_action_triggered,
-                },
-                source_ids=(action_id,),
+                action_text=thought.content,
+                model=thought.model,
+                source_id=thought.id,
+                response_plan=response.response_plan,
             )
-        )
-        self.activity_ledger.append_subject_reply(
-            subject_id,
-            text_raw=thought.content,
-            source_ids=(thought.id, action_id),
-            response_statuses=final_statuses,
-        )
-        self.feedback.ingest_result(subject_id, activity.id, thought.content)
+            action_id = action_result.action_id
+            self.evaluation.emit(
+                EvaluationEvent(
+                    event_id=f"eval-action-{action_id}",
+                    subject_id=subject_id,
+                    activity_id=activity.id,
+                    event_type="language_action_recorded",
+                    payload={
+                        "action_id": action_id,
+                        "robot_action_triggered": action_result.robot_action_triggered,
+                    },
+                    source_ids=(action_id,),
+                )
+            )
+            self.activity_ledger.append_subject_reply(
+                subject_id,
+                text_raw=thought.content,
+                source_ids=(thought.id, action_id),
+                response_statuses=final_statuses,
+            )
+            self.feedback.ingest_result(subject_id, activity.id, thought.content)
+        else:
+            self.activity_ledger.append_subject_state(
+                subject_id,
+                state_delta={
+                    "mode": response.response_plan.mode,
+                    "reason": response.response_plan.reason,
+                },
+                source_ids=(thought.id,),
+                response_statuses=final_statuses,
+            )
 
-        # 阶段⑦ 收尾：推进活跃区窗口起点，不再做事件剔除
+        # 阶段⑦ 收尾：推进活跃区窗口起点，关闭本活动。30 失败不影响完成。
         active_through = self.activity_ledger.head_sequence(subject_id)
         if active_through:
             self.active_zone.advance(subject_id, active_through)
@@ -510,7 +535,11 @@ class SubjectProcess:
             final_response_statuses=final_statuses,
             thought_id=thought.id,
             action_id=action_id,
-            reason="external_activity_finished_after_action",
+            reason=(
+                "external_activity_finished_after_action"
+                if spoke
+                else f"external_activity_finished_mode_{response.response_plan.mode}"
+            ),
         )
         completed = self.repository.get_activity(close_result.activity_id)
         memory_result = self.memory_control.run_once(subject_id)
@@ -552,7 +581,7 @@ class SubjectProcess:
             completed,
             perception,
             thought,
-            thought.content,
+            thought.content if spoke else "",
             current,
             speaker=speaker,
         )

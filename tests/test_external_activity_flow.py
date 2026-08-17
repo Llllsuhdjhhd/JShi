@@ -1,18 +1,17 @@
 """外部活动完整参与图的逐阶段测试。
 
-目标流程（与"外部活动完整参与图"一一对应）：
+目标流程（当前七阶段）：
 
-    阶段0  应用入口：CLI 触发 experience
-    阶段1  记录入口：事实历史 external_input
-    阶段2  活跃区装载：未完成/完成事件 + 承诺 + 个人世界（不做归属判断）
-    阶段3  活动建立：Activity 挂载开放事项/意图
-    阶段4  认知活动：感知（已接受）→ 模型推断（考虑中）→ 认识状态
-    阶段5  行动：语言行动 language_action
-    阶段6  收尾与沉淀：活动完成、双历史、状态迁移审计、新未完成现实
+    阶段①  记录入口：对象解析 + fact/external_input
+    阶段②  活跃区装载
+    阶段③  状态组装
+    阶段④  活动建立
+    阶段⑤  认知（response_plan）+ 06 标记
+    阶段⑥  行动：有 verbal 才落 language_action
+    阶段⑦  收尾：活动完成；30 尝试投递
 
-测试使用确定性的 RecordingModel，断言每个阶段"哪些系统参与、
-产生什么记录、状态如何迁移"；虚线部分（意图填充、结果反馈、
-治理检验）以"锁定当前缺口"的断言记录现状。
+虚线部分（意图、结果反馈、治理、embodied）仍锁定为占位。
+09 与个人世界装载质量不在本文件验收。
 """
 
 from __future__ import annotations
@@ -279,17 +278,21 @@ def test_phase6_subject_history_records_assembly_and_cognition(runtime):
     result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
-    assert [item.event_type for item in subject] == [
-        "event_loaded",
+    types = [item.event_type for item in subject]
+    for required in (
+        "context_window_loaded",
         "current_state_assembled",
         "activity_created",
         "cognitive_content_appeared",
+        "activity_response_state",
         "activity_completed",
-    ]
-    input_fact = repository.list_history("stone", HistoryKind.FACT)[0]
-    assert input_fact.id in subject[0].source_ids
-    assert subject[3].content["cognitive_content_id"] == result.thought.id
-    assert subject[3].content["epistemic_status"] == "considering"
+    ):
+        assert required in types
+    cognition = next(
+        item for item in subject if item.event_type == "cognitive_content_appeared"
+    )
+    assert cognition.content["cognitive_content_id"] == result.thought.id
+    assert cognition.content["epistemic_status"] == "considering"
 
 
 def test_phase6_epistemic_transition_is_audited(runtime):

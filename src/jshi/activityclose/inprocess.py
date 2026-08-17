@@ -44,7 +44,9 @@ class InProcessActivityClose(ActivityClosePort):
                     "reason": reason,
                     "response_statuses": list(completed.response_statuses),
                 },
-                source_ids=(thought_id, action_id),
+                source_ids=tuple(
+                    item for item in (thought_id, action_id) if item
+                ),
             )
         )
         return ActivityCloseResult(
