@@ -216,7 +216,7 @@ def main() -> None:
             print(f"错误：{exc}")
             return
         print(result.action_text)
-        print(f"[活动 {result.activity.id}；认知 {result.thought.id}]")
+        print(f"[活动 {result.activity.id}；mode {result.response_plan.mode}]")
     elif args.command in {"reflect", "inner"}:
         result = process.reflect(args.subject_id, args.prompt)
         print(result.content)

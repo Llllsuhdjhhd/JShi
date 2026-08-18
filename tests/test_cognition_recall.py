@@ -99,7 +99,7 @@ def test_single_recall_records_metrics_and_reference(tmp_path):
     result = process.experience("stone", "他最近怎么样", object_ref="user")
 
     assert model.calls == 2
-    assert result.thought.content == "最终回应"
+    assert result.action_text == "最终回应"
     metrics = subject_events(repository, "recall_metrics")
     assert len(metrics) == 1
     content = metrics[0].content
@@ -125,7 +125,7 @@ def test_recall_is_truncated_after_one_round(tmp_path):
     result = process.experience("stone", "你好", object_ref="user")
 
     assert model.calls == 2
-    assert result.thought.content == "还要更多"
+    assert result.action_text == "还要更多"
     metrics = subject_events(repository, "recall_metrics")
     assert len(metrics) == 1
     assert metrics[0].content["truncated"] is True

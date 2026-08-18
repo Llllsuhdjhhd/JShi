@@ -18,7 +18,6 @@ class ActivityClosePort(Protocol):
         activity_id: str,
         *,
         final_response_statuses: Sequence[str],
-        thought_id: str,
         action_id: str,
         reason: str,
     ) -> ActivityCloseResult: ...

@@ -198,14 +198,14 @@ class RecallCoordinator:
         subject_id: str,
         activity_id: str,
         added_ids: Sequence[str],
-        thought_source_ids: Sequence[str],
+        cited_ids: Sequence[str],
     ) -> None:
         from jshi.subject.domain import HistoryKind, HistoryRecord
 
         if not added_ids:
             return
         referenced = [
-            event_id for event_id in added_ids if event_id in thought_source_ids
+            event_id for event_id in added_ids if event_id in cited_ids
         ]
         self._repository.add_history(
             HistoryRecord(

@@ -23,7 +23,6 @@ def test_activity_close_completes_and_audits(tmp_path):
         "stone",
         activity.id,
         final_response_statuses=("verbal",),
-        thought_id="thought-1",
         action_id="action-1",
         reason="done",
     )
@@ -72,7 +71,7 @@ def test_action_router_triggers_robot_for_embodied(tmp_path):
         activity_id="a1",
         action_text="点头",
         model="m",
-        source_id="thought-1",
+        source_id="activity-1",
         response_plan=ResponsePlan(
             mode="respond",
             items=(ResponseItem(channel="embodied", text="点头"),),

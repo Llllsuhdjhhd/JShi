@@ -98,7 +98,7 @@ VALID_CHANNELS = frozenset({"verbal", "embodied"})
 
 
 def verbal_text(plan: ResponsePlan) -> str:
-    """说话文本只来自 respond 下的 verbal item，不用 thought。"""
+    """说话文本只来自 respond 下的 verbal item。"""
     return plan.verbal_text()
 
 
@@ -152,7 +152,7 @@ class SubjectPreview:
 class SubjectActivityResult:
     activity: Activity
     perception: CognitiveContent
-    thought: CognitiveContent
+    response_plan: ResponsePlan
     action_text: str
     current_state: AssembledCurrentState
     speaker: SpeakerCandidate = field(
@@ -470,8 +470,8 @@ class SubjectProcess:
         )
         self.repository.add_cognitive_content(perception)
 
-        # 阶段⑤ 认知活动（多轮，可追加召回；模型聚焦事件）
-        thought, response = self._cognize(
+        # 阶段⑤ 认知活动（可追加召回）
+        response = self._cognize(
             subject_id, activity, current, perception
         )
         activity, final_statuses, _ = self.mark_activity_response_status(
@@ -491,7 +491,7 @@ class SubjectProcess:
         )
         if response.object_assessment is not None:
             speaker = self._apply_object_assessment(
-                subject_id, speaker, fact, thought, response.object_assessment
+                subject_id, speaker, fact, activity.id, response.object_assessment
             )
 
         # 阶段⑥：10 按 item 分发。语言只来自 verbal；embodied 四个 mode 都可。
@@ -506,8 +506,8 @@ class SubjectProcess:
                 subject_id=subject_id,
                 activity_id=activity.id,
                 action_text=spoken_text,
-                model=thought.model,
-                source_id=thought.id,
+                model=response.model,
+                source_id=activity.id,
                 response_plan=plan,
             )
             action_id = action_result.action_id
@@ -545,7 +545,7 @@ class SubjectProcess:
             self.activity_ledger.append_subject_reply(
                 subject_id,
                 text_raw=spoken_text,
-                source_ids=(thought.id, *(item for item in (action_id,) if item)),
+                source_ids=(activity.id, *(item for item in (action_id,) if item)),
                 response_plan=plan_payload,
                 response_statuses=final_statuses,
             )
@@ -559,7 +559,7 @@ class SubjectProcess:
                         item.text for item in plan.items if item.channel == "embodied"
                     ],
                 },
-                source_ids=(thought.id,),
+                source_ids=(activity.id,),
                 response_plan=plan_payload,
                 response_statuses=final_statuses,
             )
@@ -574,7 +574,6 @@ class SubjectProcess:
             subject_id,
             activity.id,
             final_response_statuses=final_statuses,
-            thought_id=thought.id,
             action_id=action_id,
             reason=(
                 "external_activity_finished_after_action"
@@ -621,7 +620,7 @@ class SubjectProcess:
         return SubjectActivityResult(
             completed,
             perception,
-            thought,
+            plan,
             spoken_text,
             current,
             speaker=speaker,
@@ -645,57 +644,13 @@ class SubjectProcess:
             )
         )
 
-    def _materialize_thought(
-        self,
-        subject_id: str,
-        activity: Activity,
-        current: AssembledCurrentState,
-        perception: CognitiveContent,
-        working_recalled: Sequence[RecalledFragment],
-        response: object,
-    ) -> CognitiveContent:
-        thought = CognitiveContent(
-            subject_id=subject_id,
-            activity_id=activity.id,
-            kind=CognitiveKind.INFERENCE,
-            content=response.text,
-            epistemic_status=EpistemicStatus.CONSIDERING,
-            evidence_kind=EvidenceKind.COGNITIVE_REASONING,
-            source_ids=(
-                perception.id,
-                *(
-                    source_id
-                    for fragment in current.fragments
-                    for source_id in fragment.source_ids
-                ),
-                *(item.event_id for item in working_recalled),
-            ),
-            model=response.model,
-        )
-        self.repository.add_cognitive_content(thought)
-        self.repository.add_history(
-            HistoryRecord(
-                subject_id=subject_id,
-                kind=HistoryKind.SUBJECT,
-                event_type="cognitive_content_appeared",
-                content={
-                    "activity_id": activity.id,
-                    "cognitive_content_id": thought.id,
-                    "content": thought.content,
-                    "epistemic_status": thought.epistemic_status.value,
-                },
-                source_ids=thought.source_ids,
-            )
-        )
-        return thought
-
     def _cognize(
         self,
         subject_id: str,
         activity: Activity,
         current: AssembledCurrentState,
         perception: CognitiveContent,
-    ) -> tuple[CognitiveContent, object]:
+    ) -> object:
         """主流程认知编排：05 产出候选，09 协调器执行记忆补充，再继续认知。"""
         working_recalled: list[RecalledFragment] = list(current.recalled)
         known_ids = {item.event_id for item in working_recalled}
@@ -756,22 +711,17 @@ class SubjectProcess:
             )
         )
 
-        thought = self._materialize_thought(
-            subject_id,
-            activity,
-            current,
-            perception,
-            working_recalled,
-            response,
-        )
         self.evaluation.emit(
             EvaluationEvent(
                 event_id=new_id(),
                 subject_id=subject_id,
                 activity_id=activity.id,
-                event_type="thought_materialized",
-                payload={"cognitive_content_id": thought.id},
-                source_ids=(thought.id,),
+                event_type="response_plan_ready",
+                payload={
+                    "mode": response.response_plan.mode,
+                    "reason": response.response_plan.reason,
+                },
+                source_ids=(activity.id, perception.id),
             )
         )
 
@@ -780,14 +730,26 @@ class SubjectProcess:
             for entry in executions
             for event_id in entry.fresh_ids
         )
+        cited_ids = tuple(
+            dict.fromkeys(
+                (
+                    *(item.event_id for item in working_recalled),
+                    *(
+                        source_id
+                        for fragment in current.fragments
+                        for source_id in fragment.source_ids
+                    ),
+                )
+            )
+        )
         if added_ids:
             self.recall_coordinator.record_reference(
                 subject_id=subject_id,
                 activity_id=activity.id,
                 added_ids=added_ids,
-                thought_source_ids=thought.source_ids,
+                cited_ids=cited_ids,
             )
-        return thought, response
+        return response
 
     def mark_activity_response_status(
         self,
@@ -866,7 +828,7 @@ class SubjectProcess:
         subject_id: str,
         speaker: SpeakerCandidate,
         fact: HistoryRecord,
-        thought: CognitiveContent,
+        activity_id: str,
         assessment: ObjectAssessment,
     ) -> SpeakerCandidate:
         """认知确认：记录判定并更新对象档案状态（追加记录，不改写事实原文）。"""
@@ -880,10 +842,9 @@ class SubjectProcess:
                     "object_id": assessment.object_id or speaker.object_id,
                     "conclusion": assessment.conclusion,
                     "reason": assessment.reason,
-                    "cognitive_content_id": thought.id,
-                    "epistemic_status": thought.epistemic_status.value,
+                    "activity_id": activity_id,
                 },
-                source_ids=(thought.id,),
+                source_ids=(activity_id, fact.id),
             )
         )
         updated = speaker

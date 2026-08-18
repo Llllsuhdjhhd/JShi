@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol, Sequence
 
 from jshi.models import RecallEvaluation
 
 from .coordinator import RecallExecution
-
-if TYPE_CHECKING:
-    from jshi.subject.domain import CognitiveContent
 
 
 class RecallEvaluatorPort(Protocol):
@@ -19,9 +16,9 @@ class RecallEvaluatorPort(Protocol):
         subject_id: str,
         activity_id: str,
         execution: RecallExecution,
-        thought: CognitiveContent,
+        cited_ids: Sequence[str],
     ) -> RecallEvaluation | None:
-        """基于召回执行和最终 thought 生成评价；不可用时返回 None。"""
+        """基于召回执行和本轮引用的来源 id 生成评价；不可用时返回 None。"""
 
 
 class RuleBasedRecallEvaluator:
@@ -33,13 +30,12 @@ class RuleBasedRecallEvaluator:
         subject_id: str,
         activity_id: str,
         execution: RecallExecution,
-        thought: CognitiveContent,
+        cited_ids: Sequence[str],
     ) -> RecallEvaluation:
         del subject_id, activity_id
+        cited = set(cited_ids)
         referenced = [
-            event_id
-            for event_id in execution.fresh_ids
-            if event_id in thought.source_ids
+            event_id for event_id in execution.fresh_ids if event_id in cited
         ]
         usefulness = "related" if referenced else "unrelated"
         need_more = execution.returned_count == 0

@@ -144,7 +144,7 @@ def test_followup_recall_extends_working_set(tmp_path):
 
     result = process.experience("stone", "他最近怎么样", object_ref="user")
 
-    assert result.thought.content == "最终回应"
+    assert result.action_text == "最终回应"
     assert model.calls == 2
     extended = [
         item
@@ -178,7 +178,7 @@ def test_followup_recall_is_truncated_after_one_round(tmp_path):
     result = process.experience("stone", "你好", object_ref="user")
 
     assert model.calls == 2
-    assert result.thought.content == "还要更多"
+    assert result.action_text == "还要更多"
     metrics = [
         item
         for item in repository.list_history("stone", HistoryKind.SUBJECT)

@@ -199,20 +199,19 @@ def test_phase4_perception_is_accepted_report(runtime):
     assert len(perception.source_ids) == 1  # 感知以输入事实为来源
 
 
-def test_phase4_thought_is_considering_inference(runtime):
+def test_phase4_external_activity_has_no_thought_record(runtime):
     process, repository, _model, _identities = runtime
 
     result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
-    thought = result.thought
-    assert thought.kind is CognitiveKind.INFERENCE
-    assert thought.epistemic_status is EpistemicStatus.CONSIDERING
-    assert thought.evidence_kind is EvidenceKind.COGNITIVE_REASONING
-    assert thought.model == "recording-model"
-    # 来源链：感知 → 推断
-    assert result.perception.id in thought.source_ids
-    stored = repository.get_cognitive_content(thought.id)
-    assert stored.epistemic_status is EpistemicStatus.CONSIDERING
+    kinds = {
+        item.kind
+        for item in repository.list_cognitive_contents(result.activity.id)
+    }
+    assert CognitiveKind.PERCEPTION in kinds
+    assert CognitiveKind.INFERENCE not in kinds
+    assert result.response_plan.mode == "respond"
+    assert result.action_text
 
 
 def test_phase4_model_request_receives_subject_state_and_context(runtime):
@@ -275,7 +274,7 @@ def test_phase5_external_result_feedback_is_not_yet_implemented(runtime):
 def test_phase6_subject_history_records_assembly_and_cognition(runtime):
     process, repository, _model, _identities = runtime
 
-    result = process.experience("stone", "今天有些疲倦", object_ref="user")
+    process.experience("stone", "今天有些疲倦", object_ref="user")
 
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
     types = [item.event_type for item in subject]
@@ -283,30 +282,26 @@ def test_phase6_subject_history_records_assembly_and_cognition(runtime):
         "context_window_loaded",
         "current_state_assembled",
         "activity_created",
-        "cognitive_content_appeared",
         "activity_response_state",
         "activity_completed",
     ):
         assert required in types
-    cognition = next(
-        item for item in subject if item.event_type == "cognitive_content_appeared"
-    )
-    assert cognition.content["cognitive_content_id"] == result.thought.id
-    assert cognition.content["epistemic_status"] == "considering"
+    assert "cognitive_content_appeared" not in types
 
 
 def test_phase6_epistemic_transition_is_audited(runtime):
     process, repository, _model, _identities = runtime
-    result = process.experience("stone", "今天有些疲倦", object_ref="user")
+    process.experience("stone", "今天有些疲倦", object_ref="user")
+    reflection = process.reflect("stone", "回顾刚才的理解")
 
     updated = process.transition_cognition(
-        result.thought.id,
+        reflection.id,
         EpistemicStatus.PROVISIONAL,
         "目前证据有限，先暂时接受",
     )
 
     assert updated.epistemic_status is EpistemicStatus.PROVISIONAL
-    transitions = repository.list_transitions(result.thought.id)
+    transitions = repository.list_transitions(reflection.id)
     assert [(t.from_state, t.to_state, t.reason) for t in transitions] == [
         ("considering", "provisional", "目前证据有限，先暂时接受")
     ]
@@ -319,7 +314,7 @@ def test_phase6_proposed_open_matter_persists_into_next_activity(runtime):
     process, repository, _model, _identities = runtime
     result = process.experience("stone", "他看起来很累", object_ref="user")
     concern = process.propose_open_matter(
-        "stone", "继续关心他的疲倦", source_ids=(result.thought.id,)
+        "stone", "继续关心他的疲倦", source_ids=(result.activity.id,)
     )
 
     later = process.experience("stone", "又见面了", object_ref="user")

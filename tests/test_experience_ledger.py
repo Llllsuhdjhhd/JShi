@@ -208,7 +208,7 @@ def test_subject_reply_is_appended_to_same_log():
     reply = ledger.append_subject_reply(
         "stone",
         text_raw="我在。",
-        source_ids=("thought-1",),
+        source_ids=("activity-1",),
     )
 
     assert incoming.sequence == 1
@@ -227,7 +227,7 @@ def test_subject_state_without_text_is_logged():
             "to": "accepted",
             "reason": "object_confirmed",
         },
-        source_ids=("thought-1", "transition-1"),
+        source_ids=("activity-1", "transition-1"),
     )
 
     assert state.actor_kind == ActorKind.SUBJECT

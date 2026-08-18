@@ -46,8 +46,8 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
     result = process.experience("stone", "我今天有些疲倦", object_ref="user")
 
     assert result.activity.status is ActivityStatus.COMPLETED
-    assert result.thought.epistemic_status is EpistemicStatus.CONSIDERING
-    assert result.thought.model == "context-model"
+    assert result.response_plan.mode == "respond"
+    assert result.action_text
     assert result.current_state.active_event_ids == ()
     facts = repository.list_history("stone", HistoryKind.FACT)
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
@@ -55,13 +55,16 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
         "external_input",
         "language_action",
     ]
-    assert [item.event_type for item in subject] == [
-        "event_loaded",
+    types = [item.event_type for item in subject]
+    for required in (
+        "context_window_loaded",
         "current_state_assembled",
         "activity_created",
-        "cognitive_content_appeared",
+        "activity_response_state",
         "activity_completed",
-    ]
+    ):
+        assert required in types
+    assert "cognitive_content_appeared" not in types
 
 
 def test_assemble_loads_existing_open_matter_only(tmp_path):
@@ -88,29 +91,30 @@ def test_propose_open_matter_requires_sources(tmp_path):
 
 def test_epistemic_transition_preserves_revision_history(tmp_path):
     process, repository = runtime(tmp_path)
-    result = process.experience("stone", "也许明天会更好", object_ref="user")
+    process.experience("stone", "也许明天会更好", object_ref="user")
+    reflection = process.reflect("stone", "回顾刚才的理解")
 
     provisional = process.transition_cognition(
-        result.thought.id,
+        reflection.id,
         EpistemicStatus.PROVISIONAL,
         "目前证据有限，先暂时接受",
     )
     revised = process.transition_cognition(
-        result.thought.id,
+        reflection.id,
         EpistemicStatus.REVISED,
         "新事实改变了原来的理解",
     )
 
     assert provisional.epistemic_status is EpistemicStatus.PROVISIONAL
     assert revised.epistemic_status is EpistemicStatus.REVISED
-    transitions = repository.list_transitions(result.thought.id)
+    transitions = repository.list_transitions(reflection.id)
     assert [(item.from_state, item.to_state) for item in transitions] == [
         ("considering", "provisional"),
         ("provisional", "revised"),
     ]
     with pytest.raises(ValueError):
         process.transition_cognition(
-            result.thought.id, EpistemicStatus.ACCEPTED, "不能从已修正状态恢复"
+            reflection.id, EpistemicStatus.ACCEPTED, "不能从已修正状态恢复"
         )
 
 
@@ -179,15 +183,15 @@ def test_reflection_is_internal_cognition_not_external_fact(tmp_path):
     assert reflections[-1].content["cognitive_content_id"] == reflection.id
 
 
-def test_propose_open_matter_after_experience_links_thought(tmp_path):
+def test_propose_open_matter_after_experience_links_activity(tmp_path):
     process, repository = runtime(tmp_path)
     result = process.experience("stone", "他看起来很累", object_ref="user")
     open_matter = process.propose_open_matter(
         "stone",
         "继续关心他的疲倦",
-        source_ids=(result.thought.id,),
+        source_ids=(result.activity.id,),
     )
-    assert open_matter.source_ids == (result.thought.id,)
+    assert open_matter.source_ids == (result.activity.id,)
     assert repository.list_history("stone", HistoryKind.SUBJECT)[-1].event_type == (
         "personal_item_created"
     )
