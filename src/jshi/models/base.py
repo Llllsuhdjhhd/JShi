@@ -39,6 +39,17 @@ class ResponsePlan:
     reason: str = ""
     items: tuple[ResponseItem, ...] = ()
 
+    def verbal_text(self) -> str:
+        if self.mode in {"think", "ignore", "wait"}:
+            return ""
+        for item in self.items:
+            if item.channel == "verbal" and item.text.strip():
+                return item.text
+        return ""
+
+    def has_embodied(self) -> bool:
+        return any(item.channel == "embodied" for item in self.items)
+
 
 @dataclass(frozen=True)
 class ObjectAssessment:

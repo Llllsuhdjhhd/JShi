@@ -6,12 +6,15 @@ from typing import TYPE_CHECKING, Sequence
 
 from jshi.activezone import (
     ActiveZonePort,
-    ActiveZoneView,
     InProcessActiveZone,
 )
 from jshi.action import InProcessActionRouter, PlaceholderRobotAction
 from jshi.activityclose import InProcessActivityClose
-from jshi.experienceledger import ExperienceLedgerPort, InProcessExperienceLedger
+from jshi.experienceledger import (
+    ContextViewState,
+    ExperienceLedgerPort,
+    InProcessExperienceLedger,
+)
 from jshi.evaluation import EvaluationEvent, InProcessEvaluationSystem, new_id
 from jshi.assembly import (
     ActivityWindowSource,
@@ -91,15 +94,22 @@ RESPONSE_STATUSES = frozenset(
     {"respond", "verbal", "embodied", "think", "ignore", "wait"}
 )
 SILENT_MODES = frozenset({"think", "ignore", "wait"})
+VALID_CHANNELS = frozenset({"verbal", "embodied"})
+
+
+def verbal_text(plan: ResponsePlan) -> str:
+    """说话文本只来自 respond 下的 verbal item，不用 thought。"""
+    return plan.verbal_text()
 
 
 def should_emit_language_action(plan: ResponsePlan) -> bool:
-    """对外说话才落 language_action。think/ignore/wait 都结束本活动，但不说话。"""
-    if plan.mode in SILENT_MODES:
-        return False
-    return any(
-        item.channel == "verbal" and item.text.strip() for item in plan.items
-    )
+    """对外说话才落 language_action。think/ignore/wait 不说话。"""
+    return bool(plan.verbal_text())
+
+
+def should_trigger_embodied(plan: ResponsePlan) -> bool:
+    """embodied 可与四个 mode 组合。"""
+    return plan.has_embodied()
 
 
 @dataclass(frozen=True)
@@ -109,7 +119,7 @@ class AssembledCurrentState:
     input_text: str
     subject_state: SubjectState
     personal_items: tuple[PersonalItem, ...]
-    active_zone: ActiveZoneView
+    context_view: ContextViewState
     active_segment_ids: tuple[str, ...]
     recalled: tuple[RecalledFragment, ...]
     fragments: tuple[AssemblyFragment, ...] = ()
@@ -120,14 +130,22 @@ class AssembledCurrentState:
         """兼容旧名称：实际是活动段 id。"""
         return self.active_segment_ids
 
+    @property
+    def active_zone(self) -> ContextViewState:
+        return self.context_view
+
 
 @dataclass(frozen=True)
 class SubjectPreview:
     """preview-state 输出：对象解析 + 活跃区装载 + 组装快照（只读，不落库）。"""
 
     speaker: SpeakerCandidate
-    active_zone: ActiveZoneView
+    context_view: ContextViewState
     assembled: AssembledCurrentState
+
+    @property
+    def active_zone(self) -> ContextViewState:
+        return self.context_view
 
 
 @dataclass(frozen=True)
@@ -223,7 +241,7 @@ class SubjectProcess:
         self,
         subject_id: str,
         input_text: str,
-        view: ActiveZoneView | None = None,
+        view: ContextViewState | None = None,
         *,
         object_id: str | None = None,
     ) -> AssembledCurrentState:
@@ -236,7 +254,7 @@ class SubjectProcess:
             subject_id=subject_id,
             input_text=input_text,
             object_id=object_id,
-            active_zone=view,
+            context_view=view,
             budget_extra=4,
             recall_level=1,
         )
@@ -245,7 +263,7 @@ class SubjectProcess:
             input_text=input_text,
             subject_state=working_set.subject_state,
             personal_items=tuple(working_set.personal_items),
-            active_zone=view,
+            context_view=view,
             active_segment_ids=working_set.active_segment_ids,
             recalled=(),
             fragments=working_set.fragments,
@@ -270,7 +288,7 @@ class SubjectProcess:
         assembled = self.assemble_current_state(
             subject_id, input_text, view, object_id=speaker.object_id
         )
-        return SubjectPreview(speaker=speaker, active_zone=view, assembled=assembled)
+        return SubjectPreview(speaker=speaker, context_view=view, assembled=assembled)
 
     # ------------------------------------------------------------------
     # 外部活动主流程
@@ -359,7 +377,7 @@ class SubjectProcess:
                 )
             )
 
-        # 阶段② 活跃区装载：只取原始活动窗口，不识别事件
+        # 阶段② 活跃区装载：只读 16 当前 ContextViewState
         view = self.active_zone.load(subject_id, text)
         self.repository.add_history(
             HistoryRecord(
@@ -368,14 +386,11 @@ class SubjectProcess:
                 event_type="context_window_loaded",
                 content={
                     "input": text,
-                    "segment_ids": [segment.segment_id for segment in view.segments],
-                    "start_sequence": view.start_sequence,
-                    "budget_chars": view.budget_chars,
+                    "version": view.version,
+                    "segment_ids": list(view.segment_refs),
+                    "last_applied_sequence": view.last_applied_sequence,
                 },
-                source_ids=(
-                    fact.id,
-                    *(segment.segment_id for segment in view.segments),
-                ),
+                source_ids=(fact.id, *view.segment_refs),
             )
         )
 
@@ -391,7 +406,7 @@ class SubjectProcess:
                 content={
                     "input": text,
                     "segment_ids": list(current.active_segment_ids),
-                    "budget_chars": view.budget_chars,
+                    "version": view.version,
                     "value_count": len(current.subject_state.salient_values),
                     "commitment_count": len(current.subject_state.commitments),
                     "recalled_event_ids": [
@@ -479,56 +494,82 @@ class SubjectProcess:
                 subject_id, speaker, fact, thought, response.object_assessment
             )
 
-        # 阶段⑥ 行动：仅 verbal 落语言行动。think/ignore/wait 不说话，活动仍结束。
-        # wait ≠ think：wait 是本轮等后续输入或外部结果；think 是本轮不对外说。
-        # 下一轮外部输入创建新活动，不把同一 Activity 挂起。embodied 仍占位。
+        # 阶段⑥：10 按 item 分发。语言只来自 verbal；embodied 四个 mode 都可。
+        # think/ignore/wait 不说话，活动仍结束。结果反馈与语言同级，不挂在说话之后。
+        plan = response.response_plan
+        spoken_text = verbal_text(plan)
+        spoke = bool(spoken_text)
+        embodied = should_trigger_embodied(plan)
         action_id = ""
-        spoke = should_emit_language_action(response.response_plan)
-        if spoke:
+        if spoke or embodied:
             action_result = self.action_router.dispatch(
                 subject_id=subject_id,
                 activity_id=activity.id,
-                action_text=thought.content,
+                action_text=spoken_text,
                 model=thought.model,
                 source_id=thought.id,
-                response_plan=response.response_plan,
+                response_plan=plan,
             )
             action_id = action_result.action_id
             self.evaluation.emit(
                 EvaluationEvent(
-                    event_id=f"eval-action-{action_id}",
+                    event_id=f"eval-action-{activity.id}",
                     subject_id=subject_id,
                     activity_id=activity.id,
-                    event_type="language_action_recorded",
+                    event_type="action_dispatched",
                     payload={
                         "action_id": action_id,
+                        "spoke": spoke,
                         "robot_action_triggered": action_result.robot_action_triggered,
                     },
-                    source_ids=(action_id,),
+                    source_ids=(activity.id, *(item for item in (action_id,) if item)),
                 )
             )
+            self.feedback.ingest_result(
+                subject_id,
+                activity.id,
+                spoken_text
+                or next(
+                    (item.text for item in plan.items if item.channel == "embodied"),
+                    plan.reason,
+                ),
+            )
+        plan_payload = {
+            "mode": plan.mode,
+            "reason": plan.reason,
+            "items": [
+                {"channel": item.channel, "text": item.text} for item in plan.items
+            ],
+        }
+        if spoke:
             self.activity_ledger.append_subject_reply(
                 subject_id,
-                text_raw=thought.content,
-                source_ids=(thought.id, action_id),
+                text_raw=spoken_text,
+                source_ids=(thought.id, *(item for item in (action_id,) if item)),
+                response_plan=plan_payload,
                 response_statuses=final_statuses,
             )
-            self.feedback.ingest_result(subject_id, activity.id, thought.content)
         else:
             self.activity_ledger.append_subject_state(
                 subject_id,
                 state_delta={
-                    "mode": response.response_plan.mode,
-                    "reason": response.response_plan.reason,
+                    "mode": plan.mode,
+                    "reason": plan.reason,
+                    "embodied": [
+                        item.text for item in plan.items if item.channel == "embodied"
+                    ],
                 },
                 source_ids=(thought.id,),
+                response_plan=plan_payload,
                 response_statuses=final_statuses,
             )
+        self.activity_ledger.apply_context_assessment(
+            subject_id,
+            getattr(response, "context_assessment", None),
+            allow_edit=plan.mode == "respond",
+        )
 
-        # 阶段⑦ 收尾：推进活跃区窗口起点，关闭本活动。30 失败不影响完成。
-        active_through = self.activity_ledger.head_sequence(subject_id)
-        if active_through:
-            self.active_zone.advance(subject_id, active_through)
+        # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
         close_result = self.activity_close.close(
             subject_id,
             activity.id,
@@ -581,7 +622,7 @@ class SubjectProcess:
             completed,
             perception,
             thought,
-            thought.content if spoke else "",
+            spoken_text,
             current,
             speaker=speaker,
         )
@@ -765,12 +806,32 @@ class SubjectProcess:
                 ]
             )
         )
-        valid = tuple(status for status in recommended if status in RESPONSE_STATUSES)
-        unknown = tuple(status for status in recommended if status not in RESPONSE_STATUSES)
+        unknown = tuple(
+            status
+            for status in recommended
+            if status not in RESPONSE_STATUSES
+        )
+        illegal: list[str] = []
+        accepted: list[str] = []
+        if response_plan.mode in RESPONSE_STATUSES:
+            accepted.append(response_plan.mode)
+        for item in response_plan.items:
+            if item.channel not in VALID_CHANNELS:
+                if item.channel not in unknown:
+                    unknown = (*unknown, item.channel)
+                continue
+            if item.channel == "verbal" and response_plan.mode in SILENT_MODES:
+                illegal.append("verbal")
+                continue
+            if item.channel not in accepted:
+                accepted.append(item.channel)
+        missing_reason = (
+            response_plan.mode in SILENT_MODES and not response_plan.reason.strip()
+        )
         final = (
             tuple(dict.fromkeys(human_override))
             if human_override is not None
-            else valid
+            else tuple(accepted)
         )
         updated = self.repository.update_activity(
             activity.id,
@@ -786,6 +847,8 @@ class SubjectProcess:
                     "recommended": list(recommended),
                     "final": list(final),
                     "unknown_statuses": list(unknown),
+                    "illegal_channels": illegal,
+                    "missing_reason": missing_reason,
                     "reason": response_plan.reason,
                     "items": [
                         {"channel": item.channel, "text": item.text}

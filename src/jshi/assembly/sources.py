@@ -50,33 +50,34 @@ class IdentitySource:
 
 
 class ActivityWindowSource:
-    """活跃区源（02）：原始活动窗口，不含事件概念，按长度控制。"""
+    """活跃区源（02）：只读 16 的 ContextViewState，不重切。"""
 
     name = "activity"
     status = "implemented"
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
-        view = ctx.active_zone
+        view = ctx.context_view or ctx.active_zone
         if view is None:
             return LoadResult()
-        fragments = tuple(
-            AssemblyFragment(
-                source="activity",
-                id=segment.segment_id,
-                content=segment.text_raw or "",
-                kind=(
-                    "external_input"
-                    if segment.actor_kind.value == "external"
-                    else "subject_activity"
+        text = getattr(view, "context_text", "") or ""
+        if not text:
+            return LoadResult()
+        version = getattr(view, "version", 0)
+        segment_refs = tuple(getattr(view, "segment_refs", ()) or ())
+        return LoadResult(
+            fragments=(
+                AssemblyFragment(
+                    source="activity",
+                    id=f"context-v{version}",
+                    content=text,
+                    kind="context_view",
+                    status="active",
+                    importance=1.0,
+                    source_ids=segment_refs,
+                    always=False,
                 ),
-                status="active",
-                importance=1.0,
-                source_ids=(segment.segment_id, *segment.source_ids),
-                always=False,
             )
-            for segment in view.segments
         )
-        return LoadResult(fragments=fragments)
 
 
 class PersonalWorldSource:

@@ -145,7 +145,10 @@ class InProcessMemoryControl(MemoryControlPort):
 
     def monitor(self, subject_id: str) -> MemoryProcessStatus:
         state = self._state(subject_id)
-        pending = self._ledger.active_window(subject_id)
+        memory_start = self._ledger.consumer_cursor(subject_id, ConsumerKind.MEMORY)
+        pending = self._ledger.list_experiences(
+            subject_id, after_sequence=memory_start
+        )
         return MemoryProcessStatus(
             subject_id=subject_id,
             previous_status=state.previous_status,

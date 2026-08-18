@@ -1,9 +1,9 @@
-﻿"""02 活跃区与活动窗口测试：不包含事件语义。"""
+﻿"""02 活跃区：只读 16 的 ContextViewState。"""
 
 from __future__ import annotations
 
 from jshi.activezone import InProcessActiveZone
-from jshi.experienceledger import InProcessExperienceLedger, OutputKind
+from jshi.experienceledger import InProcessExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import ModelRequest, ModelResponse
 from jshi.recognition import ObjectProfile
@@ -36,25 +36,28 @@ def runtime(tmp_path, model=None):
     return process, repository
 
 
-def test_first_activity_window_contains_current_external(tmp_path):
+def test_first_activity_reads_empty_context_view(tmp_path):
     model = CountingModel()
-    process, repository = runtime(tmp_path, model=model)
+    process, _repository = runtime(tmp_path, model=model)
 
     result = process.experience("stone", "你好", object_ref="user")
 
-    kinds = [segment.output_kind for segment in result.current_state.active_zone.segments]
-    assert kinds == [OutputKind.EXTERNAL_INPUT]
+    assert result.current_state.context_view.context_text == ""
+    assert result.current_state.context_view.segment_refs == ()
     assert model.calls == 1
+    applied = process.activity_ledger.current_context_view("stone")
+    assert "你好" in applied.context_text
 
 
-def test_second_activity_window_does_not_repeat_previous_activity(tmp_path):
-    process, repository = runtime(tmp_path)
+def test_second_activity_reads_previous_applied_view(tmp_path):
+    process, _repository = runtime(tmp_path)
 
     process.experience("stone", "你好", object_ref="user")
     result = process.experience("stone", "继续", object_ref="user")
 
-    kinds = [segment.output_kind for segment in result.current_state.active_zone.segments]
-    assert kinds == [OutputKind.EXTERNAL_INPUT]
+    text = result.current_state.context_view.context_text
+    assert "你好" in text
+    assert "继续" not in text
 
 
 def test_context_window_loaded_is_recorded(tmp_path):
@@ -69,6 +72,7 @@ def test_context_window_loaded_is_recorded(tmp_path):
     ]
     assert len(loaded) == 1
     assert "segment_ids" in loaded[0].content
+    assert "version" in loaded[0].content
 
 
 def test_active_zone_does_not_produce_event_records(tmp_path):
@@ -84,15 +88,15 @@ def test_active_zone_does_not_produce_event_records(tmp_path):
     assert "event_evicted" not in event_types
 
 
-def test_in_process_active_zone_uses_ledger_window():
+def test_in_process_active_zone_only_reads_current_view():
     ledger = InProcessExperienceLedger()
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
     ledger.append_subject_reply("stone", text_raw="reply")
 
-    active = InProcessActiveZone(ledger, default_chars=20)
-    view = active.load("stone", "继续")
+    active = InProcessActiveZone(ledger)
+    assert active.load("stone", "继续").context_text == ""
 
-    assert [segment.output_kind for segment in view.segments] == [
-        OutputKind.EXTERNAL_INPUT,
-        OutputKind.SUBJECT_REPLY,
-    ]
+    ledger.apply_context_assessment("stone")
+    view = active.load("stone", "继续")
+    assert "one" in view.context_text
+    assert "reply" in view.context_text

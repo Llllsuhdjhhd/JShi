@@ -11,6 +11,7 @@ class AssemblyContext:
     subject_id: str
     input_text: str
     object_id: str | None = None
+    context_view: object | None = None
     active_zone: object | None = None
     budget_extra: int = 4
     recall_level: int = 1

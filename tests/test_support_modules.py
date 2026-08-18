@@ -80,5 +80,6 @@ def test_action_router_triggers_robot_for_embodied(tmp_path):
     )
 
     assert result.robot_action_triggered is True
+    assert result.action_id == ""
     facts = repository.list_history("stone", HistoryKind.FACT)
-    assert any(record.event_type == "language_action" for record in facts)
+    assert all(record.event_type != "language_action" for record in facts)

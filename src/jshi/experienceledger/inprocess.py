@@ -1,10 +1,13 @@
 ﻿from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Mapping, Sequence
 
 from .port import (
+    ContextAssessment,
+    ContextViewState,
     ExperienceLedgerPort,
     ExperienceSegment,
     ActorKind,
@@ -13,9 +16,25 @@ from .port import (
     MemoryIngestLedgerEntry,
     OutputKind,
     SegmentStatus,
+    empty_context_view,
     new_id,
     utc_now,
 )
+
+_SENTENCE_RE = re.compile(r".+?(?:[。！？.!?]+|$)", re.S)
+
+
+def split_sentences(text: str) -> tuple[str, ...]:
+    if not text:
+        return ()
+    return tuple(part for part in _SENTENCE_RE.findall(text) if part.strip())
+
+
+@dataclass(frozen=True)
+class _Sentence:
+    ref: str
+    segment_id: str
+    text: str
 
 
 @dataclass
@@ -23,6 +42,9 @@ class _SubjectLedgerState:
     segments: list[ExperienceSegment] = field(default_factory=list)
     cursors: dict[ConsumerKind, int] = field(default_factory=dict)
     ingest_entries: list[MemoryIngestLedgerEntry] = field(default_factory=list)
+    context: ContextViewState = field(default_factory=empty_context_view)
+    pending_sequences: list[int] = field(default_factory=list)
+    sentences: list[_Sentence] = field(default_factory=list)
 
 
 class InProcessExperienceLedger(ExperienceLedgerPort):
@@ -86,6 +108,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         state_delta: Mapping[str, object] | None = None,
+        response_plan: Mapping[str, object] | None = None,
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ExperienceSegment:
@@ -96,6 +119,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             actor_object_id=None,
             text_raw=text_raw,
             state_delta=dict(state_delta) if state_delta else None,
+            response_plan=dict(response_plan) if response_plan else None,
             response_statuses=tuple(dict.fromkeys(response_statuses)),
             mentioned_object_ids=mentioned_object_ids,
             source_ids=source_ids,
@@ -109,6 +133,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         state_delta: Mapping[str, object],
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
+        response_plan: Mapping[str, object] | None = None,
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ExperienceSegment:
@@ -119,6 +144,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             actor_object_id=None,
             text_raw=None,
             state_delta=dict(state_delta),
+            response_plan=dict(response_plan) if response_plan else None,
             response_statuses=tuple(dict.fromkeys(response_statuses)),
             mentioned_object_ids=mentioned_object_ids,
             source_ids=source_ids,
@@ -131,6 +157,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         *,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
+        response_plan: Mapping[str, object] | None = None,
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ExperienceSegment:
@@ -141,6 +168,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             actor_object_id=None,
             text_raw=None,
             state_delta=None,
+            response_plan=dict(response_plan) if response_plan else None,
             response_statuses=tuple(dict.fromkeys(response_statuses)),
             mentioned_object_ids=mentioned_object_ids,
             source_ids=source_ids,
@@ -183,6 +211,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         mentioned_object_ids: Sequence[str],
         source_ids: Sequence[str],
         occurred_at: datetime | None,
+        response_plan: Mapping[str, object] | None = None,
     ) -> ExperienceSegment:
         state = self._state(subject_id)
         sequence = self.head_sequence(subject_id) + 1
@@ -196,12 +225,153 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             mentioned_object_ids=tuple(dict.fromkeys(mentioned_object_ids)),
             text_raw=text_raw,
             state_delta=state_delta,
+            response_plan=dict(response_plan) if response_plan else None,
             response_statuses=tuple(dict.fromkeys(response_statuses)),
             source_ids=tuple(dict.fromkeys(source_ids)),
             occurred_at=occurred_at or utc_now(),
         )
         state.segments.append(segment)
+        state.pending_sequences.append(sequence)
         return segment
+
+    def current_context_view(self, subject_id: str) -> ContextViewState:
+        return self._state(subject_id).context
+
+    def apply_context_assessment(
+        self,
+        subject_id: str,
+        assessment: ContextAssessment | None = None,
+        *,
+        allow_edit: bool = True,
+    ) -> ContextViewState:
+        state = self._state(subject_id)
+        assessment = self._coerce_assessment(assessment)
+        changed = False
+        excluded = set(state.context.excluded_sentence_refs)
+        focused = list(state.context.focused_refs)
+
+        if allow_edit:
+            visible = self._visible_sentences(state, excluded)
+            if assessment.need_trim and assessment.trim_refs:
+                excluded.update(self._resolve_refs(assessment.trim_refs, visible))
+                changed = True
+            if assessment.need_focus and assessment.focus_refs:
+                focused = list(
+                    dict.fromkeys(
+                        (
+                            *focused,
+                            *self._resolve_refs(
+                                assessment.focus_refs,
+                                self._visible_sentences(state, excluded),
+                            ),
+                        )
+                    )
+                )
+                changed = True
+
+        last_applied = state.context.last_applied_sequence
+        segment_refs = list(state.context.segment_refs)
+        if state.pending_sequences:
+            by_sequence = {segment.sequence: segment for segment in state.segments}
+            for sequence in state.pending_sequences:
+                segment = by_sequence.get(sequence)
+                if segment is None:
+                    continue
+                if segment.segment_id not in segment_refs:
+                    segment_refs.append(segment.segment_id)
+                for index, text in enumerate(split_sentences(segment.text_raw or "")):
+                    state.sentences.append(
+                        _Sentence(
+                            ref=f"{segment.segment_id}:{index}",
+                            segment_id=segment.segment_id,
+                            text=text,
+                        )
+                    )
+                last_applied = max(last_applied, sequence)
+            state.pending_sequences.clear()
+            changed = True
+
+        if not changed:
+            return state.context
+
+        state.context = ContextViewState(
+            version=state.context.version + 1,
+            context_text=self._render_context(state, excluded),
+            segment_refs=tuple(segment_refs),
+            excluded_sentence_refs=tuple(dict.fromkeys(excluded)),
+            focused_refs=tuple(focused),
+            last_applied_sequence=last_applied,
+        )
+        return state.context
+
+    def list_experiences(
+        self,
+        subject_id: str,
+        *,
+        after_sequence: int = 0,
+    ) -> tuple[ExperienceSegment, ...]:
+        return tuple(
+            segment
+            for segment in self._state(subject_id).segments
+            if segment.sequence > after_sequence
+        )
+
+    @staticmethod
+    def _coerce_assessment(
+        assessment: ContextAssessment | object | None,
+    ) -> ContextAssessment:
+        if assessment is None:
+            return ContextAssessment()
+        if isinstance(assessment, ContextAssessment):
+            return assessment
+        return ContextAssessment(
+            need_recall=bool(getattr(assessment, "need_recall", False)),
+            need_trim=bool(getattr(assessment, "need_trim", False)),
+            need_focus=bool(getattr(assessment, "need_focus", False)),
+            trim_refs=tuple(getattr(assessment, "trim_refs", ()) or ()),
+            focus_refs=tuple(getattr(assessment, "focus_refs", ()) or ()),
+        )
+
+    @staticmethod
+    def _visible_sentences(
+        state: _SubjectLedgerState,
+        excluded: set[str],
+    ) -> list[_Sentence]:
+        return [sentence for sentence in state.sentences if sentence.ref not in excluded]
+
+    @staticmethod
+    def _resolve_refs(
+        refs: Sequence[str],
+        visible: Sequence[_Sentence],
+    ) -> tuple[str, ...]:
+        resolved: list[str] = []
+        visible_refs = {sentence.ref for sentence in visible}
+        for raw in refs:
+            if raw in visible_refs:
+                resolved.append(raw)
+                continue
+            if raw.isdigit():
+                index = int(raw) - 1
+                if 0 <= index < len(visible):
+                    resolved.append(visible[index].ref)
+                continue
+            for sentence in visible:
+                if sentence.segment_id == raw:
+                    resolved.append(sentence.ref)
+        return tuple(dict.fromkeys(resolved))
+
+    @staticmethod
+    def _render_context(state: _SubjectLedgerState, excluded: set[str]) -> str:
+        chunks: list[str] = []
+        previous_segment = None
+        for sentence in state.sentences:
+            if sentence.ref in excluded:
+                continue
+            if previous_segment is not None and sentence.segment_id != previous_segment:
+                chunks.append("\n")
+            chunks.append(sentence.text)
+            previous_segment = sentence.segment_id
+        return "".join(chunks)
 
     def active_window(
         self,

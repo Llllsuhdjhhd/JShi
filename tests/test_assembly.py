@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-from jshi.activezone import ActiveZoneView
 from jshi.assembly import (
     ActivityWindowSource,
     AssemblyContext,
@@ -18,6 +17,7 @@ from jshi.assembly import (
     ObjectSource,
     PersonalWorldSource,
 )
+from jshi.experienceledger import empty_context_view
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import ModelRequest, ModelResponse
 from jshi.personalworld import InProcessPersonalWorld
@@ -71,7 +71,10 @@ def test_process_assembly_builds_fragments_and_report(tmp_path):
         and fragment.always
         for fragment in fragments
     )
-    assert any(fragment.source == "activity" for fragment in fragments)
+    second = process.experience("stone", "继续", object_ref="user")
+    assert any(
+        fragment.source == "activity" for fragment in second.current_state.fragments
+    )
     assert any(
         fragment.source == "personal" and fragment.kind == "commitment"
         for fragment in fragments
@@ -93,7 +96,8 @@ def test_process_assembly_builds_fragments_and_report(tmp_path):
 def test_activity_window_not_in_personal(tmp_path):
     process, _repository, _identities = runtime(tmp_path)
 
-    result = process.experience("stone", "你好", object_ref="user")
+    process.experience("stone", "你好", object_ref="user")
+    result = process.experience("stone", "继续", object_ref="user")
 
     activity_ids = [
         fragment.id
@@ -140,7 +144,7 @@ def test_budget_truncation_keeps_always_and_reports_skipped(tmp_path):
         subject_id="stone",
         input_text="你好",
         object_id="OBJ-USER",
-        active_zone=ActiveZoneView(segments=(), start_sequence=0, budget_chars=2000),
+        context_view=empty_context_view(),
         budget_extra=1,
     )
     ws = assembler.assemble(ctx)
@@ -203,7 +207,7 @@ def test_memory_source_filters_by_object_and_recency(tmp_path):
         subject_id="stone",
         input_text="随便聊聊",
         object_id="OBJ-A",
-        active_zone=ActiveZoneView(segments=(), start_sequence=0, budget_chars=2000),
+        context_view=empty_context_view(),
         budget_extra=4,
         recall_level=1,
     )
@@ -218,7 +222,7 @@ def test_memory_source_filters_by_object_and_recency(tmp_path):
             subject_id="stone",
             input_text="随便聊聊",
             object_id="OBJ-A",
-            active_zone=ActiveZoneView(segments=(), start_sequence=0, budget_chars=2000),
+            context_view=empty_context_view(),
             budget_extra=4,
             recall_level=8,
         )
@@ -238,7 +242,7 @@ def test_memory_source_skips_without_object_id(tmp_path):
         subject_id="stone",
         input_text="你好",
         object_id=None,
-        active_zone=ActiveZoneView(segments=(), start_sequence=0, budget_chars=2000),
+        context_view=empty_context_view(),
         budget_extra=4,
     )
     assert source.load(ctx).fragments == ()
@@ -268,7 +272,7 @@ def test_single_source_failure_is_isolated(tmp_path):
         AssemblyContext(
             subject_id="stone",
             input_text="你好",
-            active_zone=ActiveZoneView(segments=(), start_sequence=0, budget_chars=2000),
+            context_view=empty_context_view(),
             budget_extra=4,
         )
     )

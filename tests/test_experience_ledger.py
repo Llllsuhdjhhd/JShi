@@ -29,18 +29,62 @@ def test_append_external_sequence_and_head():
     assert first.output_kind == OutputKind.EXTERNAL_INPUT
 
 
-def test_active_window_uses_active_zone_start_not_head():
+def test_append_does_not_change_context_view_until_apply():
     ledger = InProcessExperienceLedger()
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="two")
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="three")
-    ledger.advance_consumer_cursor(
-        "stone", ConsumerKind.ACTIVE_ZONE, through_sequence=2
+    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="你好。")
+
+    view = ledger.current_context_view("stone")
+    assert view.version == 0
+    assert view.context_text == ""
+    assert view.segment_refs == ()
+
+
+def test_apply_merges_pending_into_context_view():
+    ledger = InProcessExperienceLedger()
+    first = ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="你好。")
+    reply = ledger.append_subject_reply("stone", text_raw="我在。")
+
+    view = ledger.apply_context_assessment("stone")
+
+    assert view.version == 1
+    assert "你好。" in view.context_text
+    assert "我在。" in view.context_text
+    assert first.segment_id in view.segment_refs
+    assert reply.segment_id in view.segment_refs
+    assert view.last_applied_sequence == 2
+    assert ledger.list_experiences("stone")[-1].segment_id == reply.segment_id
+
+
+def test_trim_applies_to_view_the_model_saw_then_merges_pending():
+    from jshi.experienceledger import ContextAssessment
+
+    ledger = InProcessExperienceLedger()
+    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="第一句。第二句。")
+    ledger.apply_context_assessment("stone")
+    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="新来的。")
+
+    view = ledger.apply_context_assessment(
+        "stone",
+        ContextAssessment(need_trim=True, trim_refs=("2",)),
+        allow_edit=True,
     )
 
-    window = ledger.active_window("stone")
+    assert "第一句。" in view.context_text
+    assert "第二句。" not in view.context_text
+    assert "新来的。" in view.context_text
+    assert view.excluded_sentence_refs
 
-    assert [segment.sequence for segment in window] == [3]
+
+def test_memory_batch_does_not_change_context_view():
+    ledger = InProcessExperienceLedger(memory_batch_segments=1)
+    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="你好。")
+    before = ledger.apply_context_assessment("stone")
+
+    batch = ledger.build_memory_batch("stone")
+    assert batch is not None
+    after = ledger.current_context_view("stone")
+
+    assert after == before
 
 
 def test_memory_batch_not_built_below_threshold():

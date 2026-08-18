@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from jshi.activezone import ActiveZoneView
 from jshi.attention import ChancePort, PlaceholderChance
 from jshi.core import Provenance, SubjectState
+from jshi.experienceledger import ContextViewState
 
 from .port import (
     AssemblyContext,
@@ -22,7 +22,8 @@ class AssembledWorkingSet:
     input_text: str
     subject_state: SubjectState
     fragments: tuple[AssemblyFragment, ...]
-    active_zone: ActiveZoneView | None = None
+    context_view: ContextViewState | None = None
+    active_zone: ContextViewState | None = None
     active_segment_ids: tuple[str, ...] = ()
     personal_items: tuple[object, ...] = ()
     report: tuple[SourceLoadReport, ...] = ()
@@ -111,11 +112,15 @@ class CurrentStateAssembler:
             input_text=ctx.input_text,
             subject_state=self._subject_state(ctx.subject_id, kept_fragments),
             fragments=kept_fragments,
-            active_zone=ctx.active_zone,
+            context_view=ctx.context_view or ctx.active_zone,
+            active_zone=ctx.context_view or ctx.active_zone,
             active_segment_ids=tuple(
-                fragment.id
-                for fragment in kept_fragments
-                if fragment.source == "activity"
+                getattr(ctx.context_view or ctx.active_zone, "segment_refs", ())
+                or tuple(
+                    fragment.id
+                    for fragment in kept_fragments
+                    if fragment.source == "activity"
+                )
             ),
             personal_items=tuple(raw_items),
             report=reports,

@@ -43,23 +43,26 @@ class InProcessActionRouter(ActionPort):
     ) -> ActionDispatchResult:
         from jshi.subject.domain import HistoryKind, HistoryRecord
 
-        action = HistoryRecord(
-            subject_id=subject_id,
-            kind=HistoryKind.FACT,
-            event_type="language_action",
-            content={
-                "activity_id": activity_id,
-                "text": action_text,
-                "model": model,
-                "response_statuses": [response_plan.mode],
-                "reason": response_plan.reason,
-            },
-            source_ids=(source_id,),
-        )
-        self.repository.add_history(action)
-        robot_triggered = any(
-            item.channel == "embodied" for item in response_plan.items
-        )
+        spoken = response_plan.verbal_text()
+        del action_text
+        action_id = ""
+        if spoken:
+            action = HistoryRecord(
+                subject_id=subject_id,
+                kind=HistoryKind.FACT,
+                event_type="language_action",
+                content={
+                    "activity_id": activity_id,
+                    "text": spoken,
+                    "model": model,
+                    "response_statuses": [response_plan.mode],
+                    "reason": response_plan.reason,
+                },
+                source_ids=(source_id,),
+            )
+            self.repository.add_history(action)
+            action_id = action.id
+        robot_triggered = response_plan.has_embodied()
         if robot_triggered:
             self.robot.trigger_embodied_action(
                 subject_id=subject_id,
@@ -70,6 +73,6 @@ class InProcessActionRouter(ActionPort):
                 response_statuses=(response_plan.mode, "embodied"),
             )
         return ActionDispatchResult(
-            action_id=action.id,
+            action_id=action_id,
             robot_action_triggered=robot_triggered,
         )

@@ -89,20 +89,21 @@ def test_active_zone_loads_raw_window_without_attribution(tmp_path):
         if item.event_type == "context_window_loaded"
     ]
     assert len(loaded) == 1
-    assert loaded[0].content["segment_ids"]
+    assert loaded[0].content["segment_ids"] == []
+    assert loaded[0].content["version"] == 0
     assembled = [
         item
         for item in subject
         if item.event_type == "current_state_assembled"
     ]
-    assert assembled[0].content["segment_ids"]
-    assert result.current_state.active_segment_ids
+    assert assembled[0].content["segment_ids"] == []
+    assert result.current_state.active_segment_ids == ()
 
 
-def test_first_input_window_contains_current_segment(tmp_path):
+def test_first_input_is_not_in_context_view_until_apply(tmp_path):
     process, repository = runtime(tmp_path)
 
-    process.experience("stone", "今天有些疲倦", object_ref="user")
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
     loaded = [
@@ -110,13 +111,11 @@ def test_first_input_window_contains_current_segment(tmp_path):
         for item in subject
         if item.event_type == "context_window_loaded"
     ]
-    assert loaded[0].content["segment_ids"]
-    assembled = [
-        item
-        for item in subject
-        if item.event_type == "current_state_assembled"
-    ]
-    assert assembled[0].content["segment_ids"]
+    assert loaded[0].content["segment_ids"] == []
+    assert result.current_state.context_view.context_text == ""
+    assert "今天有些疲倦" in process.activity_ledger.current_context_view(
+        "stone"
+    ).context_text
 
 
 class FollowupModel:
@@ -234,6 +233,7 @@ def test_preview_is_read_only(tmp_path):
     preview = process.preview_state("stone", "你好", object_ref="user")
 
     assert preview.speaker.status == "confirmed"
-    assert preview.active_zone.segments == ()
+    assert preview.context_view.context_text == ""
+    assert preview.context_view.segment_refs == ()
     assert preview.assembled.active_segment_ids == ()
     assert repository.list_history("stone") == ()

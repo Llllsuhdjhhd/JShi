@@ -303,9 +303,11 @@ def main() -> None:
             f"说话人：{preview.speaker.label}（对象 {preview.speaker.object_id}，"
             f"置信度 {preview.speaker.confidence}，状态 {preview.speaker.status}）"
         )
-        print(f"活跃区（预算 {preview.active_zone.budget}）：")
-        for event in preview.active_zone.events:
-            print(f"  - {event.event_id} [{event.status}] {event.content}")
+        print(f"上下文视图 v{preview.context_view.version}：")
+        if preview.context_view.context_text:
+            print(preview.context_view.context_text)
+        else:
+            print("  （空）")
         print(f"价值：{list(assembled.subject_state.salient_values)}")
         print(f"承诺：{list(assembled.subject_state.commitments)}")
         print(f"未完成现实（主体面）：{list(assembled.subject_state.concerns)}")

@@ -52,10 +52,34 @@ class ExperienceSegment:
     mentioned_object_ids: tuple[str, ...]
     text_raw: str | None
     state_delta: Mapping[str, object] | None
+    response_plan: Mapping[str, object] | None = None
     response_statuses: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     occurred_at: datetime = field(default_factory=utc_now)
     status: SegmentStatus = SegmentStatus.ACCEPTED
+
+
+@dataclass(frozen=True)
+class ContextViewState:
+    version: int = 0
+    context_text: str = ""
+    segment_refs: tuple[str, ...] = ()
+    excluded_sentence_refs: tuple[str, ...] = ()
+    focused_refs: tuple[str, ...] = ()
+    last_applied_sequence: int = 0
+
+
+@dataclass(frozen=True)
+class ContextAssessment:
+    need_recall: bool = False
+    need_trim: bool = False
+    need_focus: bool = False
+    trim_refs: tuple[str, ...] = ()
+    focus_refs: tuple[str, ...] = ()
+
+
+def empty_context_view() -> ContextViewState:
+    return ContextViewState()
 
 
 @dataclass(frozen=True)
@@ -105,6 +129,7 @@ class ExperienceLedgerPort(Protocol):
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         state_delta: Mapping[str, object] | None = None,
+        response_plan: Mapping[str, object] | None = None,
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ExperienceSegment: ...
@@ -116,6 +141,7 @@ class ExperienceLedgerPort(Protocol):
         state_delta: Mapping[str, object],
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
+        response_plan: Mapping[str, object] | None = None,
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ExperienceSegment: ...
@@ -126,6 +152,7 @@ class ExperienceLedgerPort(Protocol):
         *,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
+        response_plan: Mapping[str, object] | None = None,
         response_statuses: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ExperienceSegment: ...
@@ -140,6 +167,23 @@ class ExperienceLedgerPort(Protocol):
         mentioned_object_ids: Sequence[str] = (),
         occurred_at: datetime | None = None,
     ) -> ExperienceSegment: ...
+
+    def current_context_view(self, subject_id: str) -> ContextViewState: ...
+
+    def apply_context_assessment(
+        self,
+        subject_id: str,
+        assessment: ContextAssessment | None = None,
+        *,
+        allow_edit: bool = True,
+    ) -> ContextViewState: ...
+
+    def list_experiences(
+        self,
+        subject_id: str,
+        *,
+        after_sequence: int = 0,
+    ) -> tuple[ExperienceSegment, ...]: ...
 
     def active_window(
         self,
