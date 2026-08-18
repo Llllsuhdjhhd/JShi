@@ -228,7 +228,7 @@ def test_phase4_model_request_receives_subject_state_and_context(runtime):
     personal_report = {
         item.source: item for item in result.current_state.source_report
     }["personal"]
-    assert f"personal:{concern.id}" in personal_report.skipped_ids
+    assert f"personal:{concern.id}" not in personal_report.loaded_ids
     assert result.current_state.speaker is not None
     assert result.current_state.speaker.label == "user"
 

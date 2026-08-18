@@ -243,19 +243,49 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         assessment: ContextAssessment | None = None,
         *,
         allow_edit: bool = True,
+        recall_excerpts: Sequence[tuple[str, str]] = (),
+        speaker_object_id: str | None = None,
+        protected_refs: Sequence[str] = (),
     ) -> ContextViewState:
         state = self._state(subject_id)
         assessment = self._coerce_assessment(assessment)
         changed = False
         excluded = set(state.context.excluded_sentence_refs)
         focused = list(state.context.focused_refs)
+        protected = set(protected_refs)
+        excerpts = {
+            ref: text for ref, text in state.context.recall_excerpts
+        }
+        for ref, text in recall_excerpts:
+            if not ref:
+                continue
+            if excerpts.get(ref) != text:
+                excerpts[ref] = text
+                changed = True
 
         if allow_edit:
             visible = self._visible_sentences(state, excluded)
-            if assessment.need_trim and assessment.trim_refs:
-                excluded.update(self._resolve_refs(assessment.trim_refs, visible))
-                changed = True
-            if assessment.need_focus and assessment.focus_refs:
+            trim_targets = assessment.trim_refs if (
+                assessment.need_trim or assessment.trim_refs
+            ) else ()
+            if trim_targets:
+                sentence_trims = []
+                for raw in trim_targets:
+                    if self._is_protected_ref(raw, protected, speaker_object_id or state.context.speaker_object_id):
+                        continue
+                    if raw in excerpts or raw.replace("memory:", "") in {
+                        key.replace("memory:", "") for key in excerpts
+                    }:
+                        for key in list(excerpts):
+                            if key == raw or key.endswith(raw) or raw.endswith(key.replace("memory:", "")):
+                                del excerpts[key]
+                                changed = True
+                        continue
+                    sentence_trims.append(raw)
+                if sentence_trims:
+                    excluded.update(self._resolve_refs(sentence_trims, visible))
+                    changed = True
+            if assessment.need_focus or assessment.focus_refs:
                 focused = list(
                     dict.fromkeys(
                         (
@@ -291,13 +321,19 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             state.pending_sequences.clear()
             changed = True
 
+        kept_speaker = speaker_object_id or state.context.speaker_object_id
+        if speaker_object_id and speaker_object_id != state.context.speaker_object_id:
+            changed = True
+
         if not changed:
             return state.context
 
         state.context = ContextViewState(
             version=state.context.version + 1,
-            context_text=self._render_context(state, excluded),
+            context_text=self._render_context(state, excluded, excerpts),
             segment_refs=tuple(segment_refs),
+            recall_excerpts=tuple(excerpts.items()),
+            speaker_object_id=kept_speaker,
             excluded_sentence_refs=tuple(dict.fromkeys(excluded)),
             focused_refs=tuple(focused),
             last_applied_sequence=last_applied,
@@ -325,12 +361,27 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         if isinstance(assessment, ContextAssessment):
             return assessment
         return ContextAssessment(
-            need_recall=bool(getattr(assessment, "need_recall", False)),
             need_trim=bool(getattr(assessment, "need_trim", False)),
             need_focus=bool(getattr(assessment, "need_focus", False)),
             trim_refs=tuple(getattr(assessment, "trim_refs", ()) or ()),
             focus_refs=tuple(getattr(assessment, "focus_refs", ()) or ()),
         )
+
+    @staticmethod
+    def _is_protected_ref(
+        raw: str,
+        protected: set[str],
+        speaker_object_id: str | None,
+    ) -> bool:
+        if raw in protected:
+            return True
+        if raw.startswith("object:") or raw.startswith("identity:") or raw.startswith("stance:"):
+            return True
+        if speaker_object_id and (
+            raw == speaker_object_id or raw == f"object:{speaker_object_id}"
+        ):
+            return True
+        return False
 
     @staticmethod
     def _visible_sentences(
@@ -361,7 +412,11 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         return tuple(dict.fromkeys(resolved))
 
     @staticmethod
-    def _render_context(state: _SubjectLedgerState, excluded: set[str]) -> str:
+    def _render_context(
+        state: _SubjectLedgerState,
+        excluded: set[str],
+        excerpts: Mapping[str, str] | None = None,
+    ) -> str:
         chunks: list[str] = []
         previous_segment = None
         for sentence in state.sentences:
@@ -371,7 +426,17 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
                 chunks.append("\n")
             chunks.append(sentence.text)
             previous_segment = sentence.segment_id
-        return "".join(chunks)
+        body = "".join(chunks)
+        if not excerpts:
+            return body
+        recall_block = "\n".join(
+            f"[回忆 {ref}] {text}" for ref, text in excerpts.items() if text
+        )
+        if not recall_block:
+            return body
+        if body:
+            return f"{body}\n{recall_block}"
+        return recall_block
 
     def active_window(
         self,

@@ -8,8 +8,13 @@ from jshi.activezone import (
     ActiveZonePort,
     InProcessActiveZone,
 )
-from jshi.action import InProcessActionRouter, PlaceholderRobotAction
+from jshi.action import (
+    InProcessActionRouter,
+    PlaceholderRobotAction,
+    PlaceholderSpeech,
+)
 from jshi.activityclose import InProcessActivityClose
+from jshi.responsemark import InProcessResponseMark
 from jshi.experienceledger import (
     ContextViewState,
     ExperienceLedgerPort,
@@ -51,7 +56,7 @@ from jshi.memory import (
 )
 from jshi.memorycontrol import InProcessMemoryControl
 from jshi.objects import InProcessObjectSystem, ObjectSystemPort
-from jshi.models import ModelPort, ModelRequest, ObjectAssessment, ResponsePlan
+from jshi.models import ModelPort, ModelRequest, ModelSpeaker, ObjectAssessment, ResponsePlan
 from jshi.recognition import (
     CarrierEntry,
     MIN_OBJECT_CONFIDENCE,
@@ -90,11 +95,6 @@ logger = logging.getLogger(__name__)
 
 # 上下文补充策略：当前占位为最多一轮；执行与记忆侧指标归 09。
 FOLLOWUP_RECALL_MAX_ROUNDS = 1
-RESPONSE_STATUSES = frozenset(
-    {"respond", "verbal", "embodied", "think", "ignore", "wait"}
-)
-SILENT_MODES = frozenset({"think", "ignore", "wait"})
-VALID_CHANNELS = frozenset({"verbal", "embodied"})
 
 
 def verbal_text(plan: ResponsePlan) -> str:
@@ -162,7 +162,7 @@ class SubjectActivityResult:
 
 
 class SubjectProcess:
-    """最小主体循环：识别→落位→读取既往视图→组装→活动→认知(可追加召回)→行动→收尾。
+    """最小主体循环：识别→落位→读取上一活跃区→组装→活动→认知(可追加召回)→行动→按方案编活跃区→收尾。
 
     各系统可独立替换为真实实现，不改主流程顺序。
     """
@@ -195,9 +195,11 @@ class SubjectProcess:
         self.recall_evaluator = recall_evaluator or RuleBasedRecallEvaluator()
         self.activity_ledger = activity_ledger or InProcessExperienceLedger()
         self.activity_close = InProcessActivityClose(repository)
+        self.response_mark = InProcessResponseMark(repository)
         self.action_router = InProcessActionRouter(
             repository,
             PlaceholderRobotAction(),
+            PlaceholderSpeech(),
         )
         self.evaluation = InProcessEvaluationSystem()
         self.memory_control = InProcessMemoryControl(
@@ -474,7 +476,7 @@ class SubjectProcess:
         self.repository.add_cognitive_content(perception)
 
         # 阶段⑤ 认知活动（可追加召回）
-        response = self._cognize(
+        response, working_recalled = self._cognize(
             subject_id, activity, current, perception
         )
         activity, final_statuses, _ = self.mark_activity_response_status(
@@ -497,8 +499,8 @@ class SubjectProcess:
                 subject_id, speaker, fact, activity.id, response.object_assessment
             )
 
-        # 阶段⑥：10 按 item 分发。语言只来自 verbal；embodied 四个 mode 都可。
-        # think/ignore/wait 不说话，活动仍结束。结果反馈与语言同级，不挂在说话之后。
+        # 阶段⑥：10 按 item 分发。verbal 落记录并走独立语音占位；embodied 走肢体占位。
+        # think/ignore/wait 不说话、不发音，活动仍结束。结果反馈与语言同级。
         plan = response.response_plan
         spoken_text = verbal_text(plan)
         spoke = bool(spoken_text)
@@ -523,6 +525,7 @@ class SubjectProcess:
                     payload={
                         "action_id": action_id,
                         "spoke": spoke,
+                        "speech_triggered": action_result.speech_triggered,
                         "robot_action_triggered": action_result.robot_action_triggered,
                     },
                     source_ids=(activity.id, *(item for item in (action_id,) if item)),
@@ -569,7 +572,18 @@ class SubjectProcess:
         self.activity_ledger.apply_context_assessment(
             subject_id,
             getattr(response, "context_assessment", None),
-            allow_edit=plan.mode == "respond",
+            allow_edit=True,
+            recall_excerpts=tuple(
+                (f"memory:{item.event_id}", item.text) for item in working_recalled
+            ),
+            speaker_object_id=(
+                speaker.object_id if speaker is not None else None
+            ),
+            protected_refs=tuple(
+                fragment.id
+                for fragment in current.fragments
+                if fragment.always or fragment.source in {"object", "identity"}
+            ),
         )
 
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
@@ -585,21 +599,22 @@ class SubjectProcess:
             ),
         )
         completed = self.repository.get_activity(close_result.activity_id)
-        memory_result = self.memory_control.run_once(subject_id)
-        self.evaluation.emit(
-            EvaluationEvent(
-                event_id=f"eval-memory-{activity.id}",
-                subject_id=subject_id,
-                activity_id=activity.id,
-                event_type="memory_control_attempted",
-                payload={
-                    "status": memory_result.status,
-                    "ingest_id": memory_result.ingest_id,
-                    "error": memory_result.error,
-                },
-                source_ids=(activity.id,),
+        if close_result.handoff_to_memory_control:
+            memory_result = self.memory_control.run_once(subject_id)
+            self.evaluation.emit(
+                EvaluationEvent(
+                    event_id=f"eval-memory-{activity.id}",
+                    subject_id=subject_id,
+                    activity_id=activity.id,
+                    event_type="memory_control_attempted",
+                    payload={
+                        "status": memory_result.status,
+                        "ingest_id": memory_result.ingest_id,
+                        "error": memory_result.error,
+                    },
+                    source_ids=(activity.id,),
+                )
             )
-        )
         findings = self.governance.check(subject_id, completed, fact, None)
         if findings:
             self.repository.add_history(
@@ -634,15 +649,25 @@ class SubjectProcess:
         current: AssembledCurrentState,
         working_recalled: Sequence[RecalledFragment],
     ) -> object:
-        """05 认知层：一次模型调用，只产出回应与上下文候选，不执行记忆。"""
+        """05 认知层：一次模型调用，只产出回应与上下文方案，不执行记忆。"""
+        speaker = None
+        if current.speaker is not None:
+            speaker = ModelSpeaker(
+                object_id=current.speaker.object_id,
+                label=current.speaker.label,
+                aliases=current.speaker.aliases,
+                status=current.speaker.status,
+            )
         return self.cognition.generate(
             ModelRequest(
                 purpose="subject_activity",
                 input_text=current.input_text,
                 subject_state=current.subject_state,
+                speaker=speaker,
                 context=self._model_context(
                     working_recalled,
                     current.fragments,
+                    current.context_view,
                 ),
             )
         )
@@ -653,8 +678,8 @@ class SubjectProcess:
         activity: Activity,
         current: AssembledCurrentState,
         perception: CognitiveContent,
-    ) -> object:
-        """主流程认知编排：05 产出候选，09 协调器执行记忆补充，再继续认知。"""
+    ) -> tuple[object, list[RecalledFragment]]:
+        """主流程认知编排：05 产出方案，09 协调器执行记忆补充，再继续认知。"""
         working_recalled: list[RecalledFragment] = list(current.recalled)
         known_ids = {item.event_id for item in working_recalled}
         response = self._cognize_once(current, working_recalled)
@@ -752,7 +777,7 @@ class SubjectProcess:
                 added_ids=added_ids,
                 cited_ids=cited_ids,
             )
-        return response
+        return response, working_recalled
 
     def mark_activity_response_status(
         self,
@@ -762,69 +787,15 @@ class SubjectProcess:
         *,
         human_override: Sequence[str] | None = None,
     ) -> tuple[Activity, tuple[str, ...], tuple[str, ...]]:
-        """06：校验模型推荐的回复状态并标记到活动。"""
-        recommended = tuple(
-            dict.fromkeys(
-                [
-                    response_plan.mode,
-                    *(item.channel for item in response_plan.items),
-                ]
-            )
-        )
-        unknown = tuple(
-            status
-            for status in recommended
-            if status not in RESPONSE_STATUSES
-        )
-        illegal: list[str] = []
-        accepted: list[str] = []
-        if response_plan.mode in RESPONSE_STATUSES:
-            accepted.append(response_plan.mode)
-        for item in response_plan.items:
-            if item.channel not in VALID_CHANNELS:
-                if item.channel not in unknown:
-                    unknown = (*unknown, item.channel)
-                continue
-            if item.channel == "verbal" and response_plan.mode in SILENT_MODES:
-                illegal.append("verbal")
-                continue
-            if item.channel not in accepted:
-                accepted.append(item.channel)
-        missing_reason = (
-            response_plan.mode in SILENT_MODES and not response_plan.reason.strip()
-        )
-        final = (
-            tuple(dict.fromkeys(human_override))
-            if human_override is not None
-            else tuple(accepted)
-        )
-        updated = self.repository.update_activity(
+        """06：校验并标记 response_plan。不写经历、不改活跃区、不投递记忆。"""
+        marked = self.response_mark.mark(
+            subject_id,
             activity.id,
-            response_statuses=final,
+            response_plan,
+            human_override=human_override,
         )
-        self.repository.add_history(
-            HistoryRecord(
-                subject_id=subject_id,
-                kind=HistoryKind.SUBJECT,
-                event_type="activity_response_state",
-                content={
-                    "activity_id": updated.id,
-                    "recommended": list(recommended),
-                    "final": list(final),
-                    "unknown_statuses": list(unknown),
-                    "illegal_channels": illegal,
-                    "missing_reason": missing_reason,
-                    "reason": response_plan.reason,
-                    "items": [
-                        {"channel": item.channel, "text": item.text}
-                        for item in response_plan.items
-                    ],
-                    "source": "human_overridden" if human_override is not None else "model_recommended",
-                },
-                source_ids=(updated.id,),
-            )
-        )
-        return updated, final, unknown
+        updated = self.repository.get_activity(activity.id)
+        return updated, marked.final, marked.unknown
 
     def _apply_object_assessment(
         self,
@@ -947,8 +918,9 @@ class SubjectProcess:
     def _model_context(
         recalled: Sequence[RecalledFragment],
         fragments: Sequence[AssemblyFragment],
+        context_view: ContextViewState | None = None,
     ) -> tuple[dict[str, object], ...]:
-        return tuple(
+        items: list[dict[str, object]] = [
             {
                 "id": fragment.id,
                 "kind": fragment.kind,
@@ -957,16 +929,32 @@ class SubjectProcess:
                 "source": fragment.source,
             }
             for fragment in fragments
-        ) + tuple(
+        ]
+        if context_view is not None:
+            items.append(
+                {
+                    "id": f"context-v{context_view.version}",
+                    "kind": "active_zone_refs",
+                    "content": "",
+                    "status": "active",
+                    "source": "activity",
+                    "segment_refs": list(context_view.segment_refs),
+                    "recall_refs": [ref for ref, _text in context_view.recall_excerpts],
+                    "speaker_object_id": context_view.speaker_object_id,
+                }
+            )
+        items.extend(
             {
-                "id": item.event_id,
+                "id": f"memory:{item.event_id}",
                 "kind": "recalled_fact",
                 "content": item.text,
                 "status": "active",
+                "source": "memory",
                 "event_type": item.event_type,
             }
             for item in recalled
         )
+        return tuple(items)
 
     # ------------------------------------------------------------------
     # 反思（内部活动，委托给反思系统）
@@ -1038,23 +1026,12 @@ class SubjectProcess:
                 source_ids=reflection.source_ids,
             )
         )
-        self.repository.update_activity(
+        self.activity_close.close(
+            subject_id,
             activity.id,
-            status=ActivityStatus.COMPLETED,
+            final_response_statuses=(),
+            action_id="",
             reason="internal_activity_finished",
-        )
-        self.repository.add_history(
-            HistoryRecord(
-                subject_id=subject_id,
-                kind=HistoryKind.SUBJECT,
-                event_type="activity_completed",
-                content={
-                    "activity_id": activity.id,
-                    "to": ActivityStatus.COMPLETED.value,
-                    "reason": "internal_activity_finished",
-                },
-                source_ids=(),
-            )
         )
         return reflection
 
@@ -1120,6 +1097,9 @@ class SubjectProcess:
         content: str,
         source_ids: tuple[str, ...] = (),
         importance: float = 1.0,
+        *,
+        level: str = "中",
+        entry_type: str = "",
     ) -> PersonalItem:
         metadata: dict[str, object] = {}
         if importance != 1.0:
@@ -1130,6 +1110,8 @@ class SubjectProcess:
             content=content,
             source_ids=source_ids,
             metadata=metadata,
+            level=level,
+            entry_type=entry_type,
         )
         self.repository.add_personal_item(item)
         self.repository.add_history(

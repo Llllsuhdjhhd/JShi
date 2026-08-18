@@ -95,7 +95,7 @@ class ObjectSource:
 
 
 class ActivityWindowSource:
-    """既往视图源（02）：只翻译已读入的 ContextViewState，不调用 load。"""
+    """上一活跃区源（02）：只翻译已读入的 ContextViewState，不调用 load。"""
 
     name = "activity"
     status = "implemented"
@@ -104,11 +104,10 @@ class ActivityWindowSource:
         view = ctx.context_view
         if view is None:
             return LoadResult()
+        fragments: list[AssemblyFragment] = []
         text = view.context_text or ""
-        if not text:
-            return LoadResult()
-        return LoadResult(
-            fragments=(
+        if text:
+            fragments.append(
                 AssemblyFragment(
                     source="activity",
                     id=f"context-v{view.version}",
@@ -118,13 +117,26 @@ class ActivityWindowSource:
                     importance=1.0,
                     source_ids=tuple(view.segment_refs),
                     always=True,
-                ),
+                )
             )
-        )
+        for ref, excerpt in view.recall_excerpts:
+            fragments.append(
+                AssemblyFragment(
+                    source="activity",
+                    id=ref,
+                    content=excerpt,
+                    kind="recall_excerpt",
+                    status="active",
+                    importance=1.0,
+                    source_ids=(ref,),
+                    always=False,
+                )
+            )
+        return LoadResult(fragments=tuple(fragments))
 
 
 class PersonalWorldSource:
-    """个人世界源（08）：透传 select；concern 由 03 跳过并记入报告。"""
+    """个人世界源（08）：透传 select；与活跃区已有 personal id 去重。"""
 
     name = "personal"
     status = "implemented"
@@ -135,14 +147,14 @@ class PersonalWorldSource:
     def load(self, ctx: AssemblyContext) -> LoadResult:
         from jshi.personalworld.values import is_binding, is_boundary
 
-        selected = tuple(
-            self._personal_world.select(ctx.subject_id, ctx.input_text)
-        )
+        occupied = _occupied_personal_ids(ctx.context_view)
+        selected = tuple(self._personal_world.select(ctx.subject_id))
         skipped: list[str] = []
         kept = []
         for item in selected:
-            if item.kind.value == "concern":
-                skipped.append(f"personal:{item.id}")
+            fragment_id = f"personal:{item.id}"
+            if item.kind.value == "concern" or fragment_id in occupied or item.id in occupied:
+                skipped.append(fragment_id)
                 continue
             kept.append(item)
         fragments = tuple(
@@ -164,6 +176,16 @@ class PersonalWorldSource:
             raw_items=tuple(kept),
             skipped_ids=tuple(skipped),
         )
+
+
+def _occupied_personal_ids(view) -> set[str]:
+    if view is None:
+        return set()
+    occupied: set[str] = set()
+    occupied.update(view.segment_refs)
+    occupied.update(view.focused_refs)
+    occupied.update(ref for ref, _text in view.recall_excerpts)
+    return occupied
 
 
 class MemorySource:

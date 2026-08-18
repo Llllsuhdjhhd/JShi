@@ -83,6 +83,7 @@ def test_wait_plus_verbal_is_illegal_and_does_not_speak(tmp_path):
         if item.event_type == "activity_response_state"
     ]
     assert audit[-1].content["illegal_channels"] == ["verbal"]
+    assert audit[-1].content["missing_items"] is False
 
 
 def test_wait_plus_embodied_triggers_robot_without_speech(tmp_path):

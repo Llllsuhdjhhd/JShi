@@ -91,6 +91,8 @@ class PersonalItem:
     source_ids: tuple[str, ...] = ()
     status: PersonalStatus = PersonalStatus.ACTIVE
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    level: str = "中"
+    entry_type: str = ""
     id: str = field(default_factory=new_id)
     revision: int = 1
     created_at: datetime = field(default_factory=utc_now)

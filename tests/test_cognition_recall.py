@@ -142,6 +142,29 @@ def test_evaluation_is_not_run_inline(tmp_path):
     assert len(subject_events(repository, "recall_metrics")) == 1
 
 
+def test_model_request_carries_speaker_and_addressable_context(tmp_path):
+    class CaptureModel:
+        name = "capture-model"
+
+        def __init__(self) -> None:
+            self.request = None
+
+        def generate(self, request: ModelRequest):
+            self.request = request
+            return ModelResponse(text="回应", model=self.name)
+
+    model = CaptureModel()
+    process, _repository = runtime(tmp_path, model=model)
+    process.experience("stone", "你好", object_ref="user")
+
+    assert model.request is not None
+    assert model.request.speaker is not None
+    assert model.request.speaker.label == "user"
+    assert model.request.speaker.object_id
+    assert all("id" in item and "source" in item for item in model.request.context)
+    assert any(item.get("kind") == "speaker" for item in model.request.context)
+
+
 def test_no_recall_no_metrics_or_evaluation(tmp_path):
     process, repository = runtime(tmp_path)
 
@@ -150,3 +173,41 @@ def test_no_recall_no_metrics_or_evaluation(tmp_path):
     assert subject_events(repository, "recall_metrics") == []
     assert subject_events(repository, "recall_evaluated") == []
     assert subject_events(repository, "recall_reference") == []
+
+
+def test_trim_plan_updates_active_zone_without_second_model_call(tmp_path):
+    from jshi.experienceledger import ContextAssessment
+
+    class TrimModel:
+        name = "trim-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.seen_ids: list[str] = []
+
+        def generate(self, request: ModelRequest):
+            self.calls += 1
+            self.seen_ids = [str(item.get("id", "")) for item in request.context]
+            return ModelResponse(
+                text="回应",
+                model=self.name,
+                context_assessment=ContextAssessment(
+                    need_trim=True,
+                    trim_refs=("memory:kept-out",),
+                ),
+            )
+
+    model = TrimModel()
+    process, _repository = runtime(tmp_path, model=model)
+    process.activity_ledger.apply_context_assessment(
+        "stone",
+        recall_excerpts=(("memory:kept-out", "过时线索"),),
+        speaker_object_id="OBJ-USER",
+    )
+    process.experience("stone", "你好", object_ref="user")
+    view = process.activity_ledger.current_context_view("stone")
+
+    assert model.calls == 1
+    assert view.recall_excerpts == ()
+    assert "过时线索" not in view.context_text
+    assert view.speaker_object_id

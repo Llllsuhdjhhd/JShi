@@ -1,13 +1,17 @@
-"""个人世界装载系统（PersonalWorldPort）的测试。
-
-覆盖：按重要程度排序、预算内截断、约束（承诺/开放事项）始终装载、
-重要程度持久化、以及端口可替换（与记忆系统平行）。
-"""
+"""08 薄壳：合并有序列表、按 id 去重、按等级取量；不装 concern。"""
 
 from __future__ import annotations
 
 import pytest
 
+from jshi.assembly import (
+    AssemblyContext,
+    AssemblySpeaker,
+    CurrentStateAssembler,
+    IdentitySource,
+    PersonalWorldSource,
+)
+from jshi.experienceledger import ContextViewState
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import ModelRequest, ModelResponse
 from jshi.personalworld import InProcessPersonalWorld
@@ -36,71 +40,99 @@ def runtime(tmp_path):
     return repository, identities
 
 
-def test_selection_ranks_context_items_by_importance(runtime):
-    repository, identities = runtime
-    world = InProcessPersonalWorld(repository)
-    process = SubjectProcess(repository, identities, FixedModel(), personal_world=world)
-    process.add_personal_item(
-        "stone", PersonalKind.AESTHETIC, "低重要度审美", importance=0.2
-    )
-    process.add_personal_item(
-        "stone", PersonalKind.VALUE, "高重要度价值", importance=0.9
-    )
-    process.add_personal_item(
-        "stone", PersonalKind.CAPABILITY, "中重要度能力", importance=0.5
-    )
-
-    selected = world.select("stone", "任意输入")
-
-    contents = [item.content for item in selected]
-    assert contents.index("高重要度价值") < contents.index("中重要度能力")
-    assert contents.index("中重要度能力") < contents.index("低重要度审美")
-
-
-def test_budget_truncates_ranked_items_but_keeps_constraints(runtime):
+def test_select_keeps_module_order_and_drops_concern(runtime):
     repository, identities = runtime
     world = InProcessPersonalWorld(repository)
     process = SubjectProcess(repository, identities, FixedModel(), personal_world=world)
     process.add_personal_item("stone", PersonalKind.VALUE, "价值甲", importance=0.9)
-    process.add_personal_item("stone", PersonalKind.AESTHETIC, "审美乙", importance=0.8)
-    process.add_personal_item(
-        "stone", PersonalKind.SELF_UNDERSTANDING, "自我理解丙", importance=0.7
-    )
+    process.add_personal_item("stone", PersonalKind.VALUE, "价值乙", importance=0.2)
+    process.add_personal_item("stone", PersonalKind.AESTHETIC, "审美")
     commitment = process.add_personal_item("stone", PersonalKind.COMMITMENT, "始终履约")
-    concern = process.propose_open_matter(
-        "stone", "继续追问", source_ids=("seed",)
-    )
+    concern = process.propose_open_matter("stone", "继续追问", source_ids=("seed",))
 
-    selected = world.select("stone", "任意输入", budget=1)
+    selected = world.select("stone", "朋友")
+    ids = [item.id for item in selected]
+    kinds = [item.kind for item in selected]
 
-    ids = {item.id for item in selected}
+    assert concern.id not in ids
     assert commitment.id in ids
-    assert concern.id in ids
+    assert kinds.index(PersonalKind.COMMITMENT) < kinds.index(PersonalKind.VALUE)
     contents = [item.content for item in selected]
-    assert "价值甲" in contents  # 预算内最高重要度条目
-    assert "审美乙" not in contents
-    assert "自我理解丙" not in contents
+    assert contents.index("价值甲") < contents.index("价值乙")
+    assert world.select("stone", "无关查询") == selected
 
 
-def test_importance_is_persisted_in_metadata(runtime):
+def test_load_level_low_takes_fewer_ordinary_items(runtime):
+    repository, identities = runtime
+    world = InProcessPersonalWorld(repository)
+    process = SubjectProcess(repository, identities, FixedModel(), personal_world=world)
+    for index in range(6):
+        process.add_personal_item(
+            "stone",
+            PersonalKind.VALUE,
+            f"价值{index}",
+            importance=1.0 - index * 0.05,
+            level="中",
+        )
+    commitment = process.add_personal_item("stone", PersonalKind.COMMITMENT, "始终履约")
+
+    low = world.select("stone", load_level="低")
+    mid = world.select("stone", load_level="中")
+
+    assert commitment.id in {item.id for item in low}
+    ordinary_low = [item for item in low if item.kind is PersonalKind.VALUE]
+    ordinary_mid = [item for item in mid if item.kind is PersonalKind.VALUE]
+    assert len(ordinary_low) == 1
+    assert len(ordinary_mid) >= 4
+    assert len(ordinary_low) < len(ordinary_mid)
+
+
+def test_standing_excludes_concern_and_keeps_commitment_and_boundary(runtime):
     repository, identities = runtime
     process = SubjectProcess(repository, identities, FixedModel())
-
-    item = process.add_personal_item(
-        "stone", PersonalKind.VALUE, "重要价值", importance=0.8
+    process.add_personal_item("stone", PersonalKind.VALUE, "价值甲")
+    commitment = process.add_personal_item("stone", PersonalKind.COMMITMENT, "始终履约")
+    process.propose_open_matter("stone", "继续追问", source_ids=("seed",))
+    boundary = PersonalItem(
+        subject_id="stone",
+        kind=PersonalKind.VALUE,
+        content="不可编造事实",
+        metadata={"role": "boundary", "binding": True},
     )
-    stored = repository.get_personal_item(item.id)
-    assert stored.metadata.get("importance") == 0.8
+    repository.add_personal_item(boundary)
 
-    default = process.add_personal_item("stone", PersonalKind.AESTHETIC, "默认条目")
-    assert default.metadata == {}
+    world = InProcessPersonalWorld(repository)
+    constraints = world.standing_constraints("stone")
+    ids = {item.id for item in constraints}
+    assert commitment.id in ids
+    assert boundary.id in ids
+    assert not any(item.kind is PersonalKind.CONCERN for item in constraints)
+    selected = world.select("stone")
+    assert list(ids).count(boundary.id) == 1
+    assert [item.id for item in selected].count(boundary.id) == 1
+    assert [item.id for item in selected].count(commitment.id) == 1
+
+
+def test_does_not_duplicate_same_id_from_modules(runtime):
+    repository, _identities = runtime
+    item = PersonalItem(
+        subject_id="stone",
+        kind=PersonalKind.VALUE,
+        content="同一条",
+        metadata={"role": "boundary", "binding": True},
+    )
+    repository.add_personal_item(item)
+    world = InProcessPersonalWorld(repository)
+    selected = world.select("stone")
+    assert [entry.id for entry in selected].count(item.id) == 1
 
 
 def test_subject_process_uses_injected_port(runtime):
     repository, identities = runtime
 
     class FixedPort:
-        def select(self, subject_id, query, *, budget=20):
+        def select(self, subject_id, query="", *, load_level="中"):
+            del query, load_level
             return (
                 PersonalItem(
                     subject_id=subject_id,
@@ -112,85 +144,34 @@ def test_subject_process_uses_injected_port(runtime):
     process = SubjectProcess(
         repository, identities, FixedModel(), personal_world=FixedPort()
     )
-
     assembled = process.assemble_current_state("stone", "输入")
-
     assert [item.content for item in assembled.personal_items] == ["仅此一条"]
 
 
-def test_standing_constraints_returns_commitments_and_concerns(runtime):
-    repository, identities = runtime
-    process = SubjectProcess(repository, identities, FixedModel())
-    process.add_personal_item("stone", PersonalKind.VALUE, "价值甲")
-    commitment = process.add_personal_item(
-        "stone", PersonalKind.COMMITMENT, "始终履约"
-    )
-    concern = process.propose_open_matter(
-        "stone", "继续追问", source_ids=("seed",)
-    )
-
-    constraints = InProcessPersonalWorld(repository).standing_constraints("stone")
-
-    ids = {item.id for item in constraints}
-    assert commitment.id in ids
-    assert concern.id in ids
-    assert not any(item.kind is PersonalKind.VALUE for item in constraints)
-
-
-def test_query_relevance_breaks_ties_within_same_importance(runtime):
+def test_assembly_skips_personal_ids_already_in_active_zone(runtime):
     repository, identities = runtime
     world = InProcessPersonalWorld(repository)
     process = SubjectProcess(repository, identities, FixedModel(), personal_world=world)
-    process.add_personal_item("stone", PersonalKind.AESTHETIC, "普通审美")
-    process.add_personal_item("stone", PersonalKind.VALUE, "朋友相关价值")
-
-    selected = world.select("stone", "朋友")
-
-    contents = [item.content for item in selected]
-    assert contents.index("朋友相关价值") < contents.index("普通审美")
-
-
-def test_importance_dominates_query_relevance(runtime):
-    repository, identities = runtime
-    world = InProcessPersonalWorld(repository)
-    process = SubjectProcess(repository, identities, FixedModel(), personal_world=world)
-    process.add_personal_item(
-        "stone", PersonalKind.AESTHETIC, "朋友相关但低重要", importance=0.2
-    )
-    process.add_personal_item(
-        "stone", PersonalKind.VALUE, "高重要普通内容", importance=0.9
-    )
-
-    selected = world.select("stone", "朋友")
-
-    contents = [item.content for item in selected]
-    assert contents.index("高重要普通内容") < contents.index("朋友相关但低重要")
-
-
-def test_select_and_standing_constraints_include_boundaries(runtime):
-    repository, _identities = runtime
-    world = InProcessPersonalWorld(repository)
-    repository.add_personal_item(
-        PersonalItem(
-            subject_id="stone",
-            kind=PersonalKind.VALUE,
-            content="优先坦率表达",
-            metadata={"importance": 0.9},
+    value = process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
+    assembler = CurrentStateAssembler(
+        sources=(
+            IdentitySource(identities),
+            PersonalWorldSource(world),
         )
     )
-    boundary = PersonalItem(
-        subject_id="stone",
-        kind=PersonalKind.VALUE,
-        content="不可编造事实",
-        metadata={"role": "boundary", "binding": True},
+    ws = assembler.assemble(
+        AssemblyContext(
+            subject_id="stone",
+            input_text="你好",
+            speaker=AssemblySpeaker(object_id="OBJ-USER", label="user"),
+            context_view=ContextViewState(
+                segment_refs=(f"personal:{value.id}",),
+            ),
+        )
     )
-    repository.add_personal_item(boundary)
-
-    selected = world.select("stone", "任意输入", budget=1)
-
-    assert boundary.id in {item.id for item in selected}
-    assert "优先坦率表达" in {item.content for item in selected}
-
-    constraints = world.standing_constraints("stone")
-    assert boundary.id in {item.id for item in constraints}
-    assert world.select_boundaries("stone") == (boundary,)
+    personal_ids = {
+        fragment.id for fragment in ws.fragments if fragment.source == "personal"
+    }
+    assert f"personal:{value.id}" not in personal_ids
+    report = {item.source: item for item in ws.report}
+    assert f"personal:{value.id}" in report["personal"].skipped_ids

@@ -8,6 +8,7 @@ from typing import Protocol, Sequence
 class ActivityCloseResult:
     activity_id: str
     final_activity_status: str
+    transition_id: str = ""
     handoff_to_memory_control: bool = True
 
 

@@ -64,6 +64,8 @@ class ContextViewState:
     version: int = 0
     context_text: str = ""
     segment_refs: tuple[str, ...] = ()
+    recall_excerpts: tuple[tuple[str, str], ...] = ()
+    speaker_object_id: str | None = None
     excluded_sentence_refs: tuple[str, ...] = ()
     focused_refs: tuple[str, ...] = ()
     last_applied_sequence: int = 0
@@ -71,7 +73,6 @@ class ContextViewState:
 
 @dataclass(frozen=True)
 class ContextAssessment:
-    need_recall: bool = False
     need_trim: bool = False
     need_focus: bool = False
     trim_refs: tuple[str, ...] = ()
@@ -176,6 +177,9 @@ class ExperienceLedgerPort(Protocol):
         assessment: ContextAssessment | None = None,
         *,
         allow_edit: bool = True,
+        recall_excerpts: Sequence[tuple[str, str]] = (),
+        speaker_object_id: str | None = None,
+        protected_refs: Sequence[str] = (),
     ) -> ContextViewState: ...
 
     def list_experiences(

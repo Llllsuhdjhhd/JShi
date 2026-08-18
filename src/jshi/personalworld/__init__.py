@@ -1,6 +1,11 @@
 """个人世界装载系统：08 薄壳 + 100 价值观/边界装载。"""
 
-from .port import InProcessPersonalWorld, PersonalWorldPort
+from .port import (
+    DEFAULT_LEVEL,
+    InProcessPersonalWorld,
+    PersonalWorldPort,
+    LOAD_QUOTAS,
+)
 from .values import (
     InProcessValues,
     ValueConsolidationReport,
@@ -16,6 +21,8 @@ from .values import (
 __all__ = [
     "InProcessPersonalWorld",
     "PersonalWorldPort",
+    "DEFAULT_LEVEL",
+    "LOAD_QUOTAS",
     "InProcessValues",
     "ValueConsolidationReport",
     "ValueConsolidationSuggestion",

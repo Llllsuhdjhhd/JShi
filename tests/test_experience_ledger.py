@@ -75,6 +75,45 @@ def test_trim_applies_to_view_the_model_saw_then_merges_pending():
     assert view.excluded_sentence_refs
 
 
+def test_apply_keeps_recall_excerpts_and_speaker():
+    from jshi.experienceledger import ContextAssessment
+
+    ledger = InProcessExperienceLedger()
+    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="你好。")
+    view = ledger.apply_context_assessment(
+        "stone",
+        recall_excerpts=(("memory:e1", "上周很忙"),),
+        speaker_object_id="OBJ-A",
+    )
+    assert view.speaker_object_id == "OBJ-A"
+    assert view.recall_excerpts == (("memory:e1", "上周很忙"),)
+    assert "上周很忙" in view.context_text
+
+    trimmed = ledger.apply_context_assessment(
+        "stone",
+        ContextAssessment(need_trim=True, trim_refs=("memory:e1",)),
+        speaker_object_id="OBJ-A",
+        protected_refs=("object:OBJ-A",),
+    )
+    assert trimmed.recall_excerpts == ()
+    assert "上周很忙" not in trimmed.context_text
+    assert trimmed.speaker_object_id == "OBJ-A"
+
+
+def test_trim_does_not_drop_protected_object():
+    from jshi.experienceledger import ContextAssessment
+
+    ledger = InProcessExperienceLedger()
+    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="你好。")
+    view = ledger.apply_context_assessment(
+        "stone",
+        ContextAssessment(need_trim=True, trim_refs=("object:OBJ-A",)),
+        speaker_object_id="OBJ-A",
+        protected_refs=("object:OBJ-A",),
+    )
+    assert view.speaker_object_id == "OBJ-A"
+
+
 def test_memory_batch_does_not_change_context_view():
     ledger = InProcessExperienceLedger(memory_batch_segments=1)
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="你好。")

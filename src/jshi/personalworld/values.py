@@ -114,6 +114,8 @@ class ValuesPort(Protocol):
         self, subject_id: str, context: str, *, budget: int = 4
     ) -> Sequence[PersonalItem]: ...
 
+    def list_ordered(self, subject_id: str) -> Sequence[PersonalItem]: ...
+
     def select_boundaries(self, subject_id: str) -> Sequence[PersonalItem]: ...
 
     def standing_constraints(self, subject_id: str) -> Sequence[PersonalItem]: ...
@@ -217,6 +219,16 @@ class InProcessValues:
             reverse=True,
         )
         return tuple(ranked[: max(budget, 0)])
+
+    def list_ordered(self, subject_id: str) -> Sequence[PersonalItem]:
+        items = [
+            item
+            for item in self._loadable_values(subject_id)
+            if not is_boundary(item)
+        ]
+        return tuple(
+            sorted(items, key=lambda item: (item_importance(item), item.id), reverse=True)
+        )
 
     def select_boundaries(self, subject_id: str) -> Sequence[PersonalItem]:
         return tuple(

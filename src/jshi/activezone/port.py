@@ -6,10 +6,10 @@ from jshi.experienceledger import ContextViewState, ExperienceLedgerPort
 
 
 class ActiveZonePort(Protocol):
-    """阶段②：只从 16 读取既往 ContextViewState，不是整块活跃区。"""
+    """阶段②：只从 16 读取上一份活跃区。"""
 
     def load(self, subject_id: str) -> ContextViewState:
-        """返回 16 的当前既往视图。不重切、不调整、不消费本轮输入。"""
+        """返回 16 的当前活跃区。不重切、不调整、不消费本轮输入。"""
 
 
 class InProcessActiveZone:

@@ -6,6 +6,15 @@ from typing import Any, Mapping, Protocol
 from urllib.request import Request, urlopen
 
 from jshi.core import SubjectState
+from jshi.experienceledger.port import ContextAssessment
+
+
+@dataclass(frozen=True)
+class ModelSpeaker:
+    object_id: str
+    label: str
+    aliases: tuple[str, ...] = ()
+    status: str = "provisional"
 
 
 @dataclass(frozen=True)
@@ -13,6 +22,7 @@ class ModelRequest:
     purpose: str
     input_text: str
     subject_state: SubjectState
+    speaker: ModelSpeaker | None = None
     context: tuple[Mapping[str, Any], ...] = ()
 
 
@@ -79,6 +89,7 @@ class ModelResponse:
     response_plan: ResponsePlan = field(default_factory=lambda: ResponsePlan(mode="respond"))
     recall_requests: tuple[RecallRequest, ...] = ()
     object_assessment: ObjectAssessment | None = None
+    context_assessment: ContextAssessment = field(default_factory=ContextAssessment)
 
     @property
     def text(self) -> str:
@@ -102,6 +113,7 @@ class ModelResponse:
         response_plan: ResponsePlan | None = None,
         recall_requests: tuple[RecallRequest, ...] = (),
         object_assessment: ObjectAssessment | None = None,
+        context_assessment: ContextAssessment | None = None,
         *,
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
@@ -122,6 +134,11 @@ class ModelResponse:
         object.__setattr__(self, "response_plan", response_plan)
         object.__setattr__(self, "recall_requests", recall_requests)
         object.__setattr__(self, "object_assessment", object_assessment)
+        object.__setattr__(
+            self,
+            "context_assessment",
+            context_assessment if context_assessment is not None else ContextAssessment(),
+        )
 
 
 class ModelPort(Protocol):

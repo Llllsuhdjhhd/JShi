@@ -10,6 +10,19 @@ from jshi.models import ResponsePlan
 class ActionDispatchResult:
     action_id: str
     robot_action_triggered: bool = False
+    speech_triggered: bool = False
+
+
+class SpeechPort(Protocol):
+    """把 verbal 文本说出来。与肢体动作分立，本期占位。"""
+
+    def speak(
+        self,
+        *,
+        subject_id: str,
+        activity_id: str,
+        text: str,
+    ) -> None: ...
 
 
 class RobotActionPort(Protocol):

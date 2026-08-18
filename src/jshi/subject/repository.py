@@ -50,7 +50,9 @@ class SubjectRepository:
                     metadata TEXT NOT NULL,
                     revision INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    level TEXT NOT NULL DEFAULT '中',
+                    entry_type TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS ix_personal_subject
                     ON personal_items(subject_id, kind, status);
@@ -120,12 +122,29 @@ class SubjectRepository:
                 connection.execute(
                     "ALTER TABLE activities ADD COLUMN response_statuses TEXT NOT NULL DEFAULT '[]'"
                 )
+            personal_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(personal_items)"
+                ).fetchall()
+            }
+            if "level" not in personal_columns:
+                connection.execute(
+                    "ALTER TABLE personal_items ADD COLUMN level TEXT NOT NULL DEFAULT '中'"
+                )
+            if "entry_type" not in personal_columns:
+                connection.execute(
+                    "ALTER TABLE personal_items ADD COLUMN entry_type TEXT NOT NULL DEFAULT ''"
+                )
 
     def add_personal_item(self, item: PersonalItem) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO personal_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO personal_items (
+                    id, subject_id, kind, content, source_ids, status, metadata,
+                    revision, created_at, updated_at, level, entry_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item.id,
@@ -138,6 +157,8 @@ class SubjectRepository:
                     item.revision,
                     item.created_at.isoformat(),
                     item.updated_at.isoformat(),
+                    item.level,
+                    item.entry_type,
                 ),
             )
 
@@ -453,6 +474,7 @@ def _load_ids(value: str) -> tuple[str, ...]:
 
 
 def _personal(row: sqlite3.Row) -> PersonalItem:
+    keys = set(row.keys())
     return PersonalItem(
         id=row["id"],
         subject_id=row["subject_id"],
@@ -461,6 +483,8 @@ def _personal(row: sqlite3.Row) -> PersonalItem:
         source_ids=_load_ids(row["source_ids"]),
         status=PersonalStatus(row["status"]),
         metadata=json.loads(row["metadata"]),
+        level=row["level"] if "level" in keys else "中",
+        entry_type=row["entry_type"] if "entry_type" in keys else "",
         revision=row["revision"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
