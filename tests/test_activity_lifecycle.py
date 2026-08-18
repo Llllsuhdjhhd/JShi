@@ -1,4 +1,4 @@
-"""04 活动生命周期测试：活动不挂载事件。"""
+"""04 活动生命周期：一轮一活动，关闭为 completed。"""
 
 from __future__ import annotations
 
@@ -69,13 +69,13 @@ def test_internal_activity_created_and_completed(tmp_path):
     ]
 
 
-def test_activity_does_not_attach_events(tmp_path):
-    process, repository = runtime(tmp_path)
+def test_next_input_creates_new_activity(tmp_path):
+    process, _repository = runtime(tmp_path)
 
-    result = process.experience("stone", "继续", object_ref="user")
+    first = process.experience("stone", "你好", object_ref="user")
+    second = process.experience("stone", "继续", object_ref="user")
 
-    assert result.activity.active_concern_ids == ()
-    event_types = {
-        r.event_type for r in repository.list_history("stone", HistoryKind.SUBJECT)
-    }
-    assert "activity_events_attached" not in event_types
+    assert first.activity.id != second.activity.id
+    assert first.activity.status.value == "completed"
+    assert second.activity.status.value == "completed"
+    assert first.activity.trigger != second.activity.trigger

@@ -74,7 +74,6 @@ class ActivityKind(StrEnum):
 
 class ActivityStatus(StrEnum):
     OPEN = "open"
-    WAITING = "waiting"
     COMPLETED = "completed"
     ABANDONED = "abandoned"
 
@@ -104,7 +103,6 @@ class Activity:
     kind: ActivityKind
     trigger: str
     status: ActivityStatus = ActivityStatus.OPEN
-    active_concern_ids: tuple[str, ...] = ()
     intention_ids: tuple[str, ...] = ()
     response_statuses: tuple[str, ...] = ()
     id: str = field(default_factory=new_id)

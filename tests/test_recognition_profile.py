@@ -82,6 +82,7 @@ def test_known_object_matches_profile(tmp_path):
     assert fact.content["object_ref"] == "user"
     assert result.speaker.object_id == "OBJ-USER"
     assert result.speaker.confidence == 0.85
+    assert result.speaker.aliases == ()
     # 已存在对象不重复创建
     assert len(process.profiles.list()) == 1
 
@@ -98,6 +99,7 @@ def test_new_name_creates_provisional_profile_on_landing(tmp_path):
     fact = repository.list_history("stone", HistoryKind.FACT)[0]
     assert profiles[0].source == fact.id
     assert result.speaker.confidence == 0.60
+    assert result.speaker.aliases == ()
     event_types = [
         item.event_type
         for item in repository.list_history("stone", HistoryKind.SUBJECT)
@@ -111,8 +113,8 @@ def test_channel_without_profile_creates_provisional(tmp_path):
     result = process.experience("stone", "你好", channel="dev-7")
 
     assert result.speaker.status == "provisional"
-    assert result.speaker.confidence == 0.70
-    assert result.speaker.object_id
+    assert result.speaker.confidence == 0.95
+    assert result.speaker.aliases == ()
     profile = process.profiles.list()[0]
     assert profile.status == "provisional"
     fact = repository.list_history("stone", HistoryKind.FACT)[0]
@@ -137,7 +139,7 @@ def test_channel_match_is_strong_signal(tmp_path):
     )
 
     assert result.speaker.object_id == "OBJ-DEV"
-    assert result.speaker.confidence == 0.95
+    assert result.speaker.confidence == 1.00
 
 
 def test_carrier_match_gives_object_name(tmp_path):
@@ -161,8 +163,9 @@ def test_carrier_match_gives_object_name(tmp_path):
 
     assert result.speaker.object_id == "OBJ-VP"
     assert result.speaker.label == "声纹好友"
-    assert result.speaker.confidence == 0.95
+    assert result.speaker.confidence == 0.98
     assert result.speaker.reason == "carrier_match"
+    assert result.speaker.aliases == ()
 
 
 def test_carrier_unmatched_creates_provisional_with_carrier(tmp_path):
@@ -177,7 +180,7 @@ def test_carrier_unmatched_creates_provisional_with_carrier(tmp_path):
     profile = process.profiles.list()[0]
     assert profile.status == "provisional"
     assert profile.carriers == (CarrierEntry(kind="voiceprint", value="vp-new"),)
-    assert result.speaker.confidence == 0.70
+    assert result.speaker.confidence == 0.85
     fact = repository.list_history("stone", HistoryKind.FACT)[0]
     assert fact.content["object_id"] == profile.object_id
 
@@ -325,5 +328,75 @@ def test_resolver_rules(tmp_path):
         resolver.resolve("stone", "你好", None)
     channel_new = resolver.resolve("stone", "你好", None, channel="dev-x")
     assert channel_new.status == "provisional"
-    assert channel_new.confidence == 0.70
+    assert channel_new.confidence == 0.95
     assert channel_new.object_id
+
+
+def test_object_id_ref_is_channel_bound(tmp_path):
+    process, _repository = runtime(tmp_path)
+    process.profiles.create(
+        ObjectProfile(
+            object_id="OBJ-USER",
+            label="user",
+            aliases=("朋友",),
+            source="test",
+            status="confirmed",
+        )
+    )
+
+    result = process.experience("stone", "你好", object_ref="OBJ-USER")
+
+    assert result.speaker.object_id == "OBJ-USER"
+    assert result.speaker.confidence == 1.00
+    assert result.speaker.reason == "object_id_match"
+    assert result.speaker.aliases == ("朋友",)
+
+
+def test_name_match_carries_aliases(tmp_path):
+    process, _repository = runtime(tmp_path)
+    process.profiles.create(
+        ObjectProfile(
+            object_id="OBJ-A",
+            label="张三",
+            aliases=("阿三",),
+            source="test",
+            status="confirmed",
+        )
+    )
+
+    result = process.experience("stone", "你好", object_ref="阿三")
+
+    assert result.speaker.object_id == "OBJ-A"
+    assert result.speaker.label == "张三"
+    assert result.speaker.aliases == ("阿三",)
+    assert result.speaker.confidence == 0.85
+    assert result.speaker.reason == "name_match"
+
+
+def test_duplicate_names_close_scores_are_blocked(tmp_path):
+    process, repository = runtime(tmp_path)
+    _register_duplicates(process)
+    process.repository.add_history(
+        HistoryRecord(
+            subject_id="stone",
+            kind=HistoryKind.FACT,
+            event_type="external_input",
+            content={"text": "你好围棋", "object_id": "OBJ-Z1"},
+        )
+    )
+    process.repository.add_history(
+        HistoryRecord(
+            subject_id="stone",
+            kind=HistoryKind.FACT,
+            event_type="external_input",
+            content={"text": "你好围棋", "object_id": "OBJ-Z2"},
+        )
+    )
+
+    with pytest.raises(ValueError, match="confidence too low"):
+        process.experience("stone", "你好围棋", object_ref="张三")
+
+    facts = repository.list_history("stone", HistoryKind.FACT)
+    assert all(item.content.get("object_id") in {"OBJ-Z1", "OBJ-Z2"} for item in facts)
+    assert len(process.profiles.list()) == 2
+

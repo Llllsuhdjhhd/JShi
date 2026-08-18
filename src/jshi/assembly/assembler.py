@@ -11,34 +11,31 @@ from .port import (
     AssemblyContext,
     AssemblyFragment,
     AssemblySourcePort,
+    AssemblySpeaker,
     SourceLoadReport,
 )
+
+_PROTECTED_SOURCES = frozenset({"identity", "object", "activity"})
 
 
 @dataclass(frozen=True)
 class AssembledWorkingSet:
-    """组装器输出：统一片段 + 主体状态快照 + 活跃区视图 + 装载报告。"""
+    """组装器输出：刺激、说话人、快照、分片、既往视图、装载报告。"""
 
     input_text: str
     subject_state: SubjectState
     fragments: tuple[AssemblyFragment, ...]
     context_view: ContextViewState | None = None
-    active_zone: ContextViewState | None = None
-    active_segment_ids: tuple[str, ...] = ()
+    speaker: AssemblySpeaker | None = None
     personal_items: tuple[object, ...] = ()
     report: tuple[SourceLoadReport, ...] = ()
 
-    @property
-    def active_event_ids(self) -> tuple[str, ...]:
-        """兼容旧名称：当前实际是活跃区活动段 id，不再是事件 id。"""
-        return self.active_segment_ids
-
 
 class CurrentStateAssembler:
-    """03 组装编排者：收集 → 去重 → 预算截断 → 快照 → 偶然性 → 报告。
+    """03 组装编排者：收集 → 源内去重 → 全局上限（占位）→ 快照 → 报告。
 
-    各源相互独立，接口可并行；占位实现顺序调用（本地读取开销小）。
-    单个源失败只记录原因，不影响其余源。
+    各源相互独立；占位实现顺序调用。单源失败只记录原因，不影响其余源。
+    08 / 09 的筛选不在此复制；不得裁掉身份、对象、08 常驻与既往视图正文。
     """
 
     name = "current-state-assembler"
@@ -53,33 +50,34 @@ class CurrentStateAssembler:
 
     def assemble(self, ctx: AssemblyContext) -> AssembledWorkingSet:
         collected: list[AssemblyFragment] = []
-        raw_items: list[object] = []
+        personal_raw: list[object] = []
         errors: dict[str, str] = {}
+        skipped_by_source: dict[str, list[str]] = {}
         for source in self.sources:
             try:
                 result = source.load(ctx)
                 collected.extend(result.fragments)
-                raw_items.extend(result.raw_items)
+                if source.name == "personal":
+                    personal_raw.extend(result.raw_items)
+                skipped_by_source[source.name] = list(result.skipped_ids)
             except Exception as exc:  # 失败隔离：单源失败不影响组装
                 errors[source.name] = str(exc)
+                skipped_by_source.setdefault(source.name, [])
 
-        # 去重：保留第一个出现的片段；源注册顺序即优先级
-        # （活动窗口先于个人世界，个人世界先于记忆）。
-        deduped: dict[str, AssemblyFragment] = {}
+        deduped: dict[tuple[str, str], AssemblyFragment] = {}
         for fragment in collected:
-            deduped.setdefault(fragment.id, fragment)
+            deduped.setdefault((fragment.source, fragment.id), fragment)
         fragments = tuple(deduped.values())
 
-        # 预算截断：常驻与活跃区源不占组装额外预算（活跃区已自行控制长度）；
-        # 其余按 个人世界 > 记忆 > 其他 的注册顺序截断。
         kept: list[AssemblyFragment] = []
-        skipped_by_source: dict[str, list[str]] = {}
         budget_used = 0
+        limit = ctx.working_set_limit
         for fragment in fragments:
-            if fragment.always or fragment.source == "activity":
+            protected = fragment.always or fragment.source in _PROTECTED_SOURCES
+            if protected:
                 kept.append(fragment)
                 continue
-            if budget_used < ctx.budget_extra:
+            if limit is None or budget_used < limit:
                 kept.append(fragment)
                 budget_used += 1
             else:
@@ -97,12 +95,8 @@ class CurrentStateAssembler:
                     for fragment in kept_fragments
                     if fragment.source == source.name
                 ),
-                skipped_ids=tuple(
-                    skipped_by_source.get(source.name, ())
-                ),
-                budget=ctx.budget_extra
-                if source.name in {"personal", "memory"}
-                else 0,
+                skipped_ids=tuple(skipped_by_source.get(source.name, ())),
+                budget=limit or 0,
                 error=errors.get(source.name),
             )
             for source in self.sources
@@ -110,19 +104,11 @@ class CurrentStateAssembler:
 
         working_set = AssembledWorkingSet(
             input_text=ctx.input_text,
+            speaker=ctx.speaker,
             subject_state=self._subject_state(ctx.subject_id, kept_fragments),
             fragments=kept_fragments,
-            context_view=ctx.context_view or ctx.active_zone,
-            active_zone=ctx.context_view or ctx.active_zone,
-            active_segment_ids=tuple(
-                getattr(ctx.context_view or ctx.active_zone, "segment_refs", ())
-                or tuple(
-                    fragment.id
-                    for fragment in kept_fragments
-                    if fragment.source == "activity"
-                )
-            ),
-            personal_items=tuple(raw_items),
+            context_view=ctx.context_view,
+            personal_items=tuple(personal_raw),
             report=reports,
         )
         return self.chance.apply("assemble", working_set)

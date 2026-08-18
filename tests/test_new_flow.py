@@ -80,8 +80,6 @@ def test_active_zone_loads_raw_window_without_attribution(tmp_path):
 
     result = process.experience("stone", "继续", object_ref="user")
 
-    # 输入不做归属判断：活动挂载为空
-    assert result.activity.active_concern_ids == ()
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
     loaded = [
         item

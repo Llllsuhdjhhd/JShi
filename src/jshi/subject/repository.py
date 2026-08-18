@@ -61,7 +61,6 @@ class SubjectRepository:
                     kind TEXT NOT NULL,
                     trigger TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    active_concern_ids TEXT NOT NULL,
                     intention_ids TEXT NOT NULL,
                     response_statuses TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -234,14 +233,18 @@ class SubjectRepository:
     def add_activity(self, activity: Activity) -> None:
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO activities VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                """
+                INSERT INTO activities (
+                    id, subject_id, kind, trigger, status,
+                    intention_ids, response_statuses, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     activity.id,
                     activity.subject_id,
                     activity.kind.value,
                     activity.trigger,
                     activity.status.value,
-                    _dump_ids(activity.active_concern_ids),
                     _dump_ids(activity.intention_ids),
                     _dump_ids(activity.response_statuses),
                     activity.created_at.isoformat(),
@@ -263,7 +266,6 @@ class SubjectRepository:
         activity_id: str,
         *,
         status: ActivityStatus | None = None,
-        active_concern_ids: tuple[str, ...] | None = None,
         intention_ids: tuple[str, ...] | None = None,
         response_statuses: tuple[str, ...] | None = None,
         reason: str = "",
@@ -272,11 +274,6 @@ class SubjectRepository:
         updated = replace(
             current,
             status=status or current.status,
-            active_concern_ids=(
-                active_concern_ids
-                if active_concern_ids is not None
-                else current.active_concern_ids
-            ),
             intention_ids=(
                 intention_ids if intention_ids is not None else current.intention_ids
             ),
@@ -291,12 +288,11 @@ class SubjectRepository:
             connection.execute(
                 """
                 UPDATE activities
-                SET status = ?, active_concern_ids = ?, intention_ids = ?, response_statuses = ?, updated_at = ?
+                SET status = ?, intention_ids = ?, response_statuses = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     updated.status.value,
-                    _dump_ids(updated.active_concern_ids),
                     _dump_ids(updated.intention_ids),
                     _dump_ids(updated.response_statuses),
                     updated.updated_at.isoformat(),
@@ -472,13 +468,15 @@ def _personal(row: sqlite3.Row) -> PersonalItem:
 
 
 def _activity(row: sqlite3.Row) -> Activity:
+    raw_status = row["status"]
+    if raw_status == "waiting":
+        raw_status = "completed"
     return Activity(
         id=row["id"],
         subject_id=row["subject_id"],
         kind=ActivityKind(row["kind"]),
         trigger=row["trigger"],
-        status=ActivityStatus(row["status"]),
-        active_concern_ids=_load_ids(row["active_concern_ids"]),
+        status=ActivityStatus(raw_status),
         intention_ids=_load_ids(row["intention_ids"]),
         response_statuses=_load_ids(row["response_statuses"]),
         created_at=datetime.fromisoformat(row["created_at"]),

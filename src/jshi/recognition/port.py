@@ -14,6 +14,63 @@ from .profile import (
 # 置信度门禁阈值：候选置信度低于此值不进入后续活动。
 MIN_OBJECT_CONFIDENCE = 0.5
 
+# 占位档位，与 doc/design/01-身份识别.md §4.1 一致。
+CONF_BOUND_NEW = 0.95
+CONF_BOUND_CONFIRMED = 1.00
+CONF_CARRIER_NEW = 0.85
+CONF_CARRIER_PROVISIONAL = 0.90
+CONF_CARRIER_CONFIRMED = 0.98
+CONF_NAME_NEW = 0.60
+CONF_NAME_PROVISIONAL = 0.65
+CONF_NAME_CONFIRMED = 0.85
+CONF_MEMORY_PROVISIONAL = 0.55
+CONF_MEMORY_CONFIRMED = 0.60
+
+
+def _status_confidence(
+    status: str,
+    *,
+    new: float,
+    provisional: float,
+    confirmed: float,
+) -> float:
+    if status == "confirmed":
+        return confirmed
+    if status == "provisional":
+        return provisional
+    return new
+
+
+def bound_confidence(status: str | None = None) -> float:
+    """文字通道已绑定：账号 / 会话 / object_id。"""
+    if status == "confirmed":
+        return CONF_BOUND_CONFIRMED
+    return CONF_BOUND_NEW
+
+
+def carrier_confidence(status: str | None = None) -> float:
+    return _status_confidence(
+        status or "",
+        new=CONF_CARRIER_NEW,
+        provisional=CONF_CARRIER_PROVISIONAL,
+        confirmed=CONF_CARRIER_CONFIRMED,
+    )
+
+
+def name_confidence(status: str) -> float:
+    return _status_confidence(
+        status,
+        new=CONF_NAME_NEW,
+        provisional=CONF_NAME_PROVISIONAL,
+        confirmed=CONF_NAME_CONFIRMED,
+    )
+
+
+def memory_confidence(status: str) -> float:
+    if status == "confirmed":
+        return CONF_MEMORY_CONFIRMED
+    return CONF_MEMORY_PROVISIONAL
+
 
 @dataclass(frozen=True)
 class SpeakerCandidate:
@@ -23,11 +80,13 @@ class SpeakerCandidate:
     有效候选必须可引用（object_id 必填）：无对象是输入信封契约错误，
     在入口校验阶段拒绝，不构成候选；"身份未确认"由 provisional 表达。
     `actor_object_id` 是外部对象 id；`subject_id` 是匠石主体 id，二者不可混用。
+    名称与别名都必须带：label 非空；aliases 字段必有，首次可为空列表。
     """
 
     subject_id: str
     actor_object_id: str
     label: str = ""
+    aliases: tuple[str, ...] = ()
     confidence: float = 0.0
     status: str = "provisional"  # provisional | confirmed | rejected
     object_ref: str | None = None
@@ -59,8 +118,8 @@ class ProfileObjectRecognition:
     """基于对象档案的占位解析实现：三模式识别链。
 
     模式一（载体识别）：输入携带 carriers 时按 kind+value 精确匹配，命中即唯一对象；
-    模式二（文字标识）：按显式名字匹配 label/别名得到候选集，唯一候选直接给对象；
-    模式三（记忆匹配）：重名时用注入的 memory_matcher 按候选对象记忆消歧，给置信最高者。
+    模式二（文字标识）：先按 object_id 绑定，再按名字/别名匹配；唯一候选直接给对象；
+    模式三（记忆匹配）：重名时用注入的 memory_matcher 消歧；不够领先则无法区分。
     未命中 → 产生新对象候选（暂定，不立即落库，由主流程通过门禁后落库）。
     """
 
@@ -88,6 +147,9 @@ class ProfileObjectRecognition:
         mentioned_object_ids: tuple[str, ...] = (),
     ) -> SpeakerCandidate:
         ref = (object_ref or "").strip()
+        extra = {
+            "mentioned_object_ids": mentioned_object_ids,
+        }
         if carriers:
             for carrier in carriers:
                 profile = self._profiles.find_by_carrier(carrier.kind, carrier.value)
@@ -96,22 +158,20 @@ class ProfileObjectRecognition:
                         subject_id,
                         profile,
                         ref or channel or carrier.value,
-                        0.95 if profile.status == "confirmed" else 0.70,
+                        carrier_confidence(profile.status),
                         carriers=(carrier,),
                         reason="carrier_match",
-                        mentioned_object_ids=mentioned_object_ids,
+                        **extra,
                     )
-            # 载体引用未匹配 → 以载体为引用产生暂定候选（携带 carriers 供落库）
-            return SpeakerCandidate(
-                subject_id=subject_id,
-                actor_object_id=new_object_id(),
-                label=ref or channel or carriers[0].value,
-                confidence=0.70,
-                status="provisional",
+            label = ref or channel or carriers[0].value
+            return _fresh(
+                subject_id,
+                label=label,
+                confidence=CONF_CARRIER_NEW,
                 object_ref=ref or channel,
-                mentioned_object_ids=mentioned_object_ids,
                 carriers=tuple(carriers),
                 reason="carrier_unmatched",
+                **extra,
             )
         if channel:
             profile = self._profiles.find_by_channel(channel)
@@ -120,22 +180,29 @@ class ProfileObjectRecognition:
                     subject_id,
                     profile,
                     ref or channel,
-                    0.95 if profile.status == "confirmed" else 0.70,
+                    bound_confidence(profile.status),
                     reason="channel_match",
-                    mentioned_object_ids=mentioned_object_ids,
+                    **extra,
                 )
-            # 渠道提供引用但未匹配已确认档案 → 暂定对象候选（可引用标识）
-            return SpeakerCandidate(
-                subject_id=subject_id,
-                actor_object_id=new_object_id(),
+            return _fresh(
+                subject_id,
                 label=ref or channel,
-                confidence=0.70,
-                status="provisional",
+                confidence=CONF_BOUND_NEW,
                 object_ref=ref or channel,
-                mentioned_object_ids=mentioned_object_ids,
                 reason="channel_unmatched",
+                **extra,
             )
         if ref:
+            by_id = self._profiles.get(ref)
+            if by_id is not None:
+                return _candidate(
+                    subject_id,
+                    by_id,
+                    ref,
+                    bound_confidence(by_id.status),
+                    reason="object_id_match",
+                    **extra,
+                )
             candidates = self._profiles.find_by_names(ref)
             if len(candidates) == 1:
                 profile = candidates[0]
@@ -143,58 +210,86 @@ class ProfileObjectRecognition:
                     subject_id,
                     profile,
                     ref,
-                    0.85 if profile.status == "confirmed" else 0.65,
+                    name_confidence(profile.status),
                     reason="name_match",
-                    mentioned_object_ids=mentioned_object_ids,
-                )
-            if len(candidates) > 1 and self._memory_matcher is not None:
-                matched = self._memory_matcher(subject_id, text, candidates)
-                if matched is not None:
-                    profile, score = matched
-                    return _candidate(
-                        subject_id,
-                        profile,
-                        ref,
-                        0.60 if profile.status == "confirmed" else 0.55,
-                        reason=f"memory_match:{score:.2f}",
-                        mentioned_object_ids=mentioned_object_ids,
-                    )
-                return SpeakerCandidate(
-                    subject_id=subject_id,
-                    actor_object_id=new_object_id(),
-                    label=ref,
-                    confidence=0.0,
-                    status="provisional",
-                    object_ref=ref,
-                    mentioned_object_ids=mentioned_object_ids,
-                    reason="ambiguous_names_no_memory",
+                    **extra,
                 )
             if len(candidates) > 1:
-                return SpeakerCandidate(
-                    subject_id=subject_id,
-                    actor_object_id=new_object_id(),
-                    label=ref,
-                    confidence=0.0,
-                    status="provisional",
-                    object_ref=ref,
-                    mentioned_object_ids=mentioned_object_ids,
-                    reason="ambiguous_names",
+                return self._disambiguate(
+                    subject_id, text, ref, candidates, extra
                 )
-            # 显式名字未匹配 → 新对象候选（暂定，不落库）
-            return SpeakerCandidate(
-                subject_id=subject_id,
-                actor_object_id=new_object_id(),
+            return _fresh(
+                subject_id,
                 label=ref,
-                confidence=0.60,
-                status="provisional",
+                confidence=CONF_NAME_NEW,
                 object_ref=ref,
-                mentioned_object_ids=mentioned_object_ids,
                 reason="new_name",
+                **extra,
             )
-        # 两者皆无 → 无效输入信封（正常由主流程入口校验拒绝；此处兜底）
         raise ValueError(
             "invalid input envelope: external input requires an object reference"
         )
+
+    def _disambiguate(
+        self,
+        subject_id: str,
+        text: str,
+        ref: str,
+        candidates: tuple[ObjectProfile, ...],
+        extra: dict,
+    ) -> SpeakerCandidate:
+        if self._memory_matcher is not None:
+            matched = self._memory_matcher(subject_id, text, candidates)
+            if matched is not None:
+                profile, score = matched
+                return _candidate(
+                    subject_id,
+                    profile,
+                    ref,
+                    memory_confidence(profile.status),
+                    reason=f"memory_match:{score:.2f}",
+                    **extra,
+                )
+            return _fresh(
+                subject_id,
+                label=ref,
+                confidence=0.0,
+                object_ref=ref,
+                reason="ambiguous_names_no_memory",
+                **extra,
+            )
+        return _fresh(
+            subject_id,
+            label=ref,
+            confidence=0.0,
+            object_ref=ref,
+            reason="ambiguous_names",
+            **extra,
+        )
+
+
+def _fresh(
+    subject_id: str,
+    *,
+    label: str,
+    confidence: float,
+    object_ref: str | None,
+    reason: str,
+    mentioned_object_ids: tuple[str, ...] = (),
+    carriers: tuple[CarrierEntry, ...] = (),
+) -> SpeakerCandidate:
+    return SpeakerCandidate(
+        subject_id=subject_id,
+        actor_object_id=new_object_id(),
+        label=label,
+        aliases=(),
+        confidence=confidence,
+        status="provisional",
+        object_ref=object_ref,
+        mentioned_object_ids=mentioned_object_ids,
+        carriers=carriers,
+        reason=reason,
+    )
 
 
 def _candidate(
@@ -212,6 +307,7 @@ def _candidate(
             subject_id=subject_id,
             actor_object_id=profile.object_id,
             label=profile.label,
+            aliases=tuple(profile.aliases),
             confidence=0.0,
             status="rejected",
             object_ref=ref,
@@ -223,6 +319,7 @@ def _candidate(
         subject_id=subject_id,
         actor_object_id=profile.object_id,
         label=profile.label,
+        aliases=tuple(profile.aliases),
         confidence=base,
         status=profile.status,
         object_ref=ref,

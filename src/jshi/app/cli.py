@@ -311,7 +311,7 @@ def main() -> None:
         print(f"价值：{list(assembled.subject_state.salient_values)}")
         print(f"承诺：{list(assembled.subject_state.commitments)}")
         print(f"未完成现实（主体面）：{list(assembled.subject_state.concerns)}")
-        print(f"活跃区事件 id：{list(assembled.active_event_ids)}")
+        print(f"既往段引用：{list(assembled.context_view.segment_refs)}")
         print("装载报告：")
         for report in assembled.source_report:
             line = f"  - {report.source}: {len(report.loaded_ids)} 条（{report.status}）"

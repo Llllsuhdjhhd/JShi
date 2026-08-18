@@ -126,8 +126,10 @@ def test_subject_process_wires_injected_memory_into_assembly(tmp_path):
         for fragment in preview.assembled.fragments
         if fragment.source == "memory"
     ]
-    assert [fragment.id for fragment in memory_fragments] == ["memory-injected"]
-    assert memory_fragments[0].content == "injected-memory"
+    assert [fragment.id for fragment in memory_fragments] == [
+        "memory:memory-injected"
+    ]
+    assert memory_fragments[0].content == "user（）：injected-memory"
 
 
 def test_cli_recall_uses_memory_port(tmp_path, monkeypatch, capsys):

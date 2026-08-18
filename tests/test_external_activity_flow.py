@@ -123,11 +123,10 @@ def test_phase2_assembly_loads_all_personal_world_systems(runtime):
     # 个人世界系统
     assert "优先坦率表达" in state.salient_values
     assert "下次继续询问近况" in state.commitments
-    assert "继续理解朋友的疲倦" in state.concerns
-    # 活跃区事件（concern）由 active_zone 独立承载，个人世界不再重复装载
+    assert state.concerns == ()
+    assert not any(fragment.kind == "concern" for fragment in assembled.fragments)
     assert len(assembled.personal_items) == 6
-    # 未完成现实系统：只装载已有主体面，不新增
-    assert concern.id in assembled.active_event_ids
+    # 未完成现实本轮不进工作集；档案仍在
     assert len(repository.list_personal_items("stone", PersonalKind.CONCERN)) == 1
     # 阶段③ 不做全量文本召回：初始工作集不携带 recalled 片段（追加召回在认知阶段）
     assert assembled.recalled == ()
@@ -158,28 +157,20 @@ def test_phase2_assembly_provenance_marks_source(runtime):
 # 阶段3：活动建立 -----------------------------------------------------------
 
 
-def test_phase3_activity_is_external_mounted_and_completed(runtime):
+def test_phase3_activity_is_external_and_completed(runtime):
     process, repository, _model, _identities = runtime
-    concern = process.propose_open_matter(
-        "stone", "继续理解朋友的疲倦", source_ids=("seed",)
-    )
-
     result = process.experience("stone", "今天有些疲倦", object_ref="user")
 
     activity = result.activity
     assert activity.kind is ActivityKind.EXTERNAL
     assert activity.status is ActivityStatus.COMPLETED
-    # 占位模型不聚焦：活动挂载空（模型聚焦回填见 test_active_zone）
-    assert activity.active_concern_ids == ()
-    # 意图系统：字段存在但当前未填充（虚线缺口，锁定现状）
     assert activity.intention_ids == ()
-    # 触发源指向阶段1的输入事实
     input_fact = repository.list_history("stone", HistoryKind.FACT)[0]
     assert activity.trigger == input_fact.id
 
     stored = repository.get_activity(activity.id)
     assert stored.status is ActivityStatus.COMPLETED
-    assert stored.active_concern_ids == activity.active_concern_ids
+    assert stored.id == activity.id
 
 
 # 阶段4：认知活动 -----------------------------------------------------------
@@ -231,10 +222,19 @@ def test_phase4_model_request_receives_subject_state_and_context(runtime):
     assert request.input_text == "今天有些疲倦"
     assert request.subject_state.subject_id == "stone"
     assert "优先坦率表达" in request.subject_state.salient_values
-    assert concern.id in result.current_state.active_event_ids
+    assert not any(
+        fragment.kind == "concern" for fragment in result.current_state.fragments
+    )
+    personal_report = {
+        item.source: item for item in result.current_state.source_report
+    }["personal"]
+    assert f"personal:{concern.id}" in personal_report.skipped_ids
+    assert result.current_state.speaker is not None
+    assert result.current_state.speaker.label == "user"
 
     kinds = {item["kind"] for item in request.context}
-    assert {"value", "commitment", "event", "aesthetic"} <= kinds
+    assert {"value", "commitment", "aesthetic", "speaker"} <= kinds
+    assert "event" not in kinds
     assert not any(item["kind"] == "recalled_fact" for item in request.context)
 
 
@@ -318,14 +318,15 @@ def test_phase6_proposed_open_matter_persists_into_next_activity(runtime):
     )
 
     later = process.experience("stone", "又见面了", object_ref="user")
-    assert later.activity.active_concern_ids == ()
-    assert concern.id in later.current_state.active_event_ids
-    assert "继续关心他的疲倦" in later.current_state.subject_state.concerns
+    assert later.activity.id != result.activity.id
+    assert later.current_state.subject_state.concerns == ()
+    assert not any(
+        fragment.id.endswith(concern.id) for fragment in later.current_state.fragments
+    )
 
     # 显式关闭后不再进入后续活动
     process.close_personal_item(concern.id, PersonalStatus.RELEASED, "暂时放下")
     final = process.experience("stone", "改天再聊", object_ref="user")
-    # 不再作为未完成现实进入主体状态（完成事件可作为背景保留）
     assert final.current_state.subject_state.concerns == ()
 
 

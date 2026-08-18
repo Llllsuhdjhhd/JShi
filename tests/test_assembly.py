@@ -1,8 +1,8 @@
 """03 状态组装测试。
 
-覆盖：统一装载片段与源报告、事件/个人世界去重、常驻内容、
-预算截断与跳过报告、记忆源对象过滤与低档、占位源标记、
-单源失败隔离、记账与 preview 只读。
+覆盖：五源对接、对象三件套、本轮输入不成分片、concern 跳过、
+工作集上限不裁常驻、记忆源对象过滤与名字 join、单源失败隔离、
+记账与 preview 只读。
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ from __future__ import annotations
 from jshi.assembly import (
     ActivityWindowSource,
     AssemblyContext,
+    AssemblySpeaker,
     CurrentStateAssembler,
-    EpistemicSource,
     IdentitySource,
     MemorySource,
     ObjectSource,
@@ -82,15 +82,26 @@ def test_process_assembly_builds_fragments_and_report(tmp_path):
     report = {item.source: item for item in result.current_state.source_report}
     assert set(report) == {
         "identity",
+        "object",
         "activity",
         "personal",
         "memory",
-        "epistemic",
-        "object",
     }
-    assert report["epistemic"].status == "placeholder"
-    assert report["object"].status == "placeholder"
+    assert "epistemic" not in report
+    assert report["object"].status == "implemented"
     assert report["memory"].status == "implemented"
+    speaker_bits = [
+        fragment
+        for fragment in fragments
+        if fragment.source == "object"
+    ]
+    assert speaker_bits
+    assert "名字=user" in speaker_bits[0].content
+    assert "称呼=" in speaker_bits[0].content
+    assert result.current_state.speaker is not None
+    assert result.current_state.speaker.object_id
+    assert result.current_state.input_text == "你好"
+    assert not any(fragment.kind == "concern" for fragment in fragments)
 
 
 def test_activity_window_not_in_personal(tmp_path):
@@ -113,7 +124,7 @@ def test_activity_window_not_in_personal(tmp_path):
     assert "concern" not in personal_kinds
 
 
-def test_budget_truncation_keeps_always_and_reports_skipped(tmp_path):
+def test_assembler_does_not_recut_personal_world_selection(tmp_path):
     identities = IdentityRepository(tmp_path / "identities.json")
     identities.create(
         IdentityProfile("stone", "匠石", "测试基础型", "我是匠石。")
@@ -123,10 +134,9 @@ def test_budget_truncation_keeps_always_and_reports_skipped(tmp_path):
     assembler = CurrentStateAssembler(
         sources=(
             IdentitySource(identities),
+            ObjectSource(),
             ActivityWindowSource(),
             PersonalWorldSource(personal_world),
-            EpistemicSource(),
-            ObjectSource(),
         )
     )
     for index in range(5):
@@ -143,9 +153,8 @@ def test_budget_truncation_keeps_always_and_reports_skipped(tmp_path):
     ctx = AssemblyContext(
         subject_id="stone",
         input_text="你好",
-        object_id="OBJ-USER",
+        speaker=AssemblySpeaker(object_id="OBJ-USER", label="user"),
         context_view=empty_context_view(),
-        budget_extra=1,
     )
     ws = assembler.assemble(ctx)
 
@@ -153,11 +162,52 @@ def test_budget_truncation_keeps_always_and_reports_skipped(tmp_path):
         fragment for fragment in ws.fragments
         if fragment.source == "personal" and fragment.kind == "value"
     ]
-    assert len(values) == 1  # 额外预算 1：只保留一个非常驻条目
-    assert commitment.id in {fragment.id for fragment in ws.fragments}
+    assert len(values) == 5
+    assert f"personal:{commitment.id}" in {fragment.id for fragment in ws.fragments}
+    report = {item.source: item for item in ws.report}
+    assert report["personal"].skipped_ids == ()
+
+
+def test_working_set_limit_skips_non_resident_only(tmp_path):
+    identities = IdentityRepository(tmp_path / "identities.json")
+    identities.create(
+        IdentityProfile("stone", "匠石", "测试基础型", "我是匠石。")
+    )
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    personal_world = InProcessPersonalWorld(repository)
+    assembler = CurrentStateAssembler(
+        sources=(
+            IdentitySource(identities),
+            PersonalWorldSource(personal_world),
+        )
+    )
+    for index in range(5):
+        repository.add_personal_item(
+            repository_personal_item(
+                repository, f"价值{index}", PersonalKind.VALUE
+            )
+        )
+    commitment = repository_personal_item(
+        repository, "常驻承诺", PersonalKind.COMMITMENT
+    )
+    repository.add_personal_item(commitment)
+
+    ws = assembler.assemble(
+        AssemblyContext(
+            subject_id="stone",
+            input_text="你好",
+            context_view=empty_context_view(),
+            working_set_limit=1,
+        )
+    )
+    values = [
+        fragment for fragment in ws.fragments
+        if fragment.source == "personal" and fragment.kind == "value"
+    ]
+    assert len(values) == 1
+    assert f"personal:{commitment.id}" in {fragment.id for fragment in ws.fragments}
     report = {item.source: item for item in ws.report}
     assert len(report["personal"].skipped_ids) == 4
-    assert report["personal"].budget == 1
 
 
 def repository_personal_item(repository, content, kind):
@@ -206,24 +256,23 @@ def test_memory_source_filters_by_object_and_recency(tmp_path):
     ctx = AssemblyContext(
         subject_id="stone",
         input_text="随便聊聊",
-        object_id="OBJ-A",
+        speaker=AssemblySpeaker(object_id="OBJ-A", label="甲", aliases=("A",)),
         context_view=empty_context_view(),
-        budget_extra=4,
         recall_level=1,
     )
     low = source.load(ctx).fragments
     assert len(low) == 3  # 低档 1–3 → 3 条线索
-    assert all(fragment.id for fragment in low)
-    assert "对象A的第4条" in {fragment.content for fragment in low}
+    assert all(fragment.id.startswith("memory:") for fragment in low)
+    assert any("对象A的第4条" in fragment.content for fragment in low)
+    assert all("甲（A）：" in fragment.content for fragment in low)
     assert "对象B的往事" not in {fragment.content for fragment in low}
 
     deep = source.load(
         AssemblyContext(
             subject_id="stone",
             input_text="随便聊聊",
-            object_id="OBJ-A",
+            speaker=AssemblySpeaker(object_id="OBJ-A", label="甲"),
             context_view=empty_context_view(),
-            budget_extra=4,
             recall_level=8,
         )
     ).fragments
@@ -241,9 +290,8 @@ def test_memory_source_skips_without_object_id(tmp_path):
     ctx = AssemblyContext(
         subject_id="stone",
         input_text="你好",
-        object_id=None,
+        speaker=None,
         context_view=empty_context_view(),
-        budget_extra=4,
     )
     assert source.load(ctx).fragments == ()
 
@@ -273,7 +321,6 @@ def test_single_source_failure_is_isolated(tmp_path):
             subject_id="stone",
             input_text="你好",
             context_view=empty_context_view(),
-            budget_extra=4,
         )
     )
 
@@ -299,13 +346,13 @@ def test_current_state_assembled_records_sources(tmp_path):
     source_names = {item["source"] for item in sources}
     assert source_names == {
         "identity",
+        "object",
         "activity",
         "personal",
         "memory",
-        "epistemic",
-        "object",
     }
     assert all(item["status"] in {"implemented", "placeholder"} for item in sources)
+    assert records[0].content["label"] == "user"
 
 
 def test_preview_state_reports_sources_and_stays_read_only(tmp_path):
@@ -313,7 +360,7 @@ def test_preview_state_reports_sources_and_stays_read_only(tmp_path):
 
     preview = process.preview_state("stone", "你好", object_ref="user")
 
-    assert len(preview.assembled.source_report) == 6
+    assert len(preview.assembled.source_report) == 5
     assert repository.list_history("stone") == ()
 
 
@@ -333,7 +380,7 @@ def test_personal_world_source_marks_binding_boundary_always(tmp_path):
     boundary_fragments = [
         fragment
         for fragment in result.current_state.fragments
-        if fragment.id == boundary.id
+        if fragment.id == f"personal:{boundary.id}"
     ]
     assert boundary_fragments
     assert boundary_fragments[0].kind == "boundary"

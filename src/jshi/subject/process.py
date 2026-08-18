@@ -20,8 +20,8 @@ from jshi.assembly import (
     ActivityWindowSource,
     AssemblyContext,
     AssemblyFragment,
+    AssemblySpeaker,
     CurrentStateAssembler,
-    EpistemicSource,
     IdentitySource,
     MemorySource,
     ObjectSource,
@@ -124,6 +124,7 @@ class AssembledCurrentState:
     recalled: tuple[RecalledFragment, ...]
     fragments: tuple[AssemblyFragment, ...] = ()
     source_report: tuple[SourceLoadReport, ...] = ()
+    speaker: AssemblySpeaker | None = None
 
     @property
     def active_event_ids(self) -> tuple[str, ...]:
@@ -161,11 +162,9 @@ class SubjectActivityResult:
 
 
 class SubjectProcess:
-    """最小主体循环：识别→落位→活跃区装载→组装→活动→认知(可追加召回)→行动→收尾。
+    """最小主体循环：识别→落位→读取既往视图→组装→活动→认知(可追加召回)→行动→收尾。
 
-    每个系统都是占位接口：身份识别、活跃区、意图、受约束偶然性、结果反馈、
-    治理检验、反思。各系统可独立替换为真实实现，不改主流程顺序。
-    归属判断已废弃；事件与记忆侧边界归 07/09，不在主流程活动窗口处理。
+    各系统可独立替换为真实实现，不改主流程顺序。
     """
 
     def __init__(
@@ -223,11 +222,12 @@ class SubjectProcess:
         self.assembler = assembler or CurrentStateAssembler(
             sources=(
                 IdentitySource(self.identities),
+                ObjectSource(),
                 ActivityWindowSource(),
                 PersonalWorldSource(self.personal_world),
-                MemorySource(repository, memory=self.memory),
-                EpistemicSource(),
-                ObjectSource(),
+                MemorySource(
+                    repository, memory=self.memory, profiles=self.profiles
+                ),
             ),
             chance=self.chance,
         )
@@ -243,28 +243,30 @@ class SubjectProcess:
         input_text: str,
         view: ContextViewState | None = None,
         *,
+        speaker: SpeakerCandidate | None = None,
         object_id: str | None = None,
     ) -> AssembledCurrentState:
         """单一路径组装（只读已有记录）：
-        委托组装器收集各装载源，合并去重、预算截断、生成快照与报告；
-        不调用模型、不写长期记录。
+        委托组装器收集各装载源，源内去重、生成快照与报告；
+        不调用模型、不写长期记录、不再解析对象。
         """
-        view = view or self.active_zone.load(subject_id, input_text)
+        view = view or self.active_zone.load(subject_id)
+        assembly_speaker = self._assembly_speaker(speaker, object_id)
         ctx = AssemblyContext(
             subject_id=subject_id,
             input_text=input_text,
-            object_id=object_id,
+            speaker=assembly_speaker,
             context_view=view,
-            budget_extra=4,
             recall_level=1,
         )
         working_set = self.assembler.assemble(ctx)
         return AssembledCurrentState(
             input_text=input_text,
+            speaker=working_set.speaker,
             subject_state=working_set.subject_state,
             personal_items=tuple(working_set.personal_items),
             context_view=view,
-            active_segment_ids=working_set.active_segment_ids,
+            active_segment_ids=tuple(view.segment_refs),
             recalled=(),
             fragments=working_set.fragments,
             source_report=working_set.report,
@@ -284,9 +286,9 @@ class SubjectProcess:
         speaker = self.recognition.resolve(
             subject_id, input_text, object_ref, channel, carriers
         )
-        view = self.active_zone.load(subject_id, input_text)
+        view = self.active_zone.load(subject_id)
         assembled = self.assemble_current_state(
-            subject_id, input_text, view, object_id=speaker.object_id
+            subject_id, input_text, view, speaker=speaker
         )
         return SubjectPreview(speaker=speaker, context_view=view, assembled=assembled)
 
@@ -377,8 +379,8 @@ class SubjectProcess:
                 )
             )
 
-        # 阶段② 活跃区装载：只读 16 当前 ContextViewState
-        view = self.active_zone.load(subject_id, text)
+        # 阶段② 读取既往上下文：只读 16 当前 ContextViewState
+        view = self.active_zone.load(subject_id)
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -396,7 +398,7 @@ class SubjectProcess:
 
         # 阶段③ 当前状态组装（单一路径，只读已有记录）
         current = self.assemble_current_state(
-            subject_id, text, view, object_id=speaker.object_id
+            subject_id, text, view, speaker=speaker
         )
         self.repository.add_history(
             HistoryRecord(
@@ -407,6 +409,8 @@ class SubjectProcess:
                     "input": text,
                     "segment_ids": list(current.active_segment_ids),
                     "version": view.version,
+                    "object_id": speaker.object_id,
+                    "label": speaker.label,
                     "value_count": len(current.subject_state.salient_values),
                     "commitment_count": len(current.subject_state.commitments),
                     "recalled_event_ids": [
@@ -429,12 +433,11 @@ class SubjectProcess:
             )
         )
 
-        # 阶段④ 活动建立（事件挂载在认知后由模型聚焦回填）
+        # 阶段④ 活动建立
         activity = Activity(
             subject_id=subject_id,
             kind=ActivityKind.EXTERNAL,
             trigger=fact.id,
-            active_concern_ids=(),
         )
         self.repository.add_activity(activity)
         self.repository.add_history(
@@ -864,14 +867,13 @@ class SubjectProcess:
         text: str,
         candidates: tuple[ObjectProfile, ...],
     ) -> tuple[ObjectProfile, float] | None:
-        """重名消歧占位：按对象过滤事实历史，与输入做词重叠打分，返回最高者。"""
+        """重名消歧占位：按对象过滤事实历史，词重叠打分；须显著领先才返回。"""
         facts = self.repository.list_history(subject_id, kind=HistoryKind.FACT)
         bigrams = {
             text.lower()[index : index + 2]
-            for index in range(len(text) - 1)
+            for index in range(max(0, len(text) - 1))
         }
-        best: ObjectProfile | None = None
-        best_score = 0.0
+        scored: list[tuple[float, ObjectProfile]] = []
         for candidate in candidates:
             related = [
                 record
@@ -881,12 +883,49 @@ class SubjectProcess:
             hay = " ".join(
                 str(record.content.get("text", "")) for record in related
             ).lower()
-            score = sum(1 for gram in bigrams if gram in hay)
-            if score > best_score:
-                best, best_score = candidate, float(score)
-        if best is not None and best_score > 0:
-            return best, best_score
-        return None
+            score = float(sum(1 for gram in bigrams if gram in hay))
+            scored.append((score, candidate))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        best_score, best = scored[0]
+        second = scored[1][0] if len(scored) > 1 else 0.0
+        if best_score <= 0:
+            return None
+        if second > 0 and best_score < second * 2:
+            return None
+        return best, best_score
+
+    def _assembly_speaker(
+        self,
+        speaker: SpeakerCandidate | None,
+        object_id: str | None,
+    ) -> AssemblySpeaker | None:
+        if speaker is not None:
+            label = speaker.label
+            aliases = speaker.aliases
+            status = speaker.status
+            if self.profiles is not None:
+                profile = self.profiles.get(speaker.object_id)
+                if profile is not None:
+                    label = label or profile.label
+                    aliases = aliases or profile.aliases
+                    status = status or profile.status
+            return AssemblySpeaker(
+                object_id=speaker.object_id,
+                label=label,
+                aliases=tuple(aliases),
+                status=status,
+            )
+        if not object_id:
+            return None
+        profile = self.profiles.get(object_id) if self.profiles is not None else None
+        if profile is None:
+            return AssemblySpeaker(object_id=object_id, label="", aliases=())
+        return AssemblySpeaker(
+            object_id=object_id,
+            label=profile.label,
+            aliases=profile.aliases,
+            status=profile.status,
+        )
 
     @staticmethod
     def _require_object_source(
@@ -943,7 +982,6 @@ class SubjectProcess:
             subject_id=subject_id,
             kind=ActivityKind.INTERNAL,
             trigger=prompt,
-            active_concern_ids=(),
         )
         self.repository.add_activity(activity)
         self.repository.add_history(

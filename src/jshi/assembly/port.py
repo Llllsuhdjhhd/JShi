@@ -1,7 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Protocol, Sequence
+
+from jshi.experienceledger import ContextViewState
+
+
+@dataclass(frozen=True)
+class AssemblySpeaker:
+    """① 已解析的说话人，供 03 对象源与记忆过滤。03 不再 resolve。"""
+
+    object_id: str
+    label: str
+    aliases: tuple[str, ...] = ()
+    status: str = "provisional"
 
 
 @dataclass(frozen=True)
@@ -10,19 +22,17 @@ class AssemblyContext:
 
     subject_id: str
     input_text: str
-    object_id: str | None = None
-    context_view: object | None = None
-    active_zone: object | None = None
-    budget_extra: int = 4
+    speaker: AssemblySpeaker | None = None
+    context_view: ContextViewState | None = None
     recall_level: int = 1
-    focus: tuple[str, ...] = ()
+    working_set_limit: int | None = None
 
 
 @dataclass(frozen=True)
 class AssemblyFragment:
     """统一装载片段：各源输出的归一化视图（进模型上下文）。"""
 
-    source: str  # identity | activity | personal | memory | epistemic | object
+    source: str  # identity | object | activity | personal | memory
     id: str
     content: str
     kind: str
@@ -34,10 +44,11 @@ class AssemblyFragment:
 
 @dataclass(frozen=True)
 class LoadResult:
-    """装载源的一次返回：统一片段 + 可选原始条目（内部审计用）。"""
+    """装载源的一次返回：统一片段 + 该源自己跳过的 id。"""
 
     fragments: tuple[AssemblyFragment, ...] = ()
     raw_items: tuple[object, ...] = ()
+    skipped_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,7 +64,7 @@ class SourceLoadReport:
 
 
 class AssemblySourcePort(Protocol):
-    """统一装载能力：每个装载源实现同一协议，03 不依赖各源内部接口。"""
+    """统一装载能力：每个装载源实现同一协议，检索规则留在源模块。"""
 
     name: str
     status: str

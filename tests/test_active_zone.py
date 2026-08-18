@@ -1,4 +1,4 @@
-﻿"""02 活跃区：只读 16 的 ContextViewState。"""
+﻿"""02：只读 16 的既往 ContextViewState；初次与复位走同一 load。"""
 
 from __future__ import annotations
 
@@ -94,9 +94,25 @@ def test_in_process_active_zone_only_reads_current_view():
     ledger.append_subject_reply("stone", text_raw="reply")
 
     active = InProcessActiveZone(ledger)
-    assert active.load("stone", "继续").context_text == ""
+    assert active.load("stone").context_text == ""
 
     ledger.apply_context_assessment("stone")
-    view = active.load("stone", "继续")
+    view = active.load("stone")
     assert "one" in view.context_text
     assert "reply" in view.context_text
+
+
+def test_unknown_subject_and_reset_share_empty_load():
+    filled = InProcessExperienceLedger()
+    filled.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
+    filled.append_subject_reply("stone", text_raw="reply")
+    filled.apply_context_assessment("stone")
+    assert InProcessActiveZone(filled).load("stone").context_text
+
+    reset = InProcessActiveZone(InProcessExperienceLedger())
+    empty = reset.load("stone")
+    unknown = reset.load("other")
+    assert empty.context_text == ""
+    assert empty.segment_refs == ()
+    assert unknown.context_text == ""
+    assert unknown.version == 0

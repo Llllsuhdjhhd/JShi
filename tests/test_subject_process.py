@@ -77,8 +77,11 @@ def test_assemble_loads_existing_open_matter_only(tmp_path):
 
     assembled = process.assemble_current_state("stone", "今天先聊到这里")
 
-    assert open_matter.id in assembled.active_event_ids
-    assert "继续理解朋友最近的疲倦" in assembled.subject_state.concerns
+    assert assembled.subject_state.concerns == ()
+    assert not any(fragment.kind == "concern" for fragment in assembled.fragments)
+    assert not any(
+        fragment.id.endswith(open_matter.id) for fragment in assembled.fragments
+    )
     # Assembly must not create new personal items.
     assert len(repository.list_personal_items("stone", PersonalKind.CONCERN)) == 1
 
@@ -130,7 +133,6 @@ def test_open_matter_and_commitment_persist_and_close_explicitly(tmp_path):
     )
 
     result = process.experience("stone", "今天先聊到这里", object_ref="user")
-    assert result.activity.active_concern_ids == ()
     assert commitment.content in result.action_text
 
     closed_open = process.close_personal_item(

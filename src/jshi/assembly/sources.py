@@ -2,17 +2,36 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .port import AssemblyContext, AssemblyFragment, LoadResult
+from .port import AssemblyContext, AssemblyFragment, AssemblySpeaker, LoadResult
 
 if TYPE_CHECKING:
     from jshi.memory import MemoryPort
     from jshi.identity import IdentityRepository
     from jshi.personalworld import PersonalWorldPort
+    from jshi.recognition import ObjectProfileRepository
     from jshi.subject.repository import SubjectRepository
 
 
+def speaker_summary(speaker: AssemblySpeaker) -> str:
+    alias_text = "、".join(speaker.aliases)
+    return (
+        f"名字={speaker.label}；称呼={alias_text}；"
+        f"状态={speaker.status}；object_id={speaker.object_id}"
+    )
+
+
+def memory_display_text(
+    text: str,
+    *,
+    label: str,
+    aliases: tuple[str, ...],
+) -> str:
+    alias_text = "、".join(aliases)
+    return f"{label}（{alias_text}）：{text}"
+
+
 class IdentitySource:
-    """身份源（01）：档案与叙事，常驻。"""
+    """主体身份源：匠石档案与叙事。不是 01。"""
 
     name = "identity"
     status = "implemented"
@@ -49,39 +68,63 @@ class IdentitySource:
         )
 
 
+class ObjectSource:
+    """对象源（01）：消费已解析的 SpeakerCandidate，不再 resolve。"""
+
+    name = "object"
+    status = "implemented"
+
+    def load(self, ctx: AssemblyContext) -> LoadResult:
+        speaker = ctx.speaker
+        if speaker is None or not speaker.object_id:
+            return LoadResult()
+        return LoadResult(
+            fragments=(
+                AssemblyFragment(
+                    source="object",
+                    id=f"object:{speaker.object_id}",
+                    content=speaker_summary(speaker),
+                    kind="speaker",
+                    status=speaker.status,
+                    importance=1.0,
+                    source_ids=(speaker.object_id,),
+                    always=True,
+                ),
+            )
+        )
+
+
 class ActivityWindowSource:
-    """活跃区源（02）：只读 16 的 ContextViewState，不重切。"""
+    """既往视图源（02）：只翻译已读入的 ContextViewState，不调用 load。"""
 
     name = "activity"
     status = "implemented"
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
-        view = ctx.context_view or ctx.active_zone
+        view = ctx.context_view
         if view is None:
             return LoadResult()
-        text = getattr(view, "context_text", "") or ""
+        text = view.context_text or ""
         if not text:
             return LoadResult()
-        version = getattr(view, "version", 0)
-        segment_refs = tuple(getattr(view, "segment_refs", ()) or ())
         return LoadResult(
             fragments=(
                 AssemblyFragment(
                     source="activity",
-                    id=f"context-v{version}",
+                    id=f"context-v{view.version}",
                     content=text,
                     kind="context_view",
                     status="active",
                     importance=1.0,
-                    source_ids=segment_refs,
-                    always=False,
+                    source_ids=tuple(view.segment_refs),
+                    always=True,
                 ),
             )
         )
 
 
 class PersonalWorldSource:
-    """个人世界源（08）：承诺与 binding 边界常驻；其余按预算；跳过 concern。"""
+    """个人世界源（08）：透传 select；concern 由 03 跳过并记入报告。"""
 
     name = "personal"
     status = "implemented"
@@ -93,19 +136,19 @@ class PersonalWorldSource:
         from jshi.personalworld.values import is_binding, is_boundary
 
         selected = tuple(
-            self._personal_world.select(
-                ctx.subject_id,
-                ctx.input_text,
-                # 08 的 budget 只作用于普通条目；约束与边界始终由 select 返回。
-                # 这里给足候选，最终非常驻截断由 03 组装器统一控制。
-                budget=max(ctx.budget_extra + 16, 20),
-            )
+            self._personal_world.select(ctx.subject_id, ctx.input_text)
         )
-        raw = tuple(item for item in selected if item.kind.value != "concern")
+        skipped: list[str] = []
+        kept = []
+        for item in selected:
+            if item.kind.value == "concern":
+                skipped.append(f"personal:{item.id}")
+                continue
+            kept.append(item)
         fragments = tuple(
             AssemblyFragment(
                 source="personal",
-                id=item.id,
+                id=f"personal:{item.id}",
                 content=item.content,
                 kind="boundary" if is_boundary(item) else item.kind.value,
                 status=item.status.value,
@@ -114,13 +157,17 @@ class PersonalWorldSource:
                 always=item.kind.value == "commitment"
                 or (is_boundary(item) and is_binding(item)),
             )
-            for item in raw
+            for item in kept
         )
-        return LoadResult(fragments=fragments, raw_items=raw)
+        return LoadResult(
+            fragments=fragments,
+            raw_items=tuple(kept),
+            skipped_ids=tuple(skipped),
+        )
 
 
 class MemorySource:
-    """记忆源（09）：透传记忆端口，对象过滤 + 近因优先 + 档位语义由 09 实现。"""
+    """记忆源（09）：透传 recall；展示名用 01 档案或当前说话人 join。"""
 
     name = "memory"
     status = "implemented"
@@ -129,27 +176,29 @@ class MemorySource:
         self,
         repository: SubjectRepository,
         memory: MemoryPort | None = None,
+        profiles: ObjectProfileRepository | None = None,
     ) -> None:
-        # 始终走 09 端口；未注入时使用最小进程内实现，避免 03 直读事实历史。
         from jshi.memory import InProcessHistoryMemory
 
         self._memory = memory or InProcessHistoryMemory(repository)
+        self._profiles = profiles
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
-        if not ctx.object_id:
+        object_id = ctx.speaker.object_id if ctx.speaker else None
+        if not object_id:
             return LoadResult()
         recalled = self._memory.recall(
             ctx.subject_id,
             ctx.input_text,
-            object_id=ctx.object_id,
+            object_id=object_id,
             level=ctx.recall_level,
         )
         return LoadResult(
             fragments=tuple(
                 AssemblyFragment(
                     source="memory",
-                    id=item.event_id,
-                    content=item.text,
+                    id=f"memory:{item.event_id}",
+                    content=self._with_names(item.text, item.object_id, ctx.speaker),
                     kind=item.kind or "fact",
                     status="active",
                     importance=0.5,
@@ -160,22 +209,22 @@ class MemorySource:
             )
         )
 
-
-class EpistemicSource:
-    """认识状态源（06）占位：未实现，报告标记 placeholder。"""
-
-    name = "epistemic"
-    status = "placeholder"
-
-    def load(self, ctx: AssemblyContext) -> LoadResult:
-        return LoadResult()
-
-
-class ObjectSource:
-    """对象档案摘要源（01）占位：未实现，报告标记 placeholder。"""
-
-    name = "object"
-    status = "placeholder"
-
-    def load(self, ctx: AssemblyContext) -> LoadResult:
-        return LoadResult()
+    def _with_names(
+        self,
+        text: str,
+        object_id: str | None,
+        speaker: AssemblySpeaker | None,
+    ) -> str:
+        label = ""
+        aliases: tuple[str, ...] = ()
+        if object_id and self._profiles is not None:
+            profile = self._profiles.get(object_id)
+            if profile is not None:
+                label = profile.label
+                aliases = profile.aliases
+        if not label and speaker is not None and speaker.object_id == object_id:
+            label = speaker.label
+            aliases = speaker.aliases
+        if not label:
+            return text
+        return memory_display_text(text, label=label, aliases=aliases)
