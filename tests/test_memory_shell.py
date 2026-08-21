@@ -53,3 +53,27 @@ def test_memory_shell_recall_uses_object_filter_from_existing_facts(tmp_path):
 
     assert recalled
     assert "朋友" in recalled[0].text
+
+
+def test_memory_shell_ingest_uses_normalized_text(tmp_path):
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    backend = InProcessMemoryBackend(repository)
+    shell = MemoryShell(backend)
+    ledger = InProcessExperienceLedger(memory_batch_segments=1)
+    ledger.append_external(
+        "stone",
+        actor_object_id="OBJ-A",
+        text_raw="小明：你好",
+        text_normalized="OBJ-A：你好",
+    )
+    batch = ledger.build_memory_batch("stone")
+    assert batch is not None
+
+    result = shell.ingest_batch(batch)
+
+    assert result.consumed_through_sequence == 1
+    facts = repository.list_history("stone", HistoryKind.FACT)
+    memory = next(
+        item for item in facts if item.event_type == "memory_external_input"
+    )
+    assert memory.content["text"] == "OBJ-A：你好"

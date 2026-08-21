@@ -316,3 +316,20 @@ def test_memory_batch_includes_reply_state_and_keeps_subject_out_of_objects():
         OutputKind.SUBJECT_REPLY,
         OutputKind.SUBJECT_STATE,
     ]
+
+
+def test_segment_carries_normalized_text():
+    ledger = InProcessExperienceLedger(memory_batch_segments=1)
+    ledger.append_external(
+        "stone",
+        actor_object_id="OBJ-A",
+        text_raw="小明：你好",
+        text_normalized="OBJ-A：你好",
+    )
+    segment = ledger.list_experiences("stone")[-1]
+    assert segment.text_raw == "小明：你好"
+    assert segment.text_normalized == "OBJ-A：你好"
+
+    batch = ledger.build_memory_batch("stone")
+    assert batch is not None
+    assert batch.segments[0].text_normalized == "OBJ-A：你好"

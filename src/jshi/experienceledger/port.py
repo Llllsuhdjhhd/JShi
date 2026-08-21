@@ -52,6 +52,7 @@ class ExperienceSegment:
     mentioned_object_ids: tuple[str, ...]
     text_raw: str | None
     state_delta: Mapping[str, object] | None
+    text_normalized: str | None = None
     response_plan: Mapping[str, object] | None = None
     response_statuses: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
@@ -117,6 +118,7 @@ class ExperienceLedgerPort(Protocol):
         *,
         actor_object_id: str,
         text_raw: str,
+        text_normalized: str | None = None,
         mentioned_object_ids: Sequence[str] = (),
         source_ids: Sequence[str] = (),
         occurred_at: datetime | None = None,
@@ -127,6 +129,7 @@ class ExperienceLedgerPort(Protocol):
         subject_id: str,
         *,
         text_raw: str,
+        text_normalized: str | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         state_delta: Mapping[str, object] | None = None,
@@ -140,6 +143,7 @@ class ExperienceLedgerPort(Protocol):
         subject_id: str,
         *,
         state_delta: Mapping[str, object],
+        text_normalized: str | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         response_plan: Mapping[str, object] | None = None,
@@ -151,6 +155,7 @@ class ExperienceLedgerPort(Protocol):
         self,
         subject_id: str,
         *,
+        text_normalized: str | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         response_plan: Mapping[str, object] | None = None,
@@ -163,6 +168,7 @@ class ExperienceLedgerPort(Protocol):
         subject_id: str,
         *,
         text_raw: str | None = None,
+        text_normalized: str | None = None,
         state_delta: Mapping[str, object] | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),

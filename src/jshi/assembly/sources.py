@@ -23,9 +23,12 @@ def speaker_summary(speaker: AssemblySpeaker) -> str:
 def memory_display_text(
     text: str,
     *,
+    object_id: str | None,
     label: str,
     aliases: tuple[str, ...],
 ) -> str:
+    if object_id and object_id in text:
+        text = text.replace(object_id, label)
     alias_text = "、".join(aliases)
     return f"{label}（{alias_text}）：{text}"
 
@@ -249,4 +252,6 @@ class MemorySource:
             aliases = speaker.aliases
         if not label:
             return text
-        return memory_display_text(text, label=label, aliases=aliases)
+        return memory_display_text(
+            text, object_id=object_id, label=label, aliases=aliases
+        )

@@ -93,7 +93,9 @@ class InProcessMemoryBackend:
         memory_event_ids: list[str] = []
         stored_marks: dict[str, str] = {}
         for segment in batch.segments:
-            if segment.text_raw is not None:
+            if segment.text_normalized is not None:
+                text = segment.text_normalized
+            elif segment.text_raw is not None:
                 text = segment.text_raw
             elif segment.state_delta is not None:
                 text = json.dumps(segment.state_delta, ensure_ascii=False)

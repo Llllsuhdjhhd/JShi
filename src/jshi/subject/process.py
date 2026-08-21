@@ -65,6 +65,7 @@ from jshi.recognition import (
     ObjectRecognitionPort,
     ProfileObjectRecognition,
     SpeakerCandidate,
+    normalize_text,
 )
 from jshi.reflection import PlaceholderReflection, ReflectionPort
 
@@ -335,12 +336,20 @@ class SubjectProcess:
             raise ValueError(
                 f"object confidence too low: {speaker.confidence:.2f}"
             )
+        normalized = normalize_text(
+            text,
+            speaker_id=speaker.object_id,
+            subject_id=subject_id,
+            speaker_names=(speaker.label, *speaker.aliases),
+            mentioned=self._mentioned_names(speaker.mentioned_object_ids),
+        )
         fact = HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.FACT,
             event_type="external_input",
             content={
                 "text": text,
+                "normalized_text": normalized,
                 "source": speaker.label,
                 "object_id": speaker.object_id,
                 "object_status": speaker.status,
@@ -354,6 +363,7 @@ class SubjectProcess:
             subject_id,
             actor_object_id=speaker.actor_object_id,
             text_raw=text,
+            text_normalized=normalized,
             source_ids=(fact.id,),
             mentioned_object_ids=speaker.mentioned_object_ids,
         )
@@ -551,6 +561,11 @@ class SubjectProcess:
             self.activity_ledger.append_subject_reply(
                 subject_id,
                 text_raw=spoken_text,
+                text_normalized=normalize_text(
+                    spoken_text,
+                    speaker_id=subject_id,
+                    subject_id=subject_id,
+                ),
                 source_ids=(activity.id, *(item for item in (action_id,) if item)),
                 response_plan=plan_payload,
                 response_statuses=final_statuses,
@@ -831,6 +846,21 @@ class SubjectProcess:
             self.object_system.deny(speaker.object_id)
             updated = replace(speaker, status="rejected", confidence=0.0)
         return updated
+
+    def _mentioned_names(
+        self,
+        mentioned_object_ids: tuple[str, ...],
+    ) -> dict[str, str]:
+        """把上游传入的提及对象 id 解析为「名字 / 称呼 → object_id」，供归一化替换。"""
+        mapping: dict[str, str] = {}
+        for object_id in mentioned_object_ids:
+            profile = self.profiles.get(object_id)
+            if profile is None:
+                continue
+            for name in (profile.label, *profile.aliases):
+                if name:
+                    mapping[name] = object_id
+        return mapping
 
     def _match_object_by_memory(
         self,

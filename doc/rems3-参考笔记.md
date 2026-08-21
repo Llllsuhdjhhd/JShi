@@ -1,6 +1,7 @@
 # REMS3 参考笔记（只读调研）
 
-> 来源：`C:\Users\40575\Desktop\项目\memory\rems_3`（只读，不修改该目录）
+> 来源：`C:\Users\40575\Desktop\项目\memory\rems_3`（只读参考，不修改该目录）
+> **记忆项目正在独立开发**：2026-08-19 已 fork REMS3 当前工作树到 `C:\Users\40575\Desktop\prog\Jshi_memory`（独立 git 仓库，基线提交 `5699c36`）。后续记忆后端开发在 fork 中进行；主流程只依赖 `MemoryPort`，具体后端可替换。
 > 目的：把 REMS3 的实际结构与本次记忆模块讨论的映射记录下来，后续讨论直接引用本文，避免重复查证。
 
 ## 1. REMS3 是什么
