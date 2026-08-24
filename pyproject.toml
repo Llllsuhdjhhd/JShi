@@ -22,3 +22,5 @@ packages = ["src/jshi"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+cache_dir = ".pytest/cache"
+addopts = ["--basetemp=.pytest/tmp"]
