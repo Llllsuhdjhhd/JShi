@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Mapping, Sequence
@@ -12,7 +11,6 @@ from .port import (
     ExperienceSegment,
     ActorKind,
     ConsumerKind,
-    MemoryBatch,
     MemoryIngestLedgerEntry,
     OutputKind,
     SegmentStatus,
@@ -21,22 +19,6 @@ from .port import (
     utc_now,
 )
 
-_SENTENCE_RE = re.compile(r".+?(?:[。！？.!?]+|$)", re.S)
-
-
-def split_sentences(text: str) -> tuple[str, ...]:
-    if not text:
-        return ()
-    return tuple(part for part in _SENTENCE_RE.findall(text) if part.strip())
-
-
-@dataclass(frozen=True)
-class _Sentence:
-    ref: str
-    segment_id: str
-    text: str
-
-
 @dataclass
 class _SubjectLedgerState:
     segments: list[ExperienceSegment] = field(default_factory=list)
@@ -44,7 +26,6 @@ class _SubjectLedgerState:
     ingest_entries: list[MemoryIngestLedgerEntry] = field(default_factory=list)
     context: ContextViewState = field(default_factory=empty_context_view)
     pending_sequences: list[int] = field(default_factory=list)
-    sentences: list[_Sentence] = field(default_factory=list)
 
 
 class InProcessExperienceLedger(ExperienceLedgerPort):
@@ -54,14 +35,8 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         self,
         *,
         active_window_chars: int = 2000,
-        memory_batch_chars: int = 2000,
-        memory_batch_segments: int = 3,
-        memory_batch_max_age_seconds: float = 3600,
     ) -> None:
         self.active_window_chars = active_window_chars
-        self.memory_batch_chars = memory_batch_chars
-        self.memory_batch_segments = memory_batch_segments
-        self.memory_batch_max_age_seconds = memory_batch_max_age_seconds
         self._states: dict[str, _SubjectLedgerState] = {}
 
     def _state(self, subject_id: str) -> _SubjectLedgerState:
@@ -83,7 +58,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         *,
         actor_object_id: str,
         text_raw: str,
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         mentioned_object_ids: Sequence[str] = (),
         source_ids: Sequence[str] = (),
         occurred_at: datetime | None = None,
@@ -94,7 +69,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             output_kind=OutputKind.EXTERNAL_INPUT,
             actor_object_id=actor_object_id,
             text_raw=text_raw,
-            text_normalized=text_normalized,
+            objects=objects,
             state_delta=None,
             response_statuses=(),
             mentioned_object_ids=mentioned_object_ids,
@@ -107,7 +82,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         subject_id: str,
         *,
         text_raw: str,
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         state_delta: Mapping[str, object] | None = None,
@@ -121,7 +96,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             output_kind=OutputKind.SUBJECT_REPLY,
             actor_object_id=None,
             text_raw=text_raw,
-            text_normalized=text_normalized,
+            objects=objects,
             state_delta=dict(state_delta) if state_delta else None,
             response_plan=dict(response_plan) if response_plan else None,
             response_statuses=tuple(dict.fromkeys(response_statuses)),
@@ -135,7 +110,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         subject_id: str,
         *,
         state_delta: Mapping[str, object],
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         response_plan: Mapping[str, object] | None = None,
@@ -148,7 +123,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             output_kind=OutputKind.SUBJECT_STATE,
             actor_object_id=None,
             text_raw=None,
-            text_normalized=text_normalized,
+            objects=objects,
             state_delta=dict(state_delta),
             response_plan=dict(response_plan) if response_plan else None,
             response_statuses=tuple(dict.fromkeys(response_statuses)),
@@ -161,7 +136,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         self,
         subject_id: str,
         *,
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         response_plan: Mapping[str, object] | None = None,
@@ -174,7 +149,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             output_kind=OutputKind.SUBJECT_SILENT,
             actor_object_id=None,
             text_raw=None,
-            text_normalized=text_normalized,
+            objects=objects,
             state_delta=None,
             response_plan=dict(response_plan) if response_plan else None,
             response_statuses=tuple(dict.fromkeys(response_statuses)),
@@ -188,7 +163,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         subject_id: str,
         *,
         text_raw: str | None = None,
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         state_delta: Mapping[str, object] | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
@@ -200,7 +175,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             output_kind=OutputKind.INTERNAL,
             actor_object_id=None,
             text_raw=text_raw,
-            text_normalized=text_normalized,
+            objects=objects,
             state_delta=dict(state_delta) if state_delta else None,
             response_statuses=(),
             mentioned_object_ids=mentioned_object_ids,
@@ -216,7 +191,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         output_kind: OutputKind,
         actor_object_id: str | None,
         text_raw: str | None,
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         state_delta: Mapping[str, object] | None,
         response_statuses: Sequence[str],
         mentioned_object_ids: Sequence[str],
@@ -235,7 +210,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             actor_object_id=actor_object_id,
             mentioned_object_ids=tuple(dict.fromkeys(mentioned_object_ids)),
             text_raw=text_raw,
-            text_normalized=text_normalized,
+            objects=dict(objects) if objects else None,
             state_delta=state_delta,
             response_plan=dict(response_plan) if response_plan else None,
             response_statuses=tuple(dict.fromkeys(response_statuses)),
@@ -262,7 +237,6 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         state = self._state(subject_id)
         assessment = self._coerce_assessment(assessment)
         changed = False
-        excluded = set(state.context.excluded_sentence_refs)
         focused = list(state.context.focused_refs)
         protected = set(protected_refs)
         excerpts = {
@@ -275,44 +249,10 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
                 excerpts[ref] = text
                 changed = True
 
-        if allow_edit:
-            visible = self._visible_sentences(state, excluded)
-            trim_targets = assessment.trim_refs if (
-                assessment.need_trim or assessment.trim_refs
-            ) else ()
-            if trim_targets:
-                sentence_trims = []
-                for raw in trim_targets:
-                    if self._is_protected_ref(raw, protected, speaker_object_id or state.context.speaker_object_id):
-                        continue
-                    if raw in excerpts or raw.replace("memory:", "") in {
-                        key.replace("memory:", "") for key in excerpts
-                    }:
-                        for key in list(excerpts):
-                            if key == raw or key.endswith(raw) or raw.endswith(key.replace("memory:", "")):
-                                del excerpts[key]
-                                changed = True
-                        continue
-                    sentence_trims.append(raw)
-                if sentence_trims:
-                    excluded.update(self._resolve_refs(sentence_trims, visible))
-                    changed = True
-            if assessment.need_focus or assessment.focus_refs:
-                focused = list(
-                    dict.fromkeys(
-                        (
-                            *focused,
-                            *self._resolve_refs(
-                                assessment.focus_refs,
-                                self._visible_sentences(state, excluded),
-                            ),
-                        )
-                    )
-                )
-                changed = True
+        segment_refs = list(state.context.segment_refs)
+        segments_by_id = {segment.segment_id: segment for segment in state.segments}
 
         last_applied = state.context.last_applied_sequence
-        segment_refs = list(state.context.segment_refs)
         if state.pending_sequences:
             by_sequence = {segment.sequence: segment for segment in state.segments}
             for sequence in state.pending_sequences:
@@ -321,32 +261,53 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
                     continue
                 if segment.segment_id not in segment_refs:
                     segment_refs.append(segment.segment_id)
-                for index, text in enumerate(split_sentences(segment.text_raw or "")):
-                    state.sentences.append(
-                        _Sentence(
-                            ref=f"{segment.segment_id}:{index}",
-                            segment_id=segment.segment_id,
-                            text=text,
-                        )
-                    )
                 last_applied = max(last_applied, sequence)
             state.pending_sequences.clear()
             changed = True
 
+        if allow_edit:
+            # 删除段 / 回忆摘录（作用于合并后的完整视图；remove 与 drop_recall 合并处理）
+            remove_refs = tuple(
+                dict.fromkeys((*assessment.remove, *assessment.drop_recall))
+            )
+            for raw in remove_refs:
+                if self._is_protected_ref(
+                    raw, protected, speaker_object_id or state.context.speaker_object_id
+                ):
+                    continue
+                if self._drop_excerpt(raw, excerpts):
+                    changed = True
+                    continue
+                if raw in segments_by_id or raw in segment_refs:
+                    segment_refs = [ref for ref in segment_refs if ref != raw]
+                    focused = [ref for ref in focused if ref != raw]
+                    changed = True
+            # 聚焦（段级）
+            for raw in assessment.focus:
+                if raw in segments_by_id and raw not in focused:
+                    focused.append(raw)
+                    changed = True
+
         kept_speaker = speaker_object_id or state.context.speaker_object_id
         if speaker_object_id and speaker_object_id != state.context.speaker_object_id:
             changed = True
+
+        if allow_edit:
+            capped, capped_changed = self._enforce_cap(
+                state, segment_refs, kept_speaker, protected
+            )
+            segment_refs = capped
+            changed = changed or capped_changed
 
         if not changed:
             return state.context
 
         state.context = ContextViewState(
             version=state.context.version + 1,
-            context_text=self._render_context(state, excluded, excerpts),
+            context_text=self._render_context(state, segment_refs, excerpts),
             segment_refs=tuple(segment_refs),
             recall_excerpts=tuple(excerpts.items()),
             speaker_object_id=kept_speaker,
-            excluded_sentence_refs=tuple(dict.fromkeys(excluded)),
             focused_refs=tuple(focused),
             last_applied_sequence=last_applied,
         )
@@ -372,11 +333,17 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             return ContextAssessment()
         if isinstance(assessment, ContextAssessment):
             return assessment
+        remove = tuple(getattr(assessment, "remove", ()) or ())
+        if not remove:
+            remove = tuple(getattr(assessment, "trim_refs", ()) or ())
+        drop_recall = tuple(getattr(assessment, "drop_recall", ()) or ())
+        focus = tuple(getattr(assessment, "focus", ()) or ())
+        if not focus:
+            focus = tuple(getattr(assessment, "focus_refs", ()) or ())
         return ContextAssessment(
-            need_trim=bool(getattr(assessment, "need_trim", False)),
-            need_focus=bool(getattr(assessment, "need_focus", False)),
-            trim_refs=tuple(getattr(assessment, "trim_refs", ()) or ()),
-            focus_refs=tuple(getattr(assessment, "focus_refs", ()) or ()),
+            remove=remove,
+            drop_recall=drop_recall,
+            focus=focus,
         )
 
     @staticmethod
@@ -396,49 +363,33 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         return False
 
     @staticmethod
-    def _visible_sentences(
-        state: _SubjectLedgerState,
-        excluded: set[str],
-    ) -> list[_Sentence]:
-        return [sentence for sentence in state.sentences if sentence.ref not in excluded]
-
-    @staticmethod
-    def _resolve_refs(
-        refs: Sequence[str],
-        visible: Sequence[_Sentence],
-    ) -> tuple[str, ...]:
-        resolved: list[str] = []
-        visible_refs = {sentence.ref for sentence in visible}
-        for raw in refs:
-            if raw in visible_refs:
-                resolved.append(raw)
-                continue
-            if raw.isdigit():
-                index = int(raw) - 1
-                if 0 <= index < len(visible):
-                    resolved.append(visible[index].ref)
-                continue
-            for sentence in visible:
-                if sentence.segment_id == raw:
-                    resolved.append(sentence.ref)
-        return tuple(dict.fromkeys(resolved))
+    def _drop_excerpt(raw: str, excerpts: dict[str, str]) -> bool:
+        """按引用删除回忆摘录；命中返回 True。"""
+        if raw in excerpts:
+            del excerpts[raw]
+            return True
+        normalized = raw[7:] if raw.startswith("memory:") else raw
+        if normalized:
+            hits = [key for key in excerpts if key[7:] == normalized]
+            for key in hits:
+                del excerpts[key]
+            return bool(hits)
+        return False
 
     @staticmethod
     def _render_context(
         state: _SubjectLedgerState,
-        excluded: set[str],
+        segment_refs: Sequence[str],
         excerpts: Mapping[str, str] | None = None,
     ) -> str:
-        chunks: list[str] = []
-        previous_segment = None
-        for sentence in state.sentences:
-            if sentence.ref in excluded:
+        by_id = {segment.segment_id: segment for segment in state.segments}
+        parts: list[str] = []
+        for ref in segment_refs:
+            segment = by_id.get(ref)
+            if segment is None or not segment.text_raw:
                 continue
-            if previous_segment is not None and sentence.segment_id != previous_segment:
-                chunks.append("\n")
-            chunks.append(sentence.text)
-            previous_segment = sentence.segment_id
-        body = "".join(chunks)
+            parts.append(segment.text_raw)
+        body = "\n".join(parts)
         if not excerpts:
             return body
         recall_block = "\n".join(
@@ -449,6 +400,44 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         if body:
             return f"{body}\n{recall_block}"
         return recall_block
+
+    def _enforce_cap(
+        self,
+        state: _SubjectLedgerState,
+        segment_refs: Sequence[str],
+        speaker_object_id: str | None,
+        protected: set[str],
+    ) -> tuple[list[str], bool]:
+        """物理硬上限：超过 active_window_chars 时剔除最旧的非保护段。"""
+        by_id = {segment.segment_id: segment for segment in state.segments}
+
+        def is_protected(segment_id: str) -> bool:
+            segment = by_id.get(segment_id)
+            if segment is None:
+                return True
+            if segment_id in protected:
+                return True
+            if speaker_object_id and segment.actor_object_id == speaker_object_id:
+                return True
+            return False
+
+        kept: list[str] = []
+        total = 0
+        dropped = 0
+        for ref in reversed(segment_refs):
+            segment = by_id.get(ref)
+            size = len(segment.text_raw or "") if segment else 0
+            if (total + size <= self.active_window_chars) or is_protected(ref):
+                kept.append(ref)
+                total += size
+            else:
+                dropped += 1
+        kept.reverse()
+        # 至少保留最新一段，避免视图为空
+        if not kept and segment_refs:
+            kept = [segment_refs[-1]]
+            dropped -= 1
+        return kept, dropped > 0
 
     def active_window(
         self,
@@ -470,96 +459,6 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             selected.append(segment)
             used += size
         return tuple(selected)
-
-    def build_memory_batch(
-        self,
-        subject_id: str,
-        *,
-        min_chars: int | None = None,
-        min_segments: int | None = None,
-        max_age_seconds: float | None = None,
-    ) -> MemoryBatch | None:
-        state = self._state(subject_id)
-        memory_start = state.cursors.get(ConsumerKind.MEMORY, 0)
-        pending = [
-            segment for segment in state.segments if segment.sequence > memory_start
-        ]
-        if not pending:
-            return None
-
-        chars = sum(len(segment.text_raw or "") for segment in pending)
-        required_chars = min_chars or self.memory_batch_chars
-        required_segments = min_segments or self.memory_batch_segments
-        max_age = (
-            max_age_seconds
-            if max_age_seconds is not None
-            else self.memory_batch_max_age_seconds
-        )
-
-        oldest = pending[0]
-        age_seconds = (utc_now() - oldest.occurred_at).total_seconds()
-        triggered = (
-            chars >= required_chars
-            or len(pending) >= required_segments
-            or age_seconds >= max_age
-        )
-        if not triggered:
-            return None
-
-        first_external = next(
-            (
-                segment.actor_object_id
-                for segment in pending
-                if segment.actor_kind == ActorKind.EXTERNAL
-                and segment.actor_object_id
-            ),
-            None,
-        )
-        object_ids = tuple(
-            dict.fromkeys(
-                object_id
-                for segment in pending
-                for object_id in (
-                    (
-                        segment.actor_object_id
-                        if segment.actor_kind == ActorKind.EXTERNAL
-                        else None
-                    ),
-                    *segment.mentioned_object_ids,
-                )
-                if object_id
-            )
-        )
-        object_sources: dict[str, tuple[str, ...]] = {}
-        for segment in pending:
-            candidate_ids = []
-            if segment.actor_kind == ActorKind.EXTERNAL and segment.actor_object_id:
-                candidate_ids.append(segment.actor_object_id)
-            candidate_ids.extend(segment.mentioned_object_ids)
-            for object_id in dict.fromkeys(candidate_ids):
-                object_sources.setdefault(object_id, [])
-                object_sources[object_id].append(segment.segment_id)
-        source_ids = tuple(
-            dict.fromkeys(
-                source_id
-                for segment in pending
-                for source_id in (segment.segment_id, *segment.source_ids)
-            )
-        )
-        return MemoryBatch(
-            batch_id=new_id(),
-            subject_id=subject_id,
-            external_object_id=first_external,
-            object_ids=object_ids,
-            object_sources={
-                object_id: tuple(dict.fromkeys(segment_ids))
-                for object_id, segment_ids in object_sources.items()
-            },
-            from_sequence=oldest.sequence,
-            to_sequence=pending[-1].sequence,
-            segments=tuple(pending),
-            source_ids=source_ids,
-        )
 
     def advance_consumer_cursor(
         self,

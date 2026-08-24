@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import replace
 from datetime import datetime
@@ -23,6 +24,8 @@ from .domain import (
     StateTransition,
     utc_now,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SubjectRepository:
@@ -189,7 +192,14 @@ class SubjectRepository:
         query += " ORDER BY updated_at"
         with self._connect() as connection:
             rows = connection.execute(query, arguments).fetchall()
-        return tuple(_personal(row) for row in rows)
+        items: list[PersonalItem] = []
+        for row in rows:
+            try:
+                items.append(_personal(row))
+            except ValueError as exc:
+                # 已废除种类（如旧数据里的 concern）不进入个人世界装载。
+                logger.warning("skip legacy personal item: %s", exc)
+        return tuple(items)
 
     def update_personal_status(
         self, item_id: str, status: PersonalStatus

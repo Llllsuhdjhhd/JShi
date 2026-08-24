@@ -1,21 +1,47 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Callable
 
-from jshi.experienceledger import (
-    ExperienceLedgerPort,
-    ConsumerKind,
+from jshi.experienceledger import ConsumerKind, ExperienceLedgerPort, OutputKind
+from jshi.memory.contracts import (
     MemoryBatch,
+    MemoryExperience,
+    new_id,
+    utc_now,
 )
 
 from .port import (
     MemoryBatchIngestPort,
     MemoryControlPort,
     MemoryControlResult,
-    MemoryIngestResult,
     MemoryProcessStatus,
     MemoryTriggerDecision,
 )
+
+
+def _origin_for(output_kind: OutputKind) -> str:
+    """经历段 → 记忆 origin：内部段 internal，其余 external（Jshi_memory 210 映射）。"""
+    return "internal" if output_kind is OutputKind.INTERNAL else "external"
+
+
+def _experience_text(segment) -> str:
+    if segment.text_raw:
+        return segment.text_raw
+    if segment.state_delta:
+        return json.dumps(segment.state_delta, ensure_ascii=False)
+    return ""
+
+
+def _window_minutes(raw: str) -> tuple[int, int]:
+    start_raw, _, end_raw = raw.partition("-")
+    def minutes(value: str) -> int:
+        hour_text, _, minute_text = value.strip().partition(":")
+        return int(hour_text) * 60 + int(minute_text or "0")
+
+    return minutes(start_raw), minutes(end_raw)
 
 
 @dataclass
@@ -23,10 +49,15 @@ class _ControlState:
     previous_status: str = "idle"
     attempts: int = 0
     last_error: str = ""
+    last_flush_at: datetime | None = None
 
 
 class InProcessMemoryControl(MemoryControlPort):
-    """07 最小实现：只管理投递决策、游标、重试和台账。"""
+    """30 最小实现：冲刷策略（220）+ 批次构造 + 游标 / 重试 / 台账。
+
+    触发参数全部可配置（默认见 Jshi_memory design/220）；后端 ingest_batch
+    只负责接收（有序、失败隔离），行为不随策略变化。
+    """
 
     def __init__(
         self,
@@ -34,17 +65,25 @@ class InProcessMemoryControl(MemoryControlPort):
         memory: MemoryBatchIngestPort,
         *,
         max_retry: int = 3,
-        min_chars: int | None = None,
-        min_segments: int | None = None,
-        max_age_seconds: float | None = None,
+        flush_max_chars: int = 2000,
+        flush_max_segments: int = 20,
+        flush_max_idle_seconds: float = 600,
+        flush_on_idle_seconds: float = 1800,
+        flush_night_window: str = "00:00-06:00",
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self._ledger = ledger
         self._memory = memory
         self._max_retry = max_retry
-        self._min_chars = min_chars
-        self._min_segments = min_segments
-        self._max_age_seconds = max_age_seconds
+        self._flush_max_chars = flush_max_chars
+        self._flush_max_segments = flush_max_segments
+        self._flush_max_idle_seconds = flush_max_idle_seconds
+        self._flush_on_idle_seconds = flush_on_idle_seconds
+        self._flush_night_window = flush_night_window
+        self._now = now or utc_now
         self._states: dict[str, _ControlState] = {}
+
+    # ------------------------------------------------------------------
 
     def _state(self, subject_id: str) -> _ControlState:
         state = self._states.get(subject_id)
@@ -52,6 +91,81 @@ class InProcessMemoryControl(MemoryControlPort):
             state = _ControlState()
             self._states[subject_id] = state
         return state
+
+    def _pending(self, subject_id: str):
+        memory_start = self._ledger.consumer_cursor(subject_id, ConsumerKind.MEMORY)
+        return self._ledger.list_experiences(subject_id, after_sequence=memory_start)
+
+    def build_batch(self, subject_id: str) -> MemoryBatch | None:
+        """取 memory_start 之后的未投递段，构造 MemoryBatch；无未投递段返回 None。"""
+        pending = self._pending(subject_id)
+        if not pending:
+            return None
+        experiences = tuple(
+            MemoryExperience(
+                subject_id=subject_id,
+                text=_experience_text(segment),
+                objects=dict(segment.objects or {}),
+                source_ids=tuple(segment.source_ids),
+                occurred_at=segment.occurred_at,
+                segment_id=segment.segment_id,
+                origin=_origin_for(segment.output_kind),
+            )
+            for segment in pending
+        )
+        source_ids = tuple(
+            dict.fromkeys(
+                source_id
+                for segment in pending
+                for source_id in (segment.segment_id, *segment.source_ids)
+            )
+        )
+        return MemoryBatch(
+            batch_id=new_id(),
+            subject_id=subject_id,
+            experiences=experiences,
+            from_sequence=pending[0].sequence,
+            to_sequence=pending[-1].sequence,
+            source_ids=source_ids,
+        )
+
+    # ------------------------------------------------------------------
+    # 触发策略（Jshi_memory design/220）
+    # ------------------------------------------------------------------
+
+    def _flush_reason(self, subject_id: str, pending) -> str | None:
+        now = self._now()
+        state = self._state(subject_id)
+        chars = sum(len(segment.text_raw or "") for segment in pending)
+        if chars >= self._flush_max_chars:
+            return "flush_max_chars"
+        if len(pending) >= self._flush_max_segments:
+            return "flush_max_segments"
+        if state.last_flush_at is not None:
+            idle_since_flush = (now - state.last_flush_at).total_seconds()
+            if idle_since_flush >= self._flush_max_idle_seconds:
+                return "flush_max_idle"
+        newest = max(segment.occurred_at for segment in pending)
+        if (now - newest).total_seconds() >= self._flush_on_idle_seconds:
+            return "flush_on_idle"
+        if self._in_night_window(now):
+            return "flush_night_window"
+        return None
+
+    def _in_night_window(self, now: datetime) -> bool:
+        raw = (self._flush_night_window or "").strip()
+        if not raw or "-" not in raw:
+            return False
+        try:
+            start, end = _window_minutes(raw)
+        except ValueError:
+            return False
+        current = now.hour * 60 + now.minute
+        if start <= end:
+            return start <= current <= end
+        return current >= start or current <= end  # 跨午夜时段
+
+    # ------------------------------------------------------------------
 
     def evaluate(self, subject_id: str) -> MemoryTriggerDecision:
         state = self._state(subject_id)
@@ -65,44 +179,32 @@ class InProcessMemoryControl(MemoryControlPort):
                 should_trigger=False,
                 reason="max_retry_reached",
             )
-
-        batch = self._ledger.build_memory_batch(
-            subject_id,
-            min_chars=self._min_chars,
-            min_segments=self._min_segments,
-            max_age_seconds=self._max_age_seconds,
-        )
-        if batch is None:
+        pending = self._pending(subject_id)
+        if not pending:
+            return MemoryTriggerDecision(
+                should_trigger=False,
+                reason="insufficient_memory_data",
+            )
+        reason = self._flush_reason(subject_id, pending)
+        if reason is None:
             return MemoryTriggerDecision(
                 should_trigger=False,
                 reason="insufficient_memory_data",
             )
         return MemoryTriggerDecision(
             should_trigger=True,
-            reason="memory_batch_ready",
-            from_sequence=batch.from_sequence,
-            to_sequence=batch.to_sequence,
+            reason=reason,
+            from_sequence=pending[0].sequence,
+            to_sequence=pending[-1].sequence,
         )
 
     def run_once(self, subject_id: str) -> MemoryControlResult:
         decision = self.evaluate(subject_id)
         if not decision.should_trigger:
-            return MemoryControlResult(
-                decision=decision,
-                status="skipped",
-            )
-
-        batch = self._ledger.build_memory_batch(
-            subject_id,
-            min_chars=self._min_chars,
-            min_segments=self._min_segments,
-            max_age_seconds=self._max_age_seconds,
-        )
+            return MemoryControlResult(decision=decision, status="skipped")
+        batch = self.build_batch(subject_id)
         if batch is None:
-            return MemoryControlResult(
-                decision=decision,
-                status="skipped",
-            )
+            return MemoryControlResult(decision=decision, status="skipped")
 
         entry = self._ledger.register_ingest(batch)
         self._ledger.mark_ingesting(entry.ingest_id)
@@ -110,28 +212,25 @@ class InProcessMemoryControl(MemoryControlPort):
         state.previous_status = "ingesting"
         try:
             result = self._memory.ingest_batch(batch)
-            consumed = result.consumed_through_sequence
-            if consumed <= 0:
-                raise RuntimeError("memory backend returned no consumed sequence")
+            consumed = self._consumed_sequence(batch, result.stored_marks)
             self._ledger.advance_consumer_cursor(
-                subject_id,
-                ConsumerKind.MEMORY,
-                through_sequence=consumed,
+                subject_id, ConsumerKind.MEMORY, through_sequence=consumed
             )
             self._ledger.mark_ingested(
                 entry.ingest_id,
-                memory_event_ids=result.memory_event_ids,
+                memory_event_ids=result.sealed_event_ids,
                 stored_marks=result.stored_marks,
             )
             state.previous_status = "idle"
             state.attempts = 0
             state.last_error = ""
+            state.last_flush_at = self._now()
             return MemoryControlResult(
                 decision=decision,
                 status="ingested",
                 ingest_id=entry.ingest_id,
             )
-        except Exception as exc:  # 失败隔离：保留原文，允许重试
+        except Exception as exc:  # 失败隔离：保留原文与批次，允许重试
             state.previous_status = "failed"
             state.attempts += 1
             state.last_error = str(exc)
@@ -142,6 +241,27 @@ class InProcessMemoryControl(MemoryControlPort):
                 ingest_id=entry.ingest_id,
                 error=str(exc),
             )
+
+    def _consumed_sequence(self, batch: MemoryBatch, stored_marks) -> int:
+        """凭 stored_marks 推进游标：推进到后端已接管的最远段。
+
+        - 有 stored_marks：按封存段计算（未封存段内容已由后端缓冲持有，30 越过）；
+        - 无 stored_marks（整批未封存）：推进到批次末端（后端已接管全部，等待闭环）。
+        """
+        sequences = [
+            batch.from_sequence + index
+            for index in range(len(batch.experiences))
+        ]
+        by_segment = {
+            experience.segment_id: sequence
+            for experience, sequence in zip(batch.experiences, sequences)
+        }
+        covered = [
+            sequence
+            for segment_id, sequence in by_segment.items()
+            if segment_id in stored_marks
+        ]
+        return max(covered) if covered else batch.to_sequence
 
     def monitor(self, subject_id: str) -> MemoryProcessStatus:
         state = self._state(subject_id)

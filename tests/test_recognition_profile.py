@@ -8,7 +8,6 @@ from __future__ import annotations
 import pytest
 
 from jshi.identity import IdentityProfile, IdentityRepository
-from jshi.experienceledger import OutputKind
 from jshi.models import ModelRequest, ModelResponse, ObjectAssessment
 from jshi.recognition import (
     CarrierEntry,
@@ -402,31 +401,7 @@ def test_duplicate_names_close_scores_are_blocked(tmp_path):
     assert len(process.profiles.list()) == 2
 
 
-def test_normalize_text_replaces_speaker_and_wo():
-    from jshi.recognition import normalize_text
-
-    out = normalize_text(
-        "小明：今天很累，我决定休息。我们明天见。",
-        speaker_id="OBJ-A",
-        subject_id="stone",
-        speaker_names=("小明", "阿明"),
-    )
-    assert out == "OBJ-A：今天很累，OBJ-A决定休息。我们明天见。"
-
-
-def test_normalize_text_subject_mentioned_and_unresolved():
-    from jshi.recognition import normalize_text
-
-    out = normalize_text(
-        "我觉得小王的建议不错，李四也这么说。",
-        speaker_id="stone",
-        subject_id="stone",
-        mentioned={"小王": "OBJ-W"},
-    )
-    assert out == "stone觉得OBJ-W的建议不错，李四也这么说。"
-
-
-def test_experience_normalizes_text_after_landing(tmp_path):
+def test_experience_carries_objects_mapping(tmp_path):
     process, repository = runtime(tmp_path)
     process.profiles.create(
         ObjectProfile(
@@ -438,19 +413,17 @@ def test_experience_normalizes_text_after_landing(tmp_path):
         )
     )
     process.experience(
-        "stone", "阿明：今天很累，我决定休息。", object_ref="小明"
+        "stone",
+        "阿明：今天很累，我决定休息。",
+        object_ref="小明",
+        objects={"小明": "OBJ-A", "阿明": "OBJ-A"},
     )
     facts = repository.list_history("stone", HistoryKind.FACT)
     landing = next(item for item in facts if item.event_type == "external_input")
     assert landing.content["text"] == "阿明：今天很累，我决定休息。"
-    assert landing.content["normalized_text"] == (
-        "OBJ-A：今天很累，OBJ-A决定休息。"
-    )
-    segment = next(
-        item
-        for item in process.activity_ledger.list_experiences("stone")
-        if item.output_kind == OutputKind.EXTERNAL_INPUT
-    )
+    assert landing.content["objects"] == {"小明": "OBJ-A", "阿明": "OBJ-A"}
+    assert "normalized_text" not in landing.content
+    segment = process.activity_ledger.list_experiences("stone")[0]
     assert segment.text_raw == "阿明：今天很累，我决定休息。"
-    assert segment.text_normalized == "OBJ-A：今天很累，OBJ-A决定休息。"
+    assert segment.objects == {"小明": "OBJ-A", "阿明": "OBJ-A"}
 

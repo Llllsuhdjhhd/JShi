@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 from jshi.activezone import (
     ActiveZonePort,
@@ -65,7 +65,6 @@ from jshi.recognition import (
     ObjectRecognitionPort,
     ProfileObjectRecognition,
     SpeakerCandidate,
-    normalize_text,
 )
 from jshi.reflection import PlaceholderReflection, ReflectionPort
 
@@ -127,15 +126,6 @@ class AssembledCurrentState:
     source_report: tuple[SourceLoadReport, ...] = ()
     speaker: AssemblySpeaker | None = None
 
-    @property
-    def active_event_ids(self) -> tuple[str, ...]:
-        """兼容旧名称：实际是活动段 id。"""
-        return self.active_segment_ids
-
-    @property
-    def active_zone(self) -> ContextViewState:
-        return self.context_view
-
 
 @dataclass(frozen=True)
 class SubjectPreview:
@@ -144,10 +134,6 @@ class SubjectPreview:
     speaker: SpeakerCandidate
     context_view: ContextViewState
     assembled: AssembledCurrentState
-
-    @property
-    def active_zone(self) -> ContextViewState:
-        return self.context_view
 
 
 @dataclass(frozen=True)
@@ -307,6 +293,7 @@ class SubjectProcess:
         object_ref: str | None = None,
         channel: str | None = None,
         carriers: tuple[CarrierEntry, ...] = (),
+        objects: Mapping[str, str] | None = None,
     ) -> SubjectActivityResult:
         # 阶段① 对象必填校验 → 对象解析 → 置信度门禁 → 落位
         self._require_object_source(object_ref, channel, carriers)
@@ -336,20 +323,13 @@ class SubjectProcess:
             raise ValueError(
                 f"object confidence too low: {speaker.confidence:.2f}"
             )
-        normalized = normalize_text(
-            text,
-            speaker_id=speaker.object_id,
-            subject_id=subject_id,
-            speaker_names=(speaker.label, *speaker.aliases),
-            mentioned=self._mentioned_names(speaker.mentioned_object_ids),
-        )
         fact = HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.FACT,
             event_type="external_input",
             content={
                 "text": text,
-                "normalized_text": normalized,
+                "objects": dict(objects or {}),
                 "source": speaker.label,
                 "object_id": speaker.object_id,
                 "object_status": speaker.status,
@@ -363,7 +343,7 @@ class SubjectProcess:
             subject_id,
             actor_object_id=speaker.actor_object_id,
             text_raw=text,
-            text_normalized=normalized,
+            objects=objects,
             source_ids=(fact.id,),
             mentioned_object_ids=speaker.mentioned_object_ids,
         )
@@ -561,11 +541,6 @@ class SubjectProcess:
             self.activity_ledger.append_subject_reply(
                 subject_id,
                 text_raw=spoken_text,
-                text_normalized=normalize_text(
-                    spoken_text,
-                    speaker_id=subject_id,
-                    subject_id=subject_id,
-                ),
                 source_ids=(activity.id, *(item for item in (action_id,) if item)),
                 response_plan=plan_payload,
                 response_statuses=final_statuses,
@@ -846,21 +821,6 @@ class SubjectProcess:
             self.object_system.deny(speaker.object_id)
             updated = replace(speaker, status="rejected", confidence=0.0)
         return updated
-
-    def _mentioned_names(
-        self,
-        mentioned_object_ids: tuple[str, ...],
-    ) -> dict[str, str]:
-        """把上游传入的提及对象 id 解析为「名字 / 称呼 → object_id」，供归一化替换。"""
-        mapping: dict[str, str] = {}
-        for object_id in mentioned_object_ids:
-            profile = self.profiles.get(object_id)
-            if profile is None:
-                continue
-            for name in (profile.label, *profile.aliases):
-                if name:
-                    mapping[name] = object_id
-        return mapping
 
     def _match_object_by_memory(
         self,
@@ -1158,27 +1118,6 @@ class SubjectProcess:
             )
         )
         return item
-
-    def propose_open_matter(
-        self,
-        subject_id: str,
-        content: str,
-        *,
-        source_ids: tuple[str, ...],
-    ) -> PersonalItem:
-        """Record subject-facing open matter after cognition, with required sources.
-
-        This is never called by assemble_current_state. Call it only once a
-        cognitive result (or human judgment) has identified unfinished follow-through.
-        """
-        if not source_ids:
-            raise ValueError(
-                "Subject-facing open matter requires source_ids "
-                "(cognitive content or fact ids)"
-            )
-        return self.add_personal_item(
-            subject_id, PersonalKind.CONCERN, content, source_ids=source_ids
-        )
 
     def close_personal_item(
         self, item_id: str, status: PersonalStatus, reason: str

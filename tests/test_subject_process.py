@@ -48,7 +48,7 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
     assert result.activity.status is ActivityStatus.COMPLETED
     assert result.response_plan.mode == "respond"
     assert result.action_text
-    assert result.current_state.active_event_ids == ()
+    assert result.current_state.active_segment_ids == ()
     facts = repository.list_history("stone", HistoryKind.FACT)
     subject = repository.list_history("stone", HistoryKind.SUBJECT)
     assert [item.event_type for item in facts] == [
@@ -67,29 +67,21 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
     assert "cognitive_content_appeared" not in types
 
 
-def test_assemble_loads_existing_open_matter_only(tmp_path):
+def test_assemble_loads_existing_commitments_only(tmp_path):
     process, repository = runtime(tmp_path)
-    open_matter = process.propose_open_matter(
+    commitment = process.add_personal_item(
         "stone",
-        "继续理解朋友最近的疲倦",
-        source_ids=("seed-source",),
+        PersonalKind.COMMITMENT,
+        "下次继续询问他的近况",
     )
+    process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
 
     assembled = process.assemble_current_state("stone", "今天先聊到这里")
 
-    assert assembled.subject_state.concerns == ()
-    assert not any(fragment.kind == "concern" for fragment in assembled.fragments)
-    assert not any(
-        fragment.id.endswith(open_matter.id) for fragment in assembled.fragments
-    )
+    assert commitment.content in assembled.subject_state.commitments
+    assert "优先坦率表达" in assembled.subject_state.salient_values
     # Assembly must not create new personal items.
-    assert len(repository.list_personal_items("stone", PersonalKind.CONCERN)) == 1
-
-
-def test_propose_open_matter_requires_sources(tmp_path):
-    process, _repository = runtime(tmp_path)
-    with pytest.raises(ValueError, match="source_ids"):
-        process.propose_open_matter("stone", "无来源的跟进", source_ids=())
+    assert len(repository.list_personal_items("stone")) == 2
 
 
 def test_epistemic_transition_preserves_revision_history(tmp_path):
@@ -121,13 +113,8 @@ def test_epistemic_transition_preserves_revision_history(tmp_path):
         )
 
 
-def test_open_matter_and_commitment_persist_and_close_explicitly(tmp_path):
+def test_commitment_persists_and_closes_explicitly(tmp_path):
     process, repository = runtime(tmp_path)
-    concern = process.propose_open_matter(
-        "stone",
-        "继续理解朋友最近的疲倦",
-        source_ids=("manual-seed",),
-    )
     commitment = process.add_personal_item(
         "stone", PersonalKind.COMMITMENT, "下次继续询问他的近况"
     )
@@ -135,21 +122,12 @@ def test_open_matter_and_commitment_persist_and_close_explicitly(tmp_path):
     result = process.experience("stone", "今天先聊到这里", object_ref="user")
     assert commitment.content in result.action_text
 
-    closed_open = process.close_personal_item(
-        concern.id, PersonalStatus.RELEASED, "暂时放下，改日再问"
-    )
     closed = process.close_personal_item(
         commitment.id, PersonalStatus.COMPLETED, "已经在后续交流中履行"
     )
-    assert closed_open.status is PersonalStatus.RELEASED
     assert closed.status is PersonalStatus.COMPLETED
     assert repository.list_personal_items("stone", PersonalKind.COMMITMENT) == ()
-    assert repository.list_personal_items("stone", PersonalKind.CONCERN) == ()
     assert repository.list_transitions(commitment.id)[0].reason == "已经在后续交流中履行"
-
-    later = process.assemble_current_state("stone", "又见面了")
-    # 关闭后不再作为未完成现实进入主体状态（完成事件可作为背景保留）
-    assert later.subject_state.concerns == ()
 
 
 def test_same_cognition_forms_different_outputs_from_personal_world(tmp_path):
@@ -185,15 +163,3 @@ def test_reflection_is_internal_cognition_not_external_fact(tmp_path):
     assert reflections[-1].content["cognitive_content_id"] == reflection.id
 
 
-def test_propose_open_matter_after_experience_links_activity(tmp_path):
-    process, repository = runtime(tmp_path)
-    result = process.experience("stone", "他看起来很累", object_ref="user")
-    open_matter = process.propose_open_matter(
-        "stone",
-        "继续关心他的疲倦",
-        source_ids=(result.activity.id,),
-    )
-    assert open_matter.source_ids == (result.activity.id,)
-    assert repository.list_history("stone", HistoryKind.SUBJECT)[-1].event_type == (
-        "personal_item_created"
-    )

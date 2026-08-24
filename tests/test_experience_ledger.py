@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from jshi.experienceledger import (
     ActorKind,
@@ -6,6 +6,7 @@ from jshi.experienceledger import (
     InProcessExperienceLedger,
     OutputKind,
 )
+from jshi.memory import MemoryBatch
 
 
 def test_append_external_sequence_and_head():
@@ -55,24 +56,26 @@ def test_apply_merges_pending_into_context_view():
     assert ledger.list_experiences("stone")[-1].segment_id == reply.segment_id
 
 
-def test_trim_applies_to_view_the_model_saw_then_merges_pending():
+def test_remove_drops_segment_and_merges_pending():
     from jshi.experienceledger import ContextAssessment
 
     ledger = InProcessExperienceLedger()
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="第一句。第二句。")
-    ledger.apply_context_assessment("stone")
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="新来的。")
+    first = ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="第一句。")
+    second = ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="第二句。")
+    third = ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="新来的。")
 
     view = ledger.apply_context_assessment(
         "stone",
-        ContextAssessment(need_trim=True, trim_refs=("2",)),
+        ContextAssessment(remove=(second.segment_id,)),
         allow_edit=True,
     )
 
     assert "第一句。" in view.context_text
     assert "第二句。" not in view.context_text
     assert "新来的。" in view.context_text
-    assert view.excluded_sentence_refs
+    assert first.segment_id in view.segment_refs
+    assert second.segment_id not in view.segment_refs
+    assert third.segment_id in view.segment_refs
 
 
 def test_apply_keeps_recall_excerpts_and_speaker():
@@ -91,7 +94,7 @@ def test_apply_keeps_recall_excerpts_and_speaker():
 
     trimmed = ledger.apply_context_assessment(
         "stone",
-        ContextAssessment(need_trim=True, trim_refs=("memory:e1",)),
+        ContextAssessment(drop_recall=("memory:e1",)),
         speaker_object_id="OBJ-A",
         protected_refs=("object:OBJ-A",),
     )
@@ -107,92 +110,11 @@ def test_trim_does_not_drop_protected_object():
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="你好。")
     view = ledger.apply_context_assessment(
         "stone",
-        ContextAssessment(need_trim=True, trim_refs=("object:OBJ-A",)),
+        ContextAssessment(remove=("object:OBJ-A",)),
         speaker_object_id="OBJ-A",
         protected_refs=("object:OBJ-A",),
     )
     assert view.speaker_object_id == "OBJ-A"
-
-
-def test_memory_batch_does_not_change_context_view():
-    ledger = InProcessExperienceLedger(memory_batch_segments=1)
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="你好。")
-    before = ledger.apply_context_assessment("stone")
-
-    batch = ledger.build_memory_batch("stone")
-    assert batch is not None
-    after = ledger.current_context_view("stone")
-
-    assert after == before
-
-
-def test_memory_batch_not_built_below_threshold():
-    ledger = InProcessExperienceLedger(
-        memory_batch_chars=1000,
-        memory_batch_segments=3,
-    )
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="a")
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="b")
-
-    assert ledger.build_memory_batch("stone") is None
-
-
-def test_memory_batch_covers_only_new_segments():
-    ledger = InProcessExperienceLedger(
-        memory_batch_chars=1000,
-        memory_batch_segments=2,
-    )
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="two")
-
-    batch = ledger.build_memory_batch("stone")
-
-    assert batch is not None
-    assert batch.from_sequence == 1
-    assert batch.to_sequence == 2
-    assert ledger.consumer_cursor("stone", ConsumerKind.MEMORY) == 0
-
-
-def test_memory_batch_advance_then_next_batch_is_incremental():
-    ledger = InProcessExperienceLedger(
-        memory_batch_chars=1000,
-        memory_batch_segments=2,
-    )
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="two")
-    first = ledger.build_memory_batch("stone")
-    assert first is not None
-
-    ledger.advance_consumer_cursor(
-        "stone", ConsumerKind.MEMORY, through_sequence=first.to_sequence
-    )
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="three")
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="four")
-
-    second = ledger.build_memory_batch("stone")
-
-    assert second is not None
-    assert second.from_sequence == 3
-    assert second.to_sequence == 4
-
-
-def test_object_ids_are_external_plus_mentioned_not_subject():
-    ledger = InProcessExperienceLedger(
-        memory_batch_chars=10,
-        memory_batch_segments=1,
-    )
-    ledger.append_external(
-        "stone",
-        actor_object_id="OBJ-A",
-        mentioned_object_ids=("OBJ-B",),
-        text_raw="他提到你",
-    )
-
-    batch = ledger.build_memory_batch("stone")
-
-    assert batch is not None
-    assert batch.object_ids == ("OBJ-A", "OBJ-B")
-    assert "stone" not in batch.object_ids
 
 
 def test_safe_trim_point_is_min_cursor():
@@ -216,10 +138,14 @@ def test_safe_trim_point_is_min_cursor():
 
 
 def test_ingest_ledger_state_machine():
-    ledger = InProcessExperienceLedger(memory_batch_segments=1)
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
-    batch = ledger.build_memory_batch("stone")
-    assert batch is not None
+    ledger = InProcessExperienceLedger()
+    batch = MemoryBatch(
+        batch_id="batch-1",
+        subject_id="stone",
+        experiences=(),
+        from_sequence=1,
+        to_sequence=1,
+    )
 
     entry = ledger.register_ingest(batch)
     assert entry.status == "pending"
@@ -230,11 +156,11 @@ def test_ingest_ledger_state_machine():
     ingested = ledger.mark_ingested(
         ingesting.ingest_id,
         memory_event_ids=("me-1",),
-        stored_marks={"event-1": "me-1"},
+        stored_marks={"seg-1": ["me-1"]},
     )
     assert ingested.status == "ingested"
     assert ingested.memory_event_ids == ("me-1",)
-    assert ingested.stored_marks == {"event-1": "me-1"}
+    assert ingested.stored_marks == {"seg-1": ["me-1"]}
 
 
 def test_subject_reply_is_appended_to_same_log():
@@ -288,48 +214,14 @@ def test_subject_silent_is_logged():
     assert silent.state_delta is None
 
 
-def test_memory_batch_includes_reply_state_and_keeps_subject_out_of_objects():
-    ledger = InProcessExperienceLedger(
-        memory_batch_chars=10,
-        memory_batch_segments=3,
-    )
-    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="你好")
-    ledger.append_subject_reply(
-        "stone",
-        text_raw="我在。",
-        mentioned_object_ids=("OBJ-B",),
-    )
-    ledger.append_subject_state(
-        "stone",
-        state_delta={"from": "considering", "to": "accepted"},
-    )
-
-    batch = ledger.build_memory_batch("stone")
-
-    assert batch is not None
-    assert batch.from_sequence == 1
-    assert batch.to_sequence == 3
-    assert batch.object_ids == ("OBJ-A", "OBJ-B")
-    assert "stone" not in batch.object_ids
-    assert [segment.output_kind for segment in batch.segments] == [
-        OutputKind.EXTERNAL_INPUT,
-        OutputKind.SUBJECT_REPLY,
-        OutputKind.SUBJECT_STATE,
-    ]
-
-
-def test_segment_carries_normalized_text():
-    ledger = InProcessExperienceLedger(memory_batch_segments=1)
+def test_segment_carries_objects_mapping():
+    ledger = InProcessExperienceLedger()
     ledger.append_external(
         "stone",
         actor_object_id="OBJ-A",
         text_raw="小明：你好",
-        text_normalized="OBJ-A：你好",
+        objects={"小明": "OBJ-A", "小刚": "OBJ-B"},
     )
     segment = ledger.list_experiences("stone")[-1]
     assert segment.text_raw == "小明：你好"
-    assert segment.text_normalized == "OBJ-A：你好"
-
-    batch = ledger.build_memory_batch("stone")
-    assert batch is not None
-    assert batch.segments[0].text_normalized == "OBJ-A：你好"
+    assert segment.objects == {"小明": "OBJ-A", "小刚": "OBJ-B"}

@@ -3,7 +3,6 @@ from .port import (
     MemoryBatchIngestPort,
     MemoryControlPort,
     MemoryControlResult,
-    MemoryIngestResult,
     MemoryProcessStatus,
     MemoryTriggerDecision,
 )
@@ -13,7 +12,6 @@ __all__ = [
     "MemoryBatchIngestPort",
     "MemoryControlPort",
     "MemoryControlResult",
-    "MemoryIngestResult",
     "MemoryProcessStatus",
     "MemoryTriggerDecision",
 ]

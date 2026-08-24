@@ -1,10 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol, Sequence
+from typing import Protocol
 
-from jshi.experienceledger import ExperienceLedgerPort, MemoryBatch
+from jshi.experienceledger import ExperienceLedgerPort
+from jshi.memory.contracts import BackendIngestResult, MemoryBatch
 
 
 def utc_now() -> datetime:
@@ -17,13 +18,6 @@ class MemoryTriggerDecision:
     reason: str
     from_sequence: int = 0
     to_sequence: int = 0
-
-
-@dataclass(frozen=True)
-class MemoryIngestResult:
-    consumed_through_sequence: int
-    memory_event_ids: tuple[str, ...] = ()
-    stored_marks: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -44,10 +38,10 @@ class MemoryControlResult:
 
 
 class MemoryBatchIngestPort(Protocol):
-    """09 薄壳待实现：接收 MemoryBatch，返回接管结果。"""
+    """09 薄壳：接收 MemoryBatch，返回后端接管结果。"""
 
-    def ingest_batch(self, batch: MemoryBatch) -> MemoryIngestResult:
-        """把批次交给后端；确认接管后返回 consumed_through_sequence。"""
+    def ingest_batch(self, batch: MemoryBatch) -> BackendIngestResult:
+        """把批次交给后端；返回 stored_marks / sealed_event_ids 等结果。"""
 
 
 class MemoryControlPort(Protocol):

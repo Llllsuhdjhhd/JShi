@@ -139,7 +139,6 @@ class CurrentStateAssembler:
                 if fragment.source == "personal"
                 and fragment.kind == "commitment"
             ),
-            concerns=(),
             provenance=Provenance(
                 source="assembled_current_state",
                 method="load_existing_only",

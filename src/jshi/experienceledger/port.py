@@ -3,8 +3,11 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Mapping, Protocol, Sequence
+from typing import TYPE_CHECKING, Mapping, Protocol, Sequence
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from jshi.memory.contracts import MemoryBatch
 
 
 def utc_now() -> datetime:
@@ -52,7 +55,7 @@ class ExperienceSegment:
     mentioned_object_ids: tuple[str, ...]
     text_raw: str | None
     state_delta: Mapping[str, object] | None
-    text_normalized: str | None = None
+    objects: Mapping[str, str] | None = None  # 对象映射表：名字/称呼 → object_id（与是否说话无关）
     response_plan: Mapping[str, object] | None = None
     response_statuses: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
@@ -63,39 +66,25 @@ class ExperienceSegment:
 @dataclass(frozen=True)
 class ContextViewState:
     version: int = 0
-    context_text: str = ""
+    context_text: str = ""               # 派生：按 segment_refs + recall_excerpts 渲染
     segment_refs: tuple[str, ...] = ()
     recall_excerpts: tuple[tuple[str, str], ...] = ()
     speaker_object_id: str | None = None
-    excluded_sentence_refs: tuple[str, ...] = ()
-    focused_refs: tuple[str, ...] = ()
+    focused_refs: tuple[str, ...] = ()   # 段级聚焦引用
     last_applied_sequence: int = 0
 
 
 @dataclass(frozen=True)
 class ContextAssessment:
-    need_trim: bool = False
-    need_focus: bool = False
-    trim_refs: tuple[str, ...] = ()
-    focus_refs: tuple[str, ...] = ()
+    """05 的上下文补丁：段级删除 / 回忆摘录删除 / 聚焦（省 token，不重写全文）。"""
+
+    remove: tuple[str, ...] = ()       # 段 id 或 memory:ref
+    drop_recall: tuple[str, ...] = ()  # 仅回忆摘录（memory:ref），低价值建议删除
+    focus: tuple[str, ...] = ()        # 段 id（聚焦）
 
 
 def empty_context_view() -> ContextViewState:
     return ContextViewState()
-
-
-@dataclass(frozen=True)
-class MemoryBatch:
-    batch_id: str
-    subject_id: str
-    external_object_id: str | None
-    object_ids: tuple[str, ...]
-    object_sources: Mapping[str, tuple[str, ...]]
-    from_sequence: int
-    to_sequence: int
-    segments: tuple[ExperienceSegment, ...]
-    source_ids: tuple[str, ...]
-    created_at: datetime = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True)
@@ -118,7 +107,7 @@ class ExperienceLedgerPort(Protocol):
         *,
         actor_object_id: str,
         text_raw: str,
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         mentioned_object_ids: Sequence[str] = (),
         source_ids: Sequence[str] = (),
         occurred_at: datetime | None = None,
@@ -129,7 +118,7 @@ class ExperienceLedgerPort(Protocol):
         subject_id: str,
         *,
         text_raw: str,
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         state_delta: Mapping[str, object] | None = None,
@@ -143,7 +132,7 @@ class ExperienceLedgerPort(Protocol):
         subject_id: str,
         *,
         state_delta: Mapping[str, object],
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         response_plan: Mapping[str, object] | None = None,
@@ -155,7 +144,7 @@ class ExperienceLedgerPort(Protocol):
         self,
         subject_id: str,
         *,
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
         response_plan: Mapping[str, object] | None = None,
@@ -168,7 +157,7 @@ class ExperienceLedgerPort(Protocol):
         subject_id: str,
         *,
         text_raw: str | None = None,
-        text_normalized: str | None = None,
+        objects: Mapping[str, str] | None = None,
         state_delta: Mapping[str, object] | None = None,
         source_ids: Sequence[str] = (),
         mentioned_object_ids: Sequence[str] = (),
@@ -201,15 +190,6 @@ class ExperienceLedgerPort(Protocol):
         *,
         limit_chars: int | None = None,
     ) -> tuple[ExperienceSegment, ...]: ...
-
-    def build_memory_batch(
-        self,
-        subject_id: str,
-        *,
-        min_chars: int | None = None,
-        min_segments: int | None = None,
-        max_age_seconds: float | None = None,
-    ) -> MemoryBatch | None: ...
 
     def advance_consumer_cursor(
         self,

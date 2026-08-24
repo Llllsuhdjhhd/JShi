@@ -78,7 +78,7 @@ class InProcessPersonalWorld:
         ordinary: list[PersonalItem] = []
         for module in self._modules:
             for item in module.list_ordered(subject_id):
-                if item.kind is PersonalKind.CONCERN or item.id in seen:
+                if item.id in seen:
                     continue
                 seen.add(item.id)
                 ordinary.append(item)
@@ -89,7 +89,7 @@ class InProcessPersonalWorld:
         items: list[PersonalItem] = []
         for module in self._modules:
             for item in module.list_standing(subject_id):
-                if item.kind is PersonalKind.CONCERN or item.id in seen:
+                if item.id in seen:
                     continue
                 seen.add(item.id)
                 items.append(item)

@@ -5,7 +5,6 @@ from .port import (
     ObjectRecognitionPort,
     ProfileObjectRecognition,
     SpeakerCandidate,
-    normalize_text,
 )
 from .profile import CarrierEntry, ObjectProfile, ObjectProfileRepository, new_object_id
 
@@ -18,5 +17,4 @@ __all__ = [
     "ProfileObjectRecognition",
     "SpeakerCandidate",
     "new_object_id",
-    "normalize_text",
 ]

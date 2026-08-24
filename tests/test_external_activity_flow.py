@@ -97,7 +97,7 @@ def test_phase1_input_fact_is_recorded_first(runtime):
 
 
 def test_phase2_assembly_loads_all_personal_world_systems(runtime):
-    process, repository, _model, _identities = runtime
+    process, _repository, _model, _identities = runtime
     process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
     process.add_personal_item("stone", PersonalKind.COMMITMENT, "下次继续询问近况")
     process.add_personal_item("stone", PersonalKind.RELATIONSHIP, "与朋友的信任在加深")
@@ -105,9 +105,6 @@ def test_phase2_assembly_loads_all_personal_world_systems(runtime):
     process.add_personal_item("stone", PersonalKind.AESTHETIC, "喜欢朴素真诚的表达")
     process.add_personal_item(
         "stone", PersonalKind.SELF_UNDERSTANDING, "还在学习如何拒绝"
-    )
-    concern = process.propose_open_matter(
-        "stone", "继续理解朋友的疲倦", source_ids=("seed",)
     )
     process.experience("stone", "先打个招呼", object_ref="user")  # 为召回预置一段事实历史
 
@@ -123,11 +120,7 @@ def test_phase2_assembly_loads_all_personal_world_systems(runtime):
     # 个人世界系统
     assert "优先坦率表达" in state.salient_values
     assert "下次继续询问近况" in state.commitments
-    assert state.concerns == ()
-    assert not any(fragment.kind == "concern" for fragment in assembled.fragments)
     assert len(assembled.personal_items) == 6
-    # 未完成现实本轮不进工作集；档案仍在
-    assert len(repository.list_personal_items("stone", PersonalKind.CONCERN)) == 1
     # 阶段③ 不做全量文本召回：初始工作集不携带 recalled 片段（追加召回在认知阶段）
     assert assembled.recalled == ()
 
@@ -210,9 +203,6 @@ def test_phase4_model_request_receives_subject_state_and_context(runtime):
     process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
     process.add_personal_item("stone", PersonalKind.COMMITMENT, "下次继续询问近况")
     process.add_personal_item("stone", PersonalKind.AESTHETIC, "喜欢朴素真诚的表达")
-    concern = process.propose_open_matter(
-        "stone", "继续理解朋友的疲倦", source_ids=("seed",)
-    )
     process.experience("stone", "先打个招呼", object_ref="user")  # 预置召回
 
     result = process.experience("stone", "今天有些疲倦", object_ref="user")
@@ -222,13 +212,6 @@ def test_phase4_model_request_receives_subject_state_and_context(runtime):
     assert request.input_text == "今天有些疲倦"
     assert request.subject_state.subject_id == "stone"
     assert "优先坦率表达" in request.subject_state.salient_values
-    assert not any(
-        fragment.kind == "concern" for fragment in result.current_state.fragments
-    )
-    personal_report = {
-        item.source: item for item in result.current_state.source_report
-    }["personal"]
-    assert f"personal:{concern.id}" not in personal_report.loaded_ids
     assert result.current_state.speaker is not None
     assert result.current_state.speaker.label == "user"
 
@@ -310,24 +293,24 @@ def test_phase6_epistemic_transition_is_audited(runtime):
     )
 
 
-def test_phase6_proposed_open_matter_persists_into_next_activity(runtime):
+def test_phase6_commitment_persists_into_next_activity(runtime):
     process, repository, _model, _identities = runtime
     result = process.experience("stone", "他看起来很累", object_ref="user")
-    concern = process.propose_open_matter(
-        "stone", "继续关心他的疲倦", source_ids=(result.activity.id,)
+    commitment = process.add_personal_item(
+        "stone",
+        PersonalKind.COMMITMENT,
+        "下次继续关心他的疲倦",
+        source_ids=(result.activity.id,),
     )
 
     later = process.experience("stone", "又见面了", object_ref="user")
     assert later.activity.id != result.activity.id
-    assert later.current_state.subject_state.concerns == ()
-    assert not any(
-        fragment.id.endswith(concern.id) for fragment in later.current_state.fragments
-    )
+    assert commitment.content in later.current_state.subject_state.commitments
 
     # 显式关闭后不再进入后续活动
-    process.close_personal_item(concern.id, PersonalStatus.RELEASED, "暂时放下")
+    process.close_personal_item(commitment.id, PersonalStatus.COMPLETED, "已经履行")
     final = process.experience("stone", "改天再聊", object_ref="user")
-    assert final.current_state.subject_state.concerns == ()
+    assert commitment.content not in final.current_state.subject_state.commitments
 
 
 # 阶段0：应用入口 -----------------------------------------------------------

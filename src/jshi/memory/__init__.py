@@ -1,3 +1,8 @@
+from .contracts import (
+    BackendIngestResult,
+    MemoryBatch,
+    MemoryExperience,
+)
 from .port import (
     InProcessHistoryMemory,
     MemoryPort,
@@ -10,9 +15,12 @@ from .backend import InProcessMemoryBackend, MemoryBackendPort
 from .shell import MemoryShell
 
 __all__ = [
+    "BackendIngestResult",
     "InProcessHistoryMemory",
     "InProcessMemoryBackend",
+    "MemoryBatch",
     "MemoryBackendPort",
+    "MemoryExperience",
     "MemoryPort",
     "MemoryShell",
     "RecallCoordinator",

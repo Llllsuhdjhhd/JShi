@@ -192,8 +192,7 @@ def test_trim_plan_updates_active_zone_without_second_model_call(tmp_path):
                 text="回应",
                 model=self.name,
                 context_assessment=ContextAssessment(
-                    need_trim=True,
-                    trim_refs=("memory:kept-out",),
+                    drop_recall=("memory:kept-out",),
                 ),
             )
 

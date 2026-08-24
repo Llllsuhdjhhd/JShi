@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Mapping, Protocol
+from typing import Callable, Protocol
 
 from .profile import (
     CarrierEntry,
@@ -70,73 +70,6 @@ def memory_confidence(status: str) -> float:
     if status == "confirmed":
         return CONF_MEMORY_CONFIRMED
     return CONF_MEMORY_PROVISIONAL
-
-
-_WO_SKIP_SUFFIXES = frozenset(
-    {
-        "我们",
-        "自我",
-        "无我",
-        "忘我",
-        "本我",
-        "超我",
-        "大我",
-        "小我",
-        "物我",
-        "人我",
-        "一我",
-        "真我",
-        "假我",
-    }
-)
-
-
-def normalize_text(
-    text: str,
-    *,
-    speaker_id: str,
-    subject_id: str,
-    speaker_names: tuple[str, ...] = (),
-    mentioned: Mapping[str, str] | None = None,
-) -> str:
-    """对象归一化：把文本中的「我」、说话人名字 / 称呼、已知提及替换为 id。
-
-    外部输入：speaker_id = 说话人对象 id，「我」→ 说话人；
-    主体回复 / 反思：speaker_id = subject_id，「我」→ 匠石。
-    未识别或消歧失败的提及保持原文（合法状态）；原文由调用方另行保留。
-    「我们 / 自我」等固定搭配不替换，避免误拆。
-    """
-    normalized = _replace_wo(text, speaker_id) if speaker_id else text
-    replacements: list[tuple[str, str]] = [
-        (name, speaker_id)
-        for name in speaker_names
-        if name and name.strip()
-    ]
-    for name, object_id in (mentioned or {}).items():
-        if name and name.strip() and object_id:
-            replacements.append((name, object_id))
-    for name, object_id in sorted(
-        replacements, key=lambda item: len(item[0]), reverse=True
-    ):
-        if name in normalized:
-            normalized = normalized.replace(name, object_id)
-    return normalized
-
-
-def _replace_wo(text: str, speaker_id: str) -> str:
-    """把独立「我」替换为 speaker_id；固定搭配（我们 / 自我…）不替换。"""
-    if not text:
-        return text
-    parts: list[str] = []
-    index = 0
-    while index < len(text):
-        if text[index] == "我" and text[index : index + 2] not in _WO_SKIP_SUFFIXES:
-            parts.append(speaker_id)
-            index += 1
-        else:
-            parts.append(text[index])
-            index += 1
-    return "".join(parts)
 
 
 @dataclass(frozen=True)

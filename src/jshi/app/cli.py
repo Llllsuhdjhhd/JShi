@@ -66,6 +66,12 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         help="识别载体，格式 kind:value，可重复（如 voiceprint:vp-1）",
     )
+    experience.add_argument(
+        "--object",
+        action="append",
+        default=[],
+        help="对象映射表条目，格式 名字:object_id，可重复（如 宝玉:OBJ-BAO）",
+    )
 
     reflect = commands.add_parser(
         "reflect", aliases=["inner"], help="进行一次内部反思"
@@ -84,22 +90,8 @@ def _parser() -> argparse.ArgumentParser:
         help="重要程度（装载时按此排序、预算内截断）",
     )
 
-    propose = commands.add_parser(
-        "propose-open",
-        help="在认知之后记录主体面未完成现实（必须带来源认知或事实标识）",
-    )
-    propose.add_argument("subject_id")
-    propose.add_argument("content")
-    propose.add_argument(
-        "--source",
-        action="append",
-        dest="sources",
-        required=True,
-        help="来源标识，可重复；通常为认知内容 id",
-    )
-
     close = commands.add_parser(
-        "close-personal", help="结束未完成现实（主体面）、承诺等个人内容"
+        "close-personal", help="结束承诺等个人内容"
     )
     close.add_argument("item_id")
     close.add_argument(
@@ -205,12 +197,14 @@ def main() -> None:
     elif args.command in {"experience", "chat"}:
         try:
             carriers = tuple(_parse_carrier(item) for item in args.carrier)
+            objects = _parse_objects(args.object)
             result = process.experience(
                 args.subject_id,
                 args.text,
                 object_ref=args.speaker,
                 channel=args.channel,
                 carriers=carriers,
+                objects=objects,
             )
         except ValueError as exc:
             print(f"错误：{exc}")
@@ -229,13 +223,6 @@ def main() -> None:
             importance=args.importance,
         )
         print(f"已添加：{item.id}")
-    elif args.command == "propose-open":
-        item = process.propose_open_matter(
-            args.subject_id,
-            args.content,
-            source_ids=tuple(args.sources),
-        )
-        print(f"已记录未完成现实（主体面）：{item.id}")
     elif args.command == "close-personal":
         item = process.close_personal_item(
             args.item_id, PersonalStatus(args.status), args.reason
@@ -310,7 +297,6 @@ def main() -> None:
             print("  （空）")
         print(f"价值：{list(assembled.subject_state.salient_values)}")
         print(f"承诺：{list(assembled.subject_state.commitments)}")
-        print(f"未完成现实（主体面）：{list(assembled.subject_state.concerns)}")
         print(f"既往段引用：{list(assembled.context_view.segment_refs)}")
         print("装载报告：")
         for report in assembled.source_report:
@@ -350,6 +336,16 @@ def _parse_carrier(raw: str) -> CarrierEntry:
     if not kind.strip() or not value.strip():
         raise ValueError(f"invalid carrier format: {raw!r} (expected kind:value)")
     return CarrierEntry(kind=kind.strip(), value=value.strip())
+
+
+def _parse_objects(raw: list[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for item in raw:
+        name, _, object_id = item.partition(":")
+        if not name.strip() or not object_id.strip():
+            raise ValueError(f"invalid object mapping: {item!r} (expected 名字:object_id)")
+        mapping[name.strip()] = object_id.strip()
+    return mapping
 
 
 if __name__ == "__main__":

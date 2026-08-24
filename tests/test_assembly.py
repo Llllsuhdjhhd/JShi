@@ -1,6 +1,6 @@
 """03 状态组装测试。
 
-覆盖：五源对接、对象三件套、本轮输入不成分片、concern 跳过、
+覆盖：五源对接、对象三件套、本轮输入不成分片、
 工作集上限不裁常驻、记忆源对象过滤与名字 join、单源失败隔离、
 记账与 preview 只读。
 """
@@ -56,9 +56,6 @@ def runtime(tmp_path, model=None):
 
 def test_process_assembly_builds_fragments_and_report(tmp_path):
     process, _repository, _identities = runtime(tmp_path)
-    process.propose_open_matter(
-        "stone", "继续理解朋友的疲倦", source_ids=("seed",)
-    )
     process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
     process.add_personal_item("stone", PersonalKind.COMMITMENT, "下次继续询问")
 
@@ -101,7 +98,6 @@ def test_process_assembly_builds_fragments_and_report(tmp_path):
     assert result.current_state.speaker is not None
     assert result.current_state.speaker.object_id
     assert result.current_state.input_text == "你好"
-    assert not any(fragment.kind == "concern" for fragment in fragments)
 
 
 def test_activity_window_not_in_personal(tmp_path):
@@ -115,13 +111,7 @@ def test_activity_window_not_in_personal(tmp_path):
         for fragment in result.current_state.fragments
         if fragment.source == "activity"
     ]
-    personal_kinds = {
-        fragment.kind
-        for fragment in result.current_state.fragments
-        if fragment.source == "personal"
-    }
     assert activity_ids
-    assert "concern" not in personal_kinds
 
 
 def test_assembler_does_not_recut_personal_world_selection(tmp_path):

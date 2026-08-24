@@ -2,10 +2,8 @@
 
 from typing import Sequence
 
-from jshi.experienceledger import MemoryBatch
-from jshi.memorycontrol import MemoryIngestResult
-
 from .backend import MemoryBackendPort
+from .contracts import BackendIngestResult, MemoryBatch
 from .port import RecalledFragment
 
 
@@ -50,5 +48,5 @@ class MemoryShell:
             anchor_event_ids=anchor_event_ids,
         )
 
-    def ingest_batch(self, batch: MemoryBatch) -> MemoryIngestResult:
+    def ingest_batch(self, batch: MemoryBatch) -> BackendIngestResult:
         return self._backend.ingest_batch(batch)

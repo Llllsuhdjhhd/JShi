@@ -1,4 +1,4 @@
-"""08 薄壳：合并有序列表、按 id 去重、按等级取量；不装 concern。"""
+"""08 薄壳：合并有序列表、按 id 去重、按等级取量。"""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def runtime(tmp_path):
     return repository, identities
 
 
-def test_select_keeps_module_order_and_drops_concern(runtime):
+def test_select_keeps_module_order(runtime):
     repository, identities = runtime
     world = InProcessPersonalWorld(repository)
     process = SubjectProcess(repository, identities, FixedModel(), personal_world=world)
@@ -48,13 +48,11 @@ def test_select_keeps_module_order_and_drops_concern(runtime):
     process.add_personal_item("stone", PersonalKind.VALUE, "价值乙", importance=0.2)
     process.add_personal_item("stone", PersonalKind.AESTHETIC, "审美")
     commitment = process.add_personal_item("stone", PersonalKind.COMMITMENT, "始终履约")
-    concern = process.propose_open_matter("stone", "继续追问", source_ids=("seed",))
 
     selected = world.select("stone", "朋友")
     ids = [item.id for item in selected]
     kinds = [item.kind for item in selected]
 
-    assert concern.id not in ids
     assert commitment.id in ids
     assert kinds.index(PersonalKind.COMMITMENT) < kinds.index(PersonalKind.VALUE)
     contents = [item.content for item in selected]
@@ -87,12 +85,11 @@ def test_load_level_low_takes_fewer_ordinary_items(runtime):
     assert len(ordinary_low) < len(ordinary_mid)
 
 
-def test_standing_excludes_concern_and_keeps_commitment_and_boundary(runtime):
+def test_standing_keeps_commitment_and_boundary(runtime):
     repository, identities = runtime
     process = SubjectProcess(repository, identities, FixedModel())
     process.add_personal_item("stone", PersonalKind.VALUE, "价值甲")
     commitment = process.add_personal_item("stone", PersonalKind.COMMITMENT, "始终履约")
-    process.propose_open_matter("stone", "继续追问", source_ids=("seed",))
     boundary = PersonalItem(
         subject_id="stone",
         kind=PersonalKind.VALUE,
@@ -106,7 +103,6 @@ def test_standing_excludes_concern_and_keeps_commitment_and_boundary(runtime):
     ids = {item.id for item in constraints}
     assert commitment.id in ids
     assert boundary.id in ids
-    assert not any(item.kind is PersonalKind.CONCERN for item in constraints)
     selected = world.select("stone")
     assert list(ids).count(boundary.id) == 1
     assert [item.id for item in selected].count(boundary.id) == 1

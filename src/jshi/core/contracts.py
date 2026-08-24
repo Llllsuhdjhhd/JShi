@@ -21,8 +21,7 @@ class Provenance:
 class SubjectState:
     """Snapshot passed to the cognitive model for one activity.
 
-    ``concerns`` holds subject-facing open matter texts already stored for this
-    subject (未完成现实·主体面). It must not be invented at assemble time.
+    主体面未完成现实 / concern 已废除（D-007）：快照不携带、不编造跟进义务。
     """
 
     subject_id: str
@@ -30,7 +29,6 @@ class SubjectState:
     current_stance: str
     salient_values: tuple[str, ...] = ()
     commitments: tuple[str, ...] = ()
-    concerns: tuple[str, ...] = ()
     uncertainties: tuple[str, ...] = ()
     provenance: Provenance = field(
         default_factory=lambda: Provenance(source="empty_subject_state")
