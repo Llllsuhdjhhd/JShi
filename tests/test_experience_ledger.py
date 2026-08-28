@@ -56,6 +56,20 @@ def test_apply_merges_pending_into_context_view():
     assert ledger.list_experiences("stone")[-1].segment_id == reply.segment_id
 
 
+def test_context_view_carries_segment_texts_for_model_addressing():
+    ledger = InProcessExperienceLedger()
+    first = ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="第一句。")
+    reply = ledger.append_subject_reply("stone", text_raw="我在。")
+
+    view = ledger.apply_context_assessment("stone")
+
+    assert view.segment_texts == (
+        (first.segment_id, "第一句。"),
+        (reply.segment_id, "我在。"),
+    )
+    assert view.context_text == "第一句。\n我在。"
+
+
 def test_remove_drops_segment_and_merges_pending():
     from jshi.experienceledger import ContextAssessment
 

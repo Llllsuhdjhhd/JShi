@@ -4,6 +4,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Mapping, Sequence
 
+from jshi.core.params import ACTIVE_ZONE_CHARS
+
 from .port import (
     ContextAssessment,
     ContextViewState,
@@ -34,7 +36,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
     def __init__(
         self,
         *,
-        active_window_chars: int = 2000,
+        active_window_chars: int = ACTIVE_ZONE_CHARS,
     ) -> None:
         self.active_window_chars = active_window_chars
         self._states: dict[str, _SubjectLedgerState] = {}
@@ -306,6 +308,12 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             version=state.context.version + 1,
             context_text=self._render_context(state, segment_refs, excerpts),
             segment_refs=tuple(segment_refs),
+            segment_texts=tuple(
+                (ref, segment.text_raw)
+                for ref in segment_refs
+                if (segment := segments_by_id.get(ref)) is not None
+                and segment.text_raw
+            ),
             recall_excerpts=tuple(excerpts.items()),
             speaker_object_id=kept_speaker,
             focused_refs=tuple(focused),

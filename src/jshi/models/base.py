@@ -24,6 +24,8 @@ class ModelRequest:
     subject_state: SubjectState
     speaker: ModelSpeaker | None = None
     context: tuple[Mapping[str, Any], ...] = ()
+    # skill 注入的系统级说明（角色锚定 + 输出 schema + 示例）；由适配器并入 system。
+    system_extra: str = ""
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,15 @@ class RecallEvaluation:
     note: str = ""
 
 
+@dataclass(frozen=True)
+class ImportanceRank:
+    """05 的第 5 用途段"重要性排序"：给 14 统计用（当前占位，14 未接管）。"""
+
+    id: str
+    importance: float = 0.0
+    reason: str = ""
+
+
 @dataclass(frozen=True, init=False)
 class ModelResponse:
     model: str
@@ -90,6 +101,7 @@ class ModelResponse:
     recall_requests: tuple[RecallRequest, ...] = ()
     object_assessment: ObjectAssessment | None = None
     context_assessment: ContextAssessment = field(default_factory=ContextAssessment)
+    importance_ranking: tuple[ImportanceRank, ...] = ()
 
     @property
     def text(self) -> str:
@@ -114,6 +126,7 @@ class ModelResponse:
         recall_requests: tuple[RecallRequest, ...] = (),
         object_assessment: ObjectAssessment | None = None,
         context_assessment: ContextAssessment | None = None,
+        importance_ranking: tuple[ImportanceRank, ...] = (),
         *,
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
@@ -139,6 +152,7 @@ class ModelResponse:
             "context_assessment",
             context_assessment if context_assessment is not None else ContextAssessment(),
         )
+        object.__setattr__(self, "importance_ranking", importance_ranking)
 
 
 class ModelPort(Protocol):
@@ -155,10 +169,28 @@ class EchoModel:
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         if request.purpose in {"inner", "reflection"}:
-            text = f"我正在回顾：{request.input_text}"
-        else:
-            text = f"我听见了：{request.input_text}"
-        return ModelResponse(text=text, model=self.name)
+            return ModelResponse(
+                text=f"我正在回顾：{request.input_text}",
+                model=self.name,
+            )
+        payload = {
+            "response_plan": {
+                "mode": "respond",
+                "reason": "offline echo",
+                "items": [
+                    {
+                        "channel": "verbal",
+                        "text": f"我听见了：{request.input_text}",
+                    }
+                ],
+            },
+            "context_assessment": {"remove": [], "drop_recall": [], "focus": []},
+            "recall_requests": [],
+        }
+        return ModelResponse(
+            text=json.dumps(payload, ensure_ascii=False),
+            model=self.name,
+        )
 
 
 class OpenAICompatibleModel:
@@ -177,15 +209,37 @@ class OpenAICompatibleModel:
         personal_context = json.dumps(
             request.context, ensure_ascii=False, default=str
         )
+        # 说话人身份必须明确：名字、称呼、object_id、状态单列，让模型清晰看到"谁在说 + 其 id"。
+        speaker_line = ""
+        if request.speaker is not None:
+            alias_text = "、".join(request.speaker.aliases)
+            speaker_line = (
+                f"说话人：{request.speaker.label}"
+                f"（称呼：{alias_text or '无'}；object_id={request.speaker.object_id}；"
+                f"状态={request.speaker.status}）\n"
+            )
+        # 对象身份未确认时，把回应引导为澄清式提问（轻量路径，见 design/01 §4.3、05）。
+        if request.speaker is not None and request.speaker.status != "confirmed":
+            clarity_hint = (
+                "\n注意：当前说话人身份尚未确认（provisional）。"
+                "若需要向对方确认身份，请把你的回应写成一句澄清式提问"
+                "（例如「你是……吗？」），不要默认身份成立。"
+            )
+        else:
+            clarity_hint = ""
         system = (
+            # skill 的系统级说明优先（角色锚定 + 输出 schema + 示例），再补主体背景。
+            f"{request.system_extra}\n"
+            f"{speaker_line}"
             f"{request.subject_state.identity_summary}\n"
             f"当前立场：{request.subject_state.current_stance}\n"
             f"重要价值：{', '.join(request.subject_state.salient_values)}\n"
             f"已有承诺：{', '.join(request.subject_state.commitments)}\n"
-            f"相关个人世界：{personal_context}\n"
+            f"相关背景材料：{personal_context}\n"
             "这些内容属于当前匠石的个人历史和认知处境。"
             "不要把推断或想象写成已经发生的事实。"
             "请区分事实、推断、反思和想象。"
+            + clarity_hint
         )
         payload = json.dumps(
             {

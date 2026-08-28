@@ -2,54 +2,46 @@
 
 from __future__ import annotations
 
-from jshi.personalworld import InProcessValues, ValueSource
+import json
+from datetime import timedelta
+from pathlib import Path
+
+from jshi.personalworld import InProcessPersonalWorld, InProcessValues, ValueSource
 from jshi.subject import PersonalItem, PersonalKind, PersonalStatus, SubjectRepository
 
+from tests.value_seed import accepted_boundary, accepted_value, import_values
 
-def add_item(
-    repository,
-    content,
-    *,
-    kind=PersonalKind.VALUE,
-    importance=1.0,
-    metadata=None,
-):
-    meta = dict(metadata or {})
-    if importance != 1.0:
-        meta["importance"] = importance
-    item = PersonalItem(
-        subject_id="stone",
-        kind=kind,
-        content=content,
-        metadata=meta,
+
+def add_loadable(world, content, **kwargs):
+    role = kwargs.pop("role", "value")
+    entry = accepted_value(content, role=role, **kwargs) if role == "value" else accepted_boundary(
+        content, **kwargs
     )
-    repository.add_personal_item(item)
-    return item
+    report = world.import_entries("stone", [entry])
+    return world.get(report.imported_ids[0])
 
 
-def test_select_values_ranks_importance_then_relevance(tmp_path):
+def test_select_values_is_catalog_order_not_query_rank(tmp_path):
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
     world = InProcessValues(repository)
-    add_item(repository, "朋友相关但低重要", importance=0.2)
-    add_item(repository, "高重要普通内容", importance=0.9)
-    add_item(repository, "普通审美", importance=0.5)
+    add_loadable(world, "朋友相关但低重要", importance=0.2)
+    add_loadable(world, "高重要普通内容", importance=0.9)
+    add_loadable(world, "普通审美", importance=0.5)
 
     selected = world.select_values("stone", "朋友")
 
-    contents = [item.content for item in selected]
-    assert contents.index("高重要普通内容") < contents.index("普通审美")
-    assert contents.index("普通审美") < contents.index("朋友相关但低重要")
+    assert [item.content for item in selected] == [
+        "朋友相关但低重要",
+        "高重要普通内容",
+        "普通审美",
+    ]
 
 
 def test_select_values_excludes_boundaries(tmp_path):
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
     world = InProcessValues(repository)
-    add_item(repository, "优先坦率表达", importance=0.9)
-    add_item(
-        repository,
-        "不可编造事实",
-        metadata={"role": "boundary", "binding": True},
-    )
+    add_loadable(world, "优先坦率表达", importance=0.9)
+    add_loadable(world, "不可编造事实", role="boundary", binding=True)
 
     selected = world.select_values("stone", "任意输入")
 
@@ -59,12 +51,10 @@ def test_select_values_excludes_boundaries(tmp_path):
 def test_select_boundaries_and_standing_constraints(tmp_path):
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
     world = InProcessValues(repository)
-    boundary = add_item(
-        repository,
-        "不可编造事实",
-        metadata={"role": "boundary", "binding": True},
+    boundary = add_loadable(
+        world, "不可编造事实", role="boundary", binding=True
     )
-    add_item(repository, "优先坦率表达")
+    add_loadable(world, "优先坦率表达")
 
     assert world.select_boundaries("stone") == (boundary,)
     assert world.standing_constraints("stone") == (boundary,)
@@ -73,11 +63,7 @@ def test_select_boundaries_and_standing_constraints(tmp_path):
 def test_non_binding_boundary_is_not_standing_constraint(tmp_path):
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
     world = InProcessValues(repository)
-    add_item(
-        repository,
-        "软性边界",
-        metadata={"role": "boundary", "binding": False},
-    )
+    add_loadable(world, "软性边界", role="boundary", binding=False)
 
     assert world.select_boundaries("stone") == ()
     assert world.standing_constraints("stone") == ()
@@ -224,3 +210,51 @@ def test_consolidate_detects_duplicate_and_is_cursor_resumable(tmp_path):
     assert first.processed_count == 3
     assert second.processed_count == 0
     assert second.suggestions == ()
+
+
+def test_ordinary_values_hold_snapshot_until_catalog_or_timer(tmp_path):
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    values = InProcessValues(repository, refresh_seconds=60)
+    world = InProcessPersonalWorld(repository, values=values)
+    import_values(values, "stone", [accepted_value("甲")])
+    first = [item.content for item in world.select("stone") if item.kind is PersonalKind.VALUE]
+    assert first == ["甲"]
+    assert values.should_reload_values("stone") is False
+
+    sneaked = PersonalItem(
+        subject_id="stone",
+        kind=PersonalKind.VALUE,
+        content="乙",
+        status=PersonalStatus.ACCEPTED,
+        metadata={"role": "value", "source_type": "classic_work"},
+    )
+    values._store.put(sneaked)
+    held = [item.content for item in world.select("stone") if item.kind is PersonalKind.VALUE]
+    assert held == ["甲"]
+
+    later = values._store.load_gate("stone").last_loaded_at + timedelta(seconds=61)
+    assert values.should_reload_values("stone", now=later) is True
+    values._store.bump_catalog("stone")
+    reloaded = [
+        item.content for item in world.select("stone") if item.kind is PersonalKind.VALUE
+    ]
+    assert "乙" in reloaded
+
+
+def test_example_json_imports(tmp_path):
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    world = InProcessValues(repository)
+    path = Path(__file__).resolve().parents[1] / "doc" / "examples" / "values-import.example.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    report = world.import_entries("stone", document["entries"])
+    assert len(report.imported_ids) == 26
+    exported = {entry["id"] for entry in world.export_document("stone")["entries"]}
+    assert "val-02-yan-er-you-xin" in exported
+    assert "val-20-bao-zao-lan-xing" in exported
+    assert "val-26-geng-shang-yi-ceng-lou" in exported
+    novel = next(
+        entry
+        for entry in world.export_document("stone")["entries"]
+        if entry["id"] == "val-20-bao-zao-lan-xing"
+    )
+    assert novel["source_type"] == "classic_novel"

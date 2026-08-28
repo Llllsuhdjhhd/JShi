@@ -1,5 +1,6 @@
 from .base import (
     EchoModel,
+    ImportanceRank,
     ModelPort,
     ModelRequest,
     ModelResponse,
@@ -14,6 +15,7 @@ from .base import (
 
 __all__ = [
     "EchoModel",
+    "ImportanceRank",
     "ModelPort",
     "ModelRequest",
     "ModelResponse",

@@ -25,11 +25,11 @@ from jshi.recognition import ObjectProfile
 from jshi.subject import (
     HistoryKind,
     HistoryRecord,
-    PersonalItem,
     PersonalKind,
     SubjectProcess,
     SubjectRepository,
 )
+from tests.value_seed import accepted_boundary, accepted_value, import_values
 
 
 class FixedModel:
@@ -56,8 +56,8 @@ def runtime(tmp_path, model=None):
 
 def test_process_assembly_builds_fragments_and_report(tmp_path):
     process, _repository, _identities = runtime(tmp_path)
-    process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
     process.add_personal_item("stone", PersonalKind.COMMITMENT, "下次继续询问")
+    import_values(process, "stone", [accepted_value("优先坦率表达")])
 
     result = process.experience("stone", "你好", object_ref="user")
 
@@ -130,10 +130,10 @@ def test_assembler_does_not_recut_personal_world_selection(tmp_path):
         )
     )
     for index in range(5):
-        repository.add_personal_item(
-            repository_personal_item(
-                repository, f"价值{index}", PersonalKind.VALUE
-            )
+        import_values(
+            personal_world,
+            "stone",
+            [accepted_value(f"价值{index}")],
         )
     commitment = repository_personal_item(
         repository, "常驻承诺", PersonalKind.COMMITMENT
@@ -172,10 +172,10 @@ def test_working_set_limit_skips_non_resident_only(tmp_path):
         )
     )
     for index in range(5):
-        repository.add_personal_item(
-            repository_personal_item(
-                repository, f"价值{index}", PersonalKind.VALUE
-            )
+        import_values(
+            personal_world,
+            "stone",
+            [accepted_value(f"价值{index}")],
         )
     commitment = repository_personal_item(
         repository, "常驻承诺", PersonalKind.COMMITMENT
@@ -356,21 +356,22 @@ def test_preview_state_reports_sources_and_stays_read_only(tmp_path):
 
 def test_personal_world_source_marks_binding_boundary_always(tmp_path):
     process, repository, _identities = runtime(tmp_path)
-    boundary = PersonalItem(
-        subject_id="stone",
-        kind=PersonalKind.VALUE,
-        content="不可编造事实",
-        metadata={"role": "boundary", "binding": True},
+    reports = import_values(
+        process,
+        "stone",
+        [
+            accepted_boundary("不可编造事实"),
+            accepted_value("优先坦率表达", importance=0.9),
+        ],
     )
-    repository.add_personal_item(boundary)
-    process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达", importance=0.9)
+    boundary_id = reports.imported_ids[0]
 
     result = process.experience("stone", "你好", object_ref="user")
 
     boundary_fragments = [
         fragment
         for fragment in result.current_state.fragments
-        if fragment.id == f"personal:{boundary.id}"
+        if fragment.id == f"personal:{boundary_id}"
     ]
     assert boundary_fragments
     assert boundary_fragments[0].kind == "boundary"

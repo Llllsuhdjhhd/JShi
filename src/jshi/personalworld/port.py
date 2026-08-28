@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Protocol, Sequence
 
+from jshi.core.params import value_load_char_budget
 from jshi.subject.domain import PersonalItem, PersonalKind, PersonalStatus
 from jshi.subject.repository import SubjectRepository
 
-from .values import InProcessValues, ValuesPort, item_importance
+from .values import InProcessValues, ValuesPort, is_boundary, item_importance
 
 ITEM_LEVELS = ("低", "中", "高")
 DEFAULT_LEVEL = "中"
@@ -65,6 +66,10 @@ class InProcessPersonalWorld:
             RemainderModule(repository),
         )
 
+    @property
+    def values(self) -> ValuesPort:
+        return self._values
+
     def select(
         self,
         subject_id: str,
@@ -82,7 +87,14 @@ class InProcessPersonalWorld:
                     continue
                 seen.add(item.id)
                 ordinary.append(item)
-        return standing + _take_by_level(ordinary, load_level)
+        values: list[PersonalItem] = []
+        rest: list[PersonalItem] = []
+        for item in ordinary:
+            if item.kind is PersonalKind.VALUE and not is_boundary(item):
+                values.append(item)
+            else:
+                rest.append(item)
+        return standing + tuple(values) + _take_by_level(rest, load_level)
 
     def standing_constraints(self, subject_id: str) -> Sequence[PersonalItem]:
         seen: set[str] = set()
@@ -109,7 +121,19 @@ class ValuesModule:
         return tuple(self._values.standing_constraints(subject_id))
 
     def list_ordered(self, subject_id: str) -> Sequence[PersonalItem]:
-        return tuple(self._values.list_ordered(subject_id))
+        values = self._values
+        should_reload = getattr(values, "should_reload_values", None)
+        if callable(should_reload) and not should_reload(subject_id):
+            hydrate = getattr(values, "hydrate_loaded_values", None)
+            items = tuple(hydrate(subject_id)) if callable(hydrate) else ()
+        else:
+            items = tuple(values.list_ordered(subject_id))
+            mark = getattr(values, "mark_catalog_loaded", None)
+            budgeted = _take_by_char_budget(items, value_load_char_budget())
+            if callable(mark):
+                mark(subject_id, [item.id for item in budgeted])
+            return budgeted
+        return _take_by_char_budget(items, value_load_char_budget())
 
 
 class CommitmentModule:
@@ -164,6 +188,20 @@ class RemainderModule:
 
 def normalize_level(level: str) -> str:
     return level if level in ITEM_LEVELS else DEFAULT_LEVEL
+
+
+def _take_by_char_budget(
+    items: Sequence[PersonalItem], budget: int
+) -> tuple[PersonalItem, ...]:
+    taken: list[PersonalItem] = []
+    used = 0
+    for item in items:
+        size = len(item.content)
+        if taken and used + size > budget:
+            break
+        taken.append(item)
+        used += size
+    return tuple(taken)
 
 
 def _take_by_level(

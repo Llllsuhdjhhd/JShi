@@ -6,6 +6,7 @@ from .port import (
     PersonalWorldPort,
     LOAD_QUOTAS,
 )
+from .store import SqliteValueStore, ValueStore
 from .values import (
     InProcessValues,
     ValueConsolidationReport,
@@ -23,6 +24,8 @@ __all__ = [
     "PersonalWorldPort",
     "DEFAULT_LEVEL",
     "LOAD_QUOTAS",
+    "SqliteValueStore",
+    "ValueStore",
     "InProcessValues",
     "ValueConsolidationReport",
     "ValueConsolidationSuggestion",

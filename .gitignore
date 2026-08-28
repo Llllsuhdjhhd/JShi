@@ -7,6 +7,8 @@ __pycache__/
 .jshi/
 .jshi-*/
 .jshi-try/
+.env
+.env.local
 dist/
 build/
 

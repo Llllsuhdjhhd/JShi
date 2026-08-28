@@ -220,7 +220,10 @@ class MemorySource:
                 AssemblyFragment(
                     source="memory",
                     id=f"memory:{item.event_id}",
-                    content=self._with_names(item.text, item.object_id, ctx.speaker),
+                    # 用 content（按 summary_level 选的摘要）装配；进程内无摘要则落回原文。
+                    content=self._with_names(
+                        item.content or item.text, item.object_id, ctx.speaker
+                    ),
                     kind=item.kind or "fact",
                     status="active",
                     importance=0.5,

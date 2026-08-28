@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
@@ -112,6 +112,14 @@ def should_trigger_embodied(plan: ResponsePlan) -> bool:
     return plan.has_embodied()
 
 
+_MEMORY_PREFIX = "memory:"
+
+
+def _memory_event_id(ref: str) -> str:
+    """从工作集 id 里提出记忆 event_id（`memory:{event_id}` → `{event_id}`）。"""
+    return ref[len(_MEMORY_PREFIX):] if ref.startswith(_MEMORY_PREFIX) else ref
+
+
 @dataclass(frozen=True)
 class AssembledCurrentState:
     """Pre-model working set. Never invents subject-facing open matter."""
@@ -198,6 +206,7 @@ class SubjectProcess:
 
             personal_world = InProcessPersonalWorld(repository)
         self.personal_world = personal_world
+        self.values = getattr(personal_world, "values", None)
         self.profiles = ObjectProfileRepository(repository.path)
         self.object_system = object_system or InProcessObjectSystem(self.profiles)
         self.recognition = recognition or ProfileObjectRecognition(
@@ -671,7 +680,13 @@ class SubjectProcess:
     ) -> tuple[object, list[RecalledFragment]]:
         """主流程认知编排：05 产出方案，09 协调器执行记忆补充，再继续认知。"""
         working_recalled: list[RecalledFragment] = list(current.recalled)
-        known_ids = {item.event_id for item in working_recalled}
+        # 初始召回（03 工作集里的 memory 分片）与追加召回共用去重集：
+        # 追加召回不会再次取回已在工作集里的记忆，避免同一 event_id 重复进模型上下文。
+        known_ids = {item.event_id for item in working_recalled} | {
+            _memory_event_id(fragment.id)
+            for fragment in current.fragments
+            if fragment.source == "memory"
+        }
         response = self._cognize_once(current, working_recalled)
         rounds = 0
         executions: list[RecallExecution] = []
@@ -738,6 +753,11 @@ class SubjectProcess:
                 payload={
                     "mode": response.response_plan.mode,
                     "reason": response.response_plan.reason,
+                    **(
+                        {"skill_fallback": response.metadata.get("skill_fallback")}
+                        if response.metadata and response.metadata.get("skill_fallback")
+                        else {}
+                    ),
                 },
                 source_ids=(activity.id, perception.id),
             )
@@ -929,6 +949,10 @@ class SubjectProcess:
                     "status": "active",
                     "source": "activity",
                     "segment_refs": list(context_view.segment_refs),
+                    "segments": [
+                        {"id": segment_id, "text": text}
+                        for segment_id, text in context_view.segment_texts
+                    ],
                     "recall_refs": [ref for ref, _text in context_view.recall_excerpts],
                     "speaker_object_id": context_view.speaker_object_id,
                 }
@@ -937,7 +961,7 @@ class SubjectProcess:
             {
                 "id": f"memory:{item.event_id}",
                 "kind": "recalled_fact",
-                "content": item.text,
+                "content": item.content or item.text,
                 "status": "active",
                 "source": "memory",
                 "event_type": item.event_type,
@@ -1091,6 +1115,11 @@ class SubjectProcess:
         level: str = "中",
         entry_type: str = "",
     ) -> PersonalItem:
+        if kind is PersonalKind.VALUE:
+            raise ValueError(
+                "价值观与边界须走 100（import-values / propose-value），"
+                "不要用 add-personal"
+            )
         metadata: dict[str, object] = {}
         if importance != 1.0:
             metadata["importance"] = importance

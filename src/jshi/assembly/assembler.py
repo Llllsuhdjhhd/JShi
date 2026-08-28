@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from jshi.attention import ChancePort, PlaceholderChance
-from jshi.core import Provenance, SubjectState
+from jshi.core import Provenance, SubjectState, params
 from jshi.experienceledger import ContextViewState
 
 from .port import (
@@ -69,21 +69,41 @@ class CurrentStateAssembler:
             deduped.setdefault((fragment.source, fragment.id), fragment)
         fragments = tuple(deduped.values())
 
-        kept: list[AssemblyFragment] = []
-        budget_used = 0
-        limit = ctx.working_set_limit
+        # 魔法书默认：窗口 × 1/15（非保护片段的字符预算）。缺省即生效，仍可显式覆盖。
+        limit = (
+            ctx.working_set_limit
+            if ctx.working_set_limit is not None
+            else params.working_set_limit()
+        )
+
+        # 分档（三档）：
+        #  - protected：永不裁、不占预算 —— 身份 / 对象 / 既往视图正文 / 08 常驻(always)。
+        #  - memory：单独一档，"受预算但仍可被裁" —— 占用同一上限，但在普通条目之前先分配，
+        #    背景不会把它挤掉；memory 自身超限时仍会被裁。
+        #  - ordinary：普通条目（个人世界普通价值等）—— 最低档，预算不足时先裁。
+        #
+        # 先按档位收集，再按"memory → ordinary"顺序分配预算；被裁的计入 skipped。
+        protected_frags: list[AssemblyFragment] = []
+        memory_frags: list[AssemblyFragment] = []
+        ordinary_frags: list[AssemblyFragment] = []
         for fragment in fragments:
-            protected = fragment.always or fragment.source in _PROTECTED_SOURCES
-            if protected:
-                kept.append(fragment)
-                continue
-            if limit is None or budget_used < limit:
-                kept.append(fragment)
-                budget_used += 1
+            if fragment.always or fragment.source in _PROTECTED_SOURCES:
+                protected_frags.append(fragment)
+            elif fragment.source == "memory":
+                memory_frags.append(fragment)
             else:
+                ordinary_frags.append(fragment)
+
+        kept: list[AssemblyFragment] = list(protected_frags)
+        budget_left = limit or 0
+        for fragment in (*memory_frags, *ordinary_frags):
+            if budget_left <= 0:
                 skipped_by_source.setdefault(fragment.source, []).append(
                     fragment.id
                 )
+                continue
+            kept.append(fragment)
+            budget_left -= max(len(fragment.content), 1)
         kept_fragments = tuple(kept)
 
         reports = tuple(
@@ -126,7 +146,8 @@ class CurrentStateAssembler:
 
         return SubjectState(
             subject_id=subject_id,
-            identity_summary=first("identity", "identity_summary") or "匠石",
+            # 身份源缺失时不得硬造"匠石"身份；置空并由装载报告标记该源错误。
+            identity_summary=first("identity", "identity_summary"),
             current_stance=first("identity", "stance"),
             salient_values=tuple(
                 fragment.content

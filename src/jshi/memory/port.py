@@ -27,11 +27,19 @@ def recall_level_limit(level: int) -> int:
 
 @dataclass(frozen=True)
 class RecalledFragment:
-    """One recalled past fragment shown in the current-state working set."""
+    """One recalled past fragment shown in the current-state working set.
+
+    形状对齐《记忆层契约》/ 09：``event_id`` 是稳定记忆单元标识（去重键），
+    ``text`` 是原文（溯源），``content`` 是按 ``summary_level`` 选出的摘要文本
+    （供预算 / 组装）。``event_type`` 是进程内实现的附加字段，非契约；真实
+    记忆后端接入后不依赖它。
+    """
 
     event_id: str
     event_type: str
     text: str
+    content: str = ""  # 摘要文本（按 summary_level）；进程内实现缺省为原文
+    summary_level: str | None = None  # L1 等；进程内实现无多级摘要，为 None
     kind: str = "fact"
     object_id: str | None = None
     source_ids: tuple[str, ...] = ()
@@ -132,6 +140,10 @@ class InProcessHistoryMemory:
                 event_id=record.id,
                 event_type=record.event_type,
                 text=str(record.content.get("text", "")),
+                # 进程内实现没有多级摘要：content 落回原文（真正的摘要档位由
+                # 外部记忆后端接入后提供）。
+                content=str(record.content.get("text", "")),
+                summary_level=None,
                 kind=record.kind.value,
                 object_id=(
                     str(record.content["object_id"])

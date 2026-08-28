@@ -16,9 +16,13 @@
 
 from __future__ import annotations
 
+import json
+import os
+
 import pytest
 
 from jshi.app import cli
+from jshi.app.cli import parse_env_text
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import ModelRequest, ModelResponse
 from jshi.recognition import ObjectProfile
@@ -34,6 +38,7 @@ from jshi.subject import (
     SubjectProcess,
     SubjectRepository,
 )
+from tests.value_seed import accepted_value, import_values
 
 
 class RecordingModel:
@@ -98,7 +103,7 @@ def test_phase1_input_fact_is_recorded_first(runtime):
 
 def test_phase2_assembly_loads_all_personal_world_systems(runtime):
     process, _repository, _model, _identities = runtime
-    process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
+    import_values(process, "stone", [accepted_value("优先坦率表达")])
     process.add_personal_item("stone", PersonalKind.COMMITMENT, "下次继续询问近况")
     process.add_personal_item("stone", PersonalKind.RELATIONSHIP, "与朋友的信任在加深")
     process.add_personal_item("stone", PersonalKind.CAPABILITY, "能耐心倾听")
@@ -200,7 +205,7 @@ def test_phase4_external_activity_has_no_thought_record(runtime):
 
 def test_phase4_model_request_receives_subject_state_and_context(runtime):
     process, _repository, model, _identities = runtime
-    process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
+    import_values(process, "stone", [accepted_value("优先坦率表达")])
     process.add_personal_item("stone", PersonalKind.COMMITMENT, "下次继续询问近况")
     process.add_personal_item("stone", PersonalKind.AESTHETIC, "喜欢朴素真诚的表达")
     process.experience("stone", "先打个招呼", object_ref="user")  # 预置召回
@@ -354,3 +359,109 @@ def test_phase0_cli_experience_triggers_full_flow(tmp_path, monkeypatch, capsys)
     assert len(activities) == 1
     assert activities[0].kind is ActivityKind.EXTERNAL
     assert activities[0].status is ActivityStatus.COMPLETED
+
+
+def test_parse_env_text_skips_comments_and_quotes():
+    parsed = parse_env_text(
+        "# comment\n"
+        'JSHI_MODEL_API_KEY="abc"\n'
+        "export JSHI_MODEL_NAME=deepseek-chat\n"
+    )
+    assert parsed["JSHI_MODEL_API_KEY"] == "abc"
+    assert parsed["JSHI_MODEL_NAME"] == "deepseek-chat"
+
+
+def test_load_local_env_is_noop_under_pytest(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("JSHI_MODEL_API_KEY=should-not-load\n", encoding="utf-8")
+    monkeypatch.setenv("JSHI_ENV_FILE", str(env_file))
+    monkeypatch.delenv("JSHI_MODEL_API_KEY", raising=False)
+    cli._load_local_env()
+    assert os.getenv("JSHI_MODEL_API_KEY") is None
+
+
+def test_talk_loop_two_turns_persist_object_and_zone(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("JSHI_MODEL_ENDPOINT", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_NAME", raising=False)
+    data_dir = tmp_path / "cli-data"
+
+    monkeypatch.setattr(
+        "sys.argv", ["jshi", "--data-dir", str(data_dir), "create", "stone"]
+    )
+    cli.main()
+    capsys.readouterr()
+
+    lines = iter(["第一句", "第二句", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["jshi", "--data-dir", str(data_dir), "talk", "stone", "--speaker", "dp"],
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "我听见了：第一句" in out
+    assert "我听见了：第二句" in out
+
+    from jshi.recognition import ObjectProfileRepository
+
+    profiles = ObjectProfileRepository(data_dir / "subject.sqlite3")
+    found = profiles.find_by_names("dp")
+    assert len(found) == 1
+    assert "活跃区 v1" in out
+    assert "活跃区 v2" in out
+
+
+def test_talk_remembers_speaker_in_session(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("JSHI_MODEL_ENDPOINT", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_NAME", raising=False)
+    data_dir = tmp_path / "cli-data"
+    monkeypatch.setattr(
+        "sys.argv", ["jshi", "--data-dir", str(data_dir), "create", "stone"]
+    )
+    cli.main()
+    capsys.readouterr()
+    first = iter(["/quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(first))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["jshi", "--data-dir", str(data_dir), "talk", "stone", "--speaker", "dp"],
+    )
+    cli.main()
+    capsys.readouterr()
+    session = json.loads((data_dir / "cli_session.json").read_text(encoding="utf-8"))
+    assert session["speaker"] == "dp"
+    assert session["subject_id"] == "stone"
+
+    second = iter(["hello", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(second))
+    monkeypatch.setattr(
+        "sys.argv", ["jshi", "--data-dir", str(data_dir), "talk"]
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "我听见了：hello" in out
+
+
+def test_talk_inspect_commands_do_not_need_a_new_turn(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("JSHI_MODEL_ENDPOINT", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_NAME", raising=False)
+    data_dir = tmp_path / "cli-data"
+    monkeypatch.setattr(
+        "sys.argv", ["jshi", "--data-dir", str(data_dir), "create", "stone"]
+    )
+    cli.main()
+    capsys.readouterr()
+    lines = iter(["第一句", "/plan", "/context", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["jshi", "--data-dir", str(data_dir), "talk", "stone", "--speaker", "dp"],
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "mode=respond" in out
+    assert "[verbal]" in out
+    assert "装载：" in out

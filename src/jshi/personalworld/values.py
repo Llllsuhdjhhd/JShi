@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping, Protocol, Sequence
 
-from jshi.textutil import query_terms
+from jshi.core.params import VALUE_CATALOG_REFRESH_SECONDS
 from jshi.subject.domain import (
     HistoryKind,
     HistoryRecord,
@@ -17,6 +17,8 @@ from jshi.subject.domain import (
     utc_now,
 )
 from jshi.subject.repository import SubjectRepository
+
+from .store import SqliteValueStore, ValueStore
 
 
 class ValueSource(StrEnum):
@@ -185,15 +187,59 @@ class ValuesPort(Protocol):
 
 
 class InProcessValues:
-    """100 完整本地实现：以 personal_items 承载价值库。"""
+    """100 完整本地实现：价值写入独立 ValueStore，审计仍记在主体仓库。"""
 
-    def __init__(self, repository: SubjectRepository) -> None:
+    def __init__(
+        self,
+        repository: SubjectRepository,
+        store: ValueStore | None = None,
+        *,
+        refresh_seconds: float | None = None,
+    ) -> None:
         self._repository = repository
+        self._store = store or SqliteValueStore(repository.path)
+        self._refresh_seconds = (
+            VALUE_CATALOG_REFRESH_SECONDS
+            if refresh_seconds is None
+            else float(refresh_seconds)
+        )
 
     def _all_values(self, subject_id: str) -> Sequence[PersonalItem]:
-        return self._repository.list_personal_items(
-            subject_id, kind=PersonalKind.VALUE, active_only=False
-        )
+        return self._store.list(subject_id)
+
+    def get(self, entry_id: str) -> PersonalItem | None:
+        return self._store.get(entry_id)
+
+    def should_reload_values(
+        self, subject_id: str, *, now: datetime | None = None
+    ) -> bool:
+        gate = self._store.load_gate(subject_id)
+        if gate.last_loaded_revision < gate.catalog_revision:
+            return True
+        if gate.last_loaded_at is None:
+            return True
+        if self._refresh_seconds <= 0:
+            return False
+        stamp = now or utc_now()
+        elapsed = (stamp - gate.last_loaded_at).total_seconds()
+        return elapsed >= self._refresh_seconds
+
+    def hydrate_loaded_values(self, subject_id: str) -> Sequence[PersonalItem]:
+        items: list[PersonalItem] = []
+        for entry_id in self._store.load_gate(subject_id).loaded_ids:
+            item = self._store.get(entry_id)
+            if item is None or is_boundary(item) or not is_loadable_value(item):
+                continue
+            items.append(item)
+        return tuple(items)
+
+    def mark_catalog_loaded(
+        self, subject_id: str, loaded_ids: Sequence[str]
+    ) -> None:
+        self._store.mark_loaded(subject_id, loaded_ids=loaded_ids)
+
+    def _bump(self, subject_id: str) -> None:
+        self._store.bump_catalog(subject_id)
 
     def _loadable_values(self, subject_id: str) -> Sequence[PersonalItem]:
         return tuple(
@@ -207,27 +253,14 @@ class InProcessValues:
     def select_values(
         self, subject_id: str, context: str, *, budget: int = 4
     ) -> Sequence[PersonalItem]:
-        items = [
-            item
-            for item in self._loadable_values(subject_id)
-            if not is_boundary(item)
-        ]
-        terms = query_terms(context)
-        ranked = sorted(
-            items,
-            key=lambda item: _value_score(item, terms),
-            reverse=True,
-        )
-        return tuple(ranked[: max(budget, 0)])
+        del context
+        return tuple(self.list_ordered(subject_id)[: max(budget, 0)])
 
     def list_ordered(self, subject_id: str) -> Sequence[PersonalItem]:
-        items = [
+        return tuple(
             item
             for item in self._loadable_values(subject_id)
             if not is_boundary(item)
-        ]
-        return tuple(
-            sorted(items, key=lambda item: (item_importance(item), item.id), reverse=True)
         )
 
     def select_boundaries(self, subject_id: str) -> Sequence[PersonalItem]:
@@ -286,7 +319,8 @@ class InProcessValues:
             status=PersonalStatus.CANDIDATE,
             metadata=metadata,
         )
-        self._repository.add_personal_item(item)
+        self._store.put(item)
+        self._bump(subject_id)
         self._repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -325,6 +359,7 @@ class InProcessValues:
             raise ValueError(f"Invalid review decision: {decision}")
 
         updated = self._transition(current, target, reason)
+        self._bump(current.subject_id)
         self._repository.add_history(
             HistoryRecord(
                 subject_id=current.subject_id,
@@ -354,6 +389,7 @@ class InProcessValues:
                 f"Only accepted/active values can be locked; current={current.status.value}"
             )
         updated = self._transition(current, PersonalStatus.LOCKED, reason)
+        self._bump(current.subject_id)
         self._repository.add_history(
             HistoryRecord(
                 subject_id=current.subject_id,
@@ -384,10 +420,13 @@ class InProcessValues:
             raise ValueError(
                 f"Value cannot be superseded from {current.status.value}"
             )
-        replacement = self._repository.get_personal_item(replacement_id)
+        replacement = self._store.get(replacement_id)
+        if replacement is None:
+            raise KeyError(replacement_id)
         if replacement.subject_id != current.subject_id:
             raise ValueError("Replacement value belongs to a different subject")
         updated = self._transition(current, PersonalStatus.SUPERSEDED, reason)
+        self._bump(current.subject_id)
         self._repository.add_history(
             HistoryRecord(
                 subject_id=current.subject_id,
@@ -417,16 +456,18 @@ class InProcessValues:
         for entry in entries:
             try:
                 item = self._entry_to_item(subject_id, entry)
-            except ValueError as exc:
+            except ValueError:
                 entry_id = str(entry.get("id", "<missing>"))
                 skipped.append(entry_id)
                 continue
-            existing = self._try_get(item.id)
+            existing = self._store.get(item.id)
             if existing is not None:
                 skipped.append(item.id)
                 continue
-            self._repository.add_personal_item(item)
+            self._store.put(item)
             imported.append(item.id)
+        if imported:
+            self._bump(subject_id)
         self._repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -517,14 +558,13 @@ class InProcessValues:
     ) -> PersonalItem:
         item = self._require_value(item_id)
         count = int(item.metadata.get("use_count", 0)) + 1
-        updated = self._repository.update_personal_metadata(
+        return self._store.update_metadata(
             item_id,
             {
                 "last_used_at": (at or utc_now()).isoformat(),
                 "use_count": count,
             },
         )
-        return updated
 
     # ------------------------------------------------------------------
     # 内部工具
@@ -573,14 +613,10 @@ class InProcessValues:
             revision=revision,
         )
 
-    def _try_get(self, item_id: str) -> PersonalItem | None:
-        try:
-            return self._repository.get_personal_item(item_id)
-        except KeyError:
-            return None
-
     def _require_value(self, item_id: str) -> PersonalItem:
-        item = self._repository.get_personal_item(item_id)
+        item = self._store.get(item_id)
+        if item is None:
+            raise KeyError(item_id)
         if item.kind is not PersonalKind.VALUE:
             raise ValueError(f"Item {item_id} is not a value item")
         return item
@@ -591,7 +627,7 @@ class InProcessValues:
         status: PersonalStatus,
         reason: str,
     ) -> PersonalItem:
-        updated = self._repository.update_personal_status(item.id, status)
+        updated = self._store.update_status(item.id, status)
         self._repository.add_transition(
             StateTransition(
                 subject_id=item.subject_id,
@@ -651,14 +687,6 @@ class InProcessValues:
                         )
                     )
         return suggestions
-
-
-def _value_score(item: PersonalItem, terms: frozenset[str]) -> tuple[float, float]:
-    """价值排序：重要程度优先，查询相关性只破同一重要程度内的并列。"""
-
-    hay = item.content.lower()
-    relevance = sum(1 for term in terms if term in hay) if terms else 0.0
-    return (item_importance(item), relevance)
 
 
 def _normalize(content: str) -> str:

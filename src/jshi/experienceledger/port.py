@@ -68,6 +68,7 @@ class ContextViewState:
     version: int = 0
     context_text: str = ""               # 派生：按 segment_refs + recall_excerpts 渲染
     segment_refs: tuple[str, ...] = ()
+    segment_texts: tuple[tuple[str, str], ...] = ()  # (段 id, 段原文) 在场映射，供模型寻址
     recall_excerpts: tuple[tuple[str, str], ...] = ()
     speaker_object_id: str | None = None
     focused_refs: tuple[str, ...] = ()   # 段级聚焦引用

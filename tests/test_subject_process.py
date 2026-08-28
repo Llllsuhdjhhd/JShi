@@ -14,6 +14,7 @@ from jshi.subject import (
     SubjectProcess,
     SubjectRepository,
 )
+from tests.value_seed import accepted_value, import_values
 
 
 class ContextModel:
@@ -74,14 +75,14 @@ def test_assemble_loads_existing_commitments_only(tmp_path):
         PersonalKind.COMMITMENT,
         "下次继续询问他的近况",
     )
-    process.add_personal_item("stone", PersonalKind.VALUE, "优先坦率表达")
+    import_values(process, "stone", [accepted_value("优先坦率表达")])
 
     assembled = process.assemble_current_state("stone", "今天先聊到这里")
 
     assert commitment.content in assembled.subject_state.commitments
     assert "优先坦率表达" in assembled.subject_state.salient_values
     # Assembly must not create new personal items.
-    assert len(repository.list_personal_items("stone")) == 2
+    assert len(repository.list_personal_items("stone")) == 1
 
 
 def test_epistemic_transition_preserves_revision_history(tmp_path):
@@ -136,8 +137,8 @@ def test_same_cognition_forms_different_outputs_from_personal_world(tmp_path):
     identities.create(IdentityProfile("b", "乙", "相同基础型"))
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
     process = SubjectProcess(repository, identities, ContextModel())
-    process.add_personal_item("a", PersonalKind.VALUE, "优先坦率表达")
-    process.add_personal_item("b", PersonalKind.VALUE, "优先温和表达")
+    import_values(process, "a", [accepted_value("优先坦率表达")])
+    import_values(process, "b", [accepted_value("优先温和表达")])
 
     result_a = process.experience("a", "怎样指出朋友的错误？", object_ref="user")
     result_b = process.experience("b", "怎样指出朋友的错误？", object_ref="user")

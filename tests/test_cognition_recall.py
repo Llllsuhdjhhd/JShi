@@ -121,6 +121,9 @@ def test_single_recall_records_metrics_and_reference(tmp_path):
 def test_recall_is_truncated_after_one_round(tmp_path):
     model = AlwaysRecallModel()
     process, repository = runtime(tmp_path, model=model)
+    # 一条初始召回（按对象过滤）拿不到、但追加召回（不按对象过滤）能拿到的新经历：
+    # 验证追加召回能补进"真新"记忆，且与初始召回按 event_id 去重（不会重复装已有记忆）。
+    seeded = process.memory.remember_fact("stone", "external_input", "更多往事")
 
     result = process.experience("stone", "你好", object_ref="user")
 
@@ -129,7 +132,10 @@ def test_recall_is_truncated_after_one_round(tmp_path):
     metrics = subject_events(repository, "recall_metrics")
     assert len(metrics) == 1
     assert metrics[0].content["truncated"] is True
-    assert len(subject_events(repository, "recall_extended")) == 1
+    extended = subject_events(repository, "recall_extended")
+    assert len(extended) == 1
+    # 追加召回只装入"真新"的那条（seeded），不会重复装初始召回已装的那条经历。
+    assert extended[0].content["recalled_event_ids"] == [seeded]
 
 
 def test_evaluation_is_not_run_inline(tmp_path):
@@ -163,6 +169,10 @@ def test_model_request_carries_speaker_and_addressable_context(tmp_path):
     assert model.request.speaker.object_id
     assert all("id" in item and "source" in item for item in model.request.context)
     assert any(item.get("kind") == "speaker" for item in model.request.context)
+    zone_refs = next(
+        item for item in model.request.context if item.get("kind") == "active_zone_refs"
+    )
+    assert "segments" in zone_refs
 
 
 def test_no_recall_no_metrics_or_evaluation(tmp_path):
