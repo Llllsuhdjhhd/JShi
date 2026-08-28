@@ -25,6 +25,14 @@ def recall_level_limit(level: int) -> int:
     return 8
 
 
+def _fact_mentions_object(record: object, object_id: str) -> bool:
+    content = getattr(record, "content", None) or {}
+    if str(content.get("object_id", "")) == object_id:
+        return True
+    listed = content.get("object_ids") or ()
+    return object_id in listed
+
+
 @dataclass(frozen=True)
 class RecalledFragment:
     """One recalled past fragment shown in the current-state working set.
@@ -116,7 +124,7 @@ class InProcessHistoryMemory:
             recent = [
                 record
                 for record in recent
-                if str(record.content.get("object_id", "")) == object_id
+                if _fact_mentions_object(record, object_id)
             ]
         tokens = query_terms(query)
         scored: list[tuple[float, HistoryRecord]] = []

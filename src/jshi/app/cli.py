@@ -7,7 +7,9 @@ import os
 import sys
 from pathlib import Path
 
+from jshi.experienceledger import SqliteExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
+from jshi.memory import MemoryShell, build_memory_backend
 from jshi.models import EchoModel, ModelPort, OpenAICompatibleModel
 from jshi.recognition import CarrierEntry, ObjectProfile, new_object_id
 from jshi.skill import CognitionSkill, SkillModelPort
@@ -80,7 +82,16 @@ def _runtime(
 ) -> tuple[SubjectProcess, IdentityRepository, SubjectRepository]:
     identities = IdentityRepository(data_dir / "identities.json")
     subjects = SubjectRepository(data_dir / "subject.sqlite3")
-    process = SubjectProcess(subjects, identities, _model_from_environment())
+    backend = build_memory_backend(subjects, data_dir)
+    if type(backend).__name__ != "InProcessMemoryBackend":
+        print(f"[jshi] memory backend: {type(backend).__name__}", file=sys.stderr)
+    process = SubjectProcess(
+        subjects,
+        identities,
+        _model_from_environment(),
+        memory=MemoryShell(backend),
+        activity_ledger=SqliteExperienceLedger(data_dir / "subject.sqlite3"),
+    )
     return process, identities, subjects
 
 

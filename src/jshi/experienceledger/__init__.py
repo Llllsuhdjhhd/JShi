@@ -11,6 +11,7 @@ from .port import (
     SegmentStatus,
     empty_context_view,
 )
+from .sqlite import SqliteExperienceLedger
 
 __all__ = [
     "ContextAssessment",
@@ -23,5 +24,6 @@ __all__ = [
     "MemoryIngestLedgerEntry",
     "OutputKind",
     "SegmentStatus",
+    "SqliteExperienceLedger",
     "empty_context_view",
 ]

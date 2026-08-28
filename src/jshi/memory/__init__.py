@@ -12,6 +12,13 @@ from .port import (
 from .coordinator import RecallCoordinator, RecallExecution
 from .evaluator import RecallEvaluatorPort, RuleBasedRecallEvaluator
 from .backend import InProcessMemoryBackend, MemoryBackendPort
+from .factory import (
+    UnknownMemoryBackendError,
+    build_memory_backend,
+    memory_backend_name,
+    rems_data_dir,
+)
+from .rems3 import Rems3MemoryBackend, RemsUnavailableError
 from .shell import MemoryShell
 
 __all__ = [
@@ -27,6 +34,12 @@ __all__ = [
     "RecallExecution",
     "RecallEvaluatorPort",
     "RecalledFragment",
+    "Rems3MemoryBackend",
+    "RemsUnavailableError",
     "RuleBasedRecallEvaluator",
+    "UnknownMemoryBackendError",
+    "build_memory_backend",
+    "memory_backend_name",
     "recall_level_limit",
+    "rems_data_dir",
 ]

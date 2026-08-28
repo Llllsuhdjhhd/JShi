@@ -230,6 +230,13 @@ class ProfileObjectRecognition:
             "invalid input envelope: external input requires an object reference"
         )
 
+    def lookup_by_name(self, name: str) -> ObjectProfile | None:
+        """只读按名字/别名查找。唯一命中才返回；没有或重名返回 None，不新建。"""
+        found = self._profiles.find_by_names(name)
+        if len(found) == 1:
+            return found[0]
+        return None
+
     def _disambiguate(
         self,
         subject_id: str,

@@ -66,6 +66,14 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
     ):
         assert required in types
     assert "cognitive_content_appeared" not in types
+    timing = result.timing
+    assert timing is not None
+    names = [name for name, _ms in timing.steps]
+    assert "①落位" in names
+    assert "⑤认知" in names
+    assert "⑦收尾" in names
+    assert timing.total_ms >= 0
+    assert process.last_activity_timing == timing
 
 
 def test_assemble_loads_existing_commitments_only(tmp_path):

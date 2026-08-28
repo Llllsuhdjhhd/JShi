@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 from jshi.recognition import CarrierEntry
+from jshi.subject import ActivityTiming
 
 SESSION_FILE = "cli_session.json"
 
@@ -19,8 +20,11 @@ TALK_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("/context", "", "看本轮活跃区与装载（不调模型）"),
     ("/plan", "", "看上一轮 05 的 response_plan 条目"),
     ("/prompt", "", "看认知 skill 提示词骨架（本轮材料用 /context）"),
+    ("/timing", "轮数", "上一轮各步耗时（可 /timing 5；默认不刷屏）"),
     ("/quit", "", "结束"),
 )
+
+TIMING_KEEP = 20
 
 
 def format_help_text() -> str:
@@ -36,6 +40,13 @@ def format_help_text() -> str:
 
 
 HELP_TEXT = format_help_text()
+
+
+def format_activity_timing(timing: ActivityTiming, *, heading: str = "上一轮") -> str:
+    lines = [f"{heading} 合计 {timing.total_ms:g}ms"]
+    for name, milliseconds in timing.steps:
+        lines.append(f"  {name} {milliseconds:g}ms")
+    return "\n".join(lines)
 
 EventKind = Literal["speech", "notice", "meta", "overlay"]
 
@@ -138,6 +149,7 @@ class TalkSession:
         self.carriers = carriers
         self.last_line = ""
         self.last_plan = None
+        self._timings: list[ActivityTiming] = []
         self._turn_lock = threading.Lock()
 
     @property
@@ -173,6 +185,8 @@ class TalkSession:
             return TalkOutcome((TalkEvent("overlay", self._plan_text()),))
         if line == "/prompt":
             return TalkOutcome((TalkEvent("overlay", self._prompt_text()),))
+        if line == "/timing" or line.startswith("/timing "):
+            return self._handle_timing(line)
         if line.startswith("/"):
             return TalkOutcome((TalkEvent("notice", "未知命令。输入 /help"),))
         return self._handle_utterance(line)
@@ -214,6 +228,13 @@ class TalkSession:
                 return TalkOutcome((TalkEvent("notice", f"调用失败：{exc}"),))
             self.last_line = line
             self.last_plan = result.response_plan
+            timing = result.timing or getattr(
+                self.process, "last_activity_timing", None
+            )
+            if isinstance(timing, ActivityTiming):
+                self._timings.append(timing)
+                if len(self._timings) > TIMING_KEEP:
+                    del self._timings[:-TIMING_KEEP]
             spoken = result.action_text.strip() if result.action_text else ""
             view = self.process.activity_ledger.current_context_view(self.subject_id)
             meta = (
@@ -300,3 +321,34 @@ class TalkSession:
             f"user（本轮原文）：{query}\n"
             "身份、承诺与分片 JSON 由适配器在 system 后半段追加；完整 HTTP 报文不落库。"
         )
+
+    def _handle_timing(self, line: str) -> TalkOutcome:
+        parts = line.split()
+        count = 1
+        if len(parts) > 2:
+            return TalkOutcome(
+                (TalkEvent("notice", "用法：/timing 或 /timing 5"),)
+            )
+        if len(parts) == 2:
+            try:
+                count = int(parts[1])
+            except ValueError:
+                return TalkOutcome(
+                    (TalkEvent("notice", "用法：/timing 或 /timing 5"),)
+                )
+            if count < 1:
+                return TalkOutcome(
+                    (TalkEvent("notice", "用法：/timing 或 /timing 5"),)
+                )
+            count = min(count, TIMING_KEEP)
+        if not self._timings:
+            return TalkOutcome(
+                (TalkEvent("notice", "还没有走完一轮。先说一句再 /timing。"),)
+            )
+        chosen = self._timings[-count:]
+        start = len(self._timings) - len(chosen) + 1
+        blocks = []
+        for index, timing in enumerate(chosen, start=start):
+            heading = "上一轮" if len(chosen) == 1 else f"第{index}轮"
+            blocks.append(format_activity_timing(timing, heading=heading))
+        return TalkOutcome((TalkEvent("overlay", "\n".join(blocks)),))

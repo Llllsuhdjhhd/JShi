@@ -239,3 +239,47 @@ def test_segment_carries_objects_mapping():
     segment = ledger.list_experiences("stone")[-1]
     assert segment.text_raw == "小明：你好"
     assert segment.objects == {"小明": "OBJ-A", "小刚": "OBJ-B"}
+
+
+def test_sqlite_ledger_reopens_segments_and_active_zone(tmp_path):
+    from jshi.experienceledger import SqliteExperienceLedger
+
+    path = tmp_path / "subject.sqlite3"
+    first = SqliteExperienceLedger(path)
+    incoming = first.append_external(
+        "stone", actor_object_id="OBJ-A", text_raw="上一句还在。"
+    )
+    reply = first.append_subject_reply("stone", text_raw="我接着说。")
+    view = first.apply_context_assessment("stone", speaker_object_id="OBJ-A")
+    first.advance_consumer_cursor("stone", ConsumerKind.MEMORY, incoming.sequence)
+
+    second = SqliteExperienceLedger(path)
+    restored = second.current_context_view("stone")
+    assert restored.version == view.version
+    assert restored.context_text == view.context_text
+    assert restored.segment_refs == view.segment_refs
+    assert restored.speaker_object_id == "OBJ-A"
+    segments = second.list_experiences("stone")
+    assert [item.segment_id for item in segments] == [
+        incoming.segment_id,
+        reply.segment_id,
+    ]
+    assert second.consumer_cursor("stone", ConsumerKind.MEMORY) == incoming.sequence
+    pending = second.list_experiences("stone", after_sequence=incoming.sequence)
+    assert [item.segment_id for item in pending] == [reply.segment_id]
+
+
+def test_sqlite_unmerged_pending_survives_reopen(tmp_path):
+    from jshi.experienceledger import SqliteExperienceLedger
+
+    path = tmp_path / "subject.sqlite3"
+    first = SqliteExperienceLedger(path)
+    first.append_external("stone", actor_object_id="OBJ-A", text_raw="还没编进活跃区。")
+    assert first.current_context_view("stone").version == 0
+
+    second = SqliteExperienceLedger(path)
+    assert second.current_context_view("stone").context_text == ""
+    assert second.list_experiences("stone")[0].text_raw == "还没编进活跃区。"
+    merged = second.apply_context_assessment("stone")
+    assert "还没编进活跃区。" in merged.context_text
+

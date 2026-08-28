@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Mapping, Sequence
 
@@ -56,7 +57,14 @@ from jshi.memory import (
 )
 from jshi.memorycontrol import InProcessMemoryControl
 from jshi.objects import InProcessObjectSystem, ObjectSystemPort
-from jshi.models import ModelPort, ModelRequest, ModelSpeaker, ObjectAssessment, ResponsePlan
+from jshi.models import (
+    ModelPort,
+    ModelRequest,
+    ModelSpeaker,
+    ObjectAssessment,
+    RecallRequest,
+    ResponsePlan,
+)
 from jshi.recognition import (
     CarrierEntry,
     MIN_OBJECT_CONFIDENCE,
@@ -83,6 +91,7 @@ from .domain import (
     PersonalKind,
     PersonalStatus,
     StateTransition,
+    utc_now,
 )
 from .repository import SubjectRepository
 
@@ -145,6 +154,36 @@ class SubjectPreview:
 
 
 @dataclass(frozen=True)
+class ActivityTiming:
+    """一轮活动各步耗时。旁路观测，不进经历、不进模型。"""
+
+    activity_id: str
+    started_at: str
+    steps: tuple[tuple[str, float], ...]
+    total_ms: float
+
+
+class StepClock:
+    def __init__(self) -> None:
+        self.started_at = utc_now()
+        self._last = time.perf_counter()
+        self.steps: list[tuple[str, float]] = []
+
+    def mark(self, name: str) -> None:
+        now = time.perf_counter()
+        self.steps.append((name, round((now - self._last) * 1000, 1)))
+        self._last = now
+
+    def finish(self, activity_id: str) -> ActivityTiming:
+        return ActivityTiming(
+            activity_id=activity_id,
+            started_at=self.started_at.isoformat(),
+            steps=tuple(self.steps),
+            total_ms=round(sum(ms for _name, ms in self.steps), 1),
+        )
+
+
+@dataclass(frozen=True)
 class SubjectActivityResult:
     activity: Activity
     perception: CognitiveContent
@@ -154,6 +193,7 @@ class SubjectActivityResult:
     speaker: SpeakerCandidate = field(
         default_factory=lambda: SpeakerCandidate(subject_id="", actor_object_id="")
     )
+    timing: ActivityTiming | None = None
 
 
 class SubjectProcess:
@@ -185,6 +225,7 @@ class SubjectProcess:
         self.repository = repository
         self.identities = identities
         self.cognition = cognition
+        self.last_activity_timing: ActivityTiming | None = None
         self.memory = memory or MemoryShell(InProcessMemoryBackend(repository))
         self.recall_coordinator = RecallCoordinator(repository, self.memory)
         self.recall_evaluator = recall_evaluator or RuleBasedRecallEvaluator()
@@ -304,6 +345,7 @@ class SubjectProcess:
         carriers: tuple[CarrierEntry, ...] = (),
         objects: Mapping[str, str] | None = None,
     ) -> SubjectActivityResult:
+        clock = StepClock()
         # 阶段① 对象必填校验 → 对象解析 → 置信度门禁 → 落位
         self._require_object_source(object_ref, channel, carriers)
         speaker = self.recognition.resolve(
@@ -380,6 +422,7 @@ class SubjectProcess:
                 )
             )
 
+        clock.mark("①落位")
         # 阶段② 读取既往上下文：只读 16 当前 ContextViewState
         view = self.active_zone.load(subject_id)
         self.repository.add_history(
@@ -397,6 +440,7 @@ class SubjectProcess:
             )
         )
 
+        clock.mark("②活跃区")
         # 阶段③ 当前状态组装（单一路径，只读已有记录）
         current = self.assemble_current_state(
             subject_id, text, view, speaker=speaker
@@ -434,6 +478,7 @@ class SubjectProcess:
             )
         )
 
+        clock.mark("③组装")
         # 阶段④ 活动建立
         activity = Activity(
             subject_id=subject_id,
@@ -474,9 +519,10 @@ class SubjectProcess:
         )
         self.repository.add_cognitive_content(perception)
 
+        clock.mark("④建活动")
         # 阶段⑤ 认知活动（可追加召回）
         response, working_recalled = self._cognize(
-            subject_id, activity, current, perception
+            subject_id, activity, current, perception, clock=clock
         )
         activity, final_statuses, _ = self.mark_activity_response_status(
             subject_id,
@@ -498,6 +544,7 @@ class SubjectProcess:
                 subject_id, speaker, fact, activity.id, response.object_assessment
             )
 
+        clock.mark("06标记")
         # 阶段⑥：10 按 item 分发。verbal 落记录并走独立语音占位；embodied 走肢体占位。
         # think/ignore/wait 不说话、不发音，活动仍结束。结果反馈与语言同级。
         plan = response.response_plan
@@ -568,6 +615,7 @@ class SubjectProcess:
                 response_plan=plan_payload,
                 response_statuses=final_statuses,
             )
+        clock.mark("⑥行动")
         self.activity_ledger.apply_context_assessment(
             subject_id,
             getattr(response, "context_assessment", None),
@@ -585,6 +633,7 @@ class SubjectProcess:
             ),
         )
 
+        clock.mark("16编排")
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
         close_result = self.activity_close.close(
             subject_id,
@@ -598,6 +647,7 @@ class SubjectProcess:
             ),
         )
         completed = self.repository.get_activity(close_result.activity_id)
+        clock.mark("⑦收尾")
         if close_result.handoff_to_memory_control:
             memory_result = self.memory_control.run_once(subject_id)
             self.evaluation.emit(
@@ -614,6 +664,7 @@ class SubjectProcess:
                     source_ids=(activity.id,),
                 )
             )
+        clock.mark("30投递")
         findings = self.governance.check(subject_id, completed, fact, None)
         if findings:
             self.repository.add_history(
@@ -634,6 +685,8 @@ class SubjectProcess:
                     source_ids=(fact.id,),
                 )
             )
+        timing = clock.finish(completed.id)
+        self.last_activity_timing = timing
         return SubjectActivityResult(
             completed,
             perception,
@@ -641,6 +694,7 @@ class SubjectProcess:
             spoken_text,
             current,
             speaker=speaker,
+            timing=timing,
         )
 
     def _cognize_once(
@@ -677,6 +731,7 @@ class SubjectProcess:
         activity: Activity,
         current: AssembledCurrentState,
         perception: CognitiveContent,
+        clock: StepClock | None = None,
     ) -> tuple[object, list[RecalledFragment]]:
         """主流程认知编排：05 产出方案，09 协调器执行记忆补充，再继续认知。"""
         working_recalled: list[RecalledFragment] = list(current.recalled)
@@ -688,6 +743,8 @@ class SubjectProcess:
             if fragment.source == "memory"
         }
         response = self._cognize_once(current, working_recalled)
+        if clock is not None:
+            clock.mark("⑤认知")
         rounds = 0
         executions: list[RecallExecution] = []
 
@@ -696,15 +753,23 @@ class SubjectProcess:
             and rounds < FOLLOWUP_RECALL_MAX_ROUNDS
         ):
             rounds += 1
+            speaker_object_id = (
+                current.speaker.object_id if current.speaker is not None else None
+            )
+            requests = self._bind_recall_object_ids(
+                response.recall_requests, speaker_object_id=speaker_object_id
+            )
             execution = self.recall_coordinator.execute_round(
                 subject_id=subject_id,
                 activity_id=activity.id,
                 perception_id=perception.id,
                 round_number=rounds,
-                requests=response.recall_requests,
+                requests=requests,
                 known_ids=known_ids,
             )
             executions.append(execution)
+            if clock is not None:
+                clock.mark("⑤召回")
             working_recalled.extend(execution.fresh)
             self.evaluation.emit(
                 EvaluationEvent(
@@ -729,6 +794,8 @@ class SubjectProcess:
                 execution.duration_ms,
             )
             response = self._cognize_once(current, working_recalled)
+            if clock is not None:
+                clock.mark("⑤认知(补)")
 
         truncated = bool(
             executions
@@ -969,6 +1036,60 @@ class SubjectProcess:
             for item in recalled
         )
         return tuple(items)
+
+    def _bind_recall_object_ids(
+        self,
+        requests: Sequence[RecallRequest],
+        *,
+        speaker_object_id: str | None,
+    ) -> tuple[RecallRequest, ...]:
+        """只读档案补全召回对象。不新建；模型已填且不是误用说话人 id 则不动。"""
+        return tuple(
+            self._bind_one_recall(request, speaker_object_id) for request in requests
+        )
+
+    def _bind_one_recall(
+        self,
+        request: RecallRequest,
+        speaker_object_id: str | None,
+    ) -> RecallRequest:
+        hit = self._profile_named_in_query(request.query)
+        if hit is None:
+            return request
+        existing = request.object_ids
+        if not existing:
+            return replace(request, object_ids=(hit.object_id,))
+        if (
+            speaker_object_id
+            and existing == (speaker_object_id,)
+            and hit.object_id != speaker_object_id
+        ):
+            return replace(request, object_ids=(hit.object_id,))
+        return request
+
+    def _profile_named_in_query(self, query: str) -> ObjectProfile | None:
+        text = (query or "").strip()
+        if not text:
+            return None
+        exact = self.profiles.find_by_names(text)
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            return None
+        hay = text.casefold()
+        hits: dict[str, ObjectProfile] = {}
+        for profile in self.profiles.list():
+            names = (profile.label, *profile.aliases)
+            for name in names:
+                key = name.strip()
+                if len(key) < 2:
+                    continue
+                if key.casefold() in hay:
+                    hits[profile.object_id] = profile
+                    break
+        if len(hits) == 1:
+            return next(iter(hits.values()))
+        return None
 
     # ------------------------------------------------------------------
     # 反思（内部活动，委托给反思系统）

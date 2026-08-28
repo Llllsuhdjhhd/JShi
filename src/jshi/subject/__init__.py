@@ -13,13 +13,19 @@ from .domain import (
     PersonalStatus,
     StateTransition,
 )
-from .process import AssembledCurrentState, SubjectActivityResult, SubjectProcess
+from .process import (
+    ActivityTiming,
+    AssembledCurrentState,
+    SubjectActivityResult,
+    SubjectProcess,
+)
 from .repository import SubjectRepository
 
 __all__ = [
     "Activity",
     "ActivityKind",
     "ActivityStatus",
+    "ActivityTiming",
     "AssembledCurrentState",
     "CognitiveContent",
     "CognitiveKind",

@@ -28,6 +28,7 @@ class TalkApp(App[None]):
     #chat {
         height: 1fr;
         border: solid $accent;
+        text-wrap: wrap;
     }
     #picker {
         height: auto;
@@ -55,7 +56,7 @@ class TalkApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Log(id="chat")
+        yield Log(id="chat", wrap=True)
         yield _CommandPicker(id="picker")
         yield Static(self._idle_status(), id="status")
         yield Input(placeholder="说话；输入 / 用箭头选命令", id="line")

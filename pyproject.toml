@@ -13,6 +13,8 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 talk = ["textual>=0.86,<9"]
+# 标记用：真正的引擎是邻仓 `rems`，请另执行 pip install -e <Jshi_memory>
+memory-rems = []
 
 [project.scripts]
 jshi = "jshi.app.cli:main"
@@ -25,3 +27,6 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 cache_dir = ".pytest/cache"
 addopts = ["--basetemp=.pytest/tmp"]
+markers = [
+    "rems: optional live Jshi_memory backend (set JSHI_TEST_REMS=1)",
+]

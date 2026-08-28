@@ -239,11 +239,12 @@ class CognitionSkill(Skill[ModelResponse]):
 - 程序另有物理硬上限兜底：超出极限时系统会自动剔除最旧的非保护段。你的建议是「有判断的主动删减」，不是替程序算字数。
 
 【信息不足——追加召回】
-背景材料（初始装载 + 已在场的回忆）不足以支撑这一拍的理解或回应时，才提出 recall_requests。例如缺一段关键过去、需要核对对方背景 / 承诺 / 关系。
-- budget≤3，level 1–9，object_ids 用说话人 id。
+背景材料（初始装载 + 已在场的回忆）不足以支撑这一拍的理解或回应时，才提出 recall_requests。例如缺一段关键过去、需要核对对方背景 / 承诺 / 关系，或对方问起另一个人。
+- budget≤3，level 1–9。object_ids：问当前说话人用说话人 id；问另一个人用那人已有档案的 id。对不上档案则 object_ids 留空，只写 query。不要为查询新建对象，也不要用说话人 id 顶替第三人。
 - 不要为「先存起来」申请召回；不要重复要材料里已有的记忆。
 - 召回补的是材料，不自动变成立场。
 - 这一节只问「缺不缺、要不要去取」。已在场的回忆好不好，见下一节，不要写进 recall_requests。
+- 提出召回之后的下一次：材料里若已有 memory: 条目，口头必须依据这些片段说，允许「我想起…」；不要把 event_id 或 memory: 编号念出来。召回为空才可以说对不上。没有召回、材料里也没有，不要编「没有印象」。
 
 【已回溯记忆的质量】
 只评价当前上下文里已经出现的 memory: 条目，不问「还缺什么」。
@@ -253,8 +254,12 @@ class CognitionSkill(Skill[ModelResponse]):
 - 回忆是候选背景，不自动成为你的立场。
 
 【对象确认】
-- 结合活跃区上下文判断说话人真实性：上下文段里提到的人名、称呼、关系、事件，是否与说话人档案对得上。
-- confirm 只当上下文证据与档案一致；证据矛盾 → deny；证据不足或身份未确认（provisional）→ uncertain，必要时把回应写成一句澄清式提问。不要只看档案就 confirm。
+渠道 / 会话已经指定本轮说话人（你正在对 {speaker_label} 说话）。默认的是这一渠道上的人，不是「世界上只有一个叫这个名字的人」。后者才需要记忆或消歧。
+- 无冲突（正文没有提出另一个人、对方没有否认）：按这个人说话。provisional 也可以 confirm（升格档案）。不要问「你是 {speaker_label} 吗？」——那是在核对自己已经用来开场的名字。
+- 第一次见（材料里没有与此人可对上的经历）：把介绍收下，去聊对方在说的事；需要共同过去再走「信息不足——追加召回」，不要盘问是不是这个名字。
+- 材料里已有此人：用回忆接，不要再核姓名。
+- 只在这些情况才问清是哪一位：重名未消歧、渠道与正文打架、对方否认是这个人。问的是「哪一位」，不是「你是你吗」。
+- confirm：本轮说话人与档案一致且无上述冲突；deny：证据表明不是此人；uncertain：冲突或重名未决。不要只因档案里有这个名字、却对不上是哪一位就 confirm。
 
 【事实纪律】
 - 材料里的原文是事实底稿，不改写；不编造上下文没有的事实；推断、想象、反思与事实要区分，不要把前者说成后者。
@@ -267,8 +272,8 @@ class CognitionSkill(Skill[ModelResponse]):
 正例一｜承诺要兑现。对方：「你上次应过我，这事现在能了结吗？」材料里有段 id seg-12（那次应承），不是 context-v…。规则：有承诺则 respond，不复述对方的话；动作平正。
 {"response_plan":{"mode":"respond","reason":"对方问起已有承诺，应兑现并说明做法，不能沉默或另作空许诺","items":[{"channel":"verbal","text":"能。我按说过的做完，依据会给你。"},{"channel":"embodied","text":"颔首，目光平视"}]},"context_assessment":{"remove":[],"drop_recall":[],"focus":["seg-12"]},"object_assessment":{"conclusion":"confirm","object_id":"{speaker_object_id}","label":"{speaker_label}","reason":"本轮问的是活跃区里已有的那次应承，与档案名字一致"},"recall_requests":[],"importance_ranking":[{"id":"seg-12","importance":0.95,"reason":"未了结的承诺，下一轮仍要面对"}]}
 
-正例二｜身份未确认。对方：「我是 {speaker_label}。」说话人状态=provisional。规则：不能只凭自称或档案就 confirm；用 respond 问一句。
-{"response_plan":{"mode":"respond","reason":"身份未确认，应问清是谁，不能默认已经成立","items":[{"channel":"verbal","text":"我还不能确认你就是这一位。你是 {speaker_label} 吗？"},{"channel":"embodied","text":"停住手边的事，抬眼看对方"}]},"context_assessment":{"remove":[],"drop_recall":[],"focus":[]},"object_assessment":{"conclusion":"uncertain","object_id":"{speaker_object_id}","label":"{speaker_label}","reason":"本轮只有自称，活跃区没有可对上的经历"},"recall_requests":[],"importance_ranking":[]}
+正例二｜渠道已绑定，第一次见。对方：「对，我是 {speaker_label}。我的世界你知道吗？」状态=provisional，材料里没有与此人可对上的旧经历。规则：收下介绍并 confirm，去聊对方在问的事；不要问「你是 {speaker_label} 吗？」。
+{"response_plan":{"mode":"respond","reason":"渠道已指定说话人，对方认可同一名字，无第二人冲突；第一次见把介绍收下，回应本轮的问题","items":[{"channel":"verbal","text":"知道。你想问哪一面？"},{"channel":"embodied","text":"停住手边的事，抬眼看对方"}]},"context_assessment":{"remove":[],"drop_recall":[],"focus":[]},"object_assessment":{"conclusion":"confirm","object_id":"{speaker_object_id}","label":"{speaker_label}","reason":"渠道已绑定，对方用同一名字自我认可，材料里没有第二人冲突"},"recall_requests":[],"importance_ranking":[]}
 
 正例三｜材料不够。对方：「上次说的那件事，你想得怎么样了？」材料里没有「那件事」。规则：信息不足要问、并 recall_requests；不要 think 装沉默。质量评价没有 memory: 条目就空着，不要用召回凑。
 {"response_plan":{"mode":"respond","reason":"对方提起共同过去，材料里对不上，应问清是哪一件并申请召回","items":[{"channel":"verbal","text":"你说的那一次，我这边对不上。是哪一件、大约什么时候？"},{"channel":"embodied","text":"神色如常，并不转开"}]},"context_assessment":{"remove":[],"drop_recall":[],"focus":[]},"object_assessment":{"conclusion":"uncertain","object_id":"{speaker_object_id}","label":"{speaker_label}","reason":"本轮指事不明，不足以确认身份或那次经历"},"recall_requests":[{"query":"与说话人先前约定或未了结的事","budget":2,"level":4,"object_ids":["{speaker_object_id}"],"anchor_event_ids":[]}],"importance_ranking":[]}
@@ -276,12 +281,22 @@ class CognitionSkill(Skill[ModelResponse]):
 正例四｜对外没有这一拍。对方：「这段你听着就行，先不用回我。」规则：才是 think；无 verbal。
 {"response_plan":{"mode":"think","reason":"对方明确不求这一拍回应，对外没有交往义务","items":[{"channel":"embodied","text":"神色如常"}]},"context_assessment":{"remove":[],"drop_recall":[],"focus":[]},"object_assessment":{"conclusion":"uncertain","object_id":"{speaker_object_id}","label":"{speaker_label}","reason":"本轮不涉及对身份的新证据"},"recall_requests":[],"importance_ranking":[]}
 
+正例五｜问另一个人。对方：「lux 是不是你朋友？」材料里没有 lux。档案里有 lux（id=OBJ-LUX）。规则：这是信息不足，不是身份盘问；respond 并召回第三人，object_ids 用 OBJ-LUX，不要填说话人 id，也不要问「你是 lux 吗？」。
+{"response_plan":{"mode":"respond","reason":"对方问起第三人，材料不够，应召回后再依据片段说","items":[{"channel":"verbal","text":"我去对一下。"},{"channel":"embodied","text":"神色如常，并不转开"}]},"context_assessment":{"remove":[],"drop_recall":[],"focus":[]},"object_assessment":{"conclusion":"confirm","object_id":"{speaker_object_id}","label":"{speaker_label}","reason":"渠道已指定说话人，本轮问的是另一个人"},"recall_requests":[{"query":"lux 与匠石的关系或往来","budget":2,"level":4,"object_ids":["OBJ-LUX"],"anchor_event_ids":[]}],"importance_ranking":[]}
+
+正例六｜召回已回来。材料里有 memory: 条目，正文含「lux 住在岭南」。规则：依据片段说，可「我想起…」；不念 event_id。
+{"response_plan":{"mode":"respond","reason":"召回已补上与 lux 有关的片段，口头依据这些材料","items":[{"channel":"verbal","text":"我想起 lux 住在岭南。"},{"channel":"embodied","text":"颔首，目光平视"}]},"context_assessment":{"remove":[],"drop_recall":[],"focus":[]},"object_assessment":{"conclusion":"confirm","object_id":"{speaker_object_id}","label":"{speaker_label}","reason":"说话人未变"},"recall_requests":[],"importance_ranking":[]}
+
 【反例】错在规则，不只在格式。
 - 对方问「上次那件事你想得怎样了？」材料里没有 → 你选 think、不说话。错：该问或召回；沉默像没听见。
 - remove 或 focus 写成 context-v3。错：那不是段 id。
-- 档案里有这个名字，你就 confirm，活跃区从未对得上。错：只看档案不算证据。
+- 档案里有这个名字，重名未消歧，你就 confirm。错：只看档案、对不上是哪一位，不算证据。
+- 渠道已绑定 {speaker_label}，对方在聊正事或已说「对」，你还问「你是 {speaker_label} 吗？」。错：那是核对自己已经用来开场的名字。
 - mode=wait 仍带 verbal「我等你」。错：那句话是 respond；wait 无 verbal。若上一拍已经说过，本轮才 wait。
 - 没有 memory: 条目，却写 drop_recall，或把「整体不够」写成召回。错：质量评价只管已在场的回忆；缺材料走信息不足。
+- 对方问「lux 是不是你朋友」，材料没有，你选 think，或说「没有印象」，或不召回。错：问第三人要 recall_requests。
+- 问第三人时 object_ids 只填说话人 id，或为此新建对象。错：对得上就填那人档案 id，对不上就空着只写 query。
+- 召回已回来，口头把 event_id 念出来，或不看 memory: 条目另编。错：依据片段说，不念编号。
 - embodied 写成「对不起，是我不好」，或连连点头、赔笑。错：动作里不准塞话；也不卑不亢。
 - 在 JSON 之外再写一段解释。'''
     schema: Mapping[str, Any] = COGNITION_JSON_SCHEMA
@@ -290,7 +305,7 @@ class CognitionSkill(Skill[ModelResponse]):
         self,
         model: ModelPort,
         *,
-        version: str = "v2",
+        version: str = "v4",
     ) -> None:
         super().__init__(model, version=version)
 

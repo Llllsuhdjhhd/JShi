@@ -15,6 +15,7 @@ from jshi.models import (
 from jshi.recognition import ObjectProfile
 from jshi.subject import (
     HistoryKind,
+    HistoryRecord,
     SubjectProcess,
     SubjectRepository,
 )
@@ -220,3 +221,68 @@ def test_trim_plan_updates_active_zone_without_second_model_call(tmp_path):
     assert view.recall_excerpts == ()
     assert "过时线索" not in view.context_text
     assert view.speaker_object_id
+
+
+def test_third_person_recall_binds_archive_and_speech_uses_fragment(tmp_path):
+    class ThirdPersonModel:
+        name = "third-person"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.second_ids: tuple[str, ...] = ()
+
+        def generate(self, request: ModelRequest) -> ModelResponse:
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    model=self.name,
+                    text="先对一下",
+                    recall_requests=(
+                        RecallRequest(query="lux 是不是你朋友", budget=2, level=4),
+                    ),
+                )
+            self.second_ids = tuple(
+                str(item.get("id", "")) for item in request.context
+            )
+            recalled = [
+                str(item.get("content") or "")
+                for item in request.context
+                if str(item.get("id", "")).startswith("memory:")
+                and "岭南" in str(item.get("content") or "")
+            ]
+            spoken = f"我想起{recalled[0]}" if recalled else "对不上"
+            return ModelResponse(model=self.name, text=spoken)
+
+    model = ThirdPersonModel()
+    process, repository = runtime(tmp_path, model=model)
+    process.profiles.create(
+        ObjectProfile(
+            object_id="OBJ-LUX", label="lux", source="test", status="confirmed"
+        )
+    )
+    before = len(process.profiles.list())
+    seeded = HistoryRecord(
+        subject_id="stone",
+        kind=HistoryKind.FACT,
+        event_type="memory_external",
+        content={
+            "text": "lux 住在岭南。",
+            "object_id": "OBJ-LUX",
+            "object_ids": ["OBJ-LUX"],
+        },
+    )
+    repository.add_history(seeded)
+
+    result = process.experience(
+        "stone", "lux 是不是你朋友", object_ref="user"
+    )
+
+    assert model.calls == 2
+    assert any(item.startswith("memory:") for item in model.second_ids)
+    assert "岭南" in result.action_text
+    assert "我想起" in result.action_text
+    assert seeded.id not in result.action_text
+    metrics = subject_events(repository, "recall_metrics")
+    assert metrics[0].content["request"]["object_ids"] == ["OBJ-LUX"]
+    assert len(process.profiles.list()) == before
+

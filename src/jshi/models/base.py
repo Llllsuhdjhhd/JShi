@@ -218,12 +218,13 @@ class OpenAICompatibleModel:
                 f"（称呼：{alias_text or '无'}；object_id={request.speaker.object_id}；"
                 f"状态={request.speaker.status}）\n"
             )
-        # 对象身份未确认时，把回应引导为澄清式提问（轻量路径，见 design/01 §4.3、05）。
+        # 档案未升格时：渠道上的说话人仍按这个人；不要教「你是这个名字吗」。
         if request.speaker is not None and request.speaker.status != "confirmed":
             clarity_hint = (
-                "\n注意：当前说话人身份尚未确认（provisional）。"
-                "若需要向对方确认身份，请把你的回应写成一句澄清式提问"
-                "（例如「你是……吗？」），不要默认身份成立。"
+                "\n注意：说话人档案尚未升格为 confirmed（provisional）。"
+                "渠道已指定本轮是此人。无重名、正文未提出另一人、对方未否认时："
+                "按这个人说话，可以 confirm；不要问「你是……吗？」。"
+                "只在重名未消歧、渠道与正文打架、或对方否认时，才问清是哪一位。"
             )
         else:
             clarity_hint = ""

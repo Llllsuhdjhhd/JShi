@@ -158,3 +158,64 @@ def test_prepare_talk_requires_speaker(tmp_path):
     )
     with pytest.raises(TalkSetupError):
         prepare_talk(process, identities, tmp_path, "stone", None, None, ())
+
+
+def test_runtime_reloads_active_zone_after_new_process(tmp_path):
+    first, identities, _subjects = _runtime(tmp_path)
+    identities.create(
+        IdentityProfile(
+            subject_id="stone", name="匠石", origin="测试", narrative="测试主体"
+        )
+    )
+    first.experience("stone", "你好，记下这句。", object_ref="dp")
+    view = first.active_zone.load("stone")
+    assert view.version >= 1
+    assert view.segment_refs
+
+    second, _identities, _again = _runtime(tmp_path)
+    restored = second.active_zone.load("stone")
+    assert restored.version == view.version
+    assert restored.segment_refs == view.segment_refs
+    assert restored.context_text == view.context_text
+
+
+def test_timing_command_reads_last_round_without_experience(tmp_path):
+    session = _make_session(tmp_path)
+    first = session.handle("你好")
+    spoken = "\n".join(event.text for event in first.events)
+    assert "合计" not in spoken
+    assert "①落位" not in spoken
+    counted_host, identities, _subjects = _runtime(tmp_path)
+    identities.create(
+        IdentityProfile(
+            subject_id="stone", name="匠石", origin="测试", narrative="测试主体"
+        )
+    )
+    # 同一会话上 /timing 不调 experience
+    from jshi.app.talk_session import format_activity_timing
+
+    outcome = session.handle("/timing")
+    assert outcome.events[0].kind == "overlay"
+    text = outcome.events[0].text
+    assert "上一轮 合计" in text
+    assert "①落位" in text
+    assert "⑤认知" in text
+    empty = _make_session(tmp_path / "other")
+    notice = empty.handle("/timing")
+    assert notice.events[0].kind == "notice"
+    assert "还没有走完一轮" in notice.events[0].text
+    session.handle("第二句")
+    two = session.handle("/timing 2")
+    assert "第1轮" in two.events[0].text
+    assert "第2轮" in two.events[0].text
+    usage = session.handle("/timing x")
+    assert "用法" in usage.events[0].text
+    _ = format_activity_timing
+
+
+def test_wrap_display_text_breaks_long_line():
+    from jshi.app.talk_plain import wrap_display_text
+
+    wrapped = wrap_display_text("abcdefghij", 4)
+    assert wrapped == "abcd\nefgh\nij"
+

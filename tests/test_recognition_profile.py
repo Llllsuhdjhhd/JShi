@@ -427,3 +427,30 @@ def test_experience_carries_objects_mapping(tmp_path):
     assert segment.text_raw == "阿明：今天很累，我决定休息。"
     assert segment.objects == {"小明": "OBJ-A", "阿明": "OBJ-A"}
 
+
+def test_lookup_by_name_is_read_only(tmp_path):
+    repo = ObjectProfileRepository(tmp_path / "subject.sqlite3")
+    recognition = ProfileObjectRecognition(repo)
+
+    assert recognition.lookup_by_name("lux") is None
+    assert repo.list() == ()
+
+    repo.create(
+        ObjectProfile(
+            object_id="OBJ-LUX", label="lux", source="test", status="confirmed"
+        )
+    )
+    found = recognition.lookup_by_name("lux")
+    assert found is not None
+    assert found.object_id == "OBJ-LUX"
+    assert len(repo.list()) == 1
+
+    repo.create(
+        ObjectProfile(
+            object_id="OBJ-LUX-2", label="lux", source="test", status="provisional"
+        )
+    )
+    assert recognition.lookup_by_name("lux") is None
+    assert len(repo.list()) == 2
+
+

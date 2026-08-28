@@ -73,7 +73,7 @@ def _payload() -> dict:
 def test_cognition_skill_produces_usage_segments(tmp_path):
     skill = CognitionSkill(FakeModel(_payload()))
     resp = skill.run(make_request())
-    assert resp.model == "deepseek-flash@v2"  # I-004：模型 + skill 版本
+    assert resp.model == "deepseek-flash@v4"  # I-004：模型 + skill 版本
     assert resp.response_plan.mode == "respond"
     assert "working_set_limit" in resp.response_plan.verbal_text()
     assert resp.context_assessment.focus == ("seg-12",)
@@ -113,7 +113,13 @@ def test_instruction_examples_cover_key_dialogues():
     assert "颔首，目光平视" in text
     assert "先不用回我" in text
     assert "信息不足就问" in text
-    assert "只看档案不算证据" in text
+    assert "只看档案、对不上是哪一位，不算证据" in text
+    assert "核对自己已经用来开场的名字" in text
+    assert "我还不能确认你就是这一位" not in text
+    assert "object_ids 用说话人 id" not in text
+    assert "问另一个人用那人已有档案的 id" in text
+    assert "不要编「没有印象」" in text
+    assert "lux 是不是你朋友" in text
 
 
 def test_skill_framework_is_reused_by_other_skills():
@@ -231,7 +237,7 @@ def test_skill_model_port_routes_subject_activity_but_not_reflection():
     port = SkillModelPort(skill)
 
     subject = port.generate(make_request())
-    assert subject.model == "deepseek-flash@v2"
+    assert subject.model == "deepseek-flash@v4"
     assert subject.response_plan.mode == "respond"
     assert subject.context_assessment.focus == ("seg-12",)
 

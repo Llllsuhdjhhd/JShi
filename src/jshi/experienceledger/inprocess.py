@@ -54,6 +54,9 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             self._states[subject_id] = state
         return state
 
+    def _after_write(self, subject_id: str) -> None:
+        """落盘钩子。内存实现为空。"""
+
     def append_external(
         self,
         subject_id: str,
@@ -221,6 +224,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         )
         state.segments.append(segment)
         state.pending_sequences.append(sequence)
+        self._after_write(subject_id)
         return segment
 
     def current_context_view(self, subject_id: str) -> ContextViewState:
@@ -319,6 +323,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             focused_refs=tuple(focused),
             last_applied_sequence=last_applied,
         )
+        self._after_write(subject_id)
         return state.context
 
     def list_experiences(
@@ -483,6 +488,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         current = state.cursors.get(consumer, 0)
         updated = max(current, through_sequence)
         state.cursors[consumer] = updated
+        self._after_write(subject_id)
         return updated
 
     def consumer_cursor(
@@ -493,8 +499,8 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         return self._state(subject_id).cursors.get(consumer, 0)
 
     def head_sequence(self, subject_id: str) -> int:
-        state = self._states.get(subject_id)
-        if not state or not state.segments:
+        state = self._state(subject_id)
+        if not state.segments:
             return 0
         return state.segments[-1].sequence
 
@@ -520,6 +526,8 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
                     status=SegmentStatus.ARCHIVED,
                 )
                 archived += 1
+        if archived:
+            self._after_write(subject_id)
         return archived
 
     def register_ingest(self, batch: MemoryBatch) -> MemoryIngestLedgerEntry:
@@ -529,6 +537,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             batch_id=batch.batch_id,
         )
         state.ingest_entries.append(entry)
+        self._after_write(batch.subject_id)
         return entry
 
     def mark_ingesting(self, ingest_id: str) -> MemoryIngestLedgerEntry:
@@ -587,9 +596,10 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         raise KeyError(ingest_id)
 
     def _replace_ledger(self, updated: MemoryIngestLedgerEntry) -> None:
-        for state in self._states.values():
+        for subject_id, state in self._states.items():
             for index, entry in enumerate(state.ingest_entries):
                 if entry.ingest_id == updated.ingest_id:
                     state.ingest_entries[index] = updated
+                    self._after_write(subject_id)
                     return
         raise KeyError(updated.ingest_id)

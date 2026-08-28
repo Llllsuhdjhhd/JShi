@@ -133,6 +133,37 @@ JSHI_MODEL_NAME=deepseek-chat
 
 `ENDPOINT` 必须是完整的 `.../v1/chat/completions`，不能只填站点根地址。三项都有才走远程模型；缺一则 Echo。
 
+### 1.4 记忆后端
+
+默认用进程内记忆（`subject.sqlite3` 里的事实历史）。不必另开记忆进程。
+
+可选：同进程接入邻仓 Jshi_memory（包名 `rems`）。先安装邻仓，再设环境变量。缺包时启动直接失败，不会悄悄退回进程内。
+
+安装必须用 **talk.cmd 同一个 python**（机器上常有 Anaconda 与另一份 Python 并存）。在准备跑 `talk.cmd` 的那个窗口里：
+
+```bat
+python -c "import sys; print(sys.executable)"
+```
+
+把打印出的路径用来安装（不要只用裸的 `pip`，它可能装进另一套环境）：
+
+```bat
+python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
+```
+
+`.env` 里 `JSHI_MEMORY_BACKEND=rems3` 已经够了。记忆引擎会沿用同一文件里的 `JSHI_MODEL_API_KEY` / `ENDPOINT` / `NAME`（若未另写 `REMS_LLM__API_KEY`）。然后再 `talk.cmd stone --speaker lux --tui`。成功时 stderr 会有一行 `[jshi] memory backend: Rems3MemoryBackend`。
+
+安装时若提示 Scripts 不在 PATH，可忽略，不影响 `import rems`。第一次启动可能下载向量模型，会稍慢。
+
+若报 `No module named 'rems'`，错误里会写出当前解释器路径；用那条路径再跑一次 `-m pip install`。
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `JSHI_MEMORY_BACKEND` | `inprocess` | `inprocess` 或 `rems3`；其它值报错 |
+| `JSHI_REMS_DATA_DIR` | `{data-dir}/rems` | REMS 自己的 sqlite（及可选向量路径），与 `subject.sqlite3` 分开 |
+
+换后端不搬旧记忆。进程内事实与 REMS 事件不是同一份库；`recall` 问的是当前后端。Qdrant 在邻仓默认 `:memory:` 时不必开 Docker。
+
 ---
 
 ## 2. 对话里怎么用
@@ -164,7 +195,7 @@ JSHI_MODEL_NAME=deepseek-chat
 
 - `respond` / `wait` / `think` / `ignore`：本轮回复方式。`wait` 仍结束本轮活动。
 - 第二段：说话人显示名与识别状态。
-- 活跃区版本与段数：本进程内账本上的工作上下文。
+- 活跃区版本与段数：账本上的工作上下文（落在 `subject.sqlite3`，关窗口再开仍在）。
 
 ### 2.1 重启后会丢什么
 
@@ -176,10 +207,11 @@ JSHI_MODEL_NAME=deepseek-chat
 | 承诺等个人条目  | `subject.sqlite3` 的 `personal_items` | 还在                   |
 | 价值观/边界   | 同一 sqlite 的 `value_entries`          | 还在                   |
 | 说话人会话    | `.jshi/cli_session.json`             | 还在                   |
-| 经历账本、活跃区 | **进程内内存**                            | **空**。下一轮合法，空活跃区是允许的 |
+| 经历账本、活跃区 | `subject.sqlite3` 的 `experience_ledger` | 还在。下次 02 载入上一份活跃区 |
+| 未投递经历（未过 30 冲刷） | 同一账本 | 还在账本里，不因关窗口丢失 |
 
 
-对象档案会留下来。同一名字再次出现时，按档案匹配，不必再 `add-object`。新名字第一次说话会新建**暂定**档案（见 §5），不是已确认。活跃区不会从磁盘恢复，不要指望重启后接着上一句的现场正文。
+对象档案会留下来。同一名字再次出现时，按档案匹配，不必再 `add-object`。新名字第一次说话会新建**暂定**档案（见 §5），不是已确认。未进 09 的近时对话以 16 为准，不要另开一座记忆库。
 
 ---
 
@@ -265,7 +297,7 @@ python -m jshi.app.cli reflect stone "回顾刚才的交流"
 
 **新名字会创建对象。** `--speaker` 或 `/speaker` 给的名字若对不上已有档案（显示名、别名、对象 id 都不命中），这一轮通过门禁后会落一条**暂定**对象档案：新的 `object_id`，`label` 用这次的名字，`status=provisional`。档案在对象库里，关窗口还在。下一次仍用这个名字，按名字匹配这条档案，不再新建。
 
-摘要里第二段会看到 `provisional`（暂定）或 `confirmed`（已确认）。未确认时认知可能先问一句「你是……吗？」，不把身份当成已定。
+摘要里第二段会看到 `provisional`（暂定）或 `confirmed`（已确认）。渠道已经指定说话人时，一般按这个人聊，不必每轮问「你是……吗？」；只有重名或对方否认时才会问清是哪一位。
 
 重名（两条档案都叫这个名字）必须消歧，不得任取；消歧不了则阻断，也不会再新建一条来绕过去。
 
@@ -431,7 +463,7 @@ python -m jshi.app.cli history stone --kind subject
 
 ### `recall`
 
-问当前记忆端口。未接外部记忆时走库内实现。
+问当前记忆端口。默认进程内实现；`JSHI_MEMORY_BACKEND=rems3` 时问的是邻仓引擎，不是 `subject.sqlite3` 里的旧事实。
 
 ```powershell
 python -m jshi.app.cli recall stone "朋友" --level 1 --object-id OBJ-...
@@ -462,6 +494,8 @@ python -m jshi.app.cli transition <content_id> provisional "目前证据有限"
 | `add-personal` 写 value 被拒 | 改走 `import-values` / `propose-value`   |
 | 导入跳过                      | 同 id 已在库中；换 id 或先导出核对                  |
 | 没配密钥却像在「复读」               | 三项模型环境变量不齐，走了 Echo                     |
+| `JSHI_MEMORY_BACKEND=rems3` 报没有 rems | 装进了另一套 Python。在同一窗口用 `python -c "import sys; print(sys.executable)"`，再对该解释器 `python -m pip install -e <Jshi_memory>` |
+| 换了记忆后端后 recall 变空           | 库不共用、不自动迁移；这是预期                       |
 | 重启后忘了刚才在说什么               | 活跃区在内存；身份和价值库仍在                        |
 | `/context` 活跃区为空          | 本进程还没成功说过话，或刚重启                        |
 
