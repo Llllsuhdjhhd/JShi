@@ -12,6 +12,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+talk = ["textual>=0.86,<9"]
 
 [project.scripts]
 jshi = "jshi.app.cli:main"

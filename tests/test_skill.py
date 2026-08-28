@@ -73,7 +73,7 @@ def _payload() -> dict:
 def test_cognition_skill_produces_usage_segments(tmp_path):
     skill = CognitionSkill(FakeModel(_payload()))
     resp = skill.run(make_request())
-    assert resp.model == "deepseek-flash@v1"  # I-004：模型 + skill 版本
+    assert resp.model == "deepseek-flash@v2"  # I-004：模型 + skill 版本
     assert resp.response_plan.mode == "respond"
     assert "working_set_limit" in resp.response_plan.verbal_text()
     assert resp.context_assessment.focus == ("seg-12",)
@@ -94,6 +94,26 @@ def test_system_extra_renders_speaker_placeholders():
     assert "{speaker_object_id}" not in system
     assert "dp" in system
     assert "OBJ-DP" in system
+
+
+def test_recall_need_and_memory_quality_are_separate_instructions():
+    system = CognitionSkill(FakeModel(_payload())).system_extra(make_request())
+    assert "【信息不足——追加召回】" in system
+    assert "【已回溯记忆的质量】" in system
+    assert "【记忆——信息不足与质量评价】" not in system
+    quality = system.split("【已回溯记忆的质量】", 1)[1].split("【对象确认】", 1)[0]
+    assert "整体不够" not in quality
+    assert "recall_requests" not in quality
+
+
+def test_instruction_examples_cover_key_dialogues():
+    text = CognitionSkill.instruction
+    assert "翻开工作区" not in text
+    assert "你上次应过我" in text
+    assert "颔首，目光平视" in text
+    assert "先不用回我" in text
+    assert "信息不足就问" in text
+    assert "只看档案不算证据" in text
 
 
 def test_skill_framework_is_reused_by_other_skills():
@@ -211,7 +231,7 @@ def test_skill_model_port_routes_subject_activity_but_not_reflection():
     port = SkillModelPort(skill)
 
     subject = port.generate(make_request())
-    assert subject.model == "deepseek-flash@v1"
+    assert subject.model == "deepseek-flash@v2"
     assert subject.response_plan.mode == "respond"
     assert subject.context_assessment.focus == ("seg-12",)
 

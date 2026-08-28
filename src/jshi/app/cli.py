@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 from jshi.identity import IdentityProfile, IdentityRepository
@@ -59,34 +61,6 @@ def _load_local_env() -> None:
         parsed = parse_env_text(path.read_text(encoding="utf-8"))
         for key, value in parsed.items():
             os.environ.setdefault(key, value)
-
-
-_SESSION_FILE = "cli_session.json"
-
-
-def _session_path(data_dir: Path) -> Path:
-    return Path(data_dir) / _SESSION_FILE
-
-
-def _load_session(data_dir: Path) -> dict[str, str]:
-    path = _session_path(data_dir)
-    if not path.is_file():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    return {str(key): str(value) for key, value in raw.items() if value is not None}
-
-
-def _save_session(data_dir: Path, **fields: str) -> None:
-    data = _load_session(data_dir)
-    data.update({key: value for key, value in fields.items() if value})
-    path = _session_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _model_from_environment() -> ModelPort:
@@ -170,6 +144,16 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="识别载体，格式 kind:value，可重复",
+    )
+    talk.add_argument(
+        "--tui",
+        action="store_true",
+        help="套一层全屏界面（需 pip install textual）；默认仍是原来的一行输入",
+    )
+    talk.add_argument(
+        "--plain",
+        action="store_true",
+        help="原来的一行输入（默认；与 --tui 同时出现时以本项为准）",
     )
 
     reflect = commands.add_parser(
@@ -645,181 +629,56 @@ def _parse_objects(raw: list[str]) -> dict[str, str]:
     return mapping
 
 
+def _want_tui(args) -> bool:
+    if getattr(args, "plain", False):
+        return False
+    return bool(getattr(args, "tui", False))
+
+
+def _textual_installed() -> bool:
+    return importlib.util.find_spec("textual") is not None
+
+
 def _run_talk(process, identities, args) -> None:
-    """本地输入循环。每句调用 experience；说话人写入会话文件，长期有效。"""
-    session = _load_session(args.data_dir)
-    subject_id = (args.subject_id or session.get("subject_id") or "").strip()
-    speaker = (args.speaker or session.get("speaker") or "").strip()
-    if not subject_id:
-        print("错误：未指定主体。首次请：python -m jshi.app.cli talk stone --speaker dp")
-        return
-    try:
-        identities.get(subject_id)
-    except KeyError:
-        print(
-            f"错误：主体 {subject_id} 不存在。"
-            f"请先：python -m jshi.app.cli create {subject_id}"
-        )
-        return
-    if not speaker:
-        print("错误：未指定说话人。首次请加 --speaker 名字，之后用 /speaker 更换（长期有效）。")
-        return
+    """启动对话。默认原来的一行输入；--tui 才套全屏壳。"""
+    from jshi.app.talk_plain import run_plain
+    from jshi.app.talk_session import TalkSetupError, prepare_talk
+
     try:
         carriers = tuple(_parse_carrier(item) for item in args.carrier)
-    except ValueError as exc:
-        print(f"错误：{exc}")
+        session = prepare_talk(
+            process,
+            identities,
+            args.data_dir,
+            args.subject_id,
+            args.speaker,
+            args.channel,
+            carriers,
+        )
+    except (ValueError, TalkSetupError) as exc:
+        print(exc if str(exc).startswith("错误") else f"错误：{exc}")
         return
-    _save_session(args.data_dir, subject_id=subject_id, speaker=speaker)
-    last_line = ""
-    last_plan = None
-    print("直接打字后回车即发送。命令见 /help")
-    print(f"主体 {subject_id}；对象 {speaker}（长期）")
-    while True:
-        try:
-            line = input("你：").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
-        if not line:
-            continue
-        if line in {"/quit", "/exit", "/q"}:
-            return
-        if line in {"/help", "/?"}:
-            print(
-                "/speaker 名字   切换对象（写入会话，下次启动仍有效）\n"
-                "/who            当前对象\n"
-                "/context        看本轮活跃区与装载（不调模型）\n"
-                "/plan           看上一轮 05 的 response_plan 条目\n"
-                "/prompt         看认知 skill 提示词骨架（本轮材料用 /context）\n"
-                "/quit           结束\n"
-                "价值观不在对话里改：CLI 的 import-values / propose-value / "
-                "review-value / lock-value / values"
-            )
-            continue
-        if line == "/who":
-            print(f"对象 {speaker}（长期，存在 {_session_path(args.data_dir)}）")
-            continue
-        if line == "/speaker" or line.startswith("/speaker "):
-            parts = line.split(None, 1)
-            if len(parts) < 2 or not parts[1].strip():
-                print(f"当前对象 {speaker}。用法：/speaker 名字")
-                continue
-            speaker = parts[1].strip()
-            _save_session(args.data_dir, subject_id=subject_id, speaker=speaker)
-            print(f"对象改为 {speaker}（已记住）")
-            continue
-        if line == "/context":
-            _print_talk_context(
-                process, subject_id, speaker, last_line, args.channel, carriers
-            )
-            continue
-        if line == "/plan":
-            _print_talk_plan(last_plan)
-            continue
-        if line == "/prompt":
-            _print_talk_prompt(
-                process, subject_id, speaker, last_line, args.channel, carriers
-            )
-            continue
-        if line.startswith("/"):
-            print("未知命令。输入 /help")
-            continue
-        try:
-            result = process.experience(
-                subject_id,
-                line,
-                object_ref=speaker,
-                channel=args.channel,
-                carriers=carriers,
-            )
-        except ValueError as exc:
-            print(f"错误：{exc}")
-            continue
-        except Exception as exc:
-            print(f"调用失败：{exc}")
-            continue
-        last_line = line
-        last_plan = result.response_plan
-        spoken = result.action_text.strip() if result.action_text else ""
-        print(f"匠石：{spoken or '（本轮未开口）'}")
-        view = process.activity_ledger.current_context_view(subject_id)
+    if not _want_tui(args):
+        run_plain(session)
+        return
+    try:
+        interactive = sys.stdin.isatty()
+    except Exception:
+        interactive = False
+    if not interactive:
+        print("非交互终端，使用原来的一行输入。", file=sys.stderr)
+        run_plain(session)
+        return
+    if not _textual_installed():
         print(
-            f"[{result.response_plan.mode}；"
-            f"{result.speaker.label}/{result.speaker.status}；"
-            f"活跃区 v{view.version} 段{len(view.segment_refs)}]"
+            "未安装 textual，使用原来的一行输入。pip install textual",
+            file=sys.stderr,
         )
-
-
-def _print_talk_context(process, subject_id, speaker, last_line, channel, carriers) -> None:
-    query = last_line or "（查看上下文）"
-    try:
-        preview = process.preview_state(
-            subject_id,
-            query,
-            object_ref=speaker,
-            channel=channel,
-            carriers=carriers,
-        )
-    except ValueError as exc:
-        print(f"错误：{exc}")
+        run_plain(session)
         return
-    view = preview.context_view
-    print(f"对象 {preview.speaker.label} {preview.speaker.status} {preview.speaker.object_id}")
-    print(f"活跃区 v{view.version} 段{list(view.segment_refs)}")
-    if view.context_text.strip():
-        print(view.context_text)
-    else:
-        print("（活跃区为空）")
-    print("装载：")
-    for report in preview.assembled.source_report:
-        print(f"  {report.source}: {len(report.loaded_ids)} 条")
+    from jshi.app.talk_tui import run_tui
 
-
-def _print_talk_plan(plan) -> None:
-    if plan is None:
-        print("这一轮还没有回应。先说一句再 /plan。")
-        return
-    print(f"mode={plan.mode} reason={plan.reason or '（无）'}")
-    if not plan.items:
-        print("（无 items）")
-        return
-    for item in plan.items:
-        print(f"  [{item.channel}] {item.text}")
-
-
-def _print_talk_prompt(process, subject_id, speaker, last_line, channel, carriers) -> None:
-    from jshi.models import EchoModel, ModelRequest, ModelSpeaker
-
-    query = last_line or "（查看提示词）"
-    try:
-        preview = process.preview_state(
-            subject_id,
-            query,
-            object_ref=speaker,
-            channel=channel,
-            carriers=carriers,
-        )
-    except ValueError as exc:
-        print(f"错误：{exc}")
-        return
-    assembled = preview.assembled
-    sp = assembled.speaker
-    req = ModelRequest(
-        purpose="subject_activity",
-        input_text=query,
-        subject_state=assembled.subject_state,
-        speaker=ModelSpeaker(
-            object_id=sp.object_id if sp else "",
-            label=sp.label if sp else speaker,
-            aliases=sp.aliases if sp else (),
-            status=sp.status if sp else "",
-        ),
-    )
-    extra = CognitionSkill(EchoModel()).system_extra(req)
-    print(extra)
-    print("---")
-    print(f"user（本轮原文）：{query}")
-    print("身份、承诺与分片 JSON 由适配器在 system 后半段追加；完整 HTTP 报文不落库。")
+    run_tui(session)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 本地实验入口。设计契约仍以 `doc/design/` 为准；本文只说明怎样启动、怎样对话、各条子命令做什么。
 
-在仓库根目录操作。数据默认写在 `.jshi/`（已加入 `.gitignore`，不提交）。Windows 可用 **cmd**（命令提示符）或 PowerShell；`talk.cmd` 是给 cmd 写的，两种都能跑。
+在仓库根目录操作。数据默认写在 `.jshi/`（已加入 `.gitignore`，不提交）。Windows 可用 **cmd**（命令提示符）或 PowerShell；`talk.cmd` 是给 cmd 写的，两种都能跑。默认仍是原来的一行 `你：` 输入。可选 `--tui` 套全屏壳（推荐 Windows Terminal 或 Cursor 终端，不要用系统自带命令提示符跑全屏）。
 
 ---
 
@@ -33,7 +33,7 @@ cd C:\Users\40575\Desktop\prog\main
 
 ### 1.1 对话（常用）
 
-cmd（推荐）：
+cmd：
 
 ```bat
 talk.cmd stone --speaker dp
@@ -52,7 +52,7 @@ PowerShell 同样可以：
 - `stone`：主体 id。须先 `create`（见 §3）。
 - `--speaker dp`：本轮说话人（对象引用）。外部输入必须有对象，不能省略。
 
-启动成功后出现：
+启动后仍是原来的对话：
 
 ```text
 直接打字后回车即发送。命令见 /help
@@ -68,12 +68,21 @@ PowerShell 同样可以：
 talk.cmd
 ```
 
+可选全屏壳（需先 `pip install textual`，或在仓库根 `pip install ".[talk]"`）：
+
+```bat
+talk.cmd stone --speaker dp --tui
+```
+
+上方滚动对话，下方输入，底栏只放 `mode`、对象状态、活跃区版本。输入 `/` 或 `/help` 后可用上下箭头选择命令，回车执行，Esc 关闭。斜杠命令与主链路与原来相同。未安装或非交互终端会退回一行输入，并在 stderr 提示。`--plain` 与 `--tui` 同时出现时走原来的一行输入。
+
 不用 `talk.cmd`、直接调模块时，cmd：
 
 ```bat
 set PYTHONPATH=src
 python -m jshi.app.cli talk stone --speaker dp
 python -m jshi.app.cli chat stone --speaker dp
+python -m jshi.app.cli talk stone --speaker dp --tui
 ```
 
 PowerShell 把第一行换成 `$env:PYTHONPATH="src"`。`chat` 与 `talk` 相同。
@@ -128,14 +137,14 @@ JSHI_MODEL_NAME=deepseek-chat
 
 ## 2. 对话里怎么用
 
-提示符 `你：` 下，**不以** `/` **开头的一行都当作对匠石说的话**，走主链路。空行忽略。
+提示符 `你：` 下（全屏壳为底栏），**不以** `/` **开头的一行都当作对匠石说的话**，走主链路。空行忽略。全屏壳下一轮未返回前再次提交会被忽略，不并发调用。
 
 斜杠命令不调模型（`/context`、`/prompt` 只预览组装）：
 
 
 | 命令                   | 作用                                           |
 | -------------------- | -------------------------------------------- |
-| `/help` 或 `/?`       | 列出对话命令                                       |
+| `/help` 或 `/?`       | 列出对话命令。全屏里也可输入 `/`，用上下箭头选择，回车执行 |
 | `/who`               | 当前说话人，以及会话文件路径                               |
 | `/speaker 名字`        | 更换对象，写入 `cli_session.json`，下次启动仍有效           |
 | `/context`           | 预览活跃区正文与五源装载条数；不调模型、不落新活动                    |
@@ -146,7 +155,7 @@ JSHI_MODEL_NAME=deepseek-chat
 
 价值观、承诺、对象档案**不要在对话里改**，退出后用 §4–§6 的子命令。
 
-每轮成功后会打印一行摘要，例如：
+每轮成功后会打印两行（全屏壳把第二行放到底栏）：
 
 ```text
 匠石：……
