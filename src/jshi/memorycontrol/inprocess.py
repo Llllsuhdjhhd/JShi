@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
+from typing import Any, Callable
 
+from jshi.core.params import active_zone_chars
 from jshi.experienceledger import ConsumerKind, ExperienceLedgerPort, OutputKind
 from jshi.memory.contracts import (
     MemoryBatch,
     MemoryExperience,
     new_id,
-    utc_now,
 )
 
 from .port import (
@@ -20,6 +22,11 @@ from .port import (
     MemoryProcessStatus,
     MemoryTriggerDecision,
 )
+
+
+def local_now() -> datetime:
+    """夜间窗口等墙钟概念用本地时间；时间戳仍走 UTC。"""
+    return datetime.now().astimezone()
 
 
 def _origin_for(output_kind: OutputKind) -> str:
@@ -65,7 +72,7 @@ class InProcessMemoryControl(MemoryControlPort):
         memory: MemoryBatchIngestPort,
         *,
         max_retry: int = 3,
-        flush_max_chars: int = 2000,
+        flush_max_chars: int | None = None,
         flush_max_segments: int = 20,
         flush_max_idle_seconds: float = 600,
         flush_on_idle_seconds: float = 1800,
@@ -75,13 +82,18 @@ class InProcessMemoryControl(MemoryControlPort):
         self._ledger = ledger
         self._memory = memory
         self._max_retry = max_retry
-        self._flush_max_chars = flush_max_chars
+        self._flush_max_chars = (
+            flush_max_chars if flush_max_chars is not None else active_zone_chars()
+        )
         self._flush_max_segments = flush_max_segments
         self._flush_max_idle_seconds = flush_max_idle_seconds
         self._flush_on_idle_seconds = flush_on_idle_seconds
         self._flush_night_window = flush_night_window
-        self._now = now or utc_now
+        self._now = now or local_now
         self._states: dict[str, _ControlState] = {}
+        # 异步投递：subject_id -> (batch, entry, future, decision)。
+        # 只由调用线程写入/读取；后台线程只 set future 结果，不碰账本与本状态。
+        self._inflight: dict[str, tuple[Any, Any, Future, Any]] = {}
 
     # ------------------------------------------------------------------
 
@@ -241,6 +253,85 @@ class InProcessMemoryControl(MemoryControlPort):
                 ingest_id=entry.ingest_id,
                 error=str(exc),
             )
+
+    def run_async(self, subject_id: str) -> MemoryControlResult:
+        """异步投递：把重的 ingest_batch 移到后台线程，账本/游标/状态仍在当前线程收尾。"""
+        self.drain(subject_id)
+        decision = self.evaluate(subject_id)
+        if not decision.should_trigger:
+            return MemoryControlResult(decision=decision, status="skipped")
+        batch = self.build_batch(subject_id)
+        if batch is None:
+            return MemoryControlResult(decision=decision, status="skipped")
+
+        entry = self._ledger.register_ingest(batch)
+        self._ledger.mark_ingesting(entry.ingest_id)
+        state = self._state(subject_id)
+        state.previous_status = "ingesting"
+
+        future: Future = Future()
+        self._inflight[subject_id] = (batch, entry, future, decision)
+
+        def _work() -> None:
+            try:
+                future.set_result(self._memory.ingest_batch(batch))
+            except Exception as exc:  # noqa: BLE001
+                future.set_exception(exc)
+
+        threading.Thread(
+            target=_work,
+            name=f"jshi-memory-{subject_id}",
+            daemon=True,
+        ).start()
+        return MemoryControlResult(
+            decision=decision,
+            status="ingesting",
+            ingest_id=entry.ingest_id,
+        )
+
+    def drain(self, subject_id: str) -> MemoryControlResult | None:
+        """把上一批后台 ingest 的结果落回账本/游标（仍在当前线程）。"""
+        inflight = self._inflight.get(subject_id)
+        if inflight is None:
+            return None
+        batch, entry, future, decision = inflight
+        if not future.done():
+            return None
+        del self._inflight[subject_id]
+
+        state = self._state(subject_id)
+        try:
+            result = future.result()
+        except Exception as exc:  # noqa: BLE001
+            state.previous_status = "failed"
+            state.attempts += 1
+            state.last_error = str(exc)
+            self._ledger.mark_failed(entry.ingest_id, reason=str(exc))
+            return MemoryControlResult(
+                decision=decision,
+                status="failed",
+                ingest_id=entry.ingest_id,
+                error=str(exc),
+            )
+
+        consumed = self._consumed_sequence(batch, result.stored_marks)
+        self._ledger.advance_consumer_cursor(
+            subject_id, ConsumerKind.MEMORY, through_sequence=consumed
+        )
+        self._ledger.mark_ingested(
+            entry.ingest_id,
+            memory_event_ids=result.sealed_event_ids,
+            stored_marks=result.stored_marks,
+        )
+        state.previous_status = "idle"
+        state.attempts = 0
+        state.last_error = ""
+        state.last_flush_at = self._now()
+        return MemoryControlResult(
+            decision=decision,
+            status="ingested",
+            ingest_id=entry.ingest_id,
+        )
 
     def _consumed_sequence(self, batch: MemoryBatch, stored_marks) -> int:
         """凭 stored_marks 推进游标：推进到后端已接管的最远段。

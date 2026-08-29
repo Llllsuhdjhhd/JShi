@@ -12,6 +12,7 @@ from .base import (
     ResponseItem,
     ResponsePlan,
 )
+from .prompt import build_system, build_user
 
 __all__ = [
     "EchoModel",
@@ -26,4 +27,6 @@ __all__ = [
     "RecallRequest",
     "ResponseItem",
     "ResponsePlan",
+    "build_system",
+    "build_user",
 ]

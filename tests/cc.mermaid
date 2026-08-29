@@ -1,0 +1,47 @@
+flowchart TD
+    In["外部输入: text / object_ref / channel / carriers / objects"] --> S1
+
+    subgraph ST1["① 记录入口 (01 身份识别 + 16 账本)"]
+        S1["校验对象引用"] --> S2["resolve 解析 SpeakerCandidate"]
+        S2 --> S3{"置信度 < 0.5 ?"}
+        S3 -- "是" --> S4["object_rejected · 阻断"]
+        S3 -- "否" --> S5["落位 fact/external_input"]
+        S5 --> S6["16 append_external"]
+        S6 --> S7["新对象: ensure_provisional"]
+    end
+
+    S7 --> B1["② 读取上一活跃区 (02 activezone.load) → ContextViewState"]
+    B1 --> B2["记录 context_window_loaded"]
+
+    B2 --> C["③ 状态组装 (03 assembler) → 五源只读"]
+    C --> C2["记录 current_state_assembled"]
+    C2 --> D["④ 建立活动 (04) + intent 占位"]
+
+    D --> E0["记录 activity_created"]
+    E0 --> E1["感知 perception"]
+    E1 --> E["⑤ 认知 (05 _cognize)"]
+
+    E --> E2["调模型 → response_plan + context_assessment"]
+    E2 --> E3{"有 recall_requests 且轮数<1 ?"}
+    E3 -- "是" --> E4["追加召回 (09)"]
+    E4 --> E2
+    E3 -- "否" --> E5["06 responsemark 标记"]
+
+    E5 --> F1["activity_response_state"]
+    F1 --> F2{"有 object_assessment ?"}
+    F2 -- "是" --> F3["回填档案 confirm/deny"]
+    F2 -- "否" --> G1
+    F3 --> G1
+
+    G1["⑥ 行动分发 (10)"] --> G2["verbal → language_action + 语音占位"]
+    G1 --> G3["embodied → 肢体占位"]
+    G1 --> G4["ResultFeedback 占位"]
+    G2 --> G5["16 append_subject_reply / state"]
+    G3 --> G5
+    G4 --> G5
+    G5 --> G6["16 apply_context_assessment 编新活跃区"]
+
+    G6 --> H["⑦ 收尾 (07) → completed + 审计"]
+    H --> I["handoff → 30 memory_control.run_once (09 可插拔)"]
+    I --> J["11 governance.check 占位"]
+    J --> Out["SubjectActivityResult"]

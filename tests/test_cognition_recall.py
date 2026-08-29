@@ -286,3 +286,17 @@ def test_third_person_recall_binds_archive_and_speech_uses_fragment(tmp_path):
     assert metrics[0].content["request"]["object_ids"] == ["OBJ-LUX"]
     assert len(process.profiles.list()) == before
 
+
+def test_recall_object_ids_name_resolves_to_archive(tmp_path):
+    process, _repository = runtime(tmp_path)
+    process.profiles.create(
+        ObjectProfile(
+            object_id="OBJ-LUX", label="lux", source="test", status="confirmed"
+        )
+    )
+    bound = process._bind_one_recall(
+        RecallRequest(query="以前说过什么", budget=2, level=1, object_ids=("lux",)),
+        speaker_object_id="OBJ-USER",
+    )
+    assert bound.object_ids == ("OBJ-LUX",)
+

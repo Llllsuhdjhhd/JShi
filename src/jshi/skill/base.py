@@ -82,21 +82,18 @@ class Skill(ABC, Generic[T]):
         return f"{self._model.name}@{self.version}"
 
     def system_extra(self, request: ModelRequest | None = None) -> str:
-        """skill 注入 system 的系统级说明：角色锚定 + 输出 schema + 示例。
-
-        结构与行为约定放 system（由适配器并入），``input_text`` 保持真实任务。
-        ``request`` 提供说话人 / 主体等动态值，用于渲染 instruction 里的
-        ``{speaker_label}`` 等占位符。
-        """
+        """skill 注入 system 的规则与紧凑 JSON Schema。本轮材料由适配器放进 user。"""
         instruction = (
             self._render_instruction(request) if request is not None else self.instruction
         )
-        schema_doc = json.dumps(self.schema, ensure_ascii=False, indent=2)
+        schema_doc = json.dumps(
+            self.schema, ensure_ascii=False, separators=(",", ":")
+        )
         return (
             f"{instruction}\n"
             "请严格按下面的 JSON Schema 输出：只输出一个 JSON 对象，不要任何解释文字，"
             "枚举字段（mode / channel / conclusion 等）必须取枚举值。\n"
-            f"JSON Schema：\n{schema_doc}"
+            f"JSON Schema：{schema_doc}"
         )
 
     def _render_instruction(self, request: ModelRequest) -> str:

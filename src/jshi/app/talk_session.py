@@ -19,7 +19,7 @@ TALK_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("/who", "", "当前对象"),
     ("/context", "", "看本轮活跃区与装载（不调模型）"),
     ("/plan", "", "看上一轮 05 的 response_plan 条目"),
-    ("/prompt", "", "看认知 skill 提示词骨架（本轮材料用 /context）"),
+    ("/prompt", "", "看即将发给模型的 system 与 user"),
     ("/timing", "轮数", "上一轮各步耗时（可 /timing 5；默认不刷屏）"),
     ("/quit", "", "结束"),
 )
@@ -263,6 +263,8 @@ class TalkSession:
             )
         except ValueError as exc:
             return f"错误：{exc}"
+        except Exception as exc:
+            return f"预览失败：{exc}"
         view = preview.context_view
         lines = [
             f"对象 {preview.speaker.label} {preview.speaker.status} {preview.speaker.object_id}",
@@ -288,8 +290,11 @@ class TalkSession:
         return "\n".join(lines)
 
     def _prompt_text(self) -> str:
-        from jshi.models import EchoModel, ModelRequest, ModelSpeaker
+        from dataclasses import replace
+
+        from jshi.models import EchoModel, ModelRequest, ModelSpeaker, build_system, build_user
         from jshi.skill import CognitionSkill
+        from jshi.subject.process import SubjectProcess
 
         query = self.last_line or "（查看提示词）"
         try:
@@ -300,27 +305,34 @@ class TalkSession:
                 channel=self.channel,
                 carriers=self.carriers,
             )
+            assembled = preview.assembled
+            sp = assembled.speaker
+            speaker = None
+            if sp is not None:
+                speaker = ModelSpeaker(
+                    object_id=sp.object_id,
+                    label=sp.label or self.speaker,
+                    aliases=sp.aliases,
+                    status=sp.status,
+                    reason=sp.reason,
+                )
+            req = ModelRequest(
+                purpose="subject_activity",
+                input_text=query,
+                subject_state=assembled.subject_state,
+                speaker=speaker,
+                context=SubjectProcess._model_context(
+                    assembled.recalled,
+                    assembled.fragments,
+                    assembled.context_view,
+                ),
+            )
+            req = replace(req, system_extra=CognitionSkill(EchoModel()).system_extra(req))
+            return f"system\n{build_system(req)}\n---\nuser\n{build_user(req)}"
         except ValueError as exc:
             return f"错误：{exc}"
-        assembled = preview.assembled
-        sp = assembled.speaker
-        req = ModelRequest(
-            purpose="subject_activity",
-            input_text=query,
-            subject_state=assembled.subject_state,
-            speaker=ModelSpeaker(
-                object_id=sp.object_id if sp else "",
-                label=sp.label if sp else self.speaker,
-                aliases=sp.aliases if sp else (),
-                status=sp.status if sp else "",
-            ),
-        )
-        extra = CognitionSkill(EchoModel()).system_extra(req)
-        return (
-            f"{extra}\n---\n"
-            f"user（本轮原文）：{query}\n"
-            "身份、承诺与分片 JSON 由适配器在 system 后半段追加；完整 HTTP 报文不落库。"
-        )
+        except Exception as exc:
+            return f"组装提示词失败：{exc}"
 
     def _handle_timing(self, line: str) -> TalkOutcome:
         parts = line.split()

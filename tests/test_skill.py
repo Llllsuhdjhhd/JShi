@@ -73,7 +73,7 @@ def _payload() -> dict:
 def test_cognition_skill_produces_usage_segments(tmp_path):
     skill = CognitionSkill(FakeModel(_payload()))
     resp = skill.run(make_request())
-    assert resp.model == "deepseek-flash@v4"  # I-004：模型 + skill 版本
+    assert resp.model == "deepseek-flash@v7"  # I-004：模型 + skill 版本
     assert resp.response_plan.mode == "respond"
     assert "working_set_limit" in resp.response_plan.verbal_text()
     assert resp.context_assessment.focus == ("seg-12",)
@@ -85,15 +85,61 @@ def test_cognition_skill_produces_usage_segments(tmp_path):
     assert resp.importance_ranking[0].importance == 0.9
 
 
-def test_system_extra_renders_speaker_placeholders():
+def test_system_extra_has_compact_schema_and_no_speaker():
     skill = CognitionSkill(FakeModel(_payload()))
-
     system = skill.system_extra(make_request())
-
     assert "{speaker_label}" not in system
-    assert "{speaker_object_id}" not in system
-    assert "dp" in system
-    assert "OBJ-DP" in system
+    assert "OBJ-DP" not in system
+    assert "\n  " not in system.split("JSON Schema：", 1)[1]
+    assert '"enum":[' in system
+
+
+def test_instruction_keeps_rules_without_examples():
+    text = CognitionSkill.instruction
+    assert "【正例】" not in text
+    assert "【反例】" not in text
+    assert "{speaker_label}" not in text
+    assert "翻开工作区" not in text
+    assert "颔首平视" in text
+    assert "信息不足就问" in text
+    assert "只看档案、对不上是哪一位，不算证据" in text
+    assert "核对自己已经用来开场的名字" in text
+    assert "我还不能确认你就是这一位" not in text
+    assert "object_ids 用说话人 id" not in text
+    assert "问另一个人用那人已有档案的 id" not in text
+    assert "问谁就在 query 里写谁的名字" in text
+    assert "【本轮材料】" in text
+    assert "【当前状态】" not in text
+    assert "【背景材料】" not in text
+    assert "侃侃如也" not in text
+    assert "你是匠石——" not in text
+    assert "不要编「没有印象」" in text
+    assert "不要因为记忆评审而 think" in text
+
+
+def test_empty_object_assessment_id_is_filled_from_speaker():
+    payload = dict(_payload())
+    payload["object_assessment"] = {
+        "conclusion": "confirm",
+        "object_id": "",
+        "label": "",
+        "reason": "渠道已绑定",
+    }
+    resp = CognitionSkill(FakeModel(payload)).run(make_request())
+    assert resp.object_assessment.object_id == "OBJ-DP"
+    assert resp.object_assessment.label == "dp"
+
+
+def test_object_assessment_name_is_resolved_to_speaker_id():
+    payload = dict(_payload())
+    payload["object_assessment"] = {
+        "conclusion": "confirm",
+        "object_id": "dp",
+        "label": "",
+        "reason": "渠道已绑定",
+    }
+    resp = CognitionSkill(FakeModel(payload)).run(make_request())
+    assert resp.object_assessment.object_id == "OBJ-DP"
 
 
 def test_recall_need_and_memory_quality_are_separate_instructions():
@@ -104,22 +150,6 @@ def test_recall_need_and_memory_quality_are_separate_instructions():
     quality = system.split("【已回溯记忆的质量】", 1)[1].split("【对象确认】", 1)[0]
     assert "整体不够" not in quality
     assert "recall_requests" not in quality
-
-
-def test_instruction_examples_cover_key_dialogues():
-    text = CognitionSkill.instruction
-    assert "翻开工作区" not in text
-    assert "你上次应过我" in text
-    assert "颔首，目光平视" in text
-    assert "先不用回我" in text
-    assert "信息不足就问" in text
-    assert "只看档案、对不上是哪一位，不算证据" in text
-    assert "核对自己已经用来开场的名字" in text
-    assert "我还不能确认你就是这一位" not in text
-    assert "object_ids 用说话人 id" not in text
-    assert "问另一个人用那人已有档案的 id" in text
-    assert "不要编「没有印象」" in text
-    assert "lux 是不是你朋友" in text
 
 
 def test_skill_framework_is_reused_by_other_skills():
@@ -237,7 +267,7 @@ def test_skill_model_port_routes_subject_activity_but_not_reflection():
     port = SkillModelPort(skill)
 
     subject = port.generate(make_request())
-    assert subject.model == "deepseek-flash@v4"
+    assert subject.model == "deepseek-flash@v7"
     assert subject.response_plan.mode == "respond"
     assert subject.context_assessment.focus == ("seg-12",)
 

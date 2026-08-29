@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from jshi.experienceledger import ConsumerKind, InProcessExperienceLedger
@@ -33,11 +35,25 @@ class RecordingMemory:
         )
 
 
+class BlockingMemory(RecordingMemory):
+    """ingest_batch 会阻塞，直到 release 被置位；用于验证异步投递不阻塞调用线程。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+
+    def ingest_batch(self, batch):
+        self.release.wait(timeout=5)
+        return super().ingest_batch(batch)
+
+
 def test_insufficient_data_is_skipped():
     ledger = InProcessExperienceLedger()
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
     memory = RecordingMemory()
-    control = InProcessMemoryControl(ledger, memory, flush_max_segments=2)
+    control = InProcessMemoryControl(
+        ledger, memory, flush_max_segments=2, now=lambda: _at(1, 12, 0)
+    )
 
     decision = control.evaluate("stone")
     result = control.run_once("stone")
@@ -105,7 +121,9 @@ def test_max_retry_blocks_new_trigger():
 def test_flush_by_char_count():
     ledger = InProcessExperienceLedger()
     ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="a" * 1500)
-    control = InProcessMemoryControl(ledger, RecordingMemory(), flush_max_chars=2000)
+    control = InProcessMemoryControl(
+        ledger, RecordingMemory(), flush_max_chars=2000, now=lambda: _at(1, 12, 0)
+    )
 
     assert control.evaluate("stone").should_trigger is False
 
@@ -113,6 +131,35 @@ def test_flush_by_char_count():
     decision = control.evaluate("stone")
     assert decision.should_trigger is True
     assert decision.reason == "flush_max_chars"
+
+
+def test_run_async_returns_without_waiting_and_drain_settles():
+    ledger = InProcessExperienceLedger()
+    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="one")
+    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="two")
+    memory = BlockingMemory()
+    control = InProcessMemoryControl(ledger, memory, flush_max_segments=2)
+
+    result = control.run_async("stone")
+
+    assert result.status == "ingesting"
+    assert result.ingest_id
+    # 后台 ingest 仍在阻塞时，drain 不能等待、不能阻塞调用线程。
+    assert control.drain("stone") is None
+    assert ledger.consumer_cursor("stone", ConsumerKind.MEMORY) == 0
+
+    memory.release.set()
+    settled = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        settled = control.drain("stone")
+        if settled is not None:
+            break
+        time.sleep(0.005)
+
+    assert settled is not None
+    assert settled.status == "ingested"
+    assert ledger.consumer_cursor("stone", ConsumerKind.MEMORY) == 2
 
 
 def test_flush_on_idle_uses_newest_segment_time():

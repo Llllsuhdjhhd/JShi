@@ -15,6 +15,7 @@ class ModelSpeaker:
     label: str
     aliases: tuple[str, ...] = ()
     status: str = "provisional"
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -206,48 +207,14 @@ class OpenAICompatibleModel:
         return self._model
 
     def generate(self, request: ModelRequest) -> ModelResponse:
-        personal_context = json.dumps(
-            request.context, ensure_ascii=False, default=str
-        )
-        # 说话人身份必须明确：名字、称呼、object_id、状态单列，让模型清晰看到"谁在说 + 其 id"。
-        speaker_line = ""
-        if request.speaker is not None:
-            alias_text = "、".join(request.speaker.aliases)
-            speaker_line = (
-                f"说话人：{request.speaker.label}"
-                f"（称呼：{alias_text or '无'}；object_id={request.speaker.object_id}；"
-                f"状态={request.speaker.status}）\n"
-            )
-        # 档案未升格时：渠道上的说话人仍按这个人；不要教「你是这个名字吗」。
-        if request.speaker is not None and request.speaker.status != "confirmed":
-            clarity_hint = (
-                "\n注意：说话人档案尚未升格为 confirmed（provisional）。"
-                "渠道已指定本轮是此人。无重名、正文未提出另一人、对方未否认时："
-                "按这个人说话，可以 confirm；不要问「你是……吗？」。"
-                "只在重名未消歧、渠道与正文打架、或对方否认时，才问清是哪一位。"
-            )
-        else:
-            clarity_hint = ""
-        system = (
-            # skill 的系统级说明优先（角色锚定 + 输出 schema + 示例），再补主体背景。
-            f"{request.system_extra}\n"
-            f"{speaker_line}"
-            f"{request.subject_state.identity_summary}\n"
-            f"当前立场：{request.subject_state.current_stance}\n"
-            f"重要价值：{', '.join(request.subject_state.salient_values)}\n"
-            f"已有承诺：{', '.join(request.subject_state.commitments)}\n"
-            f"相关背景材料：{personal_context}\n"
-            "这些内容属于当前匠石的个人历史和认知处境。"
-            "不要把推断或想象写成已经发生的事实。"
-            "请区分事实、推断、反思和想象。"
-            + clarity_hint
-        )
+        from jshi.models.prompt import build_system, build_user
+
         payload = json.dumps(
             {
                 "model": self._model,
                 "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": request.input_text},
+                    {"role": "system", "content": build_system(request)},
+                    {"role": "user", "content": build_user(request)},
                 ],
             }
         ).encode("utf-8")

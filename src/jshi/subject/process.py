@@ -649,7 +649,7 @@ class SubjectProcess:
         completed = self.repository.get_activity(close_result.activity_id)
         clock.mark("⑦收尾")
         if close_result.handoff_to_memory_control:
-            memory_result = self.memory_control.run_once(subject_id)
+            memory_result = self.memory_control.run_async(subject_id)
             self.evaluation.emit(
                 EvaluationEvent(
                     event_id=f"eval-memory-{activity.id}",
@@ -710,6 +710,7 @@ class SubjectProcess:
                 label=current.speaker.label,
                 aliases=current.speaker.aliases,
                 status=current.speaker.status,
+                reason=current.speaker.reason,
             )
         return self.cognition.generate(
             ModelRequest(
@@ -962,6 +963,7 @@ class SubjectProcess:
                 label=label,
                 aliases=tuple(aliases),
                 status=status,
+                reason=speaker.reason,
             )
         if not object_id:
             return None
@@ -1053,10 +1055,12 @@ class SubjectProcess:
         request: RecallRequest,
         speaker_object_id: str | None,
     ) -> RecallRequest:
+        existing = self._resolve_recall_object_ids(request.object_ids)
+        if existing != request.object_ids:
+            request = replace(request, object_ids=existing)
         hit = self._profile_named_in_query(request.query)
         if hit is None:
             return request
-        existing = request.object_ids
         if not existing:
             return replace(request, object_ids=(hit.object_id,))
         if (
@@ -1066,6 +1070,30 @@ class SubjectProcess:
         ):
             return replace(request, object_ids=(hit.object_id,))
         return request
+
+    def _resolve_recall_object_ids(self, tokens: Sequence[str]) -> tuple[str, ...]:
+        """模型填名字或档案 id 都收；重名名字丢掉，改由 query 绑定。"""
+        if self.profiles is None:
+            return tuple(str(item).strip() for item in tokens if str(item).strip())
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for raw in tokens:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            profile = self.profiles.get(text)
+            if profile is None:
+                named = self.profiles.find_by_names(text)
+                if len(named) == 1:
+                    profile = named[0]
+                elif len(named) > 1:
+                    continue
+            object_id = profile.object_id if profile is not None else text
+            if object_id in seen:
+                continue
+            seen.add(object_id)
+            resolved.append(object_id)
+        return tuple(resolved)
 
     def _profile_named_in_query(self, query: str) -> ObjectProfile | None:
         text = (query or "").strip()

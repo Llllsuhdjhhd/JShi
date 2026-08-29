@@ -180,37 +180,48 @@ def test_runtime_reloads_active_zone_after_new_process(tmp_path):
 
 
 def test_timing_command_reads_last_round_without_experience(tmp_path):
-    session = _make_session(tmp_path)
-    first = session.handle("你好")
-    spoken = "\n".join(event.text for event in first.events)
-    assert "合计" not in spoken
-    assert "①落位" not in spoken
-    counted_host, identities, _subjects = _runtime(tmp_path)
+    host, identities, _subjects = _runtime(tmp_path)
     identities.create(
         IdentityProfile(
             subject_id="stone", name="匠石", origin="测试", narrative="测试主体"
         )
     )
-    # 同一会话上 /timing 不调 experience
-    from jshi.app.talk_session import format_activity_timing
+    counted = CountingProcess(host)
+    session = TalkSession(
+        counted,
+        data_dir=tmp_path,
+        subject_id="stone",
+        speaker="dp",
+        channel=None,
+        carriers=(),
+    )
+    first = session.handle("你好")
+    spoken = "\n".join(event.text for event in first.events)
+    assert "合计" not in spoken
+    assert "①落位" not in spoken
+    assert counted.experience_calls == 1
 
     outcome = session.handle("/timing")
+    assert counted.experience_calls == 1
     assert outcome.events[0].kind == "overlay"
     text = outcome.events[0].text
     assert "上一轮 合计" in text
     assert "①落位" in text
     assert "⑤认知" in text
+
     empty = _make_session(tmp_path / "other")
     notice = empty.handle("/timing")
     assert notice.events[0].kind == "notice"
     assert "还没有走完一轮" in notice.events[0].text
+
     session.handle("第二句")
+    assert counted.experience_calls == 2
     two = session.handle("/timing 2")
+    assert counted.experience_calls == 2
     assert "第1轮" in two.events[0].text
     assert "第2轮" in two.events[0].text
     usage = session.handle("/timing x")
     assert "用法" in usage.events[0].text
-    _ = format_activity_timing
 
 
 def test_wrap_display_text_breaks_long_line():
@@ -218,4 +229,26 @@ def test_wrap_display_text_breaks_long_line():
 
     wrapped = wrap_display_text("abcdefghij", 4)
     assert wrapped == "abcd\nefgh\nij"
+    chinese = wrap_display_text("你好世界啊", 8)
+    assert chinese == "你好世界\n啊"
+
+
+def test_prompt_works_before_any_utterance(tmp_path):
+    session = _make_session(tmp_path)
+    outcome = session.handle("/prompt")
+    text = outcome.events[0].text
+    assert "system\n" in text
+    assert "【本轮】" in text
+    assert "组装提示词失败" not in text
+
+
+def test_prompt_command_shows_system_and_user(tmp_path):
+    session = _make_session(tmp_path)
+    session.handle("你好")
+    outcome = session.handle("/prompt")
+    text = outcome.events[0].text
+    assert "【本轮】" in text
+    assert "dp：你好" in text or "dp：" in text
+    assert "system\n" in text
+    assert "【正例】" not in text
 

@@ -134,7 +134,36 @@ def test_from_recalled_fragments_defaults_event_type():
     assert fragments[0].text == "原文"
 
 
-def test_adapter_ingest_and_recall_with_fake_pipeline():
+def test_embedding_weights_present_requires_large_weight_file(tmp_path):
+    from jshi.memory.rems3 import embedding_weights_present
+
+    folder = tmp_path / "models--BAAI--bge-small-zh-v1.5" / "snapshots" / "x"
+    folder.mkdir(parents=True)
+    (folder / "config.json").write_text("{}", encoding="utf-8")
+    assert embedding_weights_present("BAAI/bge-small-zh-v1.5", cache_root=tmp_path) is False
+    (folder / "model.safetensors").write_bytes(b"0" * 1_000_001)
+    assert embedding_weights_present("BAAI/bge-small-zh-v1.5", cache_root=tmp_path) is True
+
+
+def test_disable_local_embedding_skips_semantic_without_torch(monkeypatch):
+    from jshi.memory.rems3 import disable_local_embedding_if_needed
+
+    monkeypatch.setenv("JSHI_REMS_SKIP_EMBEDDING", "1")
+    called = {"semantic": 0, "index": 0}
+
+    class Recall:
+        def _semantic_route(self, *args, **kwargs):
+            called["semantic"] += 1
+            return {"evt": 1}
+
+        def index_event(self, event) -> None:
+            called["index"] += 1
+
+    pipeline = SimpleNamespace(recall_pipeline=Recall())
+    assert disable_local_embedding_if_needed(pipeline) is True
+    assert pipeline.recall_pipeline._semantic_route("stone", "你好") == {}
+    pipeline.recall_pipeline.index_event(object())
+    assert called == {"semantic": 0, "index": 0}
     pipeline = FakePipeline()
     backend = Rems3MemoryBackend(pipeline)
     result = backend.ingest_batch(_sample_batch())

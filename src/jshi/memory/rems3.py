@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
@@ -147,6 +148,63 @@ def _sqlite_url(db_path: Path) -> str:
     return "sqlite:///" + db_path.resolve().as_posix()
 
 
+_WEIGHT_SUFFIXES = {".safetensors", ".bin", ".pt", ".onnx"}
+
+
+def embedding_weights_present(
+    model_name: str, cache_root: Path | None = None
+) -> bool:
+    """只看磁盘上有没有权重大于 1MB，不 import torch。"""
+    name = (model_name or "").strip()
+    if not name:
+        return False
+    root = cache_root or (Path.home() / ".cache" / "huggingface" / "hub")
+    folder = root / ("models--" + name.replace("/", "--"))
+    if not folder.is_dir():
+        return False
+    for path in folder.rglob("*"):
+        if (
+            path.is_file()
+            and path.suffix.lower() in _WEIGHT_SUFFIXES
+            and path.stat().st_size > 1_000_000
+        ):
+            return True
+    return False
+
+
+def disable_local_embedding_if_needed(pipeline: Any) -> bool:
+    """权重缺失或显式跳过时，关掉语义向量，避免 SentenceTransformer/torch 卡住对话。
+
+    不改成 hash 嵌入：维度不同会让 Qdrant 删掉已有 collection。
+    """
+    if os.getenv("JSHI_REMS_SKIP_EMBEDDING", "").strip() in {"1", "true", "yes"}:
+        skip = True
+        reason = "JSHI_REMS_SKIP_EMBEDDING"
+    else:
+        config = getattr(pipeline, "config", None)
+        embedding = getattr(config, "embedding", None) if config is not None else None
+        provider = str(getattr(embedding, "provider", "") or "local")
+        if provider == "hash":
+            return False
+        model_name = str(getattr(embedding, "model_name", "") or "")
+        skip = not embedding_weights_present(model_name)
+        reason = f"本地没有 {model_name or 'embedding'} 权重"
+    if not skip:
+        return False
+    recall_pipeline = getattr(pipeline, "recall_pipeline", None)
+    if recall_pipeline is None:
+        return False
+    recall_pipeline._semantic_route = lambda *args, **kwargs: {}
+    recall_pipeline.index_event = lambda event: None
+    message = (
+        f"[jshi] {reason}，已跳过语义召回（不加载 torch）。"
+        "词法/对象召回仍可用。修好 torch 并下载 BAAI/bge-small-zh-v1.5 后重启。"
+    )
+    logger.warning(message)
+    print(message, file=sys.stderr)
+    return True
+
+
 def build_rems_pipeline(data_dir: Path, pipeline_cls: Any, config_cls: Any) -> Any:
     data_dir.mkdir(parents=True, exist_ok=True)
     config = config_cls()
@@ -176,14 +234,15 @@ class Rems3MemoryBackend:
         if pipeline is not None:
             self._pipeline = pipeline
             self._engine_types = engine_types
-            return
-        rems_port, pipeline_cls, config_cls = load_rems()
-        self._engine_types = (rems_port.MemoryBatch, rems_port.MemoryExperience)
-        self._pipeline = build_rems_pipeline(
-            data_dir or Path(".jshi") / "rems",
-            pipeline_cls,
-            config_cls,
-        )
+        else:
+            rems_port, pipeline_cls, config_cls = load_rems()
+            self._engine_types = (rems_port.MemoryBatch, rems_port.MemoryExperience)
+            self._pipeline = build_rems_pipeline(
+                data_dir or Path(".jshi") / "rems",
+                pipeline_cls,
+                config_cls,
+            )
+        disable_local_embedding_if_needed(self._pipeline)
 
     def _to_engine_batch(self, payload: Mapping[str, Any]) -> Any:
         experiences_raw = payload["experiences"]

@@ -9,6 +9,7 @@ __pycache__/
 .jshi-try/
 .env
 .env.local
+logs/
 dist/
 build/
 

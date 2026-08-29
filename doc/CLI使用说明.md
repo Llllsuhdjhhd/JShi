@@ -74,7 +74,7 @@ talk.cmd
 talk.cmd stone --speaker dp --tui
 ```
 
-上方滚动对话，下方输入，底栏只放 `mode`、对象状态、活跃区版本。输入 `/` 或 `/help` 后可用上下箭头选择命令，回车执行，Esc 关闭。斜杠命令与主链路与原来相同。未安装或非交互终端会退回一行输入，并在 stderr 提示。`--plain` 与 `--tui` 同时出现时走原来的一行输入。
+上方滚动对话，下方输入，底栏只放 `mode`、对象状态、活跃区版本。长口头回复按窗口显示列宽折行（汉字按两列，避免挤出右缘）。输入 `/` 或 `/help` 后可用上下箭头选择命令，回车执行，Esc 关闭。斜杠命令与主链路与原来相同。未安装或非交互终端会退回一行输入，并在 stderr 提示。`--plain` 与 `--tui` 同时出现时走原来的一行输入。需要重启 `talk` 才生效。
 
 不用 `talk.cmd`、直接调模块时，cmd：
 
@@ -153,7 +153,7 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 
 `.env` 里 `JSHI_MEMORY_BACKEND=rems3` 已经够了。记忆引擎会沿用同一文件里的 `JSHI_MODEL_API_KEY` / `ENDPOINT` / `NAME`（若未另写 `REMS_LLM__API_KEY`）。然后再 `talk.cmd stone --speaker lux --tui`。成功时 stderr 会有一行 `[jshi] memory backend: Rems3MemoryBackend`。
 
-安装时若提示 Scripts 不在 PATH，可忽略，不影响 `import rems`。第一次启动可能下载向量模型，会稍慢。
+安装时若提示 Scripts 不在 PATH，可忽略，不影响 `import rems`。本地没有 `BAAI/bge-small-zh-v1.5` 权重、或 torch 无法加载时，**不会去网上拉模型**（那会把「你好」卡住）。stderr 会写「已跳过语义召回」，词法/对象召回仍可用。可设 `JSHI_REMS_SKIP_EMBEDDING=1` 强制跳过。
 
 若报 `No module named 'rems'`，错误里会写出当前解释器路径；用那条路径再跑一次 `-m pip install`。
 
@@ -161,6 +161,7 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 |------|------|------|
 | `JSHI_MEMORY_BACKEND` | `inprocess` | `inprocess` 或 `rems3`；其它值报错 |
 | `JSHI_REMS_DATA_DIR` | `{data-dir}/rems` | REMS 自己的 sqlite（及可选向量路径），与 `subject.sqlite3` 分开 |
+| `JSHI_REMS_SKIP_EMBEDDING` | 空 | `1` 时不加载 torch / 句向量，只做词法召回 |
 
 换后端不搬旧记忆。进程内事实与 REMS 事件不是同一份库；`recall` 问的是当前后端。Qdrant 在邻仓默认 `:memory:` 时不必开 Docker。
 
@@ -180,7 +181,8 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 | `/speaker 名字`        | 更换对象，写入 `cli_session.json`，下次启动仍有效           |
 | `/context`           | 预览活跃区正文与五源装载条数；不调模型、不落新活动                    |
 | `/plan`              | 上一轮认知的 `response_plan`（mode、条目）。还没说过话则提示先说一句 |
-| `/prompt`            | 认知 skill 的提示词骨架；本轮材料仍以 `/context` 为准         |
+| `/prompt`            | 即将发给模型的 system 与 user（不调模型）。全屏里在后台组装，底栏会显示「正在组装提示词…」；第一次可能较慢（记忆后端加载），不是死机。不要用 Ctrl+P。 |
+| `/timing` `/timing n` | 回看上一轮（或最近 n 轮）各步耗时。对话默认不显示。关窗口即丢 |
 | `/quit` `/exit` `/q` | 退出循环                                         |
 
 

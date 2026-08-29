@@ -14,6 +14,7 @@ class AssemblySpeaker:
     label: str
     aliases: tuple[str, ...] = ()
     status: str = "provisional"
+    reason: str = ""
 
 
 @dataclass(frozen=True)

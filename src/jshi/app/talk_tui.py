@@ -8,7 +8,8 @@ from textual.widgets import Footer, Header, Input, Log, OptionList, Static
 from textual.widgets.option_list import Option
 from textual.worker import Worker, WorkerState
 
-from jshi.app.talk_session import TALK_COMMANDS, TalkOutcome, TalkSession
+from jshi.app.talk_plain import wrap_display_text
+from jshi.app.talk_session import TALK_COMMANDS, TalkEvent, TalkOutcome, TalkSession
 
 _NEEDS_ARGUMENT = frozenset({"/speaker"})
 _HELP_TOKENS = frozenset({"/", "/help", "/?"})
@@ -21,6 +22,8 @@ class _CommandPicker(OptionList):
 
 
 class TalkApp(App[None]):
+    # 自带命令面板（Ctrl+P / 标题栏）在本壳里会 ScreenStackError，且与 / 列表重复。
+    ENABLE_COMMAND_PALETTE = False
     CSS = """
     Screen {
         layout: vertical;
@@ -56,7 +59,7 @@ class TalkApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Log(id="chat", wrap=True)
+        yield Log(id="chat")
         yield _CommandPicker(id="picker")
         yield Static(self._idle_status(), id="status")
         yield Input(placeholder="说话；输入 / 用箭头选命令", id="line")
@@ -66,12 +69,57 @@ class TalkApp(App[None]):
         self.title = "匠石"
         self.sub_title = f"{self.session.subject_id} · {self.session.speaker}"
         chat = self.query_one("#chat", Log)
-        chat.write_line("直接打字后回车即发送。输入 / 或 /help，上下箭头选择命令。")
+        self._write_chat("直接打字后回车即发送。输入 / 或 /help，上下箭头选择命令。")
         self._picker().display = False
         self.query_one("#line", Input).focus()
 
     def _idle_status(self) -> str:
         return f"主体 {self.session.subject_id}；对象 {self.session.speaker}（长期）"
+
+    def _write_chat(self, text: str) -> None:
+        chat = self.query_one("#chat", Log)
+        wrapped = wrap_display_text(text, self._chat_columns())
+        chat.write_lines(wrapped.splitlines() or ("",))
+
+    def _status_for(self, line: str) -> str:
+        if line == "/prompt":
+            return "正在组装提示词…"
+        if line == "/context":
+            return "正在预览上下文…"
+        if line.startswith("/"):
+            return "处理中…"
+        return "等待回应…"
+
+    def _run_handle(self, line: str) -> None:
+        if self._pending or self.session.busy:
+            self.query_one("#status", Static).update("上一轮尚未结束，请稍候。")
+            return
+        self._pending = True
+        self.query_one("#status", Static).update(self._status_for(line))
+
+        def work() -> None:
+            try:
+                outcome = self.session.handle(line)
+            except Exception as exc:  # noqa: BLE001
+                outcome = TalkOutcome((TalkEvent("notice", f"调用失败：{exc}"),))
+            self.call_from_thread(self._apply, outcome)
+
+        self.run_worker(
+            work,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _chat_columns(self) -> int:
+        chat = self.query_one("#chat", Log)
+        candidates: list[int] = []
+        if chat.size.width:
+            candidates.append(chat.size.width - 2)
+        if self.size.width:
+            candidates.append(self.size.width - 4)
+        usable = [item for item in candidates if item >= 8]
+        return min(usable) if usable else 80
 
     def _picker(self) -> _CommandPicker:
         return self.query_one("#picker", _CommandPicker)
@@ -166,8 +214,8 @@ class TalkApp(App[None]):
             field.value = f"{name} "
             field.focus()
             return
-        self.query_one("#chat", Log).write_line(f"你：{name}")
-        self._apply(self.session.handle(name))
+        self._write_chat(f"你：{name}")
+        self._run_handle(name)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         line = event.value.strip()
@@ -191,18 +239,8 @@ class TalkApp(App[None]):
             event.input.value = "/help"
             event.input.focus()
             return
-        self.query_one("#chat", Log).write_line(f"你：{line}")
-        if line.startswith("/"):
-            self._apply(self.session.handle(line))
-            return
-        self._pending = True
-        self.query_one("#status", Static).update("等待回应…")
-        self.run_worker(
-            lambda: self.session.handle(line),
-            exclusive=True,
-            thread=True,
-            exit_on_error=False,
-        )
+        self._write_chat(f"你：{line}")
+        self._run_handle(line)
 
     def _use_highlight(self, stripped: str) -> bool:
         if not self._picker_visible():
@@ -217,29 +255,19 @@ class TalkApp(App[None]):
         return False
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.state is WorkerState.ERROR:
+        if event.state is WorkerState.ERROR and self._pending:
             self._pending = False
             self.query_one("#status", Static).update("调用失败。")
-            return
-        if event.state is not WorkerState.SUCCESS:
-            return
-        outcome = event.worker.result
-        if not isinstance(outcome, TalkOutcome):
-            self._pending = False
-            return
-        self._apply(outcome)
 
     def _apply(self, outcome: TalkOutcome) -> None:
         self._pending = False
-        chat = self.query_one("#chat", Log)
         status = self.query_one("#status", Static)
         meta_text = None
         for event in outcome.events:
             if event.kind == "speech":
-                chat.write_line(f"匠石：{event.text}")
+                self._write_chat(f"匠石：{event.text}")
             elif event.kind in {"notice", "overlay"}:
-                for line in event.text.splitlines() or ("",):
-                    chat.write_line(line)
+                self._write_chat(event.text)
             elif event.kind == "meta":
                 meta_text = event.text
         if meta_text:

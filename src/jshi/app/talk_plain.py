@@ -3,20 +3,46 @@
 from __future__ import annotations
 
 import shutil
+from unicodedata import east_asian_width
 
 from jshi.app.talk_session import TalkSession
 
 
+def cell_width(char: str) -> int:
+    """终端显示列宽。汉字等全角为 2，ASCII 为 1。"""
+    if ord(char) < 32:
+        return 0
+    kind = east_asian_width(char)
+    if kind in {"F", "W", "A"}:
+        return 2
+    return 1
+
+
 def wrap_display_text(text: str, width: int) -> str:
-    """按终端列宽折行。不依赖 Textual。"""
-    columns = max(8, int(width))
+    """按终端显示列宽折行（中文按两列）。不依赖 Textual。"""
+    columns = int(width)
+    if columns < 1:
+        columns = 80
     lines: list[str] = []
     for paragraph in text.splitlines() or [""]:
         if not paragraph:
             lines.append("")
             continue
-        for start in range(0, len(paragraph), columns):
-            lines.append(paragraph[start : start + columns])
+        current: list[str] = []
+        used = 0
+        for char in paragraph:
+            wide = cell_width(char)
+            if wide == 0:
+                current.append(char)
+                continue
+            if current and used + wide > columns:
+                lines.append("".join(current))
+                current = [char]
+                used = wide
+                continue
+            current.append(char)
+            used += wide
+        lines.append("".join(current))
     return "\n".join(lines)
 
 
