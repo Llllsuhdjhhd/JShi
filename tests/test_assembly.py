@@ -254,7 +254,7 @@ def test_memory_source_filters_by_object_and_recency(tmp_path):
     assert len(low) == 3  # 低档 1–3 → 3 条线索
     assert all(fragment.id.startswith("memory:") for fragment in low)
     assert any("对象A的第4条" in fragment.content for fragment in low)
-    assert all("甲（A）：" in fragment.content for fragment in low)
+    assert all(fragment.object_id == "OBJ-A" for fragment in low)
     assert "对象B的往事" not in {fragment.content for fragment in low}
 
     deep = source.load(

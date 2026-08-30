@@ -37,6 +37,7 @@ class AssemblyFragment:
     id: str
     content: str
     kind: str
+    object_id: str | None = None
     status: str = "active"
     importance: float = 1.0
     source_ids: tuple[str, ...] = ()

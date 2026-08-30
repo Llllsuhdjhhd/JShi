@@ -236,10 +236,12 @@ class TalkSession:
                 if len(self._timings) > TIMING_KEEP:
                     del self._timings[:-TIMING_KEEP]
             spoken = result.action_text.strip() if result.action_text else ""
+            embodied = result.response_plan.embodied_text().strip()
             view = self.process.activity_ledger.current_context_view(self.subject_id)
             meta = (
                 f"[{result.response_plan.mode}；"
                 f"{result.speaker.label}/{result.speaker.status}；"
+                f"动作：{embodied or '无动作'}；"
                 f"活跃区 v{view.version} 段{len(view.segment_refs)}]"
             )
             return TalkOutcome(
@@ -321,7 +323,8 @@ class TalkSession:
                 input_text=query,
                 subject_state=assembled.subject_state,
                 speaker=speaker,
-                context=SubjectProcess._model_context(
+                context=self.process._model_context(
+                    self.subject_id,
                     assembled.recalled,
                     assembled.fragments,
                     assembled.context_view,

@@ -247,7 +247,7 @@ def test_third_person_recall_binds_archive_and_speech_uses_fragment(tmp_path):
             recalled = [
                 str(item.get("content") or "")
                 for item in request.context
-                if str(item.get("id", "")).startswith("memory:")
+                if str(item.get("id", "")).startswith("M")
                 and "岭南" in str(item.get("content") or "")
             ]
             spoken = f"我想起{recalled[0]}" if recalled else "对不上"
@@ -278,7 +278,7 @@ def test_third_person_recall_binds_archive_and_speech_uses_fragment(tmp_path):
     )
 
     assert model.calls == 2
-    assert any(item.startswith("memory:") for item in model.second_ids)
+    assert any(item.startswith("M") for item in model.second_ids)
     assert "岭南" in result.action_text
     assert "我想起" in result.action_text
     assert seeded.id not in result.action_text

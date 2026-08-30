@@ -221,9 +221,8 @@ class MemorySource:
                     source="memory",
                     id=f"memory:{item.event_id}",
                     # 用 content（按 summary_level 选的摘要）装配；进程内无摘要则落回原文。
-                    content=self._with_names(
-                        item.content or item.text, item.object_id, ctx.speaker
-                    ),
+                    content=item.content or item.text,
+                    object_id=item.object_id,
                     kind=item.kind or "fact",
                     status="active",
                     importance=0.5,
@@ -231,7 +230,7 @@ class MemorySource:
                     always=False,
                 )
                 for item in recalled
-            )
+            ),
         )
 
     def _with_names(

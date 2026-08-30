@@ -26,6 +26,7 @@ from abc import ABC, abstractmethod
 from dataclasses import replace
 from typing import Any, Generic, Mapping, TypeVar
 
+from jshi.core.params import active_zone_chars
 from jshi.models import ModelPort, ModelRequest, ModelResponse
 
 T = TypeVar("T")
@@ -105,6 +106,12 @@ class Skill(ABC, Generic[T]):
             "speaker_label": speaker.label if speaker else "未知",
             "speaker_object_id": speaker.object_id if speaker else "",
             "speaker_status": speaker.status if speaker else "",
+            "values": "\n".join(
+                str(item).strip()
+                for item in state.salient_values
+                if str(item).strip()
+            ),
+            "active_zone_chars": str(active_zone_chars()),
         }
         text = self.instruction
         for key, value in values.items():

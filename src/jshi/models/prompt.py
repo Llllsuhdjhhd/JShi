@@ -46,16 +46,6 @@ def build_system(request: ModelRequest) -> str:
     if extra:
         parts.append(extra)
     state = request.subject_state
-    identity_lines: list[str] = []
-    if (state.identity_summary or "").strip():
-        identity_lines.append(_identity_opening(state.identity_summary))
-    if (state.current_stance or "").strip():
-        identity_lines.append(f"当前立场：{state.current_stance.strip()}")
-    if identity_lines:
-        parts.append("\n".join(identity_lines))
-    values = [str(item).strip() for item in state.salient_values if str(item).strip()]
-    if values:
-        parts.append("【价值】\n" + "\n".join(values))
     commitments = [
         str(item).strip() for item in state.commitments if str(item).strip()
     ]
@@ -80,12 +70,16 @@ def build_user(request: ModelRequest) -> str:
     segments = _segments(request.context)
     if segments:
         parts.append(
-            "【活跃区】\n" + "\n".join(f"{sid}：{text}" for sid, text in segments)
+            "【活跃区】\n"
+            + "\n".join(_render_ref(sid, slabel, text) for sid, slabel, text in segments)
         )
-    memories = _memories(request.context, {text for _sid, text in segments})
+    memories = _memories(
+        request.context, {text for _sid, _slabel, text in segments}
+    )
     if memories:
         parts.append(
-            "【回忆】\n" + "\n".join(f"{mid}：{text}" for mid, text in memories)
+            "【回忆】\n"
+            + "\n".join(_render_ref(mid, mlabel, text) for mid, mlabel, text in memories)
         )
     parts.append(f"【本轮】\n{label}：{request.input_text}")
     return "\n".join(parts)
@@ -115,17 +109,24 @@ def _texts_of_kind(context: Sequence[Mapping[str, Any]], kind: str) -> list[str]
     return texts
 
 
-def _segments(context: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
+def _render_ref(ref_id: str, label: str, text: str) -> str:
+    if label:
+        return f"{ref_id}（{label}）：{text}"
+    return f"{ref_id}：{text}"
+
+
+def _segments(context: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]]:
     for item in context:
         if item.get("kind") != "active_zone_refs":
             continue
-        rows: list[tuple[str, str]] = []
+        rows: list[tuple[str, str, str]] = []
         seen_ids: set[str] = set()
         for row in item.get("segments") or ():
             if not isinstance(row, dict):
                 continue
             segment_id = str(row.get("id") or "").strip()
             text = str(row.get("text") or "").strip()
+            segment_label = str(row.get("label") or "").strip()
             if (
                 not segment_id
                 or not text
@@ -134,7 +135,7 @@ def _segments(context: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
             ):
                 continue
             seen_ids.add(segment_id)
-            rows.append((segment_id, text))
+            rows.append((segment_id, segment_label, text))
         return rows
     return []
 
@@ -142,8 +143,8 @@ def _segments(context: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
 def _memories(
     context: Sequence[Mapping[str, Any]],
     segment_texts: set[str],
-) -> list[tuple[str, str]]:
-    rows: list[tuple[str, str]] = []
+) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
     seen_ids: set[str] = set()
     for item in context:
         kind = str(item.get("kind") or "")
@@ -152,8 +153,9 @@ def _memories(
             continue
         memory_id = str(item.get("id") or "").strip()
         text = str(item.get("content") or "").strip()
+        memory_label = str(item.get("label") or "").strip()
         if not memory_id or not text or text in segment_texts or memory_id in seen_ids:
             continue
         seen_ids.add(memory_id)
-        rows.append((memory_id, text))
+        rows.append((memory_id, memory_label, text))
     return rows

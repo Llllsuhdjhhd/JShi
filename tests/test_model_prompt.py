@@ -99,9 +99,8 @@ def test_build_system_is_stable_prefix():
     assert "【反例】" not in system
     assert "context-v5" not in system
     assert '"kind": "context_view"' not in system
-    assert "你是匠石，来源：基础型匠石。你以匠石的身份回应对方" in system
-    assert "你是匠石；来源" not in system
-    assert "你是匠石——" not in system
+    assert "你是匠石，来源" not in system
+    assert "当前立场" not in system
     assert "【价值】" in system
     assert "与朋友交，言而有信。" in system
     assert "personal:val-" not in system

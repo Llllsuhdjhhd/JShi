@@ -226,6 +226,8 @@ class SubjectProcess:
         self.identities = identities
         self.cognition = cognition
         self.last_activity_timing: ActivityTiming | None = None
+        self._segment_short_map: dict[str, str] = {}
+        self._memory_short_map: dict[str, str] = {}
         self.memory = memory or MemoryShell(InProcessMemoryBackend(repository))
         self.recall_coordinator = RecallCoordinator(repository, self.memory)
         self.recall_evaluator = recall_evaluator or RuleBasedRecallEvaluator()
@@ -594,9 +596,13 @@ class SubjectProcess:
             ],
         }
         if spoke:
+            reply_text = spoken_text
+            embodied_text = plan.embodied_text().strip()
+            if embodied_text:
+                reply_text = f"{spoken_text}（动作：{embodied_text}）"
             self.activity_ledger.append_subject_reply(
                 subject_id,
-                text_raw=spoken_text,
+                text_raw=reply_text,
                 source_ids=(activity.id, *(item for item in (action_id,) if item)),
                 response_plan=plan_payload,
                 response_statuses=final_statuses,
@@ -618,7 +624,9 @@ class SubjectProcess:
         clock.mark("⑥行动")
         self.activity_ledger.apply_context_assessment(
             subject_id,
-            getattr(response, "context_assessment", None),
+            self._unshorten_context_assessment(
+                getattr(response, "context_assessment", None)
+            ),
             allow_edit=True,
             recall_excerpts=tuple(
                 (f"memory:{item.event_id}", item.text) for item in working_recalled
@@ -719,6 +727,7 @@ class SubjectProcess:
                 subject_state=current.subject_state,
                 speaker=speaker,
                 context=self._model_context(
+                    current.subject_state.subject_id,
                     working_recalled,
                     current.fragments,
                     current.context_view,
@@ -993,23 +1002,86 @@ class SubjectProcess:
                 "reference (object_ref / channel / carriers)"
             )
 
-    @staticmethod
+    def _object_display(self, object_id: str | None) -> str:
+        if not object_id:
+            return "匠石"
+        profile = self.profiles.get(object_id) if self.profiles is not None else None
+        if profile is None:
+            return object_id
+        if profile.label:
+            if profile.aliases:
+                return f"{profile.label}（{'、'.join(profile.aliases)}）"
+            return profile.label
+        return object_id
+
+    def _unshorten_context_assessment(self, assessment):
+        if assessment is None:
+            return None
+        reverse = {**self._segment_short_map, **self._memory_short_map}
+        return replace(
+            assessment,
+            remove=tuple(reverse.get(item, item) for item in assessment.remove),
+            drop_recall=tuple(reverse.get(item, item) for item in assessment.drop_recall),
+            focus=tuple(reverse.get(item, item) for item in assessment.focus),
+        )
+
     def _model_context(
+        self,
+        subject_id: str,
         recalled: Sequence[RecalledFragment],
         fragments: Sequence[AssemblyFragment],
         context_view: ContextViewState | None = None,
     ) -> tuple[dict[str, object], ...]:
-        items: list[dict[str, object]] = [
-            {
-                "id": fragment.id,
-                "kind": fragment.kind,
-                "content": fragment.content,
-                "status": fragment.status,
-                "source": fragment.source,
-            }
-            for fragment in fragments
-        ]
+        items: list[dict[str, object]] = []
+        self._segment_short_map = {}
+        self._memory_short_map = {}
+
+        actor_by_segment: dict[str, str | None] = {}
         if context_view is not None:
+            for segment in self.activity_ledger.list_experiences(subject_id):
+                actor_by_segment[segment.segment_id] = segment.actor_object_id
+
+        m_counter = 0
+        for fragment in fragments:
+            if fragment.source == "memory":
+                m_counter += 1
+                short_id = f"M{m_counter}"
+                self._memory_short_map[short_id] = fragment.id
+                items.append(
+                    {
+                        "id": short_id,
+                        "kind": fragment.kind,
+                        "content": fragment.content,
+                        "status": fragment.status,
+                        "source": "memory",
+                        "label": self._object_display(fragment.object_id),
+                    }
+                )
+                continue
+            items.append(
+                {
+                    "id": fragment.id,
+                    "kind": fragment.kind,
+                    "content": fragment.content,
+                    "status": fragment.status,
+                    "source": fragment.source,
+                }
+            )
+
+        if context_view is not None:
+            segments = []
+            counter = 0
+            for segment_id, text in context_view.segment_texts:
+                counter += 1
+                short_id = f"S{counter}"
+                self._segment_short_map[short_id] = segment_id
+                segments.append(
+                    {
+                        "id": short_id,
+                        "text": text,
+                        "label": self._object_display(actor_by_segment.get(segment_id)),
+                    }
+                )
             items.append(
                 {
                     "id": f"context-v{context_view.version}",
@@ -1018,25 +1090,28 @@ class SubjectProcess:
                     "status": "active",
                     "source": "activity",
                     "segment_refs": list(context_view.segment_refs),
-                    "segments": [
-                        {"id": segment_id, "text": text}
-                        for segment_id, text in context_view.segment_texts
-                    ],
+                    "segments": segments,
                     "recall_refs": [ref for ref, _text in context_view.recall_excerpts],
                     "speaker_object_id": context_view.speaker_object_id,
                 }
             )
-        items.extend(
-            {
-                "id": f"memory:{item.event_id}",
-                "kind": "recalled_fact",
-                "content": item.content or item.text,
-                "status": "active",
-                "source": "memory",
-                "event_type": item.event_type,
-            }
-            for item in recalled
-        )
+
+        for item in recalled:
+            m_counter += 1
+            short_id = f"M{m_counter}"
+            ref = f"memory:{item.event_id}"
+            self._memory_short_map[short_id] = ref
+            items.append(
+                {
+                    "id": short_id,
+                    "kind": "recalled_fact",
+                    "content": item.content or item.text,
+                    "status": "active",
+                    "source": "memory",
+                    "event_type": item.event_type,
+                    "label": self._object_display(item.object_id),
+                }
+            )
         return tuple(items)
 
     def _bind_recall_object_ids(

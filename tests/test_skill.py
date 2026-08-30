@@ -96,25 +96,24 @@ def test_system_extra_has_compact_schema_and_no_speaker():
 
 def test_instruction_keeps_rules_without_examples():
     text = CognitionSkill.instruction
+    assert "【关于你】" in text
+    assert "【关于输入】" in text
+    assert "【价值】" in text
+    assert "【回应方式】" in text
+    assert "【其余工作】" in text
+    assert "【输出格式】" in text
+    assert "{values}" in text
+    assert "{active_zone_chars}" in text
+    assert "{speaker_label}" not in text
+    assert "不伤害人类" in text
+    assert "respond（回话）" in text
+    assert "ignore（忽略）" in text
+    assert "追加评价与召回" in text
+    assert "对象确认" in text
     assert "【正例】" not in text
     assert "【反例】" not in text
-    assert "{speaker_label}" not in text
-    assert "翻开工作区" not in text
-    assert "颔首平视" in text
-    assert "信息不足就问" in text
-    assert "只看档案、对不上是哪一位，不算证据" in text
-    assert "核对自己已经用来开场的名字" in text
-    assert "我还不能确认你就是这一位" not in text
-    assert "object_ids 用说话人 id" not in text
-    assert "问另一个人用那人已有档案的 id" not in text
-    assert "问谁就在 query 里写谁的名字" in text
-    assert "【本轮材料】" in text
-    assert "【当前状态】" not in text
-    assert "【背景材料】" not in text
-    assert "侃侃如也" not in text
-    assert "你是匠石——" not in text
-    assert "不要编「没有印象」" in text
-    assert "不要因为记忆评审而 think" in text
+    assert "【本轮材料】" not in text
+    assert "【如何选择对外姿态】" not in text
 
 
 def test_empty_object_assessment_id_is_filled_from_speaker():
@@ -142,14 +141,13 @@ def test_object_assessment_name_is_resolved_to_speaker_id():
     assert resp.object_assessment.object_id == "OBJ-DP"
 
 
-def test_recall_need_and_memory_quality_are_separate_instructions():
+def test_recall_and_evaluation_are_ordered_in_one_section():
     system = CognitionSkill(FakeModel(_payload())).system_extra(make_request())
-    assert "【信息不足——追加召回】" in system
-    assert "【已回溯记忆的质量】" in system
-    assert "【记忆——信息不足与质量评价】" not in system
-    quality = system.split("【已回溯记忆的质量】", 1)[1].split("【对象确认】", 1)[0]
-    assert "整体不够" not in quality
-    assert "recall_requests" not in quality
+    assert "追加评价与召回" in system
+    assert "drop_recall" in system
+    assert "importance_ranking" in system
+    assert "recall_requests" in system
+    assert system.index("drop_recall") < system.index("才提出 recall_requests")
 
 
 def test_skill_framework_is_reused_by_other_skills():

@@ -63,6 +63,12 @@ class ResponsePlan:
     def has_embodied(self) -> bool:
         return any(item.channel == "embodied" for item in self.items)
 
+    def embodied_text(self) -> str:
+        for item in self.items:
+            if item.channel == "embodied" and item.text.strip():
+                return item.text
+        return ""
+
 
 @dataclass(frozen=True)
 class ObjectAssessment:
