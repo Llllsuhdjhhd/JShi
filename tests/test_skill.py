@@ -73,7 +73,7 @@ def _payload() -> dict:
 def test_cognition_skill_produces_usage_segments(tmp_path):
     skill = CognitionSkill(FakeModel(_payload()))
     resp = skill.run(make_request())
-    assert resp.model == "deepseek-flash@v7"  # I-004：模型 + skill 版本
+    assert resp.model == "deepseek-flash@v8"  # I-004：模型 + skill 版本
     assert resp.response_plan.mode == "respond"
     assert "working_set_limit" in resp.response_plan.verbal_text()
     assert resp.context_assessment.focus == ("seg-12",)
@@ -189,15 +189,28 @@ def test_skill_registry_register_and_get():
     assert registry.get("missing") is None
 
 
-def test_cognition_skill_degrades_on_non_json():
+def test_cognition_skill_salvages_prose_as_verbal_on_non_json():
     skill = CognitionSkill(FakeModel(None))
+    resp = skill.run(make_request())
+    assert resp.response_plan.mode == "respond"
+    assert resp.response_plan.verbal_text() == "不是JSON的一行话"
+    assert resp.metadata is not None
+    assert resp.metadata["skill_fallback"] == "prose_as_verbal"
+    assert "不是JSON" in str(resp.metadata.get("raw_preview", ""))
+
+
+def test_cognition_skill_thinks_on_broken_json_not_silently():
+    class BrokenJsonModel(ModelPort):
+        name = "broken-json"
+
+        def generate(self, request: ModelRequest) -> ModelResponse:
+            return ModelResponse(text='{"response_plan": ', model=self.name)
+
+    skill = CognitionSkill(BrokenJsonModel())
     resp = skill.run(make_request())
     assert resp.response_plan.mode == "think"
     assert resp.response_plan.verbal_text() == ""
-    assert resp.response_plan.items == ()
-    assert resp.metadata is not None
     assert resp.metadata["skill_fallback"] == "non_json"
-    assert "不是JSON" in str(resp.metadata.get("raw_preview", ""))
 
 
 def test_invalid_mode_becomes_think_and_keeps_patch():
@@ -265,7 +278,7 @@ def test_skill_model_port_routes_subject_activity_but_not_reflection():
     port = SkillModelPort(skill)
 
     subject = port.generate(make_request())
-    assert subject.model == "deepseek-flash@v7"
+    assert subject.model == "deepseek-flash@v8"
     assert subject.response_plan.mode == "respond"
     assert subject.context_assessment.focus == ("seg-12",)
 
@@ -280,3 +293,11 @@ def test_parse_json_object_requires_object():
         parse_json_object("123")
     with pytest.raises(SkillError):
         parse_json_object("not json")
+
+
+def test_parse_json_object_tolerates_markdown_fence():
+    assert parse_json_object('```json\n{"a": 1}\n```') == {"a": 1}
+
+
+def test_parse_json_object_extracts_first_object_with_preamble():
+    assert parse_json_object('好的，结果如下：\n{"a": 1}\n') == {"a": 1}

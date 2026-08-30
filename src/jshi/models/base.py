@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Mapping, Protocol
 from urllib.request import Request, urlopen
 
@@ -27,6 +28,8 @@ class ModelRequest:
     context: tuple[Mapping[str, Any], ...] = ()
     # skill 注入的系统级说明（角色锚定 + 输出 schema + 示例）；由适配器并入 system。
     system_extra: str = ""
+    # 本轮“现在”时刻；渲染提示词时给出相对时间锚点（如“昨天”）。
+    now: datetime | None = None
 
 
 @dataclass(frozen=True)

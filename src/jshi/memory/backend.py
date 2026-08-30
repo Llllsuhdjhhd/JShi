@@ -97,6 +97,11 @@ class InProcessMemoryBackend:
                     "segment_id": experience.segment_id,
                     "origin": experience.origin,
                     "source_ids": list(experience.source_ids),
+                    "occurred_at": (
+                        experience.occurred_at.isoformat()
+                        if experience.occurred_at
+                        else None
+                    ),
                 },
                 source_ids=(
                     *(item for item in (experience.segment_id,) if item),

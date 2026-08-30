@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Protocol, Sequence
 
 from jshi.textutil import query_terms
@@ -33,6 +34,18 @@ def _fact_mentions_object(record: object, object_id: str) -> bool:
     return object_id in listed
 
 
+def _record_occurred_at(record: object) -> datetime | None:
+    """取记忆事件的“发生时间”，缺省回落为摄入时间（created_at）。"""
+    content = getattr(record, "content", None) or {}
+    raw = content.get("occurred_at")
+    if raw:
+        try:
+            return datetime.fromisoformat(str(raw))
+        except ValueError:
+            pass
+    return getattr(record, "created_at", None)
+
+
 @dataclass(frozen=True)
 class RecalledFragment:
     """One recalled past fragment shown in the current-state working set.
@@ -52,6 +65,7 @@ class RecalledFragment:
     object_id: str | None = None
     source_ids: tuple[str, ...] = ()
     score: float = 0.0
+    occurred_at: datetime | None = None
 
 
 class MemoryPort(Protocol):
@@ -160,6 +174,7 @@ class InProcessHistoryMemory:
                 ),
                 source_ids=(record.id, *record.source_ids),
                 score=scores_by_id.get(record.id, 0.0),
+                occurred_at=_record_occurred_at(record),
             )
             for record in chosen
         )

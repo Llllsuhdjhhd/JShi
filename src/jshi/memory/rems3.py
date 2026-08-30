@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
@@ -98,6 +99,12 @@ def from_recalled_fragments(raw: Sequence[Any] | None) -> tuple[RecalledFragment
     for item in raw or ():
         event_type = getattr(item, "event_type", None) or _DEFAULT_EVENT_TYPE
         kind = getattr(item, "kind", None) or "fact"
+        occurred_at = getattr(item, "occurred_at", None)
+        if isinstance(occurred_at, str):
+            try:
+                occurred_at = datetime.fromisoformat(occurred_at)
+            except ValueError:
+                occurred_at = None
         fragments.append(
             RecalledFragment(
                 event_id=item.event_id,
@@ -109,6 +116,7 @@ def from_recalled_fragments(raw: Sequence[Any] | None) -> tuple[RecalledFragment
                 object_id=getattr(item, "object_id", None),
                 source_ids=_as_tuple(getattr(item, "source_ids", ())),
                 score=float(getattr(item, "score", 0.0) or 0.0),
+                occurred_at=occurred_at,
             )
         )
     return tuple(fragments)

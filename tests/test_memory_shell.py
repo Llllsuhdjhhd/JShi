@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from jshi.experienceledger import ConsumerKind, InProcessExperienceLedger
 from jshi.memory import InProcessMemoryBackend, MemoryShell
 from jshi.memorycontrol import InProcessMemoryControl
@@ -79,3 +81,25 @@ def test_memory_shell_ingest_keeps_raw_text_and_object_ids(tmp_path):
     assert memory.content["text"] == "宝玉笑道：这个妹妹我曾见过的。"
     assert "OBJ-BAO" in memory.content["object_ids"]
     assert "OBJ-JIA" in memory.content["object_ids"]
+
+
+def test_memory_shell_ingest_stores_occurred_at(tmp_path):
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    backend = InProcessMemoryBackend(repository)
+    shell = MemoryShell(backend)
+    ledger = InProcessExperienceLedger()
+    occurred = datetime(2026, 8, 29, 20, 15, tzinfo=timezone.utc)
+    ledger.append_external(
+        "stone",
+        actor_object_id="OBJ-A",
+        text_raw="昨天的事",
+        occurred_at=occurred,
+    )
+    control = InProcessMemoryControl(ledger, shell, flush_max_segments=1)
+
+    result = control.run_once("stone")
+
+    assert result.status == "ingested"
+    facts = repository.list_history("stone", HistoryKind.FACT)
+    memory = next(item for item in facts if item.event_type == "memory_external")
+    assert memory.content["occurred_at"] == occurred.isoformat()

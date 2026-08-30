@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol, Sequence
 
 from jshi.experienceledger import ContextViewState
@@ -42,6 +43,7 @@ class AssemblyFragment:
     importance: float = 1.0
     source_ids: tuple[str, ...] = ()
     always: bool = False
+    occurred_at: datetime | None = None
 
 
 @dataclass(frozen=True)

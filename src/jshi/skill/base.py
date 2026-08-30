@@ -36,16 +36,62 @@ class SkillError(RuntimeError):
     """skill 结构化输出解析 / 校验失败。"""
 
 
+def _strip_markdown_fences(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _first_json_object(text: str) -> str:
+    """从带前后缀的文本里取出第一个配平的 ``{...}``；没有花括号就原样返回。"""
+    start = text.find("{")
+    if start < 0:
+        return text
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return text[start:]
+
+
 def parse_json_object(text: str) -> Mapping[str, Any]:
-    """把模型返回文本解析为一个 JSON 对象；失败抛 ``SkillError``。"""
+    """把模型返回文本解析为 JSON 对象；容忍 Markdown 围栏与前后缀，失败抛 ``SkillError``。"""
     raw = (text or "").strip()
-    try:
-        data = json.loads(raw)
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise SkillError(f"non-JSON skill output: {raw[:120]!r}") from exc
-    if not isinstance(data, dict):
-        raise SkillError(f"expected JSON object, got {type(data).__name__}")
-    return data
+    stripped = _strip_markdown_fences(raw)
+    for candidate in (raw, stripped, _first_json_object(stripped)):
+        candidate = (candidate or "").strip()
+        if not candidate:
+            continue
+        try:
+            data = json.loads(candidate)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            return data
+    raise SkillError(f"non-JSON skill output: {raw[:120]!r}")
 
 
 class Skill(ABC, Generic[T]):

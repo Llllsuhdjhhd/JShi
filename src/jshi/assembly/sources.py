@@ -228,6 +228,7 @@ class MemorySource:
                     importance=0.5,
                     source_ids=(item.event_id, *item.source_ids),
                     always=False,
+                    occurred_at=item.occurred_at,
                 )
                 for item in recalled
             ),

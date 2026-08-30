@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Mapping, Sequence
 
 from jshi.models.base import ModelRequest, ModelSpeaker
@@ -38,10 +39,39 @@ def _is_cognition(request: ModelRequest) -> bool:
     return bool((request.system_extra or "").strip()) or request.purpose == "subject_activity"
 
 
+_WEEKDAYS = "一二三四五六日"
+
+
+def _now_label(now: datetime | None) -> str:
+    """把“现在”渲染成本地时间锚点，供模型推算“今天 / 昨天”。"""
+    if now is None:
+        return ""
+    local = now.astimezone() if now.tzinfo is not None else now
+    return (
+        f"【当前时间】{local:%Y-%m-%d %H:%M}"
+        f"（周{_WEEKDAYS[local.weekday()]}）"
+    )
+
+
+def _time_label(raw: object) -> str:
+    """把 ISO 时间戳渲染成紧凑的本地时间标签（无则空）。"""
+    if not raw:
+        return ""
+    try:
+        value = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return ""
+    local = value.astimezone() if value.tzinfo is not None else value
+    return f"{local:%Y-%m-%d %H:%M}"
+
+
 def build_system(request: ModelRequest) -> str:
     if not _is_cognition(request):
         return _short_system(request)
     parts: list[str] = []
+    now_label = _now_label(request.now)
+    if now_label:
+        parts.append(now_label)
     extra = (request.system_extra or "").strip()
     if extra:
         parts.append(extra)
@@ -71,15 +101,21 @@ def build_user(request: ModelRequest) -> str:
     if segments:
         parts.append(
             "【活跃区】\n"
-            + "\n".join(_render_ref(sid, slabel, text) for sid, slabel, text in segments)
+            + "\n".join(
+                _render_ref(sid, slabel, text, time_label)
+                for sid, slabel, text, time_label in segments
+            )
         )
     memories = _memories(
-        request.context, {text for _sid, _slabel, text in segments}
+        request.context, {text for _sid, _slabel, text, _time in segments}
     )
     if memories:
         parts.append(
             "【回忆】\n"
-            + "\n".join(_render_ref(mid, mlabel, text) for mid, mlabel, text in memories)
+            + "\n".join(
+                _render_ref(mid, mlabel, text, time_label)
+                for mid, mlabel, text, time_label in memories
+            )
         )
     parts.append(f"【本轮】\n{label}：{request.input_text}")
     return "\n".join(parts)
@@ -109,17 +145,22 @@ def _texts_of_kind(context: Sequence[Mapping[str, Any]], kind: str) -> list[str]
     return texts
 
 
-def _render_ref(ref_id: str, label: str, text: str) -> str:
+def _render_ref(ref_id: str, label: str, text: str, time_label: str = "") -> str:
+    prefix = ref_id
+    if time_label:
+        prefix = f"{ref_id}[{time_label}]"
     if label:
-        return f"{ref_id}（{label}）：{text}"
-    return f"{ref_id}：{text}"
+        return f"{prefix}（{label}）：{text}"
+    return f"{prefix}：{text}"
 
 
-def _segments(context: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]]:
+def _segments(
+    context: Sequence[Mapping[str, Any]],
+) -> list[tuple[str, str, str, str]]:
     for item in context:
         if item.get("kind") != "active_zone_refs":
             continue
-        rows: list[tuple[str, str, str]] = []
+        rows: list[tuple[str, str, str, str]] = []
         seen_ids: set[str] = set()
         for row in item.get("segments") or ():
             if not isinstance(row, dict):
@@ -127,6 +168,7 @@ def _segments(context: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]
             segment_id = str(row.get("id") or "").strip()
             text = str(row.get("text") or "").strip()
             segment_label = str(row.get("label") or "").strip()
+            time_label = _time_label(row.get("occurred_at"))
             if (
                 not segment_id
                 or not text
@@ -135,7 +177,7 @@ def _segments(context: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]
             ):
                 continue
             seen_ids.add(segment_id)
-            rows.append((segment_id, segment_label, text))
+            rows.append((segment_id, segment_label, text, time_label))
         return rows
     return []
 
@@ -143,8 +185,8 @@ def _segments(context: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]
 def _memories(
     context: Sequence[Mapping[str, Any]],
     segment_texts: set[str],
-) -> list[tuple[str, str, str]]:
-    rows: list[tuple[str, str, str]] = []
+) -> list[tuple[str, str, str, str]]:
+    rows: list[tuple[str, str, str, str]] = []
     seen_ids: set[str] = set()
     for item in context:
         kind = str(item.get("kind") or "")
@@ -154,8 +196,9 @@ def _memories(
         memory_id = str(item.get("id") or "").strip()
         text = str(item.get("content") or "").strip()
         memory_label = str(item.get("label") or "").strip()
+        time_label = _time_label(item.get("occurred_at"))
         if not memory_id or not text or text in segment_texts or memory_id in seen_ids:
             continue
         seen_ids.add(memory_id)
-        rows.append((memory_id, memory_label, text))
+        rows.append((memory_id, memory_label, text, time_label))
     return rows

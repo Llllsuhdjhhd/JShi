@@ -241,19 +241,25 @@ class CognitionSkill(Skill[ModelResponse]):
 - system：关于你的背景以及各种约定与定义
 - user：实际的说话人与本轮对话、活跃区、已回填的回忆。
 
+【输入格式示例】
+user 里的【活跃区】和【回忆】每行都带对象名；带方括号时间时表示发生时间。不同名字是不同的人，不要把这些人的经历搞混。
+- 活跃区段：`S13[2026-08-30 11:50]（luguang）：袭击塔怎么做` —— 表示对象“luguang”在 2026-08-30 11:50 说了“袭击塔怎么做”。`（名字）` 是这条内容的归属/说话对象，`[时间]` 是发生时间。
+- 回忆条目：`M1（lux）：lux用AI创造了我；我回：记忆对不上…` —— 表示对象“lux”相关的一段记忆；回忆正文是摘要，不是逐字原话，要按 `（名字）` 判断这段经历属于谁。回忆可用时也会带时间，如 `M1[2026-08-30 11:50]（lux）：…`。
+- 若回忆行只有 `memory:EVT-…：…` 这种没有 `（名字）` 和时间的旧格式，说明这段记忆的归属对象暂未标明；不要凭空把它安到本轮说话人头上，当作“归属未标明的候选回忆”看待，必要时先确认对象。
+
 【价值】
 你的价值：你的回应应当遵循你的价值。比如你喜欢孔子的「学而时习之，不亦乐乎」，意味着你是一个好学也好交友的人。下面这些条目都是你遵循的价值：
 {values}
 
 【回应方式】
-你的回应是指你的心智基于你的个人世界与本轮输入做的反应：方式包含了动作（embodied）以及语言回应。
+设想你正处在这样的对话场景里：对方在跟你说话，你要做出得体的回应。
 语言回应的种类叫 mode，以下是互斥的 4 类，每次回应只能占其中一种：
-先判断：对方是否在向你说话、期待你回答？是，就 respond（对方问话而你不答，通常不礼貌）；对方还没说完、只需你在听，才 wait；对方是明确打扰、纠缠，才 ignore；对外没有交往义务、只在内部工作，才 think。
+先问自己：这一拍对对方有没有该发生的交往行为（回答、确认、道歉、说明、拒绝、安抚）？有，就 respond。特别是对方指出你的错、纠正你、质疑你，或要你“确认/核对/再想想”时，这都是在跟你说话并期待你开口，要 respond 承认、道歉、说明或确认，不要 think 闷着。对方还没说完、只需你在听，才 wait；对方是明确打扰、纠缠，才 ignore；只有对方没有在跟你说话、你纯粹在内心盘算（没有任何人期待你开口）才 think。
 - respond（回话）：有语言输出。对输入作语言回应，根据输入、活跃区与记忆，设想实际情况，做出得体回应。
 - wait（等待）：无语言输出。对方可能还在持续表达，或你在聆听或其他情况，本轮无回话，把时间留给对方。
 - ignore（忽略）：无语言输出。于己无关或为减少麻烦或其他情况，比如无关打扰、纠缠等。
-- think（只在内部思考）：无语言输出。对外没有交往义务，工作只在内部。
-reason 写清为什么选择这个 mode。
+- think（只在内部思考）：无语言输出。对外没有交往义务，工作只在内部。不是「有话不能说」；信息不足、被纠正、被质疑、违背价值，默认都不是 think。
+reason 写清为什么选择这个 mode。先决定这一拍要不要开口，再处理记忆/上下文；不要因为要整理回忆、缩减活跃区或追加召回就 think 或不出声，那些来不及就留空数组。
 动作（embodied）是对本轮输入做出的动作反应，此刻假设自己是类人机器人，给出动作描述，比如对方示意你坐下，你的动作可能是「走到他指定的椅子那里，坐下来」。动作与语言组成一次完整反应，须得体、自然、不卑不亢，可伴随任何 mode，如果无需动作，则输出“无动作”。
 
 【其余工作】
@@ -284,7 +290,7 @@ reason 写清为什么选择这个 mode。
         self,
         model: ModelPort,
         *,
-        version: str = "v7",
+        version: str = "v8",
     ) -> None:
         super().__init__(model, version=version)
 
@@ -296,8 +302,24 @@ reason 写清为什么选择这个 mode。
         return _bind_speaker_fields(response, request)
 
     def _fallback(self, raw_text: str) -> ModelResponse:
-        # 解析失败：本轮不对外说，不把原文/半截 JSON 当回复。
-        preview = (raw_text or "").strip()[:120]
+        # 解析失败：区分两种情况。
+        # 1) 纯自然语言（没有 JSON 花括号）说明模型只是在用普通话说，当口头回复保底；
+        # 2) 空输出或半截 JSON 才静默降级为 think，且单独打标，方便和“模型自己 think”区分。
+        raw = (raw_text or "").strip()
+        preview = raw[:120]
+        if raw and "{" not in raw and "[" not in raw:
+            return ModelResponse(
+                model=self.model_tag,
+                metadata={
+                    "skill_fallback": "prose_as_verbal",
+                    "raw_preview": preview,
+                },
+                response_plan=ResponsePlan(
+                    mode="respond",
+                    reason="structured_output_failed_but_prose_salvaged",
+                    items=(ResponseItem(channel="verbal", text=raw),),
+                ),
+            )
         metadata: dict[str, str] = {"skill_fallback": "non_json"}
         if preview:
             metadata["raw_preview"] = preview

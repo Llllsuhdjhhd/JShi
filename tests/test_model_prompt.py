@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 
 from jshi.core import Provenance, SubjectState
 from jshi.models import ModelRequest, ModelSpeaker, build_system, build_user
@@ -144,3 +145,48 @@ def test_reflection_keeps_raw_user_text():
     assert build_user(req) == "回顾今天"
     assert "【本轮】" not in build_user(req)
     assert "【价值】" not in build_system(req)
+
+
+def test_build_system_includes_current_time_when_provided():
+    req = _request(now=datetime(2026, 8, 30, 12, 34, 0))
+
+    system = build_system(req)
+
+    assert "【当前时间】2026-08-30 12:34（周日）" in system
+
+
+def test_build_user_labels_segments_and_memories_with_time():
+    req = _request(
+        now=datetime(2026, 8, 30, 12, 34, 0),
+        context=(
+            {
+                "id": "context-v5-refs",
+                "kind": "active_zone_refs",
+                "content": "",
+                "status": "active",
+                "source": "activity",
+                "segments": [
+                    {
+                        "id": "seg-a",
+                        "text": "昨天见的",
+                        "label": "lux",
+                        "occurred_at": "2026-08-29T20:15:00",
+                    },
+                ],
+            },
+            {
+                "id": "memory:extra",
+                "kind": "fact",
+                "content": "以前说过岭南",
+                "status": "active",
+                "source": "memory",
+                "label": "lux",
+                "occurred_at": "2026-07-01T09:30:00",
+            },
+        ),
+    )
+
+    user = build_user(req)
+
+    assert "seg-a[2026-08-29 20:15]（lux）：昨天见的" in user
+    assert "memory:extra[2026-07-01 09:30]（lux）：以前说过岭南" in user

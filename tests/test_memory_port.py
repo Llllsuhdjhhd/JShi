@@ -218,3 +218,38 @@ def test_recall_explicit_limit_overrides_level(tmp_path):
         )
 
     assert len(memory.recall("stone", "朋友", limit=2, level=9)) == 2
+
+
+def test_recall_carries_occurred_at(tmp_path):
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    memory = InProcessHistoryMemory(repository)
+    occurred = datetime(2026, 8, 29, 20, 15, tzinfo=timezone.utc)
+    repository.add_history(
+        HistoryRecord(
+            subject_id="stone",
+            kind=HistoryKind.FACT,
+            event_type="memory_external",
+            content={"text": "昨天的事", "occurred_at": occurred.isoformat()},
+        )
+    )
+
+    recalled = memory.recall("stone", "昨天")
+
+    assert recalled[0].occurred_at == occurred
+
+
+def test_recall_falls_back_to_created_at_when_no_occurred_at(tmp_path):
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    memory = InProcessHistoryMemory(repository)
+    record = HistoryRecord(
+        subject_id="stone",
+        kind=HistoryKind.FACT,
+        event_type="external_input",
+        content={"text": "过去的事"},
+        created_at=datetime(2026, 8, 28, 9, 0, tzinfo=timezone.utc),
+    )
+    repository.add_history(record)
+
+    recalled = memory.recall("stone", "过去")
+
+    assert recalled[0].occurred_at == record.created_at

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -323,6 +324,7 @@ class TalkSession:
                 input_text=query,
                 subject_state=assembled.subject_state,
                 speaker=speaker,
+                now=datetime.now().astimezone(),
                 context=self.process._model_context(
                     self.subject_id,
                     assembled.recalled,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Mapping, Sequence
 
 from jshi.activezone import (
@@ -127,6 +128,10 @@ _MEMORY_PREFIX = "memory:"
 def _memory_event_id(ref: str) -> str:
     """从工作集 id 里提出记忆 event_id（`memory:{event_id}` → `{event_id}`）。"""
     return ref[len(_MEMORY_PREFIX):] if ref.startswith(_MEMORY_PREFIX) else ref
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
 
 
 @dataclass(frozen=True)
@@ -726,6 +731,7 @@ class SubjectProcess:
                 input_text=current.input_text,
                 subject_state=current.subject_state,
                 speaker=speaker,
+                now=datetime.now().astimezone(),
                 context=self._model_context(
                     current.subject_state.subject_id,
                     working_recalled,
@@ -1037,9 +1043,11 @@ class SubjectProcess:
         self._memory_short_map = {}
 
         actor_by_segment: dict[str, str | None] = {}
+        time_by_segment: dict[str, datetime | None] = {}
         if context_view is not None:
             for segment in self.activity_ledger.list_experiences(subject_id):
                 actor_by_segment[segment.segment_id] = segment.actor_object_id
+                time_by_segment[segment.segment_id] = segment.occurred_at
 
         m_counter = 0
         for fragment in fragments:
@@ -1055,6 +1063,7 @@ class SubjectProcess:
                         "status": fragment.status,
                         "source": "memory",
                         "label": self._object_display(fragment.object_id),
+                        "occurred_at": _iso(fragment.occurred_at),
                     }
                 )
                 continue
@@ -1080,6 +1089,7 @@ class SubjectProcess:
                         "id": short_id,
                         "text": text,
                         "label": self._object_display(actor_by_segment.get(segment_id)),
+                        "occurred_at": _iso(time_by_segment.get(segment_id)),
                     }
                 )
             items.append(
@@ -1110,6 +1120,7 @@ class SubjectProcess:
                     "source": "memory",
                     "event_type": item.event_type,
                     "label": self._object_display(item.object_id),
+                    "occurred_at": _iso(item.occurred_at),
                 }
             )
         return tuple(items)
