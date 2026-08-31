@@ -9,8 +9,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from jshi.personalworld import ValueSource
+from jshi.privilege import SuperPermissionStore
 from jshi.recognition import CarrierEntry
-from jshi.subject import ActivityTiming
+from jshi.subject import ActivityTiming, PersonalKind
 
 SESSION_FILE = "cli_session.json"
 
@@ -22,6 +24,12 @@ TALK_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("/plan", "", "看上一轮 05 的 response_plan 条目"),
     ("/prompt", "", "看即将发给模型的 system 与 user"),
     ("/timing", "轮数", "上一轮各步耗时（可 /timing 5；默认不刷屏）"),
+    ("/login", "密码", "超级权限登录"),
+    ("/logout", "", "退出超级权限"),
+    ("/rule", "内容", "写入提示词【附加规则】"),
+    ("/value", "内容", "写入个人世界：价值观"),
+    ("/boundary", "内容", "写入个人世界：边界"),
+    ("/commitment", "内容", "写入个人世界：承诺"),
     ("/quit", "", "结束"),
 )
 
@@ -34,8 +42,16 @@ def format_help_text() -> str:
         usage = f"{name} {argument}".strip() if argument else name
         lines.append(f"{usage:<16} {summary}")
     lines.append(
-        "价值观不在对话里改：CLI 的 import-values / propose-value / "
-        "review-value / lock-value / values"
+        "超级权限：先 /login 密码，再 /rule、/value、/boundary、/commitment。"
+    )
+    lines.append(
+        "落点规则：/value、/boundary、/commitment 进个人世界（也会进提示词对应区块）；"
+        "/rule 只进提示词【附加规则】，不改长期个人世界。"
+    )
+    lines.append(
+        "/prompt/区块名 看单块：system、user、schema、当前时间、关于你、关于输入、"
+        "输入格式示例、价值、回应方式、其余工作、输出格式、承诺、边界、附加规则、"
+        "说话人、活跃区、回忆、本轮"
     )
     return "\n".join(lines)
 
@@ -48,6 +64,38 @@ def format_activity_timing(timing: ActivityTiming, *, heading: str = "上一轮"
     for name, milliseconds in timing.steps:
         lines.append(f"  {name} {milliseconds:g}ms")
     return "\n".join(lines)
+
+_PROMPT_SECTION_ALIASES = {
+    "时间": "当前时间",
+    "格式示例": "输入格式示例",
+    "规则": "附加规则",
+    "附加": "附加规则",
+}
+
+
+def _extract_prompt_section(text: str, name: str) -> str | None:
+    marker = f"【{name}】"
+    index = text.find(marker)
+    if index < 0:
+        return None
+    lines = text[index:].splitlines()
+    kept: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if kept and stripped.startswith("【") and stripped.endswith("】") and "：" not in stripped:
+            break
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _extract_json_schema(text: str) -> str | None:
+    lines = [
+        line
+        for line in text.splitlines()
+        if line.startswith("JSON Schema：") or line.startswith("请严格按下面的 JSON Schema")
+    ]
+    return "\n".join(lines) if lines else None
+
 
 EventKind = Literal["speech", "notice", "meta", "overlay"]
 
@@ -101,6 +149,7 @@ def prepare_talk(
     speaker: str | None,
     channel: str | None,
     carriers: tuple[CarrierEntry, ...],
+    super_permissions: SuperPermissionStore | None = None,
 ) -> TalkSession:
     stored = load_session(data_dir)
     subject_id = (subject_id or stored.get("subject_id") or "").strip()
@@ -128,6 +177,7 @@ def prepare_talk(
         speaker=speaker,
         channel=channel,
         carriers=carriers,
+        super_permissions=super_permissions,
     )
 
 
@@ -141,6 +191,7 @@ class TalkSession:
         speaker: str,
         channel: str | None,
         carriers: tuple[CarrierEntry, ...],
+        super_permissions: SuperPermissionStore | None = None,
     ) -> None:
         self.process = process
         self.data_dir = Path(data_dir)
@@ -148,6 +199,8 @@ class TalkSession:
         self.speaker = speaker
         self.channel = channel
         self.carriers = carriers
+        self.super_permissions = super_permissions
+        self.privileged_object_id: str | None = None
         self.last_line = ""
         self.last_plan = None
         self._timings: list[ActivityTiming] = []
@@ -180,12 +233,31 @@ class TalkSession:
             )
         if line == "/speaker" or line.startswith("/speaker "):
             return self._handle_speaker(line)
+        if line == "/login" or line.startswith("/login "):
+            return self._handle_login(line)
+        if line == "/logout":
+            return self._handle_logout()
+        if line == "/rule" or line.startswith("/rule "):
+            return self._handle_rule(line)
+        if line == "/value" or line.startswith("/value "):
+            return self._handle_value(line)
+        if line == "/boundary" or line.startswith("/boundary "):
+            return self._handle_boundary(line)
+        if line == "/commitment" or line.startswith("/commitment "):
+            return self._handle_commitment(line)
         if line == "/context":
             return TalkOutcome((TalkEvent("overlay", self._context_text()),))
         if line == "/plan":
             return TalkOutcome((TalkEvent("overlay", self._plan_text()),))
         if line == "/prompt":
             return TalkOutcome((TalkEvent("overlay", self._prompt_text()),))
+        if line.startswith("/prompt/"):
+            name = line[len("/prompt/"):].strip()
+            if not name:
+                return TalkOutcome(
+                    (TalkEvent("notice", "用法：/prompt/区块名"),)
+                )
+            return TalkOutcome((TalkEvent("overlay", self._prompt_section(name)),))
         if line == "/timing" or line.startswith("/timing "):
             return self._handle_timing(line)
         if line.startswith("/"):
@@ -208,6 +280,137 @@ class TalkSession:
         return TalkOutcome(
             (TalkEvent("notice", f"对象改为 {self.speaker}（已记住）"),)
         )
+
+    def _current_object_id(self) -> str | None:
+        profile = self.process.profiles.get(self.speaker)
+        if profile is not None:
+            return profile.object_id
+        matches = self.process.profiles.find_by_names(self.speaker)
+        if len(matches) == 1:
+            return matches[0].object_id
+        return None
+
+    def _require_privileged(self) -> str | None:
+        if self.privileged_object_id is None:
+            return "需要超级权限：先 /login 密码"
+        return None
+
+    def _handle_login(self, line: str) -> TalkOutcome:
+        parts = line.split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            return TalkOutcome((TalkEvent("notice", "用法：/login 密码"),))
+        if self.super_permissions is None:
+            return TalkOutcome((TalkEvent("notice", "未配置超级权限存储。"),))
+        object_id = self._current_object_id()
+        if object_id is None:
+            return TalkOutcome(
+                (TalkEvent("notice", "当前对象未匹配到唯一档案，无法登录。"),)
+            )
+        if not self.super_permissions.verify(object_id, parts[1].strip()):
+            return TalkOutcome(
+                (TalkEvent("notice", "密码错误或该对象无超级权限。"),)
+            )
+        self.privileged_object_id = object_id
+        return TalkOutcome((TalkEvent("notice", "已登录（超级权限）。"),))
+
+    def _handle_logout(self) -> TalkOutcome:
+        self.privileged_object_id = None
+        return TalkOutcome((TalkEvent("notice", "已退出超级权限。"),))
+
+    @staticmethod
+    def _parse_rule(body: str) -> tuple[str, str] | None:
+        body = (body or "").strip()
+        if not body:
+            return None
+        known = {
+            "关于你",
+            "关于输入",
+            "输入格式示例",
+            "价值",
+            "回应方式",
+            "其余工作",
+            "输出格式",
+        }
+        parts = body.split(None, 1)
+        if len(parts) == 2 and parts[0] in known:
+            return parts[0], parts[1].strip()
+        return "general", body
+
+    def _handle_rule(self, line: str) -> TalkOutcome:
+        denied = self._require_privileged()
+        if denied:
+            return TalkOutcome((TalkEvent("notice", denied),))
+        parts = line.split(None, 1)
+        body = parts[1] if len(parts) > 1 else ""
+        parsed = self._parse_rule(body)
+        if parsed is None:
+            return TalkOutcome(
+                (TalkEvent("notice", "用法：/rule 内容（或 /rule 区块名 内容）"),)
+            )
+        section, content = parsed
+        prompt_rules = getattr(self.process, "prompt_rules", None)
+        if prompt_rules is None:
+            return TalkOutcome((TalkEvent("notice", "未配置提示词规则存储。"),))
+        rule = prompt_rules.add(
+            self.subject_id,
+            content,
+            section=section,
+            source=f"{self.speaker}:{self.privileged_object_id}",
+        )
+        return TalkOutcome((TalkEvent("notice", f"已写入提示词规则：{rule.id}"),))
+
+    def _handle_value(self, line: str) -> TalkOutcome:
+        return self._handle_personal_write(line, "/value", "value")
+
+    def _handle_boundary(self, line: str) -> TalkOutcome:
+        return self._handle_personal_write(line, "/boundary", "boundary")
+
+    def _handle_commitment(self, line: str) -> TalkOutcome:
+        denied = self._require_privileged()
+        if denied:
+            return TalkOutcome((TalkEvent("notice", denied),))
+        parts = line.split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            return TalkOutcome((TalkEvent("notice", "用法：/commitment 内容"),))
+        item = self.process.add_personal_item(
+            self.subject_id,
+            PersonalKind.COMMITMENT,
+            parts[1].strip(),
+        )
+        return TalkOutcome((TalkEvent("notice", f"已写入承诺：{item.id}"),))
+
+    def _handle_personal_write(
+        self,
+        line: str,
+        command: str,
+        role: str,
+    ) -> TalkOutcome:
+        denied = self._require_privileged()
+        if denied:
+            return TalkOutcome((TalkEvent("notice", denied),))
+        parts = line.split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            return TalkOutcome((TalkEvent("notice", f"用法：{command} 内容"),))
+        values = getattr(self.process, "values", None)
+        if values is None:
+            return TalkOutcome((TalkEvent("notice", "当前个人世界没有 100 接口。"),))
+        try:
+            candidate = values.propose_value(
+                self.subject_id,
+                parts[1].strip(),
+                role=role,
+                source_type=ValueSource.HUMAN_INTERVENTION,
+                source_id=self.privileged_object_id,
+            )
+            accepted = values.review_value(
+                candidate.id,
+                "accept",
+                "super user command",
+                self.speaker,
+            )
+        except (KeyError, ValueError) as exc:
+            return TalkOutcome((TalkEvent("notice", f"错误：{exc}"),))
+        return TalkOutcome((TalkEvent("notice", f"已写入{role}：{accepted.id}"),))
 
     def _handle_utterance(self, line: str) -> TalkOutcome:
         if not self._turn_lock.acquire(blocking=False):
@@ -292,12 +495,11 @@ class TalkSession:
             lines.append(f"  [{item.channel}] {item.text}")
         return "\n".join(lines)
 
-    def _prompt_text(self) -> str:
+    def _prompt_parts(self) -> tuple[str, str] | str:
         from dataclasses import replace
 
         from jshi.models import EchoModel, ModelRequest, ModelSpeaker, build_system, build_user
         from jshi.skill import CognitionSkill
-        from jshi.subject.process import SubjectProcess
 
         query = self.last_line or "（查看提示词）"
         try:
@@ -325,6 +527,7 @@ class TalkSession:
                 subject_state=assembled.subject_state,
                 speaker=speaker,
                 now=datetime.now().astimezone(),
+                governing_rules=self.process._governing_rules(self.subject_id),
                 context=self.process._model_context(
                     self.subject_id,
                     assembled.recalled,
@@ -333,11 +536,39 @@ class TalkSession:
                 ),
             )
             req = replace(req, system_extra=CognitionSkill(EchoModel()).system_extra(req))
-            return f"system\n{build_system(req)}\n---\nuser\n{build_user(req)}"
+            return build_system(req), build_user(req)
         except ValueError as exc:
             return f"错误：{exc}"
         except Exception as exc:
             return f"组装提示词失败：{exc}"
+
+    def _prompt_text(self) -> str:
+        result = self._prompt_parts()
+        if isinstance(result, str):
+            return result
+        system_text, user_text = result
+        return f"system\n{system_text}\n---\nuser\n{user_text}"
+
+    def _prompt_section(self, name: str) -> str:
+        result = self._prompt_parts()
+        if isinstance(result, str):
+            return result
+        system_text, user_text = result
+
+        name = name.strip()
+        if name in {"system", "sys"}:
+            return system_text
+        if name == "user":
+            return user_text
+        if name in {"schema", "json-schema", "jsonschema"}:
+            schema = _extract_json_schema(system_text)
+            return schema or "没有找到 JSON Schema。"
+        resolved = _PROMPT_SECTION_ALIASES.get(name, name)
+        for text in (system_text, user_text):
+            section = _extract_prompt_section(text, resolved)
+            if section:
+                return section
+        return f"没有找到提示词区块：{name}"
 
     def _handle_timing(self, line: str) -> TalkOutcome:
         parts = line.split()

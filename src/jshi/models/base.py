@@ -30,6 +30,8 @@ class ModelRequest:
     system_extra: str = ""
     # 本轮“现在”时刻；渲染提示词时给出相对时间锚点（如“昨天”）。
     now: datetime | None = None
+    # 超级权限用户写入的附加规则（已格式化），渲染进 system 的【附加规则】。
+    governing_rules: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

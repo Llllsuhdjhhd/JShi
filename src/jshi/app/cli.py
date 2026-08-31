@@ -11,6 +11,7 @@ from jshi.experienceledger import SqliteExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.memory import MemoryShell, build_memory_backend
 from jshi.models import EchoModel, ModelPort, OpenAICompatibleModel
+from jshi.privilege import PromptRuleStore, SuperPermissionStore
 from jshi.recognition import CarrierEntry, ObjectProfile, new_object_id
 from jshi.skill import CognitionSkill, SkillModelPort
 from jshi.subject import (
@@ -83,6 +84,7 @@ def _runtime(
     identities = IdentityRepository(data_dir / "identities.json")
     subjects = SubjectRepository(data_dir / "subject.sqlite3")
     backend = build_memory_backend(subjects, data_dir)
+    prompt_rules = PromptRuleStore(data_dir / "prompt_rules.json")
     if type(backend).__name__ != "InProcessMemoryBackend":
         print(f"[jshi] memory backend: {type(backend).__name__}", file=sys.stderr)
     process = SubjectProcess(
@@ -91,6 +93,7 @@ def _runtime(
         _model_from_environment(),
         memory=MemoryShell(backend),
         activity_ledger=SqliteExperienceLedger(data_dir / "subject.sqlite3"),
+        prompt_rules=prompt_rules,
     )
     return process, identities, subjects
 
@@ -331,6 +334,12 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         help="识别载体，格式 kind:value，可重复（如 voiceprint:vp-1）",
     )
+
+    grant_super = commands.add_parser(
+        "grant-super", help="授予某对象超级权限并设置登录密码"
+    )
+    grant_super.add_argument("object", help="对象名或 object_id")
+    grant_super.add_argument("--password", required=True, help="登录密码")
     return parser
 
 
@@ -338,6 +347,7 @@ def main() -> None:
     _load_local_env()
     args = _parser().parse_args()
     process, identities, subjects = _runtime(args.data_dir)
+    super_permissions = SuperPermissionStore(args.data_dir / "super_permissions.json")
 
     if args.command == "create":
         identities.create(
@@ -367,7 +377,7 @@ def main() -> None:
         print(result.action_text)
         print(f"[活动 {result.activity.id}；mode {result.response_plan.mode}]")
     elif args.command in {"talk", "chat"}:
-        _run_talk(process, identities, args)
+        _run_talk(process, identities, args, super_permissions)
     elif args.command in {"reflect", "inner"}:
         result = process.reflect(args.subject_id, args.prompt)
         print(result.content)
@@ -504,6 +514,8 @@ def main() -> None:
             )
         )
         print(f"已注册对象：{profile.object_id}（{profile.label}）")
+    elif args.command == "grant-super":
+        _run_grant_super(process, super_permissions, args)
 
 
 def _require_values(process):
@@ -623,6 +635,29 @@ def _run_list_values(process, subject_id: str) -> None:
         )
 
 
+def _resolve_object(process, ref: str):
+    profile = process.profiles.get(ref)
+    if profile is not None:
+        return profile
+    matches = process.profiles.find_by_names(ref)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _run_grant_super(process, store, args) -> None:
+    profile = _resolve_object(process, args.object)
+    if profile is None:
+        print(f"错误：找不到对象 {args.object}（请先 add-object 注册）")
+        return
+    try:
+        store.grant(profile.object_id, profile.label, args.password)
+    except ValueError as exc:
+        print(f"错误：{exc}")
+        return
+    print(f"已授予超级权限：{profile.label}（{profile.object_id}）")
+
+
 def _parse_carrier(raw: str) -> CarrierEntry:
     kind, _, value = raw.partition(":")
     if not kind.strip() or not value.strip():
@@ -650,7 +685,7 @@ def _textual_installed() -> bool:
     return importlib.util.find_spec("textual") is not None
 
 
-def _run_talk(process, identities, args) -> None:
+def _run_talk(process, identities, args, super_permissions=None) -> None:
     """启动对话。默认原来的一行输入；--tui 才套全屏壳。"""
     from jshi.app.talk_plain import run_plain
     from jshi.app.talk_session import TalkSetupError, prepare_talk
@@ -665,6 +700,7 @@ def _run_talk(process, identities, args) -> None:
             args.speaker,
             args.channel,
             carriers,
+            super_permissions,
         )
     except (ValueError, TalkSetupError) as exc:
         print(exc if str(exc).startswith("错误") else f"错误：{exc}")

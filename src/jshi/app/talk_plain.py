@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from unicodedata import east_asian_width
 
@@ -46,16 +47,52 @@ def wrap_display_text(text: str, width: int) -> str:
     return "\n".join(lines)
 
 
+_ECHO_PROMPTS = ("你：", "你:")
+_META_ECHO = re.compile(r"^\[(?:respond|think|wait|ignore)；")
+_PROGRAM_OUTPUT_PREFIXES = (
+    "匠石：",
+    "匠石:",
+    "Loading ",
+    "Input length ",
+    "已登录",
+    "已退出",
+    "已写入",
+    "对象改为",
+    "当前对象",
+    "需要超级权限",
+    "密码错误",
+    "未配置",
+    "用法：",
+    "未知命令",
+    "错误：",
+    "上一轮尚未结束",
+)
+
+
+def _classify_input(line: str) -> str:
+    """把一行输入分类：返回空串表示跳过，否则返回应作为输入的内容。"""
+    text = line.strip()
+    if not text or _META_ECHO.match(text):
+        return ""
+    if any(text.startswith(prefix) for prefix in _PROGRAM_OUTPUT_PREFIXES):
+        return ""
+    for prefix in _ECHO_PROMPTS:
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
+
+
 def run_plain(session: TalkSession) -> None:
     print("直接打字后回车即发送。命令见 /help")
     print(f"主体 {session.subject_id}；对象 {session.speaker}（长期）")
     width = shutil.get_terminal_size(fallback=(80, 24)).columns
     while True:
         try:
-            line = input("你：").strip()
+            raw = input("你：")
         except (EOFError, KeyboardInterrupt):
             print()
             return
+        line = _classify_input(raw)
         if not line:
             continue
         outcome = session.handle(line)

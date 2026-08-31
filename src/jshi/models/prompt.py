@@ -84,6 +84,9 @@ def build_system(request: ModelRequest) -> str:
     boundaries = _texts_of_kind(request.context, "boundary")
     if boundaries:
         parts.append("【边界】\n" + "\n".join(boundaries))
+    governing = tuple(getattr(request, "governing_rules", ()) or ())
+    if governing:
+        parts.append("【附加规则】\n" + "\n".join(f"- {rule}" for rule in governing))
     return "\n\n".join(parts)
 
 

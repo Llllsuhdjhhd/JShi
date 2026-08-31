@@ -76,6 +76,7 @@ from jshi.recognition import (
     SpeakerCandidate,
 )
 from jshi.reflection import PlaceholderReflection, ReflectionPort
+from jshi.privilege import PromptRuleStore
 
 from .domain import (
     ALLOWED_EPISTEMIC_TRANSITIONS,
@@ -226,6 +227,7 @@ class SubjectProcess:
         recall_evaluator: RecallEvaluatorPort | None = None,
         activity_ledger: ExperienceLedgerPort | None = None,
         object_system: ObjectSystemPort | None = None,
+        prompt_rules: PromptRuleStore | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
@@ -237,6 +239,7 @@ class SubjectProcess:
         self.recall_coordinator = RecallCoordinator(repository, self.memory)
         self.recall_evaluator = recall_evaluator or RuleBasedRecallEvaluator()
         self.activity_ledger = activity_ledger or InProcessExperienceLedger()
+        self.prompt_rules = prompt_rules
         self.activity_close = InProcessActivityClose(repository)
         self.response_mark = InProcessResponseMark(repository)
         self.action_router = InProcessActionRouter(
@@ -710,6 +713,18 @@ class SubjectProcess:
             timing=timing,
         )
 
+    def _governing_rules(self, subject_id: str) -> tuple[str, ...]:
+        """把超级权限用户写入的提示词规则格式化成可渲染的附加规则行。"""
+        if self.prompt_rules is None:
+            return ()
+        rules: list[str] = []
+        for rule in self.prompt_rules.list(subject_id):
+            if rule.section == "general":
+                rules.append(rule.content)
+            else:
+                rules.append(f"[{rule.section}] {rule.content}")
+        return tuple(rules)
+
     def _cognize_once(
         self,
         current: AssembledCurrentState,
@@ -732,6 +747,9 @@ class SubjectProcess:
                 subject_state=current.subject_state,
                 speaker=speaker,
                 now=datetime.now().astimezone(),
+                governing_rules=self._governing_rules(
+                    current.subject_state.subject_id
+                ),
                 context=self._model_context(
                     current.subject_state.subject_id,
                     working_recalled,
