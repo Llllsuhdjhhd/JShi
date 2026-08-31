@@ -1,7 +1,7 @@
 """最新主体流程的系统占位测试。
 
 覆盖：阶段① 身份识别携带对象信息、阶段② 活跃区装载（空/有事件，
-输入不做归属判断）、阶段⑤ 追加召回子循环（含轮次上限）、
+输入不做归属判断）、阶段⑤ 一次认知（同轮不执行 recall_requests）、
 反馈/治理占位钩子、preview 只读。
 """
 
@@ -133,25 +133,23 @@ class FollowupModel:
         return ModelResponse(text="最终回应", model=self.name)
 
 
-def test_followup_recall_extends_working_set(tmp_path):
+def test_recall_requests_do_not_extend_working_set(tmp_path):
     model = FollowupModel()
     process, repository = runtime(tmp_path, model=model)
-    seeded = process.memory.remember_fact(
+    process.memory.remember_fact(
         "stone", "external_input", "朋友上周很忙"
     )
 
     result = process.experience("stone", "他最近怎么样", object_ref="user")
 
-    assert result.action_text == "最终回应"
-    assert model.calls == 2
+    assert result.action_text == "需要更多过去"
+    assert model.calls == 1
     extended = [
         item
         for item in repository.list_history("stone", HistoryKind.SUBJECT)
         if item.event_type == "recall_extended"
     ]
-    assert len(extended) == 1
-    assert seeded in extended[0].content["recalled_event_ids"]
-    assert extended[0].content["request"]["query"] == "朋友"
+    assert extended == []
 
 
 class AlwaysRecallModel:
@@ -169,21 +167,20 @@ class AlwaysRecallModel:
         )
 
 
-def test_followup_recall_is_truncated_after_one_round(tmp_path):
+def test_followup_recall_is_not_run(tmp_path):
     model = AlwaysRecallModel()
     process, repository = runtime(tmp_path, model=model)
 
     result = process.experience("stone", "你好", object_ref="user")
 
-    assert model.calls == 2
+    assert model.calls == 1
     assert result.action_text == "还要更多"
     metrics = [
         item
         for item in repository.list_history("stone", HistoryKind.SUBJECT)
         if item.event_type == "recall_metrics"
     ]
-    assert len(metrics) == 1
-    assert metrics[0].content["truncated"] is True
+    assert metrics == []
 
 
 class RecordingFeedback:

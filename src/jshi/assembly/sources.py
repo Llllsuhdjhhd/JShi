@@ -206,17 +206,44 @@ class MemorySource:
         self._profiles = profiles
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
+        seen: set[str] = set()
+        fragments: list[AssemblyFragment] = []
         object_id = ctx.speaker.object_id if ctx.speaker else None
-        if not object_id:
-            return LoadResult()
-        recalled = self._memory.recall(
-            ctx.subject_id,
-            ctx.input_text,
-            object_id=object_id,
-            level=ctx.recall_level,
-        )
-        return LoadResult(
-            fragments=tuple(
+        if object_id:
+            self._absorb(
+                fragments,
+                seen,
+                self._memory.recall(
+                    ctx.subject_id,
+                    ctx.input_text,
+                    object_id=object_id,
+                    level=ctx.recall_level,
+                    limit=ctx.recall_limit,
+                ),
+            )
+        for query in ctx.extra_queries:
+            text = (query or "").strip()
+            if not text:
+                continue
+            self._absorb(
+                fragments,
+                seen,
+                self._memory.recall(
+                    ctx.subject_id,
+                    text,
+                    object_id=None,
+                    level=ctx.recall_level,
+                    limit=ctx.recall_limit,
+                ),
+            )
+        return LoadResult(fragments=tuple(fragments))
+
+    def _absorb(self, fragments, seen, recalled) -> None:
+        for item in recalled:
+            if item.event_id in seen:
+                continue
+            seen.add(item.event_id)
+            fragments.append(
                 AssemblyFragment(
                     source="memory",
                     id=f"memory:{item.event_id}",
@@ -230,9 +257,7 @@ class MemorySource:
                     always=False,
                     occurred_at=item.occurred_at,
                 )
-                for item in recalled
-            ),
-        )
+            )
 
     def _with_names(
         self,

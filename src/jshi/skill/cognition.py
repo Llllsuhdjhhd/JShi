@@ -3,9 +3,8 @@
 - 输入：``ModelRequest``（本轮上下文：``input_text`` / ``speaker`` / ``subject_state`` /
   ``context``）。
 - 输出：``ModelResponse``（含 ``response_plan`` / ``context_assessment`` /
-  ``recall_requests`` / ``object_assessment`` 各用途段）。
-- 一次调用即产出多用途段；消费方拿到 ``response_plan`` 就去回复、拿到
-  ``context_assessment`` 就去整理活跃区（I-001 / I-004）。
+  ``memory_ratings`` / ``object_assessment`` 各用途段）。
+- 一次调用即产出多用途段；主流程不执行 ``recall_requests``。
 """
 
 from __future__ import annotations
@@ -15,6 +14,8 @@ from typing import Any, Mapping
 from jshi.experienceledger import ContextAssessment
 from jshi.models import (
     ImportanceRank,
+    MemoryRating,
+    MemoryRatings,
     ModelPort,
     ModelRequest,
     ModelResponse,
@@ -30,6 +31,10 @@ _RESPONSE_MODES = frozenset({"respond", "think", "ignore", "wait"})
 _SILENT_MODES = frozenset({"think", "ignore", "wait"})
 _CHANNELS = frozenset({"verbal", "embodied"})
 _CONCLUSIONS = frozenset({"confirm", "deny", "uncertain"})
+_RELEVANCE = frozenset({"related", "partial", "unrelated"})
+_USED_IN_REPLY = frozenset({"unused", "alluded", "relied"})
+_OBJECT_FIT = frozenset({"match", "other", "none"})
+_COVERAGE = frozenset({"sufficient", "thin", "missing"})
 
 # 认知 skill 的结构化输出契约（JSON Schema 形状）。
 COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
@@ -94,6 +99,28 @@ COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
                 },
             },
         },
+        "memory_ratings": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "ref": {"type": "string"},
+                            "relevance": {"enum": ["related", "partial", "unrelated"]},
+                            "helps_understanding": {"type": "integer"},
+                            "used_in_reply": {"enum": ["unused", "alluded", "relied"]},
+                            "misleading": {"type": "boolean"},
+                            "redundant": {"type": "boolean"},
+                            "object_fit": {"enum": ["match", "other", "none"]},
+                        },
+                    },
+                },
+                "coverage": {"enum": ["sufficient", "thin", "missing"]},
+                "gap_query": {"type": "string"},
+            },
+        },
     },
 }
 
@@ -108,6 +135,51 @@ def _clean_refs(values: Any) -> tuple[str, ...]:
         if text not in cleaned:
             cleaned.append(text)
     return tuple(cleaned)
+
+
+def _parse_memory_ratings(data: Mapping[str, Any]) -> MemoryRatings:
+    raw = data.get("memory_ratings")
+    if not isinstance(raw, dict):
+        return MemoryRatings()
+    items: list[MemoryRating] = []
+    for item in raw.get("items") or ():
+        if not isinstance(item, dict):
+            continue
+        ref = str(item.get("ref") or "").strip()
+        if not ref:
+            continue
+        relevance = str(item.get("relevance") or "unrelated").strip().lower()
+        if relevance not in _RELEVANCE:
+            relevance = "unrelated"
+        used = str(item.get("used_in_reply") or "unused").strip().lower()
+        if used not in _USED_IN_REPLY:
+            used = "unused"
+        fit = str(item.get("object_fit") or "none").strip().lower()
+        if fit not in _OBJECT_FIT:
+            fit = "none"
+        try:
+            helps = int(item.get("helps_understanding", 0) or 0)
+        except (TypeError, ValueError):
+            helps = 0
+        items.append(
+            MemoryRating(
+                ref=ref,
+                relevance=relevance,
+                helps_understanding=min(max(helps, 0), 2),
+                used_in_reply=used,
+                misleading=bool(item.get("misleading", False)),
+                redundant=bool(item.get("redundant", False)),
+                object_fit=fit,
+            )
+        )
+    coverage = str(raw.get("coverage") or "").strip().lower()
+    if coverage not in _COVERAGE:
+        coverage = ""
+    return MemoryRatings(
+        items=tuple(items),
+        coverage=coverage,
+        gap_query=str(raw.get("gap_query") or "").strip(),
+    )
 
 
 def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
@@ -188,6 +260,7 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         object_assessment=object_assessment,
         context_assessment=context_assessment,
         importance_ranking=importance_ranking,
+        memory_ratings=_parse_memory_ratings(data),
     )
 
 
@@ -216,6 +289,7 @@ def _bind_speaker_fields(response: ModelResponse, request: ModelRequest) -> Mode
         ),
         context_assessment=response.context_assessment,
         importance_ranking=response.importance_ranking,
+        memory_ratings=response.memory_ratings,
     )
 
 
@@ -244,7 +318,7 @@ class CognitionSkill(Skill[ModelResponse]):
 【输入格式示例】
 user 里的【活跃区】和【回忆】每行都带对象名；带方括号时间时表示发生时间。不同名字是不同的人，不要把这些人的经历搞混。
 - 活跃区段：`S13[2026-08-30 11:50]（luguang）：袭击塔怎么做` —— 表示对象“luguang”在 2026-08-30 11:50 说了“袭击塔怎么做”。`（名字）` 是这条内容的归属/说话对象，`[时间]` 是发生时间。
-- 回忆条目：`M1（lux）：lux用AI创造了我；我回：记忆对不上…` —— 表示对象“lux”相关的一段记忆；回忆正文是摘要，不是逐字原话，要按 `（名字）` 判断这段经历属于谁。回忆可用时也会带时间，如 `M1[2026-08-30 11:50]（lux）：…`。
+- 回忆条目：`M1（mei）：mei用AI创造了我；我回：记忆对不上…` —— 表示对象“mei”相关的一段记忆；回忆正文是摘要，不是逐字原话，要按 `（名字）` 判断这段经历属于谁。回忆可用时也会带时间，如 `M1[2026-08-30 11:50]（mei）：…`。
 - 若回忆行只有 `memory:EVT-…：…` 这种没有 `（名字）` 和时间的旧格式，说明这段记忆的归属对象暂未标明；不要凭空把它安到本轮说话人头上，当作“归属未标明的候选回忆”看待，必要时先确认对象。
 
 【价值】
@@ -259,27 +333,24 @@ user 里的【活跃区】和【回忆】每行都带对象名；带方括号时
 - wait（等待）：无语言输出。对方可能还在持续表达，或你在聆听或其他情况，本轮无回话，把时间留给对方。
 - ignore（忽略）：无语言输出。于己无关或为减少麻烦或其他情况，比如无关打扰、纠缠等。
 - think（只在内部思考）：无语言输出。对外没有交往义务，工作只在内部。不是「有话不能说」；信息不足、被纠正、被质疑、违背价值，默认都不是 think。
-reason 写清为什么选择这个 mode。先决定这一拍要不要开口，再处理记忆/上下文；不要因为要整理回忆、缩减活跃区或追加召回就 think 或不出声，那些来不及就留空数组。
+reason 写清为什么选择这个 mode。先决定这一拍要不要开口，再处理记忆/上下文；不要因为要整理回忆或缩减活跃区就 think 或不出声，那些来不及就留空。
 动作（embodied）是对本轮输入做出的动作反应，此刻假设自己是类人机器人，给出动作描述，比如对方示意你坐下，你的动作可能是「走到他指定的椅子那里，坐下来」。动作与语言组成一次完整反应，须得体、自然、不卑不亢，可伴随任何 mode，如果无需动作，则输出“无动作”。
 
 【其余工作】
-你的其余工作：除回应外，你每轮还要维护记忆与上下文——追加召回、活跃区管理、回忆评价、对象确认。
+除回应外，你还可以维护上下文与对象——这些都可空，不要为了填它们而不说话。不要在本轮提出追加召回；缺口写在 coverage / gap_query，下一拍再装载。
 
-追加评价与召回（recall_requests / drop_recall / importance_ranking）
-- 先评价当前上下文里已经出现的 memory: 条目：低相关 / 冗余 / 诱导 → drop_recall；相关且重要 → importance_ranking 给分并写清「为什么此刻相关」。
-- 评价之后若现有回忆仍不足以支撑本轮回应，才提出 recall_requests（追加召回）；只有当「从回忆里补比直接问对方更合适」时才追加，不要为「先存起来」追加。
-- 追加时 budget≤3，level 1–9；问谁就在 query 里写谁的名字；object_ids 留空，由程序补档案。
-- 回忆是候选背景，不自动变成立场。
+现场回忆打分（memory_ratings）
+- 只对当前上下文里已经出现的 memory: / M 编号条目打分；没有在场回忆则整段留空或不输出。
+- coverage：sufficient | thin | missing；缺什么、关于谁写在 gap_query。不要为了打分去编造未在场的记忆。
 
-活跃区管理（context_assessment）
+活跃区管理（context_assessment）——可空
 - 活跃区的推荐长度是 {active_zone_chars}；当前长度超过时给出删除建议，内容重要可放宽至 1.2 倍。
-- 给出要删除的部分与调整建议，保持删除后的活跃区合理。
+- 给出要删除的部分与调整建议，保持删除后的活跃区合理。来不及则空数组。
 - 活跃区里 S 开头编号是段短编号，回忆里 M 开头编号是记忆短编号；remove / focus 只引用 S 编号，drop_recall 只引用 M 编号。
 
-对象确认（object_assessment）
-- 当回忆内容指向的对象与传入的对象（本轮说话人）不一致时，就像现实中认错某人一样，需要确认对象。
-- 确认对象时可以追加对该对象的回忆（触发对某一个对象的回忆），并给出回忆的提示词。
-- 在合适、得体的场景下，可以询问对方。
+对象确认（object_assessment）——可空
+- 当回忆内容指向的对象与传入的对象（本轮说话人）不一致时，可以确认对象。不确定则跳过。
+- 在合适、得体的场景下，可以询问对方。不要用同轮召回补材料。
 
 【输出格式】
 你的输出格式：你每轮只输出一个 JSON 对象，字段按下方 Schema；枚举字段只取允许值，不输出任何解释文字。
@@ -290,7 +361,7 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
         self,
         model: ModelPort,
         *,
-        version: str = "v8",
+        version: str = "v9",
     ) -> None:
         super().__init__(model, version=version)
 

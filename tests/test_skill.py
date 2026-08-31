@@ -73,7 +73,7 @@ def _payload() -> dict:
 def test_cognition_skill_produces_usage_segments(tmp_path):
     skill = CognitionSkill(FakeModel(_payload()))
     resp = skill.run(make_request())
-    assert resp.model == "deepseek-flash@v8"  # I-004：模型 + skill 版本
+    assert resp.model == "deepseek-flash@v9"  # I-004：模型 + skill 版本
     assert resp.response_plan.mode == "respond"
     assert "working_set_limit" in resp.response_plan.verbal_text()
     assert resp.context_assessment.focus == ("seg-12",)
@@ -108,7 +108,9 @@ def test_instruction_keeps_rules_without_examples():
     assert "不伤害人类" in text
     assert "respond（回话）" in text
     assert "ignore（忽略）" in text
-    assert "追加评价与召回" in text
+    assert "现场回忆打分" in text
+    assert "才提出 recall_requests" not in text
+    assert "追加评价与召回" not in text
     assert "对象确认" in text
     assert "【正例】" not in text
     assert "【反例】" not in text
@@ -141,13 +143,12 @@ def test_object_assessment_name_is_resolved_to_speaker_id():
     assert resp.object_assessment.object_id == "OBJ-DP"
 
 
-def test_recall_and_evaluation_are_ordered_in_one_section():
+def test_ratings_replace_followup_recall_in_instruction():
     system = CognitionSkill(FakeModel(_payload())).system_extra(make_request())
-    assert "追加评价与召回" in system
-    assert "drop_recall" in system
-    assert "importance_ranking" in system
-    assert "recall_requests" in system
-    assert system.index("drop_recall") < system.index("才提出 recall_requests")
+    assert "现场回忆打分" in system
+    assert "memory_ratings" in system
+    assert "才提出 recall_requests" not in system
+    assert "追加评价与召回" not in system
 
 
 def test_skill_framework_is_reused_by_other_skills():
@@ -256,6 +257,31 @@ def test_context_view_fragment_id_is_not_a_segment_ref():
     assert resp.context_assessment.focus == ()
 
 
+def test_memory_ratings_are_parsed():
+    payload = dict(_payload())
+    payload["memory_ratings"] = {
+        "items": [
+            {
+                "ref": "M1",
+                "relevance": "related",
+                "helps_understanding": 2,
+                "used_in_reply": "Relied",
+                "misleading": False,
+                "redundant": False,
+                "object_fit": "match",
+            }
+        ],
+        "coverage": "thin",
+        "gap_query": "lux 岭南",
+    }
+    resp = CognitionSkill(FakeModel(payload)).run(make_request())
+    assert resp.memory_ratings.coverage == "thin"
+    assert resp.memory_ratings.gap_query == "lux 岭南"
+    assert resp.memory_ratings.items[0].ref == "M1"
+    assert resp.memory_ratings.items[0].used_in_reply == "relied"
+    assert resp.memory_ratings.items[0].helps_understanding == 2
+
+
 def test_recall_budget_and_level_are_clamped():
     payload = dict(_payload())
     payload["recall_requests"] = [
@@ -278,7 +304,7 @@ def test_skill_model_port_routes_subject_activity_but_not_reflection():
     port = SkillModelPort(skill)
 
     subject = port.generate(make_request())
-    assert subject.model == "deepseek-flash@v8"
+    assert subject.model == "deepseek-flash@v9"
     assert subject.response_plan.mode == "respond"
     assert subject.context_assessment.focus == ("seg-12",)
 

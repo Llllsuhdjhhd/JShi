@@ -26,6 +26,8 @@ class EvaluationEvent:
 
 
 class EvaluationEventPort(Protocol):
+    """事件总线端口。有效性分析不走这里。"""
+
     def emit(self, event: EvaluationEvent) -> None: ...
 
 

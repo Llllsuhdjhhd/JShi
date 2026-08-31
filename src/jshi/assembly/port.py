@@ -27,6 +27,8 @@ class AssemblyContext:
     speaker: AssemblySpeaker | None = None
     context_view: ContextViewState | None = None
     recall_level: int = 1
+    recall_limit: int | None = None
+    extra_queries: tuple[str, ...] = ()
     working_set_limit: int | None = None
 
 

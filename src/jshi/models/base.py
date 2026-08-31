@@ -105,6 +105,34 @@ class ImportanceRank:
     reason: str = ""
 
 
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class MemoryRating:
+    """对一条已在场回忆的现场打分。"""
+
+    ref: str
+    relevance: str = "unrelated"
+    helps_understanding: int = 0
+    used_in_reply: str = "unused"
+    misleading: bool = False
+    redundant: bool = False
+    object_fit: str = "none"
+
+
+@dataclass(frozen=True)
+class MemoryRatings:
+    """本轮对已在场回忆的整轮打分；无在场回忆则为空。"""
+
+    items: tuple[MemoryRating, ...] = ()
+    coverage: str = ""
+    gap_query: str = ""
+
+    def has_content(self) -> bool:
+        return bool(self.items or self.coverage or (self.gap_query or "").strip())
+
+
 @dataclass(frozen=True, init=False)
 class ModelResponse:
     model: str
@@ -114,6 +142,7 @@ class ModelResponse:
     object_assessment: ObjectAssessment | None = None
     context_assessment: ContextAssessment = field(default_factory=ContextAssessment)
     importance_ranking: tuple[ImportanceRank, ...] = ()
+    memory_ratings: MemoryRatings = field(default_factory=MemoryRatings)
 
     @property
     def text(self) -> str:
@@ -139,6 +168,7 @@ class ModelResponse:
         object_assessment: ObjectAssessment | None = None,
         context_assessment: ContextAssessment | None = None,
         importance_ranking: tuple[ImportanceRank, ...] = (),
+        memory_ratings: MemoryRatings | None = None,
         *,
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
@@ -165,6 +195,11 @@ class ModelResponse:
             context_assessment if context_assessment is not None else ContextAssessment(),
         )
         object.__setattr__(self, "importance_ranking", importance_ranking)
+        object.__setattr__(
+            self,
+            "memory_ratings",
+            memory_ratings if memory_ratings is not None else MemoryRatings(),
+        )
 
 
 class ModelPort(Protocol):
@@ -197,7 +232,6 @@ class EchoModel:
                 ],
             },
             "context_assessment": {"remove": [], "drop_recall": [], "focus": []},
-            "recall_requests": [],
         }
         return ModelResponse(
             text=json.dumps(payload, ensure_ascii=False),

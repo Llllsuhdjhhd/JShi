@@ -20,6 +20,7 @@ from .factory import (
 )
 from .rems3 import Rems3MemoryBackend, RemsUnavailableError
 from .shell import MemoryShell
+from .strategy import RecallStrategy, RecallStrategyStore
 
 __all__ = [
     "BackendIngestResult",
@@ -33,6 +34,8 @@ __all__ = [
     "RecallCoordinator",
     "RecallExecution",
     "RecallEvaluatorPort",
+    "RecallStrategy",
+    "RecallStrategyStore",
     "RecalledFragment",
     "Rems3MemoryBackend",
     "RemsUnavailableError",

@@ -1,6 +1,8 @@
 from .base import (
     EchoModel,
     ImportanceRank,
+    MemoryRating,
+    MemoryRatings,
     ModelPort,
     ModelRequest,
     ModelResponse,
@@ -17,6 +19,8 @@ from .prompt import build_system, build_user
 __all__ = [
     "EchoModel",
     "ImportanceRank",
+    "MemoryRating",
+    "MemoryRatings",
     "ModelPort",
     "ModelRequest",
     "ModelResponse",

@@ -45,15 +45,15 @@ from jshi.governance import (
 )
 from jshi.identity import IdentityRepository
 from jshi.intent import IntentPort, PlaceholderIntent
+from jshi.effectiveness import EffectivenessPort, InProcessEffectiveness
 from jshi.memory import (
-    InProcessHistoryMemory,
     InProcessMemoryBackend,
     MemoryPort,
     MemoryShell,
     RecallCoordinator,
     RecallEvaluatorPort,
-    RecallExecution,
     RecalledFragment,
+    RecallStrategyStore,
     RuleBasedRecallEvaluator,
 )
 from jshi.memorycontrol import InProcessMemoryControl
@@ -104,10 +104,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# 上下文补充策略：当前占位为最多一轮；执行与记忆侧指标归 09。
-FOLLOWUP_RECALL_MAX_ROUNDS = 1
-
-
 def verbal_text(plan: ResponsePlan) -> str:
     """说话文本只来自 respond 下的 verbal item。"""
     return plan.verbal_text()
@@ -121,14 +117,6 @@ def should_emit_language_action(plan: ResponsePlan) -> bool:
 def should_trigger_embodied(plan: ResponsePlan) -> bool:
     """embodied 可与四个 mode 组合。"""
     return plan.has_embodied()
-
-
-_MEMORY_PREFIX = "memory:"
-
-
-def _memory_event_id(ref: str) -> str:
-    """从工作集 id 里提出记忆 event_id（`memory:{event_id}` → `{event_id}`）。"""
-    return ref[len(_MEMORY_PREFIX):] if ref.startswith(_MEMORY_PREFIX) else ref
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -203,7 +191,7 @@ class SubjectActivityResult:
 
 
 class SubjectProcess:
-    """最小主体循环：识别→落位→读取上一活跃区→组装→活动→认知(可追加召回)→行动→按方案编活跃区→收尾。
+    """最小主体循环：识别→落位→读取上一活跃区→组装→活动→认知（一次）→行动→按方案编活跃区→收尾。
 
     各系统可独立替换为真实实现，不改主流程顺序。
     """
@@ -228,6 +216,8 @@ class SubjectProcess:
         activity_ledger: ExperienceLedgerPort | None = None,
         object_system: ObjectSystemPort | None = None,
         prompt_rules: PromptRuleStore | None = None,
+        recall_strategy: RecallStrategyStore | None = None,
+        effectiveness: EffectivenessPort | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
@@ -280,6 +270,10 @@ class SubjectProcess:
             ),
             chance=self.chance,
         )
+        self.recall_strategy = recall_strategy or RecallStrategyStore()
+        self.effectiveness = effectiveness or InProcessEffectiveness(
+            strategy=self.recall_strategy
+        )
         self.reflection = reflection or PlaceholderReflection(self)
 
     # ------------------------------------------------------------------
@@ -301,14 +295,20 @@ class SubjectProcess:
         """
         view = view or self.active_zone.load(subject_id)
         assembly_speaker = self._assembly_speaker(speaker, object_id)
+        strategy = self.recall_strategy.get(subject_id)
+        gap = (self.effectiveness.pending_gap_query(subject_id) or "").strip()
         ctx = AssemblyContext(
             subject_id=subject_id,
             input_text=input_text,
             speaker=assembly_speaker,
             context_view=view,
-            recall_level=1,
+            recall_level=strategy.default_level,
+            recall_limit=strategy.limit,
+            extra_queries=(gap,) if gap else (),
         )
         working_set = self.assembler.assemble(ctx)
+        if gap:
+            self.effectiveness.consume_gap(subject_id)
         return AssembledCurrentState(
             input_text=input_text,
             speaker=working_set.speaker,
@@ -530,7 +530,7 @@ class SubjectProcess:
         self.repository.add_cognitive_content(perception)
 
         clock.mark("④建活动")
-        # 阶段⑤ 认知活动（可追加召回）
+        # 阶段⑤ 认知活动（一次调用；不执行同轮补召回）
         response, working_recalled = self._cognize(
             subject_id, activity, current, perception, clock=clock
         )
@@ -664,6 +664,10 @@ class SubjectProcess:
         )
         completed = self.repository.get_activity(close_result.activity_id)
         clock.mark("⑦收尾")
+        try:
+            self.effectiveness.run_due(subject_id)
+        except Exception:
+            logger.exception("effectiveness run_due failed")
         if close_result.handoff_to_memory_control:
             memory_result = self.memory_control.run_async(subject_id)
             self.evaluation.emit(
@@ -767,83 +771,22 @@ class SubjectProcess:
         perception: CognitiveContent,
         clock: StepClock | None = None,
     ) -> tuple[object, list[RecalledFragment]]:
-        """主流程认知编排：05 产出方案，09 协调器执行记忆补充，再继续认知。"""
+        """主流程认知编排：05 一次产出方案。同轮不执行 recall_requests。"""
         working_recalled: list[RecalledFragment] = list(current.recalled)
-        # 初始召回（03 工作集里的 memory 分片）与追加召回共用去重集：
-        # 追加召回不会再次取回已在工作集里的记忆，避免同一 event_id 重复进模型上下文。
-        known_ids = {item.event_id for item in working_recalled} | {
-            _memory_event_id(fragment.id)
-            for fragment in current.fragments
-            if fragment.source == "memory"
-        }
         response = self._cognize_once(current, working_recalled)
         if clock is not None:
             clock.mark("⑤认知")
-        rounds = 0
-        executions: list[RecallExecution] = []
-
-        while (
-            response.recall_requests
-            and rounds < FOLLOWUP_RECALL_MAX_ROUNDS
-        ):
-            rounds += 1
-            speaker_object_id = (
-                current.speaker.object_id if current.speaker is not None else None
+        if getattr(response, "recall_requests", ()):
+            logger.debug(
+                "ignored recall_requests count=%s",
+                len(response.recall_requests),
             )
-            requests = self._bind_recall_object_ids(
-                response.recall_requests, speaker_object_id=speaker_object_id
-            )
-            execution = self.recall_coordinator.execute_round(
-                subject_id=subject_id,
-                activity_id=activity.id,
-                perception_id=perception.id,
-                round_number=rounds,
-                requests=requests,
-                known_ids=known_ids,
-            )
-            executions.append(execution)
-            if clock is not None:
-                clock.mark("⑤召回")
-            working_recalled.extend(execution.fresh)
-            self.evaluation.emit(
-                EvaluationEvent(
-                    event_id=new_id(),
-                    subject_id=subject_id,
-                    activity_id=activity.id,
-                    event_type="recall_executed",
-                    payload={
-                        "round": rounds,
-                        "returned_count": execution.returned_count,
-                        "fresh_ids": list(execution.fresh_ids),
-                    },
-                    source_ids=execution.fresh_ids,
-                )
-            )
-            logger.info(
-                "recall_round=%s query=%r returned=%s fresh=%s duration_ms=%s",
-                rounds,
-                execution.request["query"],
-                execution.returned_count,
-                len(execution.fresh_ids),
-                execution.duration_ms,
-            )
-            response = self._cognize_once(current, working_recalled)
-            if clock is not None:
-                clock.mark("⑤认知(补)")
-
-        truncated = bool(
-            executions
-            and response.recall_requests
-            and rounds >= FOLLOWUP_RECALL_MAX_ROUNDS
-        )
-        executions = list(
-            self.recall_coordinator.commit_metrics(
-                subject_id=subject_id,
-                activity_id=activity.id,
-                executions=executions,
-                truncated=truncated,
-            )
-        )
+        ratings = getattr(response, "memory_ratings", None)
+        if ratings is not None and ratings.has_content():
+            try:
+                self.effectiveness.record_ratings(subject_id, activity.id, ratings)
+            except Exception:
+                logger.exception("memory_ratings persist failed")
 
         self.evaluation.emit(
             EvaluationEvent(
@@ -863,31 +806,6 @@ class SubjectProcess:
                 source_ids=(activity.id, perception.id),
             )
         )
-
-        added_ids = tuple(
-            event_id
-            for entry in executions
-            for event_id in entry.fresh_ids
-        )
-        cited_ids = tuple(
-            dict.fromkeys(
-                (
-                    *(item.event_id for item in working_recalled),
-                    *(
-                        source_id
-                        for fragment in current.fragments
-                        for source_id in fragment.source_ids
-                    ),
-                )
-            )
-        )
-        if added_ids:
-            self.recall_coordinator.record_reference(
-                subject_id=subject_id,
-                activity_id=activity.id,
-                added_ids=added_ids,
-                cited_ids=cited_ids,
-            )
         return response, working_recalled
 
     def mark_activity_response_status(

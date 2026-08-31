@@ -7,9 +7,10 @@ import os
 import sys
 from pathlib import Path
 
+from jshi.effectiveness import InProcessEffectiveness, JsonlRatingStore
 from jshi.experienceledger import SqliteExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
-from jshi.memory import MemoryShell, build_memory_backend
+from jshi.memory import MemoryShell, RecallStrategyStore, build_memory_backend
 from jshi.models import EchoModel, ModelPort, OpenAICompatibleModel
 from jshi.privilege import PromptRuleStore, SuperPermissionStore
 from jshi.recognition import CarrierEntry, ObjectProfile, new_object_id
@@ -85,6 +86,12 @@ def _runtime(
     subjects = SubjectRepository(data_dir / "subject.sqlite3")
     backend = build_memory_backend(subjects, data_dir)
     prompt_rules = PromptRuleStore(data_dir / "prompt_rules.json")
+    recall_strategy = RecallStrategyStore(data_dir / "recall_strategy.json")
+    effectiveness = InProcessEffectiveness(
+        ratings=JsonlRatingStore(data_dir / "memory_ratings.jsonl"),
+        strategy=recall_strategy,
+        reports_path=data_dir / "effectiveness_reports.jsonl",
+    )
     if type(backend).__name__ != "InProcessMemoryBackend":
         print(f"[jshi] memory backend: {type(backend).__name__}", file=sys.stderr)
     process = SubjectProcess(
@@ -94,6 +101,8 @@ def _runtime(
         memory=MemoryShell(backend),
         activity_ledger=SqliteExperienceLedger(data_dir / "subject.sqlite3"),
         prompt_rules=prompt_rules,
+        recall_strategy=recall_strategy,
+        effectiveness=effectiveness,
     )
     return process, identities, subjects
 

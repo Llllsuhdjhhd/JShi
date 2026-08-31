@@ -1,13 +1,13 @@
 """05 认知与上下文统筹测试。
 
-覆盖：05 单次认知产出、主流程编排补充召回、记忆侧指标由 09 协调器写、
-独立评价过程被触发、评价不可用不阻塞。
+覆盖：05 单次认知产出、同轮不执行 recall_requests、打分缺口下一拍装载。
 """
 
 from __future__ import annotations
 
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import (
+    MemoryRatings,
     ModelRequest,
     ModelResponse,
     RecallRequest,
@@ -90,53 +90,31 @@ def subject_events(repository, event_type):
     ]
 
 
-def test_single_recall_records_metrics_and_reference(tmp_path):
+def test_recall_requests_are_not_executed_same_turn(tmp_path):
     model = FollowupModel(level=5)
     process, repository = runtime(tmp_path, model=model)
-    seeded = process.memory.remember_fact(
-        "stone", "external_input", "朋友上周很忙"
-    )
+    process.memory.remember_fact("stone", "external_input", "朋友上周很忙")
 
     result = process.experience("stone", "他最近怎么样", object_ref="user")
 
-    assert model.calls == 2
-    assert result.action_text == "最终回应"
-    metrics = subject_events(repository, "recall_metrics")
-    assert len(metrics) == 1
-    content = metrics[0].content
-    assert content["round"] == 1
-    assert content["request"]["query"] == "朋友"
-    assert content["request"]["level"] == 5
-    assert content["duration_ms"] >= 0
-    assert content["returned_count"] >= 1
-    assert content["truncated"] is False
-    assert seeded in metrics[0].source_ids
-
-    references = subject_events(repository, "recall_reference")
-    assert len(references) == 1
-    assert references[0].content["recalled_event_ids"] == [seeded]
-    assert references[0].content["referenced_ids"] == [seeded]
-    assert references[0].content["rate"] == 1.0
+    assert model.calls == 1
+    assert result.action_text == "需要更多过去"
+    assert subject_events(repository, "recall_metrics") == []
+    assert subject_events(repository, "recall_extended") == []
+    assert subject_events(repository, "recall_reference") == []
 
 
-def test_recall_is_truncated_after_one_round(tmp_path):
+def test_always_recall_requests_do_not_loop(tmp_path):
     model = AlwaysRecallModel()
     process, repository = runtime(tmp_path, model=model)
-    # 一条初始召回（按对象过滤）拿不到、但追加召回（不按对象过滤）能拿到的新经历：
-    # 验证追加召回能补进"真新"记忆，且与初始召回按 event_id 去重（不会重复装已有记忆）。
-    seeded = process.memory.remember_fact("stone", "external_input", "更多往事")
+    process.memory.remember_fact("stone", "external_input", "更多往事")
 
     result = process.experience("stone", "你好", object_ref="user")
 
-    assert model.calls == 2
+    assert model.calls == 1
     assert result.action_text == "还要更多"
-    metrics = subject_events(repository, "recall_metrics")
-    assert len(metrics) == 1
-    assert metrics[0].content["truncated"] is True
-    extended = subject_events(repository, "recall_extended")
-    assert len(extended) == 1
-    # 追加召回只装入"真新"的那条（seeded），不会重复装初始召回已装的那条经历。
-    assert extended[0].content["recalled_event_ids"] == [seeded]
+    assert subject_events(repository, "recall_metrics") == []
+    assert subject_events(repository, "recall_extended") == []
 
 
 def test_evaluation_is_not_run_inline(tmp_path):
@@ -146,7 +124,7 @@ def test_evaluation_is_not_run_inline(tmp_path):
     process.experience("stone", "他最近怎么样", object_ref="user")
 
     assert subject_events(repository, "recall_evaluated") == []
-    assert len(subject_events(repository, "recall_metrics")) == 1
+    assert subject_events(repository, "recall_metrics") == []
 
 
 def test_model_request_carries_speaker_and_addressable_context(tmp_path):
@@ -223,7 +201,7 @@ def test_trim_plan_updates_active_zone_without_second_model_call(tmp_path):
     assert view.speaker_object_id
 
 
-def test_third_person_recall_binds_archive_and_speech_uses_fragment(tmp_path):
+def test_third_person_arrives_next_turn_via_gap_query(tmp_path):
     class ThirdPersonModel:
         name = "third-person"
 
@@ -236,9 +214,10 @@ def test_third_person_recall_binds_archive_and_speech_uses_fragment(tmp_path):
             if self.calls == 1:
                 return ModelResponse(
                     model=self.name,
-                    text="先对一下",
-                    recall_requests=(
-                        RecallRequest(query="lux 是不是你朋友", budget=2, level=4),
+                    text="先记下",
+                    memory_ratings=MemoryRatings(
+                        coverage="missing",
+                        gap_query="lux 岭南",
                     ),
                 )
             self.second_ids = tuple(
@@ -273,8 +252,14 @@ def test_third_person_recall_binds_archive_and_speech_uses_fragment(tmp_path):
     )
     repository.add_history(seeded)
 
-    result = process.experience(
+    first = process.experience(
         "stone", "lux 是不是你朋友", object_ref="user"
+    )
+    assert first.action_text == "先记下"
+    assert "岭南" not in first.action_text
+
+    result = process.experience(
+        "stone", "刚才那事", object_ref="user"
     )
 
     assert model.calls == 2
@@ -282,8 +267,7 @@ def test_third_person_recall_binds_archive_and_speech_uses_fragment(tmp_path):
     assert "岭南" in result.action_text
     assert "我想起" in result.action_text
     assert seeded.id not in result.action_text
-    metrics = subject_events(repository, "recall_metrics")
-    assert metrics[0].content["request"]["object_ids"] == ["OBJ-LUX"]
+    assert subject_events(repository, "recall_metrics") == []
     assert len(process.profiles.list()) == before
 
 
