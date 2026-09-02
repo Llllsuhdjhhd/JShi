@@ -31,6 +31,9 @@ class MemoryExperience:
     occurred_at: datetime | None = None
     segment_id: str | None = None
     origin: str = "external"  # external | internal | dream
+    # 说话/互动对象 id（本段主体对话的对象；区别于 objects 的泛提及）。
+    # None = 主体自述/系统段。用于回忆时按说话人软纠偏（design/1010 防串线）。
+    interlocutor: str | None = None
 
 
 @dataclass(frozen=True)

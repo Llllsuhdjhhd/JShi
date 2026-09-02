@@ -53,6 +53,7 @@ def experience_payload(experience: MemoryExperience) -> dict[str, Any]:
         "subject_id": experience.subject_id,
         "text": experience.text,
         "objects": dict(experience.objects or {}),
+        "interlocutor": getattr(experience, "interlocutor", None),
         "source_ids": tuple(experience.source_ids or ()),
         "occurred_at": experience.occurred_at,
         "segment_id": experience.segment_id,
@@ -321,3 +322,29 @@ class Rems3MemoryBackend:
         if result.sealed_event_ids:
             return result.sealed_event_ids[0]
         return ""
+
+    def portrait(self, subject_id: str, object_id: str) -> dict | None:
+        """对象人物肖像(REMS 特性)。同进程 REMSPipeline 已实现 ``portrait``。"""
+        return self._pipeline.portrait(subject_id, object_id)
+
+    def assemble_recall_block(
+        self,
+        subject_id: str,
+        query: str,
+        *,
+        object_id: str | None = None,
+        level: int = 1,
+        limit: int | None = None,
+        anchor_event_ids: tuple[str, ...] = (),
+        budget: int | None = None,
+    ) -> dict:
+        """召回块(REMS 特性):预算受限的条目 + 对话人肖像并入。透传给 REMSPipeline。"""
+        return self._pipeline.assemble_recall_block(
+            subject_id,
+            query,
+            object_id=object_id,
+            level=level,
+            limit=limit,
+            anchor_event_ids=anchor_event_ids,
+            budget=budget,
+        )

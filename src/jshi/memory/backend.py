@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import TYPE_CHECKING, Mapping, Protocol, Sequence
 
@@ -34,6 +34,10 @@ class MemoryBackendPort(Protocol):
 
     def ingest_batch(self, batch: MemoryBatch) -> BackendIngestResult: ...
 
+    def portrait(self, subject_id: str, object_id: str) -> dict | None:
+        """对象人物肖像(REMS 特性)。进程内后端未实现返回 None。"""
+        return None
+
 
 class InProcessMemoryBackend:
     """最小后端：把 MemoryBatch 落为事实历史，不维护角色/对象系统。"""
@@ -43,6 +47,11 @@ class InProcessMemoryBackend:
         from .port import InProcessHistoryMemory
 
         self._history = InProcessHistoryMemory(repository)
+
+    def portrait(self, subject_id: str, object_id: str) -> dict | None:
+        # 进程内实现未维护对象肖像；占位返回 None(协议兼容)。
+        del subject_id, object_id
+        return None
 
     def remember_fact(
         self,

@@ -118,6 +118,7 @@ class InProcessMemoryControl(MemoryControlPort):
                 subject_id=subject_id,
                 text=_experience_text(segment),
                 objects=dict(segment.objects or {}),
+                interlocutor=getattr(segment, "actor_object_id", None),
                 source_ids=tuple(segment.source_ids),
                 occurred_at=segment.occurred_at,
                 segment_id=segment.segment_id,
