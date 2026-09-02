@@ -53,7 +53,8 @@ class RecalledFragment:
     形状对齐《记忆层契约》/ 09：``event_id`` 是稳定记忆单元标识（去重键），
     ``text`` 是原文（溯源），``content`` 是按 ``summary_level`` 选出的摘要文本
     （供预算 / 组装）。``event_type`` 是进程内实现的附加字段，非契约；真实
-    记忆后端接入后不依赖它。
+    记忆后端接入后不依赖它。``interlocutor`` 是说话/互动对象（REMS 特性，
+    比 ``object_id`` 更准，驱动按说话人软纠偏）；进程内实现没有，为 None。
     """
 
     event_id: str
@@ -63,6 +64,7 @@ class RecalledFragment:
     summary_level: str | None = None  # L1 等；进程内实现无多级摘要，为 None
     kind: str = "fact"
     object_id: str | None = None
+    interlocutor: str | None = None  # 说话/互动对象；REMS 特性,进程内 None
     source_ids: tuple[str, ...] = ()
     score: float = 0.0
     occurred_at: datetime | None = None
