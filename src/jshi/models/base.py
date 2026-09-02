@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 from urllib.request import Request, urlopen
 
 from jshi.core import SubjectState
@@ -239,6 +239,87 @@ class EchoModel:
         )
 
 
+def iter_top_level_json_values(chunks: Iterator[str]) -> Iterator[tuple[str, str]]:
+    """边到边地提取 JSON 对象顶层成员。
+
+    ``chunks`` 按序产出原始文本(流式 content 分片)。每有一个顶层 ``key: value`` 完整
+    到达就 ``yield (key, value_json)``。用标准 ``raw_decode`` 逐成员解析,自然处理字符串、
+    转义、嵌套对象/数组与标量。容忍 ``{`` 之前的 ```json 围栏/空白以及对象闭合后的余文。
+    """
+
+    buffer = ""
+    decoder = json.JSONDecoder()
+    idx = 0
+    root_open_at: int | None = None
+    pending_key: str | None = None
+    stage = 0  # 0 expect key, 1 expect colon, 2 expect value
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        buffer += chunk
+        if root_open_at is None:
+            start = buffer.find("{")
+            if start < 0:
+                continue
+            root_open_at = start
+            idx = root_open_at + 1
+        while True:
+            if stage == 0:
+                while idx < len(buffer) and buffer[idx] in " \t\r\n,":
+                    idx += 1
+                if idx >= len(buffer):
+                    break
+                if buffer[idx] == "}":
+                    return  # root object closed
+                if buffer[idx] != '"':
+                    break
+                try:
+                    key, key_end = decoder.raw_decode(buffer, idx)
+                except json.JSONDecodeError:
+                    break  # key 未完整,等更多分片
+                pending_key = key
+                idx = key_end
+                stage = 1
+                continue
+            if stage == 1:
+                while idx < len(buffer) and buffer[idx] in " \t\r\n":
+                    idx += 1
+                if idx >= len(buffer):
+                    break
+                if buffer[idx] != ":":
+                    break
+                idx += 1
+                stage = 2
+                continue
+            # stage == 2: expect value
+            while idx < len(buffer) and buffer[idx] in " \t\r\n":
+                idx += 1
+            if idx >= len(buffer):
+                break
+            try:
+                _value, value_end = decoder.raw_decode(buffer, idx)
+            except json.JSONDecodeError:
+                break  # value 尚未完整,等更多分片(stage 仍为 2)
+            yield (pending_key, buffer[idx:value_end])
+            pending_key = None
+            stage = 0
+            idx = value_end
+
+
+def _verbal_text(plan: Mapping[str, Any]) -> str:
+    """从 ``response_plan`` 段取口头文本;非 respond 或空则返回空串。"""
+    mode = (plan.get("mode") or "").strip()
+    if mode not in {"respond"}:
+        return ""
+    for item in plan.get("items") or ():
+        if isinstance(item, Mapping) and item.get("channel") == "verbal":
+            text = (item.get("text") or "").strip()
+            if text:
+                return text
+    return ""
+
+
 class OpenAICompatibleModel:
     """Minimal adapter for providers exposing an OpenAI-compatible chat endpoint."""
 
@@ -279,3 +360,51 @@ class OpenAICompatibleModel:
             model=self.name,
             metadata={"provider_response_id": result.get("id")},
         )
+
+    def generate_stream(self, request: ModelRequest) -> Iterator[str]:
+        """流式产内容分片(`choices[0].delta.content`),供"边到边"消费。
+
+        与 ``generate`` 同一套 system/user;只额外加 ``stream: True`` 并按 SSE
+        (``data: {...}``)逐行读。对 ``[DONE]`` 终止。
+        """
+        from jshi.models.prompt import build_system, build_user
+
+        payload = json.dumps(
+            {
+                "model": self._model,
+                "stream": True,
+                "messages": [
+                    {"role": "system", "content": build_system(request)},
+                    {"role": "user", "content": build_user(request)},
+                ],
+            }
+        ).encode("utf-8")
+        http_request = Request(
+            self.endpoint,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(http_request, timeout=60) as response:
+            for line in response:
+                raw = line.decode("utf-8") if isinstance(line, bytes) else str(line)
+                text = raw.strip()
+                if not text or not text.startswith("data:"):
+                    continue
+                data = text[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except ValueError:
+                    continue
+                choices = event.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    yield content

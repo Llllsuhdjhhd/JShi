@@ -4,7 +4,7 @@ import logging
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
 from jshi.activezone import (
     ActiveZonePort,
@@ -354,6 +354,7 @@ class SubjectProcess:
         channel: str | None = None,
         carriers: tuple[CarrierEntry, ...] = (),
         objects: Mapping[str, str] | None = None,
+        on_reply: Callable[[str], None] | None = None,
     ) -> SubjectActivityResult:
         clock = StepClock()
         # 阶段① 对象必填校验 → 对象解析 → 置信度门禁 → 落位
@@ -532,7 +533,7 @@ class SubjectProcess:
         clock.mark("④建活动")
         # 阶段⑤ 认知活动（一次调用；不执行同轮补召回）
         response, working_recalled = self._cognize(
-            subject_id, activity, current, perception, clock=clock
+            subject_id, activity, current, perception, clock=clock, on_reply=on_reply
         )
         activity, final_statuses, _ = self.mark_activity_response_status(
             subject_id,
@@ -733,8 +734,15 @@ class SubjectProcess:
         self,
         current: AssembledCurrentState,
         working_recalled: Sequence[RecalledFragment],
+        *,
+        on_reply: Callable[[str], None] | None = None,
     ) -> object:
-        """05 认知层：一次模型调用，只产出回应与上下文方案，不执行记忆。"""
+        """05 认知层：一次模型调用，只产出回应与上下文方案，不执行记忆。
+
+        当底层模型支持流式且调用方给了 ``on_reply`` 时，走 ``generate_stream``:
+        ``response_plan`` 一旦完整且 mode=respond 就先回调 ``on_reply``(提前开口),
+        其余段(活跃区/打分/对象)继续收、最终返回完整 ``ModelResponse``。
+        """
         speaker = None
         if current.speaker is not None:
             speaker = ModelSpeaker(
@@ -744,24 +752,25 @@ class SubjectProcess:
                 status=current.speaker.status,
                 reason=current.speaker.reason,
             )
-        return self.cognition.generate(
-            ModelRequest(
-                purpose="subject_activity",
-                input_text=current.input_text,
-                subject_state=current.subject_state,
-                speaker=speaker,
-                now=datetime.now().astimezone(),
-                governing_rules=self._governing_rules(
-                    current.subject_state.subject_id
-                ),
-                context=self._model_context(
-                    current.subject_state.subject_id,
-                    working_recalled,
-                    current.fragments,
-                    current.context_view,
-                ),
-            )
+        request = ModelRequest(
+            purpose="subject_activity",
+            input_text=current.input_text,
+            subject_state=current.subject_state,
+            speaker=speaker,
+            now=datetime.now().astimezone(),
+            governing_rules=self._governing_rules(
+                current.subject_state.subject_id
+            ),
+            context=self._model_context(
+                current.subject_state.subject_id,
+                working_recalled,
+                current.fragments,
+                current.context_view,
+            ),
         )
+        if on_reply is not None and hasattr(self.cognition, "generate_stream"):
+            return self.cognition.generate_stream(request, on_reply=on_reply)
+        return self.cognition.generate(request)
 
     def _cognize(
         self,
@@ -770,10 +779,14 @@ class SubjectProcess:
         current: AssembledCurrentState,
         perception: CognitiveContent,
         clock: StepClock | None = None,
+        *,
+        on_reply: Callable[[str], None] | None = None,
     ) -> tuple[object, list[RecalledFragment]]:
         """主流程认知编排：05 一次产出方案。同轮不执行 recall_requests。"""
         working_recalled: list[RecalledFragment] = list(current.recalled)
-        response = self._cognize_once(current, working_recalled)
+        response = self._cognize_once(
+            current, working_recalled, on_reply=on_reply
+        )
         if clock is not None:
             clock.mark("⑤认知")
         if getattr(response, "recall_requests", ()):

@@ -86,6 +86,10 @@ def run_plain(session: TalkSession) -> None:
     print("直接打字后回车即发送。命令见 /help")
     print(f"主体 {session.subject_id}；对象 {session.speaker}（长期）")
     width = shutil.get_terminal_size(fallback=(80, 24)).columns
+    # I-001 流式:模型支持时,response_plan 完整即先打印;否则整轮结束后统一打印。
+    session.on_reply = lambda text: print(
+        wrap_display_text(f"匠石：{text}", width), flush=True
+    )
     while True:
         try:
             raw = input("你：")

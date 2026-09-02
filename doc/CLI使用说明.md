@@ -162,8 +162,28 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 | `JSHI_MEMORY_BACKEND` | `inprocess` | `inprocess` 或 `rems3`；其它值报错 |
 | `JSHI_REMS_DATA_DIR` | `{data-dir}/rems` | REMS 自己的 sqlite（及可选向量路径），与 `subject.sqlite3` 分开 |
 | `JSHI_REMS_SKIP_EMBEDDING` | 空 | `1` 时不加载 torch / 句向量，只做词法召回 |
+| `REMS_CONTEXT_WINDOW` | `88000` | rems 自己的 token 窗口，**独立于** JShi 的 `DEFAULT_MODEL_CONTEXT_WINDOW`（1M） |
+| `REMS_CHARS_PER_TOKEN` | `1.5` | token→字符折算系数，与 `REMS_CONTEXT_WINDOW` 一起决定 rems 的各长度上限 |
 
 换后端不搬旧记忆。进程内事实与 REMS 事件不是同一份库；`recall` 问的是当前后端。Qdrant 在邻仓默认 `:memory:` 时不必开 Docker。
+
+> **rems 有自己的上下文窗口，跟 JShi 的不是同一个参数。** JShi 的心智窗口是
+> `DEFAULT_MODEL_CONTEXT_WINDOW = 1_000_000`（1M，见 `src/jshi/core/params.py`），
+> 派生出活跃区上限（1M/30≈33k）与工作集预算（1M/15≈67k）。而 rems 侧（`Jshi_memory/src/rems/config.py`）
+> 有自己的 `context_window`，默认 `88000`，于是：
+>
+> ```text
+> len_msg = context_window × chars_per_token / 66   # 单条消息/单事件上限，白皮书 1.1.7
+>         = 88000 × 1.5 / 66 ≈ 2000
+> ```
+>
+> 所以长输入会在代谢时触发 `Input length N exceeds len_msg 2000; boundary detection will still run`
+> 的警告（**这是预期行为**：超了单条上限，边边界检测会拆分；不是报错）。若想让 rems 的
+> `len_msg` 对齐 JShi 的 1M 窗口，在 `.env` 设 `REMS_CONTEXT_WINDOW=1000000`（`len_msg` 随之 ≈ 22_727）。
+>
+> ⚠️ `context_window` 是 rems 的总开关，会**按比例同步放大** `physical_redline`（10/66）、
+> `safe_watermark`（2/66）与 `wp_role_capacity`（回忆块容量）。把它调大 = 单条记忆/回忆块更宽松、
+> 边界拆分更少；是否合适取决于你要更细的记忆切分还是更少的拆分。默认 2000 是有意设计，不是 bug。
 
 ---
 

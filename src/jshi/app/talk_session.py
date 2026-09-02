@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from jshi.personalworld import ValueSource
 from jshi.privilege import SuperPermissionStore
@@ -192,6 +192,7 @@ class TalkSession:
         channel: str | None,
         carriers: tuple[CarrierEntry, ...],
         super_permissions: SuperPermissionStore | None = None,
+        on_reply: Callable[[str], None] | None = None,
     ) -> None:
         self.process = process
         self.data_dir = Path(data_dir)
@@ -200,11 +201,13 @@ class TalkSession:
         self.channel = channel
         self.carriers = carriers
         self.super_permissions = super_permissions
+        self.on_reply = on_reply
         self.privileged_object_id: str | None = None
         self.last_line = ""
         self.last_plan = None
         self._timings: list[ActivityTiming] = []
         self._turn_lock = threading.Lock()
+        self._reply_streamed = False
 
     @property
     def busy(self) -> bool:
@@ -419,12 +422,18 @@ class TalkSession:
             )
         try:
             try:
+                def _early(text: str) -> None:
+                    if self.on_reply is not None:
+                        self._reply_streamed = True
+                        self.on_reply(text)
+
                 result = self.process.experience(
                     self.subject_id,
                     line,
                     object_ref=self.speaker,
                     channel=self.channel,
                     carriers=self.carriers,
+                    on_reply=_early,
                 )
             except ValueError as exc:
                 return TalkOutcome((TalkEvent("notice", f"错误：{exc}"),))
@@ -440,6 +449,10 @@ class TalkSession:
                 if len(self._timings) > TIMING_KEEP:
                     del self._timings[:-TIMING_KEEP]
             spoken = result.action_text.strip() if result.action_text else ""
+            if self._reply_streamed:
+                # 已由 on_reply 流式打印,不再重复。
+                spoken = ""
+                self._reply_streamed = False
             embodied = result.response_plan.embodied_text().strip()
             view = self.process.activity_ledger.current_context_view(self.subject_id)
             meta = (

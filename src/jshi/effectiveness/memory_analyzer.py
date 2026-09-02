@@ -1,4 +1,10 @@
-"""记忆质量分析器：规则汇总，本期不调大模型。"""
+"""记忆质量分析器：规则汇总，本期不调大模型。
+
+触发条件 ``should_run`` 与旧规则一致；无基准（示例库为空）时用启发式
+``heuristic_strategy`` 兜底，有基准时由 ``baseline.MemoryQualityEvaluator``
+给出更具依据的策略。分析器只负责“何时跑”与“无基准兜底”，策略本身在
+``baseline`` / ``strategy`` 模块。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Mapping
 
 from .ratings import RatingRow
+from .strategy import MemoryRecallStrategy, utc_now
 
 ANALYZER_NAME = "memory_quality"
 ANALYZER_VERSION = "rules-v1"
@@ -51,3 +58,31 @@ def suggest_level(
         level += 1
         findings["level_delta_missing"] = 1
     return min(max(level, 1), 9), findings
+
+
+def heuristic_strategy(
+    unanalyzed: list[RatingRow],
+    current_level: int,
+) -> MemoryRecallStrategy:
+    """无基准回退：仍用旧规则定档位，但输出统一为“策略”而非分数。
+
+    有 ``baseline`` 时请让位给 ``baseline.MemoryQualityEvaluator``。
+    """
+    level, findings = suggest_level(unanalyzed, current_level)
+    delta = level - current_level
+    mode = "precision" if delta < 0 else ("coverage" if delta > 0 else "balanced")
+    if delta < 0:
+        reason = "无基准兜底：低相关/无关条目比例过高，降档以换取精度。"
+    elif delta > 0:
+        reason = "无基准兜底：coverage=missing 次数偏多，升档以补缺口。"
+    else:
+        reason = "无基准兜底：未触发升/降，档位保持不变。"
+    return MemoryRecallStrategy(
+        default_level=level,
+        recall_mode=mode,
+        confidence=0.0,
+        reason=reason,
+        evidence=(dict(findings),),
+        basis="heuristic",
+        updated_at=utc_now(),
+    )

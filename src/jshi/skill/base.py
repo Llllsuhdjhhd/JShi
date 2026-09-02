@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import replace
-from typing import Any, Generic, Mapping, TypeVar
+from typing import Any, Callable, Generic, Mapping, TypeVar
 
 from jshi.core.params import active_zone_chars
 from jshi.models import ModelPort, ModelRequest, ModelResponse
@@ -183,6 +183,49 @@ class Skill(ABC, Generic[T]):
             return self._fallback(raw.text)
         return self.parse(data)
 
+    def run_stream(
+        self,
+        request: ModelRequest,
+        on_reply: Callable[[str], None] | None = None,
+    ) -> T:
+        """流式执行：边到边消费顶层成员，``response_plan`` 完整且 mode=respond 时先调 ``on_reply``。
+
+        模型支持 ``generate_stream`` 才走流式；否则退回 ``run``（等整份 JSON）。
+        返回值仍是完整 ``T``（主流程后续照常消费），只有"提前开口"这一疗效不同。
+        任何解析失败走 ``_fallback``，不影响主流程。
+        """
+        from jshi.models.base import _verbal_text, iter_top_level_json_values
+
+        model = self._model
+        if not hasattr(model, "generate_stream"):
+            return self.run(request)
+        req = replace(request, system_extra=self.system_extra(request))
+
+        raw: list[str] = []
+
+        def _capture(chunks: Any) -> Any:
+            for chunk in chunks:
+                raw.append(chunk)
+                yield chunk
+
+        data: dict[str, Any] = {}
+        try:
+            for key, value_json in iter_top_level_json_values(
+                _capture(model.generate_stream(req))
+            ):
+                value = json.loads(value_json)
+                data[key] = value
+                if key == "response_plan" and on_reply is not None and isinstance(value, Mapping):
+                    text = _verbal_text(value)
+                    if text:
+                        on_reply(text)
+        except Exception:
+            return self._fallback("".join(raw))
+        try:
+            return self.parse(data)
+        except SkillError:
+            return self._fallback("".join(raw))
+
 
 class SkillModelPort(ModelPort):
     """把 ``Skill[ModelResponse]`` 包装成 ``ModelPort``（主流程只认 generate）。
@@ -209,6 +252,15 @@ class SkillModelPort(ModelPort):
         if request.purpose in self._apply_to:
             return self._skill.run(request)
         return self._skill._model.generate(request)
+
+    def generate_stream(
+        self,
+        request: ModelRequest,
+        on_reply: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
+        if request.purpose in self._apply_to:
+            return self._skill.run_stream(request, on_reply=on_reply)
+        return self._skill.run(request)
 
 
 class SkillRegistry:
