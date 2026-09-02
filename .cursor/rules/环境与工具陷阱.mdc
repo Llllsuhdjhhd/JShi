@@ -1,0 +1,67 @@
+---
+description: 本机(Windows/PowerShell/沙箱)操作仓库与跑测试、调模型的环境陷阱；照此避免踩坑
+alwaysApply: true
+---
+
+# 环境与工具陷阱(本机)
+
+> 记录**本仓库在本机**的实际环境限制。多数是"这里的 bash 不一定是你想的 bash"之类,不照做会浪费时间。修好后再回填。
+
+## 1. PowerShell(不是 bash)
+
+- **不支持 `&&`**:`git add ... && git commit ...` 报 `The token '&&' is not a valid statement separator`。
+  用 `;` 分隔,或用 `if ($LASTEXITCODE -ne 0) { exit 1 }` 判断上一条。
+- **多行字符串/`@"..."@` here-string 里嵌 `"` 或 `\"` 会炸**(`ParserError: TerminatorExpectedAtEndOfString`)。
+  遇到就跑一个临时 `.py`/`.ps1` 文件,别在命令行拼长字符串。
+- **`-m` 提交消息里有换行/中文会拆成多个参数**:`git commit` 报 `pathspec '...' did not match any file(s)`。
+  改用 `git commit -F <消息文件>`。
+
+## 2. git 是 worktree,真正的仓库在别处
+
+- 本工作树 `C:\Users\40575\Desktop\prog\main` 的 `.git` 是 **gitfile**:`gitdir: C:/Users/40575/Desktop/prog/Jshi-codex/.git/worktrees/main`。
+  所以 git 的实际仓库/索引/配置都在 **`prog/Jshi-codex/.git`**(工作区之外)。
+- **写 git 会被沙箱拦**:`git config --local ...`、`git add`、`git commit` 报
+  `could not lock config file ... Permission denied` / `Unable to create ... index.lock: Permission denied`。
+  因为 `.git` 在 session 工作区外。**读操作正常**(`status`/`branch`/`log`/`rev-list`/`show`/`diff`)。
+  要写就必须把那条 `pwsh` 升级为 `danger-full-access`(一次性,给 justification)。
+- **别 `git config`(写)**:改成 `git -c core.quotepath=false ...` 每条临时传参。
+- **中文文件名会显示成八进制转义**:`git status` 里是 `"\346\226\271\346\241\210..."`。
+  用 `git -c core.quotepath=false` 就能看到正常中文。
+- 分支关系用 `git rev-list --left-right --count main...HEAD`(左=main 领先,右=HEAD 领先);
+  `git branch -vv` 看全部分支;`git log --oneline` 看提交。
+
+## 3. Python / pytest(Win + Python 3.14)
+
+- **`import jshi` 要 `PYTHONPATH=src`**:包没装成 editable,直接 `python -c "import jshi"` 会 ModuleNotFoundError。
+  命令前 `$env:PYTHONPATH="src"; python ...`。
+- **pytest 9 + Windows + Python 3.14 的 tmp 清理缺陷**:测试**本体能过**,但会话结束清理 basetemp 时
+  `cleanup_dead_symlinks → root.iterdir → os.scandir` 抛 `PermissionError: [WinError 5]`,
+  于是 pytest 退出码 1、`N passed` 汇总被吞掉、一堆用例标成 `E`(error)。
+  **判定方法**:看输出有没有 `FAILED` / `AssertionError`——有才是真失败;`E`+`PermissionError` 是环境问题。
+- **沙箱禁止写 `AppData\Local\Temp\...`**:`tempfile.TemporaryDirectory`、pytest 的 `tmp_path` 在那里写/枚举会被拒
+  (`[sandbox: file access denied under workspace-write mode]`),导致 `write_examples` 等拿到 PermissionError。
+  **解决**:临时目录放进**工作区**(e.g. `.pytest/xxx`),或用 `--basetemp` 指到工作区;要判定 tmp_path 用例本体,
+  直接给测试函数传一个工作区内的 Path 来跑,绕过 pytest 的 basetemp。
+- pytest 配置在 `pyproject.toml`(`testpaths=["tests"]`,`addopts=["--basetemp=.pytest/tmp"]`)。
+  干净跑法:`python -m pytest <files> -q -p no:cacheprovider --basetemp <工作区目录>`。
+- `JSHI_TEST_REMS` 不设(默认 1 走进程内后端),别误触发 rems 联网。
+
+## 4. 模型 / rems(邻仓)
+
+- 模型配置在 `.env`(gitignore,不提交):`JSHI_MODEL_ENDPOINT=https://api.deepseek.com/v1/chat/completions`、
+  `JSHI_MODEL_API_KEY=sk-...`、`JSHI_MODEL_NAME=deepseek-v4-flash`;记忆后端 `JSHI_MEMORY_BACKEND=rems3`。
+- **rems 是邻仓**:`C:\Users\40575\Desktop\prog\Jshi_memory\src\rems`(已 import-able)。它的参数要在那里 grep。
+- **`len_msg` 是 rems 的不在 JShi**:`len_msg = context_window * chars_per_token / 66`;默认 `context_window=88000`
+  → `len_msg≈2000`。它与 JShi 的 `DEFAULT_MODEL_CONTEXT_WINDOW=1_000_000` **不是一回事**。
+  对齐到 1M 在 `.env` 设 `REMS_CONTEXT_WINDOW=1000000` / `REMS_CHARS_PER_TOKEN=1.5`(`REMS_` 前缀,rems 读 `.env`)。
+  注意:`context_window` 同步放大 `physical_redline`/`safe_watermark`/`wp_role_capacity`。
+- **默认无流式**:`OpenAICompatibleModel.generate` 用 `urlopen(...).read()` 整包读;
+  `len_msg` 警告来自 rems 代谢服务(`Input length ... exceeds len_msg ...; boundary detection will still run`),
+  是 `logger.warning`,非报错。
+
+## 5. 目录约定
+
+- 数据/会话在 `{data-dir}/.jshi/`(默认 `.jshi`,由 `JSHI_DATA_DIR` 覆盖):`subject.sqlite3`、`identities.json`、
+  `cli_session.json`(存 `subject_id`/`speaker`)、`super_permissions.json`、`memory_ratings.jsonl`、`recall_strategy.json`、`rems/`。
+- 会话当前说话人在 `.jshi/cli_session.json`;`/login` 按 `_current_object_id()` 解析的 object_id 查 `super_permissions.json`,
+  不在就报"密码错误或该对象无超级权限"——先确认授权对象是不是你当前说话人。

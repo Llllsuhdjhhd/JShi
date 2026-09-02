@@ -1,0 +1,30 @@
+---
+description: 推送到 GitHub 时直接走 gh api，不要试 git HTTPS
+alwaysApply: true
+---
+
+# 远程推送
+
+本机连 GitHub：`gh api` 可用；`git` 的 HTTPS（`github.com:443`）不可用。用户要求推送时，**不要先试** `git push` / `git fetch` / `git pull` / `git ls-remote`。
+
+SSH 密钥对应账号 `lucha2013`，对该仓库无写权限，不要用 SSH 推。
+
+## 做法
+
+本地照常 `git commit`、`git merge`。推远程时：
+
+1. `gh api` 建 tree（`base_tree` + 变更文件 `content`）
+2. `gh api` 建 commit（author / committer / message 与本地一致，使 SHA 对齐）
+3. 更新引用：`PATCH` 已有分支，`POST` 新建分支
+4. `git update-ref` 同步 `refs/remotes/origin/...`，让本地显示已与 origin 一致
+
+仓库：`Llllsuhdjhhd/JShi`。查远程引用用 `gh api repos/Llllsuhdjhhd/JShi/git/ref/heads/<branch>`。
+
+```text
+# 错误
+git push origin main
+# 连不上再试 HTTP/1.1、SSH、再试一次
+
+# 正确
+用户说推送 → 直接 gh api 建 tree / commit / 更新 refs
+```
