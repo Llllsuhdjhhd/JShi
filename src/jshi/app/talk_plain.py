@@ -102,6 +102,9 @@ def run_plain(session: TalkSession) -> None:
         outcome = session.handle(line)
         for event in outcome.events:
             if event.kind == "speech":
+                # 流式已由 on_reply 打印:此时 speech 文本为空,跳过,避免重复/空行。
+                if not event.text.strip():
+                    continue
                 print(wrap_display_text(f"匠石：{event.text}", width))
             else:
                 print(wrap_display_text(event.text, width))

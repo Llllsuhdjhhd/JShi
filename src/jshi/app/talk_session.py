@@ -450,9 +450,11 @@ class TalkSession:
                     del self._timings[:-TIMING_KEEP]
             spoken = result.action_text.strip() if result.action_text else ""
             if self._reply_streamed:
-                # 已由 on_reply 流式打印,不再重复。
-                spoken = ""
+                # 已由 on_reply 流式打印,本轮的 speech 事件不再重复(置空,前端跳过)。
+                speech_text = ""
                 self._reply_streamed = False
+            else:
+                speech_text = spoken or "（本轮未开口）"
             embodied = result.response_plan.embodied_text().strip()
             view = self.process.activity_ledger.current_context_view(self.subject_id)
             meta = (
@@ -463,7 +465,7 @@ class TalkSession:
             )
             return TalkOutcome(
                 (
-                    TalkEvent("speech", spoken or "（本轮未开口）"),
+                    TalkEvent("speech", speech_text),
                     TalkEvent("meta", meta),
                 )
             )
