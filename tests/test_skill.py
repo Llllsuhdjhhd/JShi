@@ -67,17 +67,19 @@ def _payload() -> dict:
         "object_assessment": {"conclusion": "confirm", "object_id": "OBJ-DP", "label": "dp", "reason": "档案一致"},
         "recall_requests": [{"query": "魔法书 参数", "budget": 3, "level": 2, "object_ids": ["OBJ-DP"], "anchor_event_ids": []}],
         "importance_ranking": [{"id": "seg-12", "importance": 0.9, "reason": "当前焦点"}],
+        "rewritten_context": "对方定口径。承诺仍在。",
     }
 
 
 def test_cognition_skill_produces_usage_segments(tmp_path):
     skill = CognitionSkill(FakeModel(_payload()))
     resp = skill.run(make_request())
-    assert resp.model == "deepseek-flash@v9"  # I-004：模型 + skill 版本
+    assert resp.model == "deepseek-flash@v10"  # I-004：模型 + skill 版本
     assert resp.response_plan.mode == "respond"
     assert "working_set_limit" in resp.response_plan.verbal_text()
     assert resp.context_assessment.focus == ("seg-12",)
     assert resp.object_assessment.conclusion == "confirm"
+    assert resp.rewritten_context == "对方定口径。承诺仍在。"
     assert resp.object_assessment.object_id == "OBJ-DP"
     assert resp.recall_requests[0].level == 2
     # 第 5 用途段"重要性排序"（给 14，占位）
@@ -100,15 +102,16 @@ def test_instruction_keeps_rules_without_examples():
     assert "【关于输入】" in text
     assert "【价值】" in text
     assert "【回应方式】" in text
-    assert "【其余工作】" in text
+    assert "【现场】" in text
     assert "【输出格式】" in text
     assert "{values}" in text
     assert "{active_zone_chars}" in text
+    assert "{style_instruction}" in text
     assert "{speaker_label}" not in text
     assert "不伤害人类" in text
     assert "respond（回话）" in text
     assert "ignore（忽略）" in text
-    assert "现场回忆打分" in text
+    assert "rewritten_context" in text
     assert "才提出 recall_requests" not in text
     assert "追加评价与召回" not in text
     assert "对象确认" in text
@@ -143,10 +146,10 @@ def test_object_assessment_name_is_resolved_to_speaker_id():
     assert resp.object_assessment.object_id == "OBJ-DP"
 
 
-def test_ratings_replace_followup_recall_in_instruction():
+def test_rewrite_replaces_patch_in_instruction():
     system = CognitionSkill(FakeModel(_payload())).system_extra(make_request())
-    assert "现场回忆打分" in system
-    assert "memory_ratings" in system
+    assert "【现场】" in system
+    assert "rewritten_context" in system
     assert "才提出 recall_requests" not in system
     assert "追加评价与召回" not in system
 
@@ -304,7 +307,7 @@ def test_skill_model_port_routes_subject_activity_but_not_reflection():
     port = SkillModelPort(skill)
 
     subject = port.generate(make_request())
-    assert subject.model == "deepseek-flash@v9"
+    assert subject.model == "deepseek-flash@v10"
     assert subject.response_plan.mode == "respond"
     assert subject.context_assessment.focus == ("seg-12",)
 

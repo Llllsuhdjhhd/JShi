@@ -77,6 +77,8 @@ from jshi.recognition import (
 )
 from jshi.reflection import PlaceholderReflection, ReflectionPort
 from jshi.privilege import PromptRuleStore
+from jshi.style import StylePackStore, instruction_for, is_first_style_turn
+from jshi.memory.traces import JsonlRecallTraceStore, RecallTrace
 
 from .domain import (
     ALLOWED_EPISTEMIC_TRANSITIONS,
@@ -218,6 +220,8 @@ class SubjectProcess:
         prompt_rules: PromptRuleStore | None = None,
         recall_strategy: RecallStrategyStore | None = None,
         effectiveness: EffectivenessPort | None = None,
+        style_packs: StylePackStore | None = None,
+        recall_traces: JsonlRecallTraceStore | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
@@ -274,6 +278,8 @@ class SubjectProcess:
         self.effectiveness = effectiveness or InProcessEffectiveness(
             strategy=self.recall_strategy
         )
+        self.style_packs = style_packs or StylePackStore()
+        self.recall_traces = recall_traces or JsonlRecallTraceStore()
         self.reflection = reflection or PlaceholderReflection(self)
 
     # ------------------------------------------------------------------
@@ -401,7 +407,7 @@ class SubjectProcess:
             },
         )
         self.repository.add_history(fact)
-        self.activity_ledger.append_external(
+        inbound = self.activity_ledger.append_external(
             subject_id,
             actor_object_id=speaker.actor_object_id,
             text_raw=text,
@@ -444,7 +450,8 @@ class SubjectProcess:
                 content={
                     "input": text,
                     "version": view.version,
-                    "segment_ids": list(view.segment_refs),
+                    "chars": len(view.context_text or ""),
+                    "style_pack_id": view.style_pack_id,
                     "last_applied_sequence": view.last_applied_sequence,
                 },
                 source_ids=(fact.id, *view.segment_refs),
@@ -517,6 +524,14 @@ class SubjectProcess:
             activity = self.repository.update_activity(
                 activity.id, intention_ids=intent_ids
             )
+        self._record_recall_trace(
+            subject_id,
+            activity.id,
+            current,
+            input_segment_id=inbound.segment_id,
+            query=text,
+            object_id=speaker.object_id,
+        )
 
         # 感知（已接受的他人报告）
         perception = CognitiveContent(
@@ -631,23 +646,14 @@ class SubjectProcess:
                 response_statuses=final_statuses,
             )
         clock.mark("⑥行动")
-        self.activity_ledger.apply_context_assessment(
+        pack_id = self.style_packs.get(subject_id)
+        self.activity_ledger.save_rewritten_context(
             subject_id,
-            self._unshorten_context_assessment(
-                getattr(response, "context_assessment", None)
-            ),
-            allow_edit=True,
-            recall_excerpts=tuple(
-                (f"memory:{item.event_id}", item.text) for item in working_recalled
-            ),
+            getattr(response, "rewritten_context", "") or "",
             speaker_object_id=(
                 speaker.object_id if speaker is not None else None
             ),
-            protected_refs=tuple(
-                fragment.id
-                for fragment in current.fragments
-                if fragment.always or fragment.source in {"object", "identity"}
-            ),
+            style_pack_id=pack_id,
         )
 
         clock.mark("16编排")
@@ -730,6 +736,58 @@ class SubjectProcess:
                 rules.append(f"[{rule.section}] {rule.content}")
         return tuple(rules)
 
+    def _record_recall_trace(
+        self,
+        subject_id: str,
+        activity_id: str,
+        current: AssembledCurrentState,
+        *,
+        input_segment_id: str,
+        query: str,
+        object_id: str,
+    ) -> None:
+        memory_report = next(
+            (item for item in current.source_report if item.source == "memory"),
+            None,
+        )
+        recalled = tuple(
+            item.split(":", 1)[-1]
+            for item in (memory_report.loaded_ids if memory_report is not None else ())
+        )
+        skipped = tuple(
+            item.split(":", 1)[-1]
+            for item in (memory_report.skipped_ids if memory_report is not None else ())
+        )
+        try:
+            self.recall_traces.append(
+                RecallTrace(
+                    subject_id=subject_id,
+                    activity_id=activity_id,
+                    query=query,
+                    object_id=object_id,
+                    input_segment_id=input_segment_id,
+                    level=self.recall_strategy.get(subject_id).default_level,
+                    recalled_event_ids=recalled,
+                    skipped_ids=skipped,
+                )
+            )
+        except Exception:
+            logger.exception("recall_trace persist failed")
+
+    def _style_fields(
+        self, subject_id: str, view
+    ) -> tuple[str, bool]:
+        """选当前包的写法槽：空现场或刚换包走 first，否则 continue。正文由风格包填。"""
+        pack_id = self.style_packs.get(subject_id)
+        text = ""
+        zone_pack = ""
+        if view is not None:
+            text = getattr(view, "context_text", "") or ""
+            zone_pack = getattr(view, "style_pack_id", "") or ""
+        first = is_first_style_turn(text, zone_pack, pack_id)
+        registry = getattr(self.style_packs, "registry", None)
+        return instruction_for(pack_id, first=first, registry=registry), first
+
     def _cognize_once(
         self,
         current: AssembledCurrentState,
@@ -752,6 +810,9 @@ class SubjectProcess:
                 status=current.speaker.status,
                 reason=current.speaker.reason,
             )
+        style_instruction, style_first = self._style_fields(
+            current.subject_state.subject_id, current.context_view
+        )
         request = ModelRequest(
             purpose="subject_activity",
             input_text=current.input_text,
@@ -761,6 +822,8 @@ class SubjectProcess:
             governing_rules=self._governing_rules(
                 current.subject_state.subject_id
             ),
+            style_instruction=style_instruction,
+            style_first=style_first,
             context=self._model_context(
                 current.subject_state.subject_id,
                 working_recalled,
@@ -1039,6 +1102,15 @@ class SubjectProcess:
                         "text": text,
                         "label": self._object_display(actor_by_segment.get(segment_id)),
                         "occurred_at": _iso(time_by_segment.get(segment_id)),
+                    }
+                )
+            if not segments and (context_view.context_text or "").strip():
+                segments.append(
+                    {
+                        "id": "zone",
+                        "text": context_view.context_text,
+                        "label": "",
+                        "occurred_at": "",
                     }
                 )
             items.append(

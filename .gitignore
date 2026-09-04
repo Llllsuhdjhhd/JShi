@@ -19,3 +19,4 @@ tests/idiot/reports/*
 !tests/idiot/reports/_template.md
 !tests/idiot/reports/archive/
 !tests/idiot/reports/archive/**
+/rems_quality

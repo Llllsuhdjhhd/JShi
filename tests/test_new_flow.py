@@ -22,7 +22,11 @@ class FixedModel:
     name = "fixed-model"
 
     def generate(self, request: ModelRequest) -> ModelResponse:
-        return ModelResponse(text="回应", model=self.name)
+        return ModelResponse(
+            text="回应",
+            model=self.name,
+            rewritten_context=request.input_text,
+        )
 
 
 def runtime(tmp_path, model=None):
@@ -87,7 +91,7 @@ def test_active_zone_loads_raw_window_without_attribution(tmp_path):
         if item.event_type == "context_window_loaded"
     ]
     assert len(loaded) == 1
-    assert loaded[0].content["segment_ids"] == []
+    assert loaded[0].content["chars"] == 0
     assert loaded[0].content["version"] == 0
     assembled = [
         item
@@ -109,7 +113,7 @@ def test_first_input_is_not_in_context_view_until_apply(tmp_path):
         for item in subject
         if item.event_type == "context_window_loaded"
     ]
-    assert loaded[0].content["segment_ids"] == []
+    assert loaded[0].content["chars"] == 0
     assert result.current_state.context_view.context_text == ""
     assert "今天有些疲倦" in process.activity_ledger.current_context_view(
         "stone"

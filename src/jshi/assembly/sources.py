@@ -136,7 +136,7 @@ class ActivityWindowSource:
 
 
 class PersonalWorldSource:
-    """个人世界源（08）：透传 select；与活跃区已有 personal id 去重。"""
+    """个人世界源（08）：每轮装真源，供 05 按风格重写。不再与活跃区 id 去重。"""
 
     name = "personal"
     status = "implemented"
@@ -147,16 +147,7 @@ class PersonalWorldSource:
     def load(self, ctx: AssemblyContext) -> LoadResult:
         from jshi.personalworld.values import is_binding, is_boundary
 
-        occupied = _occupied_personal_ids(ctx.context_view)
         selected = tuple(self._personal_world.select(ctx.subject_id))
-        skipped: list[str] = []
-        kept = []
-        for item in selected:
-            fragment_id = f"personal:{item.id}"
-            if fragment_id in occupied or item.id in occupied:
-                skipped.append(fragment_id)
-                continue
-            kept.append(item)
         fragments = tuple(
             AssemblyFragment(
                 source="personal",
@@ -169,23 +160,9 @@ class PersonalWorldSource:
                 always=item.kind.value == "commitment"
                 or (is_boundary(item) and is_binding(item)),
             )
-            for item in kept
+            for item in selected
         )
-        return LoadResult(
-            fragments=fragments,
-            raw_items=tuple(kept),
-            skipped_ids=tuple(skipped),
-        )
-
-
-def _occupied_personal_ids(view) -> set[str]:
-    if view is None:
-        return set()
-    occupied: set[str] = set()
-    occupied.update(view.segment_refs)
-    occupied.update(view.focused_refs)
-    occupied.update(ref for ref, _text in view.recall_excerpts)
-    return occupied
+        return LoadResult(fragments=fragments, raw_items=selected)
 
 
 class MemorySource:

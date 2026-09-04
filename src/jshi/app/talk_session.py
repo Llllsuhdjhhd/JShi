@@ -20,6 +20,7 @@ SESSION_FILE = "cli_session.json"
 TALK_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("/speaker", "名字", "切换对象（写入会话，下次启动仍有效）"),
     ("/who", "", "当前对象"),
+    ("/style", "名称", "查看或切换写法（已注册的风格包；提示词里不出现配置名）"),
     ("/context", "", "看本轮活跃区与装载（不调模型）"),
     ("/plan", "", "看上一轮 05 的 response_plan 条目"),
     ("/prompt", "", "看即将发给模型的 system 与 user"),
@@ -234,6 +235,8 @@ class TalkSession:
                     ),
                 )
             )
+        if line == "/style" or line.startswith("/style "):
+            return self._handle_style(line)
         if line == "/speaker" or line.startswith("/speaker "):
             return self._handle_speaker(line)
         if line == "/login" or line.startswith("/login "):
@@ -282,6 +285,40 @@ class TalkSession:
         save_session(self.data_dir, subject_id=self.subject_id, speaker=self.speaker)
         return TalkOutcome(
             (TalkEvent("notice", f"对象改为 {self.speaker}（已记住）"),)
+        )
+
+    def _handle_style(self, line: str) -> TalkOutcome:
+        packs = getattr(self.process, "style_packs", None)
+        if packs is None:
+            return TalkOutcome((TalkEvent("notice", "当前运行没有风格包存储"),))
+        registry = getattr(packs, "registry", None)
+        labels = []
+        display = {}
+        if registry is not None:
+            for pack in registry.all_packs():
+                label = pack.display_name or pack.pack_id
+                labels.append(label)
+                display[pack.pack_id] = label
+        names = "、".join(labels)
+        parts = line.split(None, 1)
+        current = packs.get(self.subject_id)
+        if len(parts) < 2 or not parts[1].strip():
+            return TalkOutcome(
+                (
+                    TalkEvent(
+                        "notice",
+                        f"当前写法 {display.get(current, current)}。用法：/style {names}",
+                    ),
+                )
+            )
+        chosen = packs.set(self.subject_id, parts[1].strip())
+        return TalkOutcome(
+            (
+                TalkEvent(
+                    "notice",
+                    f"写法改为 {display.get(chosen, chosen)}（已记住；提示词里仍只称匠石）",
+                ),
+            )
         )
 
     def _current_object_id(self) -> str | None:
@@ -486,10 +523,16 @@ class TalkSession:
             return f"错误：{exc}"
         except Exception as exc:
             return f"预览失败：{exc}"
+        from jshi.style import DISPLAY_NAMES
+
         view = preview.context_view
+        pack_id = view.style_pack_id
+        if not pack_id and hasattr(self.process, "style_packs"):
+            pack_id = self.process.style_packs.get(self.subject_id)
+        pack_label = DISPLAY_NAMES.get(pack_id, pack_id or "")
         lines = [
             f"对象 {preview.speaker.label} {preview.speaker.status} {preview.speaker.object_id}",
-            f"活跃区 v{view.version} 段{list(view.segment_refs)}",
+            f"活跃区 v{view.version} {pack_label} {len(view.context_text or '')}字",
         ]
         body = view.context_text.strip()
         lines.append(body if body else "（活跃区为空）")
@@ -536,6 +579,9 @@ class TalkSession:
                     status=sp.status,
                     reason=sp.reason,
                 )
+            style_instruction, style_first = self.process._style_fields(
+                self.subject_id, assembled.context_view
+            )
             req = ModelRequest(
                 purpose="subject_activity",
                 input_text=query,
@@ -543,6 +589,8 @@ class TalkSession:
                 speaker=speaker,
                 now=datetime.now().astimezone(),
                 governing_rules=self.process._governing_rules(self.subject_id),
+                style_instruction=style_instruction,
+                style_first=style_first,
                 context=self.process._model_context(
                     self.subject_id,
                     assembled.recalled,

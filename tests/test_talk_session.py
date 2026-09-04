@@ -170,12 +170,11 @@ def test_runtime_reloads_active_zone_after_new_process(tmp_path):
     first.experience("stone", "你好，记下这句。", object_ref="dp")
     view = first.active_zone.load("stone")
     assert view.version >= 1
-    assert view.segment_refs
+    assert view.context_text
 
     second, _identities, _again = _runtime(tmp_path)
     restored = second.active_zone.load("stone")
     assert restored.version == view.version
-    assert restored.segment_refs == view.segment_refs
     assert restored.context_text == view.context_text
 
 

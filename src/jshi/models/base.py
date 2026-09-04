@@ -32,6 +32,10 @@ class ModelRequest:
     now: datetime | None = None
     # 超级权限用户写入的附加规则（已格式化），渲染进 system 的【附加规则】。
     governing_rules: tuple[str, ...] = ()
+    # 当前风格包的写法要求（不含配置名）。空则只用 skill 里的【现场】。
+    style_instruction: str = ""
+    # 程序判定：本轮是否该风格的首次编写（空现场或刚切换）。
+    style_first: bool = False
 
 
 @dataclass(frozen=True)
@@ -143,6 +147,7 @@ class ModelResponse:
     context_assessment: ContextAssessment = field(default_factory=ContextAssessment)
     importance_ranking: tuple[ImportanceRank, ...] = ()
     memory_ratings: MemoryRatings = field(default_factory=MemoryRatings)
+    rewritten_context: str = ""
 
     @property
     def text(self) -> str:
@@ -169,6 +174,7 @@ class ModelResponse:
         context_assessment: ContextAssessment | None = None,
         importance_ranking: tuple[ImportanceRank, ...] = (),
         memory_ratings: MemoryRatings | None = None,
+        rewritten_context: str = "",
         *,
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
@@ -200,6 +206,7 @@ class ModelResponse:
             "memory_ratings",
             memory_ratings if memory_ratings is not None else MemoryRatings(),
         )
+        object.__setattr__(self, "rewritten_context", rewritten_context or "")
 
 
 class ModelPort(Protocol):
@@ -232,6 +239,7 @@ class EchoModel:
                 ],
             },
             "context_assessment": {"remove": [], "drop_recall": [], "focus": []},
+            "rewritten_context": request.input_text,
         }
         return ModelResponse(
             text=json.dumps(payload, ensure_ascii=False),

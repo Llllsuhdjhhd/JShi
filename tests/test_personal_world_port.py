@@ -140,7 +140,7 @@ def test_subject_process_uses_injected_port(runtime):
     assert [item.content for item in assembled.personal_items] == ["仅此一条"]
 
 
-def test_assembly_skips_personal_ids_already_in_active_zone(runtime):
+def test_assembly_still_loads_personal_when_zone_has_old_id(runtime):
     repository, identities = runtime
     world = InProcessPersonalWorld(repository)
     process = SubjectProcess(repository, identities, FixedModel(), personal_world=world)
@@ -165,6 +165,4 @@ def test_assembly_skips_personal_ids_already_in_active_zone(runtime):
     personal_ids = {
         fragment.id for fragment in ws.fragments if fragment.source == "personal"
     }
-    assert f"personal:{value_id}" not in personal_ids
-    report = {item.source: item for item in ws.report}
-    assert f"personal:{value_id}" in report["personal"].skipped_ids
+    assert f"personal:{value_id}" in personal_ids

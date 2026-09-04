@@ -11,10 +11,12 @@ from jshi.effectiveness import InProcessEffectiveness, JsonlRatingStore
 from jshi.experienceledger import SqliteExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.memory import MemoryShell, RecallStrategyStore, build_memory_backend
+from jshi.memory.traces import JsonlRecallTraceStore
 from jshi.models import EchoModel, ModelPort, OpenAICompatibleModel
 from jshi.privilege import PromptRuleStore, SuperPermissionStore
 from jshi.recognition import CarrierEntry, ObjectProfile, new_object_id
 from jshi.skill import CognitionSkill, SkillModelPort
+from jshi.style import StylePackStore
 from jshi.subject import (
     EpistemicStatus,
     HistoryKind,
@@ -103,6 +105,8 @@ def _runtime(
         prompt_rules=prompt_rules,
         recall_strategy=recall_strategy,
         effectiveness=effectiveness,
+        style_packs=StylePackStore(data_dir / "style_pack.json"),
+        recall_traces=JsonlRecallTraceStore(data_dir / "recall_traces.jsonl"),
     )
     return process, identities, subjects
 

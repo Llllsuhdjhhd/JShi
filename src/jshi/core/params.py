@@ -28,9 +28,9 @@ DEFAULT_MODEL_CONTEXT_WINDOW: int = 1_000_000
 # 活跃区占窗口的比例。见《概念词汇》「活跃区比」。
 ACTIVE_ZONE_RATIO: float = 1 / 30
 
-# 03 工作集：非保护片段的字符预算占窗口的比例。
-# 只裁 always=False 的非保护片段；身份 / 对象 / 既往视图正文 / 08 常驻不占此预算。
-WORKING_SET_LIMIT_RATIO: float = 1 / 15
+# 03 工作集：非保护片段（本轮回忆 + 普通价值）的字符预算。
+# 身份 / 对象 / 既往视图正文 / 08 常驻不占此预算。固定字数，不随窗口放大。
+WORKING_SET_LIMIT_CHARS: int = 1500
 
 # 普通价值装载占活跃区字符预算的比例。按字截断；binding 边界不占此预算。
 VALUE_LOAD_RATIO: float = 1 / 5
@@ -50,12 +50,11 @@ def active_zone_chars(context_window: int | None = None) -> int:
 
 
 def working_set_limit(context_window: int | None = None) -> int:
-    """03 工作集非保护片段的字符预算：窗口 × 1/15，至少 1。
+    """03 工作集非保护片段的字符预算，默认 1500 字。
 
-    ``context_window`` 为模型上下文窗口（token）；缺省用
-    ``DEFAULT_MODEL_CONTEXT_WINDOW``。返回字符预算，不是片段条数。
+    不随模型窗口放大。``context_window`` 保留签名，当前忽略。
     """
-    return max(1, round(_base_window(context_window) * WORKING_SET_LIMIT_RATIO))
+    return max(1, int(WORKING_SET_LIMIT_CHARS))
 
 
 def value_load_char_budget(active_zone: int | None = None) -> int:
@@ -86,7 +85,7 @@ __all__ = [
     "DEFAULT_MODEL_CONTEXT_WINDOW",
     "VALUE_CATALOG_REFRESH_SECONDS",
     "VALUE_LOAD_RATIO",
-    "WORKING_SET_LIMIT_RATIO",
+    "WORKING_SET_LIMIT_CHARS",
     "active_zone_chars",
     "value_load_char_budget",
     "working_set_limit",

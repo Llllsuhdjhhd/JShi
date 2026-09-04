@@ -28,6 +28,7 @@ from typing import Any, Callable, Generic, Mapping, TypeVar
 
 from jshi.core.params import active_zone_chars
 from jshi.models import ModelPort, ModelRequest, ModelResponse
+from jshi.style import instruction_for
 
 T = TypeVar("T")
 
@@ -158,6 +159,12 @@ class Skill(ABC, Generic[T]):
                 if str(item).strip()
             ),
             "active_zone_chars": str(active_zone_chars()),
+            "style_instruction": (
+                (getattr(request, "style_instruction", None) or "").strip()
+                or instruction_for(
+                    None, first=bool(getattr(request, "style_first", False))
+                )
+            ),
         }
         text = self.instruction
         for key, value in values.items():

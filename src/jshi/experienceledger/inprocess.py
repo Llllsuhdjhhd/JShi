@@ -326,6 +326,44 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         self._after_write(subject_id)
         return state.context
 
+    def save_rewritten_context(
+        self,
+        subject_id: str,
+        context_text: str,
+        *,
+        speaker_object_id: str | None = None,
+        style_pack_id: str = "",
+    ) -> ContextViewState:
+        """保存 05 整份现场正文。空正文保留上一份；超长从尾截断（保留开头）。"""
+        state = self._state(subject_id)
+        last_applied = state.context.last_applied_sequence
+        if state.pending_sequences:
+            last_applied = max(last_applied, max(state.pending_sequences))
+            state.pending_sequences.clear()
+        kept_speaker = speaker_object_id or state.context.speaker_object_id
+        text = (context_text or "").strip()
+        if not text:
+            if last_applied != state.context.last_applied_sequence:
+                state.context = replace(
+                    state.context,
+                    last_applied_sequence=last_applied,
+                    speaker_object_id=kept_speaker,
+                )
+                self._after_write(subject_id)
+            return state.context
+        cap = self.active_window_chars
+        if len(text) > cap:
+            text = text[:cap]
+        state.context = ContextViewState(
+            version=state.context.version + 1,
+            context_text=text,
+            speaker_object_id=kept_speaker,
+            last_applied_sequence=last_applied,
+            style_pack_id=style_pack_id or state.context.style_pack_id,
+        )
+        self._after_write(subject_id)
+        return state.context
+
     def list_experiences(
         self,
         subject_id: str,

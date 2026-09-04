@@ -2,8 +2,8 @@
 
 - 输入：``ModelRequest``（本轮上下文：``input_text`` / ``speaker`` / ``subject_state`` /
   ``context``）。
-- 输出：``ModelResponse``（含 ``response_plan`` / ``context_assessment`` /
-  ``memory_ratings`` / ``object_assessment`` 各用途段）。
+- 输出：``ModelResponse``（含 ``response_plan`` / ``rewritten_context`` /
+  ``object_assessment`` 等用途段）。
 - 一次调用即产出多用途段；主流程不执行 ``recall_requests``。
 """
 
@@ -65,6 +65,7 @@ COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
                 "focus": {"type": "array", "items": {"type": "string"}},
             },
         },
+        "rewritten_context": {"type": "string"},
         "object_assessment": {
             "type": "object",
             "properties": {
@@ -261,6 +262,7 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         context_assessment=context_assessment,
         importance_ranking=importance_ranking,
         memory_ratings=_parse_memory_ratings(data),
+        rewritten_context=str(data.get("rewritten_context") or "").strip(),
     )
 
 
@@ -290,6 +292,7 @@ def _bind_speaker_fields(response: ModelResponse, request: ModelRequest) -> Mode
         context_assessment=response.context_assessment,
         importance_ranking=response.importance_ranking,
         memory_ratings=response.memory_ratings,
+        rewritten_context=response.rewritten_context,
     )
 
 
@@ -336,21 +339,16 @@ user 里的【活跃区】和【回忆】每行都带对象名；带方括号时
 reason 写清为什么选择这个 mode。先决定这一拍要不要开口，再处理记忆/上下文；不要因为要整理回忆或缩减活跃区就 think 或不出声，那些来不及就留空。
 动作（embodied）是对本轮输入做出的动作反应，此刻假设自己是类人机器人，给出动作描述，比如对方示意你坐下，你的动作可能是「走到他指定的椅子那里，坐下来」。动作与语言组成一次完整反应，须得体、自然、不卑不亢，可伴随任何 mode，如果无需动作，则输出“无动作”。
 
-【其余工作】
-除回应外，你还可以维护上下文与对象——这些都可空，不要为了填它们而不说话。不要在本轮提出追加召回；缺口写在 coverage / gap_query，下一拍再装载。
+{style_instruction}
 
-现场回忆打分（memory_ratings）
-- 只对当前上下文里已经出现的 memory: / M 编号条目打分；没有在场回忆则整段留空或不输出。
-- coverage：sufficient | thin | missing；缺什么、关于谁写在 gap_query。不要为了打分去编造未在场的记忆。
-
-活跃区管理（context_assessment）——可空
-- 活跃区的推荐长度是 {active_zone_chars}；当前长度超过时给出删除建议，内容重要可放宽至 1.2 倍。
-- 给出要删除的部分与调整建议，保持删除后的活跃区合理。来不及则空数组。
-- 活跃区里 S 开头编号是段短编号，回忆里 M 开头编号是记忆短编号；remove / focus 只引用 S 编号，drop_recall 只引用 M 编号。
-
-对象确认（object_assessment）——可空
-- 当回忆内容指向的对象与传入的对象（本轮说话人）不一致时，可以确认对象。不确定则跳过。
-- 在合适、得体的场景下，可以询问对方。不要用同轮召回补材料。
+【现场】
+把本轮看见的全体（上一份现场、本轮原话、新回忆、对方是谁、已有承诺）整理成下一份现场全文，写入 rewritten_context。
+- 若上文有写法要求，按该要求整理；没有则按本节。不要只列删除编号。
+- 不得改变对方是谁，不得否掉或改写承诺的实质，不得把没发生的事写成经历。
+- 现场宜短，不要超过 {active_zone_chars} 字。
+- 不要做 memory_ratings；来不及就空着。
+- 对象确认（object_assessment）可空。不确定则跳过。不要用同轮召回补材料。
+- 不要因为整理现场就 think 或不出声。
 
 【输出格式】
 你的输出格式：你每轮只输出一个 JSON 对象，字段按下方 Schema；枚举字段只取允许值，不输出任何解释文字。
@@ -361,7 +359,7 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
         self,
         model: ModelPort,
         *,
-        version: str = "v9",
+        version: str = "v10",
     ) -> None:
         super().__init__(model, version=version)
 

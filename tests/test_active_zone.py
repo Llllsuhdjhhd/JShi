@@ -18,7 +18,11 @@ class CountingModel:
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         self.calls += 1
-        return ModelResponse(text="回应", model=self.name)
+        return ModelResponse(
+            text="回应",
+            model=self.name,
+            rewritten_context=request.input_text,
+        )
 
 
 def runtime(tmp_path, model=None):
@@ -71,7 +75,7 @@ def test_context_window_loaded_is_recorded(tmp_path):
         if record.event_type == "context_window_loaded"
     ]
     assert len(loaded) == 1
-    assert "segment_ids" in loaded[0].content
+    assert "chars" in loaded[0].content
     assert "version" in loaded[0].content
 
 

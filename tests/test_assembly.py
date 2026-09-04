@@ -36,7 +36,11 @@ class FixedModel:
     name = "fixed-model"
 
     def generate(self, request: ModelRequest) -> ModelResponse:
-        return ModelResponse(text="回应", model=self.name)
+        return ModelResponse(
+            text="回应",
+            model=self.name,
+            rewritten_context=request.input_text,
+        )
 
 
 def runtime(tmp_path, model=None):

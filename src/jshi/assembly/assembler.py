@@ -69,7 +69,7 @@ class CurrentStateAssembler:
             deduped.setdefault((fragment.source, fragment.id), fragment)
         fragments = tuple(deduped.values())
 
-        # 魔法书默认：窗口 × 1/15（非保护片段的字符预算）。缺省即生效，仍可显式覆盖。
+        # 魔法书默认：非保护片段 1500 字（回忆 + 普通价值）。缺省即生效，仍可显式覆盖。
         limit = (
             ctx.working_set_limit
             if ctx.working_set_limit is not None

@@ -66,13 +66,14 @@ class ExperienceSegment:
 @dataclass(frozen=True)
 class ContextViewState:
     version: int = 0
-    context_text: str = ""               # 派生：按 segment_refs + recall_excerpts 渲染
+    context_text: str = ""               # 权威：05 按风格重写的全文
     segment_refs: tuple[str, ...] = ()
-    segment_texts: tuple[tuple[str, str], ...] = ()  # (段 id, 段原文) 在场映射，供模型寻址
+    segment_texts: tuple[tuple[str, str], ...] = ()  # 旧库兼容；新保存清空
     recall_excerpts: tuple[tuple[str, str], ...] = ()
     speaker_object_id: str | None = None
-    focused_refs: tuple[str, ...] = ()   # 段级聚焦引用
+    focused_refs: tuple[str, ...] = ()
     last_applied_sequence: int = 0
+    style_pack_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,15 @@ class ExperienceLedgerPort(Protocol):
         recall_excerpts: Sequence[tuple[str, str]] = (),
         speaker_object_id: str | None = None,
         protected_refs: Sequence[str] = (),
+    ) -> ContextViewState: ...
+
+    def save_rewritten_context(
+        self,
+        subject_id: str,
+        context_text: str,
+        *,
+        speaker_object_id: str | None = None,
+        style_pack_id: str = "",
     ) -> ContextViewState: ...
 
     def list_experiences(

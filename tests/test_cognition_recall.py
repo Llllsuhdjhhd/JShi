@@ -165,8 +165,6 @@ def test_no_recall_no_metrics_or_evaluation(tmp_path):
 
 
 def test_trim_plan_updates_active_zone_without_second_model_call(tmp_path):
-    from jshi.experienceledger import ContextAssessment
-
     class TrimModel:
         name = "trim-model"
 
@@ -180,9 +178,7 @@ def test_trim_plan_updates_active_zone_without_second_model_call(tmp_path):
             return ModelResponse(
                 text="回应",
                 model=self.name,
-                context_assessment=ContextAssessment(
-                    drop_recall=("memory:kept-out",),
-                ),
+                rewritten_context="本轮只留新话。",
             )
 
     model = TrimModel()
@@ -198,6 +194,7 @@ def test_trim_plan_updates_active_zone_without_second_model_call(tmp_path):
     assert model.calls == 1
     assert view.recall_excerpts == ()
     assert "过时线索" not in view.context_text
+    assert view.context_text == "本轮只留新话。"
     assert view.speaker_object_id
 
 
