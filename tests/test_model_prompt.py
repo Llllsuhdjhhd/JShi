@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime
 
+import pytest
+
 from jshi.core import Provenance, SubjectState
-from jshi.models import ModelRequest, ModelSpeaker, build_system, build_user
+from jshi.models import ModelRequest, ModelSpeaker, OpenAICompatibleModel, build_system, build_user
 from jshi.skill import CognitionSkill
 from jshi.models.base import EchoModel
 
@@ -190,3 +193,113 @@ def test_build_user_labels_segments_and_memories_with_time():
 
     assert "seg-a[2026-08-29 20:15]（lux）：昨天见的" in user
     assert "memory:extra[2026-07-01 09:30]（lux）：以前说过岭南" in user
+
+
+class _FakeChatResponse:
+    def __init__(self, payload: bytes | list[bytes]) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> "_FakeChatResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        assert isinstance(self._payload, bytes)
+        return self._payload
+
+    def __iter__(self):
+        assert isinstance(self._payload, list)
+        return iter(self._payload)
+
+
+def test_openai_compatible_disables_thinking(monkeypatch) -> None:
+    monkeypatch.delenv("JSHI_MODEL_THINKING", raising=False)
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN201
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _FakeChatResponse(
+            json.dumps(
+                {
+                    "id": "chatcmpl-test",
+                    "choices": [{"message": {"content": '{"mode":"respond"}'}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("jshi.models.base.urlopen", fake_urlopen)
+    model = OpenAICompatibleModel(
+        "https://api.deepseek.com/v1/chat/completions",
+        "sk-test",
+        "deepseek-v4-flash",
+    )
+    response = model.generate(_request())
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["thinking"] == {"type": "disabled"}
+    assert "stream" not in body
+    assert response.text == '{"mode":"respond"}'
+
+
+def test_openai_compatible_thinking_can_be_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("JSHI_MODEL_THINKING", "enabled")
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN201
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeChatResponse(
+            json.dumps(
+                {"choices": [{"message": {"content": "{}"}}]}
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("jshi.models.base.urlopen", fake_urlopen)
+    OpenAICompatibleModel(
+        "https://api.deepseek.com/v1/chat/completions",
+        "sk-test",
+        "deepseek-v4-flash",
+    ).generate(_request())
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["thinking"] == {"type": "enabled"}
+
+
+def test_openai_compatible_thinking_rejects_unknown(monkeypatch) -> None:
+    monkeypatch.setenv("JSHI_MODEL_THINKING", "maybe")
+    with pytest.raises(ValueError, match="JSHI_MODEL_THINKING"):
+        OpenAICompatibleModel(
+            "https://api.deepseek.com/v1/chat/completions",
+            "sk-test",
+            "deepseek-v4-flash",
+        ).generate(_request())
+
+
+def test_openai_compatible_stream_also_disables_thinking(monkeypatch) -> None:
+    monkeypatch.delenv("JSHI_MODEL_THINKING", raising=False)
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN201
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        event = json.dumps(
+            {"choices": [{"delta": {"content": "你好"}}]}
+        )
+        return _FakeChatResponse(
+            [f"data: {event}\n".encode("utf-8"), b"data: [DONE]\n"]
+        )
+
+    monkeypatch.setattr("jshi.models.base.urlopen", fake_urlopen)
+    model = OpenAICompatibleModel(
+        "https://api.deepseek.com/v1/chat/completions",
+        "sk-test",
+        "deepseek-v4-flash",
+    )
+    chunks = list(model.generate_stream(_request()))
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["thinking"] == {"type": "disabled"}
+    assert body["stream"] is True
+    assert chunks == ["你好"]

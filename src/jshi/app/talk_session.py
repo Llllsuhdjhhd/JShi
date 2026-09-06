@@ -24,6 +24,7 @@ TALK_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("/context", "", "看片场、木头账本与装载（不调模型）"),
     ("/last", "", "上一轮实际装上的回忆与片场（全文）"),
     ("/memory", "", "最近一次记忆落库（全文）"),
+    ("/memory_raw", "", "尚未交 09 的账本原文（记忆游标之后）"),
     ("/plan", "", "看上一轮 05 的 response_plan 条目"),
     ("/response", "", "看上一轮模型回复（易读）"),
     ("/response_raw", "", "看上一轮模型原文（解析前）"),
@@ -105,6 +106,13 @@ def _delivery_label(result) -> str:
     status = (getattr(result, "status", None) or "").strip() or "未知"
     if status == "skipped":
         reason = getattr(getattr(result, "decision", None), "reason", "") or ""
+        labels = {
+            "insufficient_memory_data": "数据不足",
+            "previous_memory_process_not_finished": "上轮未完",
+            "max_retry_reached": "已达重试上限",
+        }
+        if reason in labels:
+            return f"skipped（{labels[reason]}）"
         return f"skipped（{reason}）" if reason else "skipped"
     return status
 
@@ -334,6 +342,8 @@ class TalkSession:
             return TalkOutcome((TalkEvent("overlay", self._last_text()),))
         if line == "/memory":
             return TalkOutcome((TalkEvent("overlay", self._memory_text()),))
+        if line == "/memory_raw":
+            return TalkOutcome((TalkEvent("overlay", self._memory_raw_text()),))
         if line == "/plan":
             return TalkOutcome((TalkEvent("overlay", self._plan_text()),))
         if line == "/response" or line == "/reply":
@@ -749,6 +759,51 @@ class TalkSession:
             ).strip() or "（无摘要）"
             rows.append((event_id, text))
         return rows
+
+    def _memory_raw_text(self) -> str:
+        ledger = getattr(self.process, "activity_ledger", None)
+        if ledger is None:
+            return "当前运行没有经历账本。"
+        from jshi.experienceledger import ConsumerKind
+
+        cursor = ledger.consumer_cursor(self.subject_id, ConsumerKind.MEMORY)
+        head = ledger.head_sequence(self.subject_id)
+        pending = list(ledger.list_experiences(self.subject_id, after_sequence=cursor))
+        lines = [
+            f"记忆游标 {cursor} / 账本末段 {head}",
+            f"未交 09：{len(pending)} 段",
+        ]
+        if not pending:
+            lines.append("没有尚未落库的账本段。")
+            return "\n".join(lines)
+        for segment in pending:
+            kind = getattr(segment.output_kind, "value", segment.output_kind)
+            speaker = self._segment_label(segment)
+            body = (segment.text_raw or "").strip() or "（空正文）"
+            lines.append(f"- seq {segment.sequence} {kind} {speaker}")
+            lines.append(body)
+        return "\n".join(lines)
+
+    def _segment_label(self, segment) -> str:
+        actor = getattr(segment, "actor_object_id", None)
+        objects = dict(getattr(segment, "objects", None) or {})
+        if actor:
+            for name, oid in objects.items():
+                if oid == actor:
+                    return name
+            profiles = getattr(self.process, "profiles", None)
+            if profiles is not None:
+                profile = profiles.get(actor)
+                if profile is not None and getattr(profile, "label", None):
+                    return profile.label
+            return actor
+        if objects:
+            return "、".join(objects)
+        kind = getattr(segment, "actor_kind", None)
+        value = getattr(kind, "value", kind)
+        if value == "subject":
+            return "匠石"
+        return "（无对象）"
 
     def _plan_text(self) -> str:
         plan = self.last_plan

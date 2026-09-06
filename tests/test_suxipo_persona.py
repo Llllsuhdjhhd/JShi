@@ -51,9 +51,25 @@ class FakeModel:
         )
 
 
-def test_suxipo_zone_chars_magic_number():
-    assert SUXIPO_ZONE_CHARS == 2000
-    assert suxipo_zone_chars() == 2000
+def test_format_zone_budget_note_over_and_under():
+    from jshi.style import format_zone_budget_note
+
+    over = format_zone_budget_note(3329, 2000)
+    assert "【片场字数】" in over
+    assert "已超限 1329 字" in over
+    assert "不得为 []" in over
+    assert "最无关" in over
+    assert "mod 压缩" in over
+    assert "不要只删最旧的" not in over
+    under = format_zone_budget_note(800, 2000)
+    assert "未超限，还剩 1200 字" in under
+    assert "可为 []" in under
+
+
+def test_zone_store_body_chars_excludes_block_ids():
+    zone = ZoneStore()
+    zone.boot("s", value="介绍", scene=["甲甲", "乙"])
+    assert zone.body_chars("s") == len("介绍") + len("甲甲") + len("乙")
 
 
 def test_suxipo_pack_content_and_contract():
@@ -67,6 +83,9 @@ def test_suxipo_pack_content_and_contract():
     assert "海明威" in instruction
     assert "不要填 id" in instruction
     assert '"edit": []' in instruction
+    assert "已超限时不得交空 edit" in instruction
+    assert "删哪一块、改哪一块由你判断" in instruction
+    assert "几条都重要" in instruction
     assert "本轮对方的话和你的回应由程序追加" in instruction
     # 配置名不进提示词
     assert "苏西坡" not in instruction
@@ -143,6 +162,8 @@ def test_smith_instruction_uses_shared_edit_rules():
     assert instruction == SMITH_INSTRUCTION
     assert "不要填 id" in instruction
     assert '"edit": []' in instruction
+    assert "已超限时不得交空 edit" in instruction
+    assert "删哪一块、改哪一块由你判断" in instruction
     assert "本轮对方的话和你的回应由程序追加" in instruction
     assert "斯密斯" not in instruction
 

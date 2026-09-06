@@ -1,5 +1,15 @@
 @echo off
-REM 默认原来的一行输入。全屏套壳：talk.cmd --tui（需 pip install textual；推荐 Windows Terminal）
+REM Default: one-line prompt. Full screen: talk.cmd --tui
+REM Use conda env py3125. PATH python is base; torch will fail there.
 cd /d "%~dp0"
-set PYTHONPATH=src
-python -m jshi.app.cli talk %*
+set "PYTHONPATH=src"
+if exist "%~dp0..\Jshi_memory\src\rems\port.py" (
+  set "PYTHONPATH=%~dp0src;%~dp0..\Jshi_memory\src"
+)
+set "PY3125=%USERPROFILE%\anaconda3\envs\py3125\python.exe"
+if exist "%PY3125%" (
+  "%PY3125%" -m jshi.app.cli talk %*
+) else (
+  echo [jshi] py3125 not found, falling back to PATH python. Recall may fail. 1>&2
+  python -m jshi.app.cli talk %*
+)

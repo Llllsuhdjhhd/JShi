@@ -72,6 +72,11 @@ class ZoneStore:
         value, blocks = self._state(subject_id)
         return not value and not blocks
 
+    def body_chars(self, subject_id: str) -> int:
+        """价值叙述 + 各场景块正文，不含 B 编号。与提示词「片场总长」同一口径。"""
+        value, blocks = self._state(subject_id)
+        return len(value) + sum(len(text) for text in blocks)
+
     def _block_offset(self, subject_id: str) -> int:
         """渲染时价值叙述占 B1，场景块从 B2 起 → 场景块下标偏移 1。"""
         return 1 if self.value_narration(subject_id) else 0

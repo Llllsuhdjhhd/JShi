@@ -1,11 +1,11 @@
 ---
-description: tune/prompt-zone-memory：按模块先文档后代码；先读记事本「下一份」
+description: memory/recall-object-bind：按模块先文档后代码；先读记事本「下一份」
 alwaysApply: true
 ---
 
 # 本次设计梳理（本分支）
 
-当前分支：`tune/prompt-zone-memory`（从 `main` @ `b0f0c03` 分出）。权威记事：`doc/design/本次梳理.md`。
+当前分支：`memory/recall-object-bind`（从本地 `main` @ `efa01e4` 分出）。权威记事：`doc/design/本次梳理.md`。
 
 每次动手前先读记事本的「下一份」；改完立刻勾进度、写变更日志。不要凭会话记忆代替记事本。
 

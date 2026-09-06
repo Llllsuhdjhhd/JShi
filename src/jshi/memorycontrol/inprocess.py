@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 import threading
 from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from jshi.core.params import active_zone_chars
 from jshi.experienceledger import ConsumerKind, ExperienceLedgerPort, OutputKind
@@ -34,12 +33,78 @@ def _origin_for(output_kind: OutputKind) -> str:
     return "internal" if output_kind is OutputKind.INTERNAL else "external"
 
 
-def _experience_text(segment) -> str:
-    if segment.text_raw:
-        return segment.text_raw
-    if segment.state_delta:
-        return json.dumps(segment.state_delta, ensure_ascii=False)
+def _name_for_object(objects: Mapping[str, str] | None, object_id: str | None) -> str:
+    if not object_id:
+        return ""
+    for key, value in dict(objects or {}).items():
+        name = str(key).strip()
+        if name and str(value).strip() == object_id:
+            return name
     return ""
+
+
+def _speaker_name(segment, subject_name: str) -> str:
+    if getattr(segment, "output_kind", None) is OutputKind.EXTERNAL_INPUT:
+        return _name_for_object(
+            getattr(segment, "objects", None),
+            getattr(segment, "actor_object_id", None),
+        )
+    return subject_name
+
+
+def _prefix_speaker(name: str, body: str) -> str:
+    if not name:
+        return body
+    if body.startswith(f"{name}：") or body.startswith(f"{name}:"):
+        return body
+    return f"{name}：{body}"
+
+
+def _embodied_from_state(state_delta: Mapping[str, object] | None) -> str:
+    if not isinstance(state_delta, dict):
+        return ""
+    raw = state_delta.get("embodied")
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, (list, tuple)):
+        parts = [str(item).strip() for item in raw if str(item).strip()]
+        return "；".join(parts)
+    return ""
+
+
+def _experience_text(segment, subject_name: str = "匠石") -> str:
+    speaker = _speaker_name(segment, subject_name or "匠石")
+    raw = getattr(segment, "text_raw", None)
+    if raw:
+        return _prefix_speaker(speaker, raw)
+    embodied = _embodied_from_state(getattr(segment, "state_delta", None))
+    if not embodied:
+        return ""
+    action = embodied if embodied.startswith("（动作：") else f"（动作：{embodied}）"
+    return _prefix_speaker(speaker, action)
+
+
+def _interlocutor_for(segment, subject_id: str) -> str | None:
+    """本段对话对象：外部输入用说话人；回复段从映射表取，多人不任取。"""
+    actor = getattr(segment, "actor_object_id", None)
+    if actor:
+        return actor
+    peers = tuple(
+        dict.fromkeys(
+            value
+            for raw in dict(getattr(segment, "objects", None) or {}).values()
+            if (value := str(raw).strip()) and value != subject_id
+        )
+    )
+    if len(peers) == 1:
+        return peers[0]
+    if len(peers) > 1:
+        mentioned = getattr(segment, "mentioned_object_ids", ()) or ()
+        for oid in mentioned:
+            if oid in peers:
+                return oid
+        return None
+    return None
 
 
 def _window_minutes(raw: str) -> tuple[int, int]:
@@ -78,9 +143,11 @@ class InProcessMemoryControl(MemoryControlPort):
         flush_on_idle_seconds: float = 1800,
         flush_night_window: str = "00:00-06:00",
         now: Callable[[], datetime] | None = None,
+        subject_name: Callable[[str], str] | None = None,
     ) -> None:
         self._ledger = ledger
         self._memory = memory
+        self._subject_name = subject_name
         self._max_retry = max_retry
         self._flush_max_chars = (
             flush_max_chars if flush_max_chars is not None else active_zone_chars()
@@ -104,6 +171,16 @@ class InProcessMemoryControl(MemoryControlPort):
             self._states[subject_id] = state
         return state
 
+    def _resolve_subject_name(self, subject_id: str) -> str:
+        lookup = self._subject_name
+        if lookup is None:
+            return "匠石"
+        try:
+            name = lookup(subject_id)
+        except KeyError:
+            return "匠石"
+        return str(name or "").strip() or "匠石"
+
     def _pending(self, subject_id: str):
         memory_start = self._ledger.consumer_cursor(subject_id, ConsumerKind.MEMORY)
         return self._ledger.list_experiences(subject_id, after_sequence=memory_start)
@@ -113,12 +190,13 @@ class InProcessMemoryControl(MemoryControlPort):
         pending = self._pending(subject_id)
         if not pending:
             return None
+        speaker = self._resolve_subject_name(subject_id)
         experiences = tuple(
             MemoryExperience(
                 subject_id=subject_id,
-                text=_experience_text(segment),
+                text=_experience_text(segment, speaker),
                 objects=dict(segment.objects or {}),
-                interlocutor=getattr(segment, "actor_object_id", None),
+                interlocutor=_interlocutor_for(segment, subject_id),
                 source_ids=tuple(segment.source_ids),
                 occurred_at=segment.occurred_at,
                 segment_id=segment.segment_id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
@@ -357,6 +358,60 @@ def _verbal_text(plan: Mapping[str, Any]) -> str:
     return ""
 
 
+def _provider_usage_metadata(result: Mapping[str, Any]) -> dict[str, Any]:
+    """从 Chat Completions JSON 抽出用量，供账单估算。缺字段则省略。"""
+    usage = result.get("usage") or {}
+    if not isinstance(usage, Mapping):
+        usage = {}
+    details = usage.get("prompt_tokens_details") or {}
+    if not isinstance(details, Mapping):
+        details = {}
+    cached = usage.get("prompt_cache_hit_tokens")
+    if cached is None:
+        cached = details.get("cached_tokens")
+    meta: dict[str, Any] = {"provider_response_id": result.get("id")}
+    if usage.get("prompt_tokens") is not None:
+        meta["prompt_tokens"] = usage.get("prompt_tokens")
+    if usage.get("completion_tokens") is not None:
+        meta["completion_tokens"] = usage.get("completion_tokens")
+    if usage.get("total_tokens") is not None:
+        meta["total_tokens"] = usage.get("total_tokens")
+    if cached is not None:
+        meta["cached_tokens"] = cached
+    if usage:
+        meta["usage"] = dict(usage)
+    return meta
+
+
+def model_thinking_type() -> str:
+    """DeepSeek V4 默认开思考。未设置时关闭；.env 里 ``JSHI_MODEL_THINKING=enabled`` 打开。"""
+    raw = (os.getenv("JSHI_MODEL_THINKING") or "disabled").strip().lower()
+    if raw in {"disabled", "off", "0", "false", "no"}:
+        return "disabled"
+    if raw in {"enabled", "on", "1", "true", "yes"}:
+        return "enabled"
+    raise ValueError(
+        f"JSHI_MODEL_THINKING 只接受 disabled 或 enabled，收到 {raw!r}"
+    )
+
+
+def _chat_payload(model: str, request: ModelRequest, *, stream: bool = False) -> bytes:
+    """Chat Completions 请求体。思考开关见 ``model_thinking_type``。"""
+    from jshi.models.prompt import build_system, build_user
+
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": build_system(request)},
+            {"role": "user", "content": build_user(request)},
+        ],
+        "thinking": {"type": model_thinking_type()},
+    }
+    if stream:
+        body["stream"] = True
+    return json.dumps(body).encode("utf-8")
+
+
 class OpenAICompatibleModel:
     """Minimal adapter for providers exposing an OpenAI-compatible chat endpoint."""
 
@@ -370,17 +425,7 @@ class OpenAICompatibleModel:
         return self._model
 
     def generate(self, request: ModelRequest) -> ModelResponse:
-        from jshi.models.prompt import build_system, build_user
-
-        payload = json.dumps(
-            {
-                "model": self._model,
-                "messages": [
-                    {"role": "system", "content": build_system(request)},
-                    {"role": "user", "content": build_user(request)},
-                ],
-            }
-        ).encode("utf-8")
+        payload = _chat_payload(self._model, request)
         http_request = Request(
             self.endpoint,
             data=payload,
@@ -395,7 +440,7 @@ class OpenAICompatibleModel:
         return ModelResponse(
             text=result["choices"][0]["message"]["content"],
             model=self.name,
-            metadata={"provider_response_id": result.get("id")},
+            metadata=_provider_usage_metadata(result),
         )
 
     def generate_stream(self, request: ModelRequest) -> Iterator[str]:
@@ -404,18 +449,7 @@ class OpenAICompatibleModel:
         与 ``generate`` 同一套 system/user;只额外加 ``stream: True`` 并按 SSE
         (``data: {...}``)逐行读。对 ``[DONE]`` 终止。
         """
-        from jshi.models.prompt import build_system, build_user
-
-        payload = json.dumps(
-            {
-                "model": self._model,
-                "stream": True,
-                "messages": [
-                    {"role": "system", "content": build_system(request)},
-                    {"role": "user", "content": build_user(request)},
-                ],
-            }
-        ).encode("utf-8")
+        payload = _chat_payload(self._model, request, stream=True)
         http_request = Request(
             self.endpoint,
             data=payload,

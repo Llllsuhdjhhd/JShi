@@ -10,6 +10,7 @@ from jshi.app.cli import _runtime
 from jshi.app.talk_session import (
     TalkSession,
     TalkSetupError,
+    _delivery_label,
     format_turn_meta,
     prepare_talk,
     recall_status,
@@ -28,9 +29,11 @@ class CountingProcess:
     def __init__(self, inner) -> None:
         self._inner = inner
         self.experience_calls = 0
+        self.last_kwargs = None
 
     def experience(self, *args, **kwargs):
         self.experience_calls += 1
+        self.last_kwargs = kwargs
         return self._inner.experience(*args, **kwargs)
 
     def preview_state(self, *args, **kwargs):
@@ -79,6 +82,14 @@ def test_format_turn_meta_splits_zone_and_ledger():
     assert "回忆 0（召回空）" in text
     assert "boot 否" in text
     assert "活跃区 v" not in text
+
+
+def test_delivery_label_shortens_insufficient_data() -> None:
+    skipped = SimpleNamespace(
+        status="skipped",
+        decision=SimpleNamespace(reason="insufficient_memory_data"),
+    )
+    assert _delivery_label(skipped) == "skipped（数据不足）"
 
 
 def test_recall_status_reports_empty_and_error():
@@ -183,6 +194,7 @@ def test_plan_and_context_do_not_create_activity(tmp_path):
     context = session.handle("/context")
     last = session.handle("/last")
     memory = session.handle("/memory")
+    memory_raw = session.handle("/memory_raw")
     raw = session.handle("/response_raw")
     assert counted.experience_calls == 1
     assert plan.events[0].kind == "overlay"
@@ -196,8 +208,26 @@ def test_plan_and_context_do_not_create_activity(tmp_path):
     assert "回忆 " in last.events[0].text
     assert memory.events[0].kind == "overlay"
     assert "记忆游标" in memory.events[0].text
+    assert memory_raw.events[0].kind == "overlay"
+    assert "未交 09" in memory_raw.events[0].text
+    assert "第一句" in memory_raw.events[0].text
     assert raw.events[0].kind == "overlay"
     assert "我听见了：第一句" in raw.events[0].text
+
+
+def test_memory_raw_empty_when_cursor_at_head(tmp_path):
+    from jshi.experienceledger import ConsumerKind
+
+    session = _make_session(tmp_path)
+    session.handle("第一句")
+    ledger = session.process.activity_ledger
+    head = ledger.head_sequence("stone")
+    ledger.advance_consumer_cursor("stone", ConsumerKind.MEMORY, head)
+    outcome = session.handle("/memory_raw")
+    text = outcome.events[0].text
+    assert "未交 09：0 段" in text
+    assert "没有尚未落库的账本段" in text
+    assert "第一句" not in text
 
 
 def test_busy_rejects_second_utterance(tmp_path):
@@ -334,4 +364,30 @@ def test_prompt_command_shows_system_and_user(tmp_path):
     assert "dp：你好" in text or "dp：" in text
     assert "system\n" in text
     assert "【正例】" not in text
+    _, user = text.split("\n---\nuser\n", 1)
+    assert "OBJ-" not in user
+
+
+def test_talk_does_not_pass_objects_but_ledger_is_filled(tmp_path):
+    host, identities, _subjects = _runtime(tmp_path)
+    identities.create(
+        IdentityProfile(
+            subject_id="stone", name="匠石", origin="测试", narrative="测试主体"
+        )
+    )
+    counted = CountingProcess(host)
+    session = TalkSession(
+        counted,
+        data_dir=tmp_path,
+        subject_id="stone",
+        speaker="lux",
+        channel=None,
+        carriers=(),
+    )
+    session.handle("你好")
+    assert counted.last_kwargs is not None
+    assert "objects" not in counted.last_kwargs
+    inbound = counted.activity_ledger.list_experiences("stone")[0]
+    assert inbound.objects is not None
+    assert inbound.objects.get("lux", "").startswith("OBJ-")
 

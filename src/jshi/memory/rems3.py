@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,21 +28,69 @@ class RemsUnavailableError(RuntimeError):
     """``JSHI_MEMORY_BACKEND=rems3`` 但 ``rems`` 包不可导入。"""
 
 
+def neighbor_rems_src() -> Path | None:
+    """邻仓 ``../Jshi_memory/src``（与本仓库并列）。没有 port.py 则不算。"""
+    repo = Path(__file__).resolve().parents[3]
+    neighbor = repo.parent / "Jshi_memory" / "src"
+    if (neighbor / "rems" / "port.py").is_file():
+        return neighbor
+    return None
+
+
+def prefer_neighbor_rems() -> Path | None:
+    """本机 conda 可能先导入另一份旧 ``rems``（无 ``port``）。邻仓放到路径最前。"""
+    neighbor = neighbor_rems_src()
+    if neighbor is None:
+        return None
+    path = str(neighbor)
+    if path in sys.path:
+        sys.path.remove(path)
+    sys.path.insert(0, path)
+    existing = sys.modules.get("rems")
+    if existing is not None:
+        file = (getattr(existing, "__file__", "") or "").replace("\\", "/")
+        if "Jshi_memory" not in file:
+            for name in list(sys.modules):
+                if name == "rems" or name.startswith("rems."):
+                    del sys.modules[name]
+    return neighbor
+
+
+def quiet_embedding_logs() -> None:
+    """句向量加载会往 stderr 打进度条、LOAD REPORT、flash attention 警告；对话里不需要。"""
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    os.environ.setdefault("TQDM_DISABLE", "1")
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+    warnings.filterwarnings(
+        "ignore",
+        message=".*flash attention.*",
+        category=UserWarning,
+    )
+
+
 def load_rems() -> tuple[Any, Any, Any]:
     """懒加载邻仓包。失败时不退回进程内后端。"""
-
+    quiet_embedding_logs()
+    prefer_neighbor_rems()
     try:
         from rems import config as rems_config
         from rems import pipeline as rems_pipeline
         from rems import port as rems_port
     except ImportError as exc:
-        import sys
-
+        imported = ""
+        module = sys.modules.get("rems")
+        if module is not None:
+            imported = getattr(module, "__file__", "") or ""
         raise RemsUnavailableError(
-            "JSHI_MEMORY_BACKEND=rems3 需要当前这条 python 已安装 rems。"
+            "JSHI_MEMORY_BACKEND=rems3 需要当前这条 python 能导入邻仓 Jshi_memory 的 rems.port。"
             f" 当前解释器：{sys.executable}"
-            f' 请用它安装："{sys.executable}" -m pip install -e <Jshi_memory 仓库路径>'
-            "（talk.cmd 的 python 往往不是刚才 pip 用的那一个）"
+            + (f" 当前导入到的 rems：{imported}" if imported else "")
+            + f' 请确认 {sys.executable} 能找到 ../Jshi_memory/src，或对该解释器执行 pip install -e <Jshi_memory>'
         ) from exc
     return rems_port, rems_pipeline.REMSPipeline, rems_config.REMSConfig
 
@@ -182,8 +231,19 @@ def embedding_weights_present(
     return False
 
 
+def local_torch_usable() -> bool:
+    """当前解释器能否真正加载 torch。base 环境的 c10.dll 会 WinError 1114。"""
+    try:
+        import torch
+
+        torch.zeros(1)
+    except Exception:
+        return False
+    return True
+
+
 def disable_local_embedding_if_needed(pipeline: Any) -> bool:
-    """权重缺失或显式跳过时，关掉语义向量，避免 SentenceTransformer/torch 卡住对话。
+    """权重缺失、torch 不可用或显式跳过时，关掉语义向量，避免卡住对话。
 
     不改成 hash 嵌入：维度不同会让 Qdrant 删掉已有 collection。
     """
@@ -197,8 +257,15 @@ def disable_local_embedding_if_needed(pipeline: Any) -> bool:
         if provider == "hash":
             return False
         model_name = str(getattr(embedding, "model_name", "") or "")
-        skip = not embedding_weights_present(model_name)
-        reason = f"本地没有 {model_name or 'embedding'} 权重"
+        if not embedding_weights_present(model_name):
+            skip = True
+            reason = f"本地没有 {model_name or 'embedding'} 权重"
+        elif not local_torch_usable():
+            skip = True
+            reason = f"当前 python 的 torch 无法加载（{sys.executable}）"
+        else:
+            skip = False
+            reason = ""
     if not skip:
         return False
     recall_pipeline = getattr(pipeline, "recall_pipeline", None)

@@ -18,7 +18,7 @@ def new_id() -> str:
 class MemoryExperience:
     """一段经历：30 按经历段映射构造，后端 ingest 的输入单元（对齐 Jshi_memory 210）。
 
-    - ``text`` 是原文，不归一化、不改写、不切分；state 类段以 JSON 表示；
+    - ``text`` 是对话行（说话人名字 + 言语/动作）；无言语无动作则为空，不用 JSON 冒充；
     - ``objects`` 覆盖一段经历涉及的所有对象（名字/称呼 → 01 object_id），与是否说话无关；
       可为空 = 主体记忆；
     - ``segment_id`` 是 30 侧经历段 id，用于 ``stored_marks`` 回填与游标推进。

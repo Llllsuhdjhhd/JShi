@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,7 @@ from jshi.memory.rems3 import (
     from_ingest_result,
     from_recalled_fragments,
     openai_compat_base_url,
+    quiet_embedding_logs,
 )
 from jshi.subject import SubjectRepository
 
@@ -134,6 +136,16 @@ def test_from_recalled_fragments_defaults_event_type():
     assert fragments[0].text == "原文"
 
 
+def test_prefer_neighbor_rems_puts_jshi_memory_first():
+    from jshi.memory.rems3 import neighbor_rems_src, prefer_neighbor_rems
+
+    neighbor = neighbor_rems_src()
+    if neighbor is None:
+        pytest.skip("本机没有并列的 Jshi_memory/src")
+    prefer_neighbor_rems()
+    assert Path(sys.path[0]).resolve() == neighbor.resolve()
+
+
 def test_embedding_weights_present_requires_large_weight_file(tmp_path):
     from jshi.memory.rems3 import embedding_weights_present
 
@@ -164,6 +176,36 @@ def test_disable_local_embedding_skips_semantic_without_torch(monkeypatch):
     assert pipeline.recall_pipeline._semantic_route("stone", "你好") == {}
     pipeline.recall_pipeline.index_event(object())
     assert called == {"semantic": 0, "index": 0}
+
+
+def test_disable_local_embedding_when_torch_broken(monkeypatch):
+    from jshi.memory.rems3 import disable_local_embedding_if_needed
+
+    monkeypatch.delenv("JSHI_REMS_SKIP_EMBEDDING", raising=False)
+    monkeypatch.setattr(
+        "jshi.memory.rems3.embedding_weights_present", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr("jshi.memory.rems3.local_torch_usable", lambda: False)
+    called = {"semantic": 0}
+
+    class Recall:
+        def _semantic_route(self, *args, **kwargs):
+            called["semantic"] += 1
+            return {"evt": 1}
+
+        def index_event(self, event) -> None:
+            return None
+
+    pipeline = SimpleNamespace(
+        config=SimpleNamespace(embedding=SimpleNamespace(provider="local", model_name="x")),
+        recall_pipeline=Recall(),
+    )
+    assert disable_local_embedding_if_needed(pipeline) is True
+    assert pipeline.recall_pipeline._semantic_route("stone", "你好") == {}
+    assert called["semantic"] == 0
+
+
+def test_adapter_ingest_and_recall_use_engine_shapes():
     pipeline = FakePipeline()
     backend = Rems3MemoryBackend(pipeline)
     result = backend.ingest_batch(_sample_batch())
@@ -331,6 +373,16 @@ def test_build_rems_pipeline_requires_api_key(monkeypatch, tmp_path):
 
     with pytest.raises(RemsUnavailableError, match="JSHI_MODEL_API_KEY"):
         build_rems_pipeline(tmp_path / "rems", _Pipe, _Cfg)
+
+
+def test_quiet_embedding_logs_sets_transformers_env(monkeypatch) -> None:
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_VERBOSITY", raising=False)
+    monkeypatch.delenv("TQDM_DISABLE", raising=False)
+    quiet_embedding_logs()
+    assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+    assert os.environ["TRANSFORMERS_VERBOSITY"] == "error"
+    assert os.environ["TQDM_DISABLE"] == "1"
 
 
 @pytest.mark.rems

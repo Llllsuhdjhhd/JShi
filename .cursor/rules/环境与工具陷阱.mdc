@@ -44,13 +44,17 @@ alwaysApply: true
   直接给测试函数传一个工作区内的 Path 来跑,绕过 pytest 的 basetemp。
 - pytest 配置在 `pyproject.toml`(`testpaths=["tests"]`,`addopts=["--basetemp=.pytest/tmp"]`)。
   干净跑法:`python -m pytest <files> -q -p no:cacheprovider --basetemp <工作区目录>`。
-- `JSHI_TEST_REMS` 不设(默认 1 走进程内后端),别误触发 rems 联网。
+- **对话/记忆实测用 conda `py3125`，不要用 PATH 上的 `python`**。后者是 base，`import torch` 报 `WinError 1114`（`c10.dll`），REMS 语义召回一开始就把整次 `recall` 打断，词法/对象路也走不到。`talk.cmd` 若存在 `%USERPROFILE%\anaconda3\envs\py3125\python.exe` 会用它。命令行：`conda activate py3125` 或 `conda run -n py3125 python ...`（仍要 `PYTHONPATH=src`）。`py3125` 的 torch 2.4.1 可正常 `torch.zeros(1)`。
 
 ## 4. 模型 / rems(邻仓)
 
 - 模型配置在 `.env`(gitignore,不提交):`JSHI_MODEL_ENDPOINT=https://api.deepseek.com/v1/chat/completions`、
   `JSHI_MODEL_API_KEY=sk-...`、`JSHI_MODEL_NAME=deepseek-v4-flash`;记忆后端 `JSHI_MEMORY_BACKEND=rems3`。
+  思考开关 `JSHI_MODEL_THINKING`（默认 `disabled`；`enabled` 打开）。V4 Flash 接口默认开思考，不写会在后台写思维链，对话能慢到一分钟。
+- **cmd 里 `talk.cmd` 的注释必须 ASCII**：UTF-8 中文注释在 GBK 的 cmd 里可能被拆成假命令（例如 `'TH' 不是内部或外部命令`），对话仍会继续。
+- **句向量加载的进度条 / Bert LOAD REPORT / flash attention 警告**：`load_rems()` 里已压掉，不应再进对话窗口。
 - **rems 是邻仓**:`C:\Users\40575\Desktop\prog\Jshi_memory\src\rems`(已 import-able)。它的参数要在那里 grep。
+- **py3125 会先导入另一份旧 rems**：`C:\Users\40575\Desktop\项目\memory\rems_3`（没有 `port`）。`JSHI_MEMORY_BACKEND=rems3` 时会报 `cannot import name 'port'`。`load_rems()` 与 `talk.cmd` 会把邻仓 `Jshi_memory/src` 放到路径最前。不要对着报错 Traceback 在 cmd 里回车，那会把每一行当命令执行。
 - **`len_msg` 是 rems 的不在 JShi**:`len_msg = context_window * chars_per_token / 66`;默认 `context_window=88000`
   → `len_msg≈2000`。它与 JShi 的 `DEFAULT_MODEL_CONTEXT_WINDOW=1_000_000` **不是一回事**。
   对齐到 1M 在 `.env` 设 `REMS_CONTEXT_WINDOW=1000000` / `REMS_CHARS_PER_TOKEN=1.5`(`REMS_` 前缀,rems 读 `.env`)。

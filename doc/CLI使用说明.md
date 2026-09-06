@@ -29,7 +29,15 @@ cd C:\Users\40575\Desktop\prog\main
 | cmd | `set PYTHONPATH=src` |
 | PowerShell | `$env:PYTHONPATH="src"` |
 
-`talk.cmd` 会自己 `set PYTHONPATH=src`，对话不必先设。其它子命令必须先设，否则会报找不到 `jshi`。需要系统能运行 `python`（已在 PATH 里）。
+`talk.cmd` 会自己设 `PYTHONPATH`（含邻仓 `Jshi_memory`）、并用 conda `py3125`。其它子命令必须先设 `PYTHONPATH=src`，否则会报找不到 `jshi`。
+
+本机请用 conda 环境 **`py3125`**，不要用 PATH 里的 `python`（那是 base：torch 的 `c10.dll` 会加载失败，回忆整路中断）。`talk.cmd` 若找到该环境会自动用它。其它命令：
+
+```powershell
+conda activate py3125
+$env:PYTHONPATH="src"
+python -m jshi.app.cli talk stone --speaker 火星人
+```
 
 ### 1.1 对话（常用）
 
@@ -45,7 +53,7 @@ PowerShell 同样可以：
 .\talk.cmd stone --speaker dp
 ```
 
-`talk.cmd` 会切到仓库根、设置 `PYTHONPATH=src`，再执行 `python -m jshi.app.cli talk ...`。
+`talk.cmd` 会切到仓库根、设置 `PYTHONPATH`、用 py3125 执行 `python -m jshi.app.cli talk ...`。
 
 含义：
 
@@ -133,6 +141,16 @@ JSHI_MODEL_NAME=deepseek-chat
 
 `ENDPOINT` 必须是完整的 `.../v1/chat/completions`，不能只填站点根地址。三项都有才走远程模型；缺一则 Echo。
 
+DeepSeek V4 Flash **默认会先写一段隐藏思维链**，对话会慢一截。本仓默认关掉。要打开时在 `.env` 加一行（改完须重启 `talk`）：
+
+```text
+JSHI_MODEL_THINKING=enabled
+```
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `JSHI_MODEL_THINKING` | `disabled` | `disabled` 关闭思考（快）；`enabled` 打开。也可写 `on` / `off` |
+
 ### 1.4 记忆后端
 
 默认用进程内记忆（`subject.sqlite3` 里的事实历史）。不必另开记忆进程。
@@ -191,7 +209,7 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 
 提示符 `你：` 下（全屏壳为底栏），**不以** `/` **开头的一行都当作对匠石说的话**，走主链路。空行忽略。全屏壳下一轮未返回前再次提交会被忽略，不并发调用。
 
-斜杠命令不调模型（`/context`、`/prompt` 只预览；`/last`、`/memory` 读上一轮缓存与账本，全文印在对话壳，不进主链路）：
+斜杠命令不调模型（`/context`、`/prompt` 只预览；`/last`、`/memory`、`/memory_raw` 读上一轮缓存与账本，全文印在对话壳，不进主链路）：
 
 
 | 命令                   | 作用                                           |
@@ -202,6 +220,7 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 | `/context`           | 预览片场、木头账本与五源装载；记忆源为空时写出原因。不调模型、不落新活动 |
 | `/last`              | 上一轮实际装上的回忆全文与当时片场。还没说过话则提示先说一句 |
 | `/memory`            | 最近一次 30 落库：游标、ingest 状态、封存事件摘要 |
+| `/memory_raw`        | 记忆游标之后、尚未交 09 的账本原文 |
 | `/plan`              | 上一轮认知的 `response_plan`（mode、条目）。还没说过话则提示先说一句 |
 | `/response`          | 上一轮解析后的易读拆分（mode、语言、动作、edit、拼好的片场） |
 | `/response_raw`      | 上一轮模型原文，解析前的那一串。不调模型 |
@@ -228,7 +247,7 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 - `木头 vN`：经历账本上的工作上下文版本（`subject.sqlite3`），与片场不是同一份。
 - `boot`：本轮是否跑了一次性写场景。
 - `投递`：本轮 30 的结果。落库正文用 `/memory`。
-- `/last`、`/memory`、`/response`、`/response_raw` 是斜杠命令，只印在对话壳里，不进主链路、不写经历。
+- `/last`、`/memory`、`/memory_raw`、`/response`、`/response_raw` 是斜杠命令，只印在对话壳里，不进主链路、不写经历。
 
 ### 2.1 重启后会丢什么
 

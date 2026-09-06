@@ -340,6 +340,28 @@ def _boot_to_model_response(data: Mapping[str, Any], model: str) -> ModelRespons
     )
 
 
+_USAGE_META_KEYS = (
+    "provider_response_id",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "cached_tokens",
+    "usage",
+)
+
+
+def _keep_usage_metadata(response: ModelResponse, raw: ModelResponse) -> ModelResponse:
+    """解析后的响应保留底层适配器记下的用量，便于账单估算。"""
+    incoming = raw.metadata or {}
+    extra = {key: incoming[key] for key in _USAGE_META_KEYS if key in incoming}
+    if not extra:
+        return response
+    merged = dict(response.metadata or {})
+    merged.update(extra)
+    object.__setattr__(response, "metadata", merged)
+    return response
+
+
 class CognitionSkill(Skill[ModelResponse]):
     """05 认知 skill：结构化心智，一次产出多用途段。
 
@@ -417,15 +439,20 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
         try:
             data = parse_json_object(raw_text)
         except SkillError:
-            return self._fallback(raw_text)
+            return _keep_usage_metadata(self._fallback(raw_text), raw)
         if getattr(request, "boot", False):
-            return _boot_to_model_response(data, model=self.model_tag).with_raw(raw_text)
+            return _keep_usage_metadata(
+                _boot_to_model_response(data, model=self.model_tag).with_raw(raw_text),
+                raw,
+            )
         if getattr(request, "persona_schema", None):
-            return _persona_to_model_response(data, model=self.model_tag).with_raw(
-                raw_text
+            return _keep_usage_metadata(
+                _persona_to_model_response(data, model=self.model_tag).with_raw(raw_text),
+                raw,
             )
         response = self.parse(data)
-        return _bind_speaker_fields(response, request).with_raw(raw_text)
+        bound = _bind_speaker_fields(response, request).with_raw(raw_text)
+        return _keep_usage_metadata(bound, raw)
 
     def _fallback(self, raw_text: str) -> ModelResponse:
         # 解析失败：区分两种情况。

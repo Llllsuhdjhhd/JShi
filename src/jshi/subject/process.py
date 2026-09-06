@@ -82,6 +82,7 @@ from jshi.style import (
     ZoneStore,
     boot_instruction_for,
     boot_schema_for,
+    format_zone_budget_note,
     instruction_for,
     is_first_style_turn,
     is_persona,
@@ -130,6 +131,34 @@ def should_emit_language_action(plan: ResponsePlan) -> bool:
 def should_trigger_embodied(plan: ResponsePlan) -> bool:
     """embodied 可与四个 mode 组合。"""
     return plan.has_embodied()
+
+
+def _speaker_object_mapping(
+    speaker: SpeakerCandidate,
+    supplied: Mapping[str, str] | None,
+    extra_aliases: Sequence[str] = (),
+) -> dict[str, str]:
+    """信封映射表 + 本轮说话人的名字/称呼 → 档案 id。说话人名字以 01 为准。"""
+    mapping = {
+        str(key).strip(): str(value).strip()
+        for key, value in dict(supplied or {}).items()
+        if str(key).strip() and str(value).strip()
+    }
+    oid = (speaker.object_id or "").strip()
+    if not oid:
+        return mapping
+    for name in (speaker.label, *speaker.aliases, *extra_aliases):
+        key = str(name).strip()
+        if key:
+            mapping[key] = oid
+    return mapping
+
+
+def _mentioned_with_speaker(speaker: SpeakerCandidate) -> tuple[str, ...]:
+    oid = (speaker.object_id or "").strip()
+    return tuple(
+        dict.fromkeys(item for item in (*speaker.mentioned_object_ids, oid) if item)
+    )
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -260,6 +289,7 @@ class SubjectProcess:
         self.memory_control = InProcessMemoryControl(
             self.activity_ledger,
             self.memory,
+            subject_name=self._subject_display_name,
         )
         if personal_world is None:
             from jshi.personalworld import InProcessPersonalWorld
@@ -409,13 +439,20 @@ class SubjectProcess:
             raise ValueError(
                 f"object confidence too low: {speaker.confidence:.2f}"
             )
+        extra_aliases: tuple[str, ...] = ()
+        if self.profiles is not None:
+            profile = self.profiles.get(speaker.object_id)
+            if profile is not None:
+                extra_aliases = profile.aliases
+        objects = _speaker_object_mapping(speaker, objects, extra_aliases)
+        mentioned_object_ids = _mentioned_with_speaker(speaker)
         fact = HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.FACT,
             event_type="external_input",
             content={
                 "text": text,
-                "objects": dict(objects or {}),
+                "objects": dict(objects),
                 "source": speaker.label,
                 "object_id": speaker.object_id,
                 "object_status": speaker.status,
@@ -431,7 +468,7 @@ class SubjectProcess:
             text_raw=text,
             objects=objects,
             source_ids=(fact.id,),
-            mentioned_object_ids=speaker.mentioned_object_ids,
+            mentioned_object_ids=mentioned_object_ids,
         )
 
         # 新对象落库（通过门禁后）：暂定档案，来源 = 输入事实 id
@@ -648,6 +685,8 @@ class SubjectProcess:
             self.activity_ledger.append_subject_reply(
                 subject_id,
                 text_raw=reply_text,
+                objects=objects,
+                mentioned_object_ids=mentioned_object_ids,
                 source_ids=(activity.id, *(item for item in (action_id,) if item)),
                 response_plan=plan_payload,
                 response_statuses=final_statuses,
@@ -662,6 +701,8 @@ class SubjectProcess:
                         item.text for item in plan.items if item.channel == "embodied"
                     ],
                 },
+                objects=objects,
+                mentioned_object_ids=mentioned_object_ids,
                 source_ids=(activity.id,),
                 response_plan=plan_payload,
                 response_statuses=final_statuses,
@@ -884,8 +925,15 @@ class SubjectProcess:
         memories = self._memory_lines(current.fragments)
         if boot:
             return self._boot_user_text(current, label, memories)
-        scene = self.zone_store.render(current.subject_state.subject_id)
-        parts = [f"【此时的片场】\n{scene or '（片场为空）'}"]
+        subject_id = current.subject_state.subject_id
+        scene = self.zone_store.render(subject_id)
+        pack_id = self.style_packs.get(subject_id)
+        registry = getattr(self.style_packs, "registry", None)
+        cap = zone_chars_for(pack_id, registry=registry)
+        parts = [
+            f"【此时的片场】\n{scene or '（片场为空）'}",
+            format_zone_budget_note(self.zone_store.body_chars(subject_id), cap),
+        ]
         parts.append(f"【此时的输入】\n{label}：{current.input_text}")
         if memories:
             parts.append("【你此时的回忆】\n" + "\n".join(memories))
@@ -1258,6 +1306,13 @@ class SubjectProcess:
                 "invalid input envelope: external input requires an object "
                 "reference (object_ref / channel / carriers)"
             )
+
+    def _subject_display_name(self, subject_id: str) -> str:
+        try:
+            profile = self.identities.get(subject_id)
+        except KeyError:
+            return "匠石"
+        return (profile.name or "").strip() or "匠石"
 
     def _object_display(self, object_id: str | None) -> str:
         if not object_id:
