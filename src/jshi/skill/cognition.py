@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Mapping
 
 from jshi.experienceledger import ContextAssessment
@@ -25,7 +26,7 @@ from jshi.models import (
     ResponsePlan,
 )
 
-from .base import Skill
+from .base import Skill, SkillError, parse_json_object
 
 _RESPONSE_MODES = frozenset({"respond", "think", "ignore", "wait"})
 _SILENT_MODES = frozenset({"think", "ignore", "wait"})
@@ -296,6 +297,49 @@ def _bind_speaker_fields(response: ModelResponse, request: ModelRequest) -> Mode
     )
 
 
+def _persona_to_model_response(
+    data: Mapping[str, Any], model: str
+) -> ModelResponse:
+    """非木头人格：{mode, reply, action, reason, edit} → ModelResponse。"""
+    mode = str(data.get("mode") or "").strip().lower()
+    if mode not in _RESPONSE_MODES:
+        mode = "think"
+    reply = str(data.get("reply") or "").strip()
+    action = str(data.get("action") or "").strip()
+    reason = str(data.get("reason") or "").strip()
+    items: list[ResponseItem] = []
+    if reply and mode == "respond":
+        items.append(ResponseItem(channel="verbal", text=reply))
+    if action:
+        items.append(ResponseItem(channel="embodied", text=action))
+    if mode in _SILENT_MODES:
+        items = [item for item in items if item.channel != "verbal"]
+    if mode == "respond" and not any(
+        item.channel == "verbal" and item.text.strip() for item in items
+    ):
+        mode = "think"
+    zone_edit = tuple(
+        item for item in (data.get("edit") or []) if isinstance(item, Mapping)
+    )
+    return ModelResponse(
+        model=model,
+        response_plan=ResponsePlan(mode=mode, reason=reason, items=tuple(items)),
+        zone_edit=zone_edit,
+    )
+
+
+def _boot_to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
+    """一次性 boot（写场景）：只交 scene；value 由程序按人格给定。"""
+    scene = tuple(
+        str(item).strip() for item in (data.get("scene") or []) if str(item).strip()
+    )
+    return ModelResponse(
+        model=model,
+        response_plan=ResponsePlan(mode="think", reason="boot_scene_authored"),
+        scene=scene,
+    )
+
+
 class CognitionSkill(Skill[ModelResponse]):
     """05 认知 skill：结构化心智，一次产出多用途段。
 
@@ -367,7 +411,17 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
         return _to_model_response(data, model=self.model_tag)
 
     def run(self, request: ModelRequest) -> ModelResponse:
-        response = super().run(request)
+        req = replace(request, system_extra=self.system_extra(request))
+        raw = self._model.generate(req)
+        try:
+            data = parse_json_object(raw.text)
+        except SkillError:
+            return self._fallback(raw.text)
+        if getattr(request, "boot", False):
+            return _boot_to_model_response(data, model=self.model_tag)
+        if getattr(request, "persona_schema", None):
+            return _persona_to_model_response(data, model=self.model_tag)
+        response = self.parse(data)
         return _bind_speaker_fields(response, request)
 
     def _fallback(self, raw_text: str) -> ModelResponse:

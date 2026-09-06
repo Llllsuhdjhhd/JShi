@@ -16,7 +16,7 @@ from jshi.models import EchoModel, ModelPort, OpenAICompatibleModel
 from jshi.privilege import PromptRuleStore, SuperPermissionStore
 from jshi.recognition import CarrierEntry, ObjectProfile, new_object_id
 from jshi.skill import CognitionSkill, SkillModelPort
-from jshi.style import StylePackStore
+from jshi.style import StylePackStore, ZoneStore
 from jshi.subject import (
     EpistemicStatus,
     HistoryKind,
@@ -107,6 +107,7 @@ def _runtime(
         effectiveness=effectiveness,
         style_packs=StylePackStore(data_dir / "style_pack.json"),
         recall_traces=JsonlRecallTraceStore(data_dir / "recall_traces.jsonl"),
+        zone_store=ZoneStore(data_dir / "zone.json"),
     )
     return process, identities, subjects
 

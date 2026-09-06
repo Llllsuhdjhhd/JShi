@@ -74,7 +74,7 @@ talk.cmd
 talk.cmd stone --speaker dp --tui
 ```
 
-上方滚动对话，下方输入，底栏只放 `mode`、对象状态、活跃区版本。长口头回复按窗口显示列宽折行（汉字按两列，避免挤出右缘）。输入 `/` 或 `/help` 后可用上下箭头选择命令，回车执行，Esc 关闭。斜杠命令与主链路与原来相同。未安装或非交互终端会退回一行输入，并在 stderr 提示。`--plain` 与 `--tui` 同时出现时走原来的一行输入。需要重启 `talk` 才生效。
+上方滚动对话，下方输入，底栏放 `mode`、对象、回忆条数、片场块数、木头账本版本。长口头回复按窗口显示列宽折行（汉字按两列，避免挤出右缘）。输入 `/` 或 `/help` 后可用上下箭头选择命令，回车执行，Esc 关闭。斜杠命令与主链路与原来相同。未安装或非交互终端会退回一行输入，并在 stderr 提示。`--plain` 与 `--tui` 同时出现时走原来的一行输入。需要重启 `talk` 才生效。
 
 不用 `talk.cmd`、直接调模块时，cmd：
 
@@ -191,7 +191,7 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 
 提示符 `你：` 下（全屏壳为底栏），**不以** `/` **开头的一行都当作对匠石说的话**，走主链路。空行忽略。全屏壳下一轮未返回前再次提交会被忽略，不并发调用。
 
-斜杠命令不调模型（`/context`、`/prompt` 只预览组装）：
+斜杠命令不调模型（`/context`、`/prompt` 只预览；`/last`、`/memory` 读上一轮缓存与账本，全文印在对话壳，不进主链路）：
 
 
 | 命令                   | 作用                                           |
@@ -199,7 +199,9 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 | `/help` 或 `/?`       | 列出对话命令。全屏里也可输入 `/`，用上下箭头选择，回车执行 |
 | `/who`               | 当前说话人，以及会话文件路径                               |
 | `/speaker 名字`        | 更换对象，写入 `cli_session.json`，下次启动仍有效           |
-| `/context`           | 预览活跃区正文与五源装载条数；不调模型、不落新活动                    |
+| `/context`           | 预览片场、木头账本与五源装载；记忆源为空时写出原因。不调模型、不落新活动 |
+| `/last`              | 上一轮实际装上的回忆全文与当时片场。还没说过话则提示先说一句 |
+| `/memory`            | 最近一次 30 落库：游标、ingest 状态、封存事件摘要 |
 | `/plan`              | 上一轮认知的 `response_plan`（mode、条目）。还没说过话则提示先说一句 |
 | `/prompt` `/prompt/区块名` | 看即将发给模型的 system 与 user（不调模型）。`/prompt/区块名` 只看单个区块（见 §2.2）。全屏里在后台组装，底栏会显示「正在组装提示词…」；第一次可能较慢（记忆后端加载），不是死机。不要用 Ctrl+P。 |
 | `/timing` `/timing n` | 回看上一轮（或最近 n 轮）各步耗时。对话默认不显示。关窗口即丢 |
@@ -214,12 +216,17 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 
 ```text
 匠石：……
-[respond；dp/confirmed；活跃区 v2 段3]
+[respond；dp/confirmed；动作：无动作；回忆 0（召回空）；片场 0 块；木头 v2；boot 否；投递 skipped]
 ```
 
 - `respond` / `wait` / `think` / `ignore`：本轮回复方式。`wait` 仍结束本轮活动。
 - 第二段：说话人显示名与识别状态。
-- 活跃区版本与段数：账本上的工作上下文（落在 `subject.sqlite3`，关窗口再开仍在）。
+- `回忆`：本轮组装实际装上的记忆条数；空时附原因（召回空 / 预算跳过 / 组装错误）。全文用 `/last`。
+- `片场`：斯密斯/苏西坡的块级现场（`zone.json`）。木头写法通常为 0 块。
+- `木头 vN`：经历账本上的工作上下文版本（`subject.sqlite3`），与片场不是同一份。
+- `boot`：本轮是否跑了一次性写场景。
+- `投递`：本轮 30 的结果。落库正文用 `/memory`。
+- `/last`、`/memory` 是斜杠命令，只印在对话壳里，不进主链路、不写经历。
 
 ### 2.1 重启后会丢什么
 
@@ -558,7 +565,7 @@ python -m jshi.app.cli transition <content_id> provisional "目前证据有限"
 | `JSHI_MEMORY_BACKEND=rems3` 报没有 rems | 装进了另一套 Python。在同一窗口用 `python -c "import sys; print(sys.executable)"`，再对该解释器 `python -m pip install -e <Jshi_memory>` |
 | 换了记忆后端后 recall 变空           | 库不共用、不自动迁移；这是预期                       |
 | 重启后忘了刚才在说什么               | 活跃区在内存；身份和价值库仍在                        |
-| `/context` 活跃区为空          | 本进程还没成功说过话，或刚重启                        |
+| `/context` 片场为空、木头账本有字 | 当前是木头写法，或人格片场尚未 boot；两份本来就分开 |
 | 粘贴整段记录后出现 `你：你：` 或把 `匠石：…`、`Loading…`、`[respond；…]` 当成输入 | 已处理：`你：` 前缀会去掉，程序自己的输出行（`匠石：…`、`Loading…`、`[mode；…]` 等）会跳过（重启 `talk` 生效） |
 
 

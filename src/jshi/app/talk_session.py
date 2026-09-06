@@ -21,8 +21,11 @@ TALK_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("/speaker", "名字", "切换对象（写入会话，下次启动仍有效）"),
     ("/who", "", "当前对象"),
     ("/style", "名称", "查看或切换写法（已注册的风格包；提示词里不出现配置名）"),
-    ("/context", "", "看本轮活跃区与装载（不调模型）"),
+    ("/context", "", "看片场、木头账本与装载（不调模型）"),
+    ("/last", "", "上一轮实际装上的回忆与片场（全文）"),
+    ("/memory", "", "最近一次记忆落库（全文）"),
     ("/plan", "", "看上一轮 05 的 response_plan 条目"),
+    ("/response", "", "看上一轮模型回复（易读）"),
     ("/prompt", "", "看即将发给模型的 system 与 user"),
     ("/timing", "轮数", "上一轮各步耗时（可 /timing 5；默认不刷屏）"),
     ("/login", "密码", "超级权限登录"),
@@ -55,6 +58,78 @@ def format_help_text() -> str:
         "说话人、活跃区、回忆、本轮"
     )
     return "\n".join(lines)
+
+
+def _memory_source_report(assembled) -> object | None:
+    reports = getattr(assembled, "source_report", ()) or ()
+    return next((item for item in reports if item.source == "memory"), None)
+
+
+def _memory_fragments(assembled) -> tuple:
+    return tuple(
+        item
+        for item in (getattr(assembled, "fragments", ()) or ())
+        if getattr(item, "source", None) == "memory"
+    )
+
+
+def recall_status(assembled) -> tuple[int, str]:
+    """本轮组装里的回忆条数，以及空时的原因（给底栏与 /last）。"""
+    fragments = _memory_fragments(assembled)
+    report = _memory_source_report(assembled)
+    count = len(fragments)
+    error = (getattr(report, "error", None) or "").strip() if report else ""
+    skipped = len(getattr(report, "skipped_ids", ()) or ()) if report else 0
+    if error:
+        short = error if len(error) <= 48 else error[:47] + "…"
+        return count, f"错误：{short}"
+    if count == 0 and skipped:
+        return 0, f"预算跳过 {skipped} 条"
+    if count == 0:
+        return 0, "召回空"
+    return count, ""
+
+
+def _zone_block_count(process, subject_id: str) -> int:
+    store = getattr(process, "zone_store", None)
+    if store is None:
+        return 0
+    value = (store.value_narration(subject_id) or "").strip()
+    return (1 if value else 0) + len(store.get(subject_id) or ())
+
+
+def _delivery_label(result) -> str:
+    if result is None:
+        return "无"
+    status = (getattr(result, "status", None) or "").strip() or "未知"
+    if status == "skipped":
+        reason = getattr(getattr(result, "decision", None), "reason", "") or ""
+        return f"skipped（{reason}）" if reason else "skipped"
+    return status
+
+
+def format_turn_meta(
+    *,
+    mode: str,
+    speaker_label: str,
+    speaker_status: str,
+    embodied: str,
+    recall_count: int,
+    recall_reason: str,
+    zone_blocks: int,
+    ledger_version: int,
+    boot: str,
+    delivery: str,
+) -> str:
+    recall = f"回忆 {recall_count}"
+    if recall_reason and recall_count == 0:
+        recall += f"（{recall_reason}）"
+    action = embodied or "无动作"
+    return (
+        f"[{mode}；{speaker_label}/{speaker_status}；动作：{action}；"
+        f"{recall}；片场 {zone_blocks} 块；木头 v{ledger_version}；"
+        f"boot {boot}；投递 {delivery}]"
+    )
 
 
 HELP_TEXT = format_help_text()
@@ -206,6 +281,7 @@ class TalkSession:
         self.privileged_object_id: str | None = None
         self.last_line = ""
         self.last_plan = None
+        self.last_assembled = None
         self._timings: list[ActivityTiming] = []
         self._turn_lock = threading.Lock()
         self._reply_streamed = False
@@ -253,8 +329,14 @@ class TalkSession:
             return self._handle_commitment(line)
         if line == "/context":
             return TalkOutcome((TalkEvent("overlay", self._context_text()),))
+        if line == "/last":
+            return TalkOutcome((TalkEvent("overlay", self._last_text()),))
+        if line == "/memory":
+            return TalkOutcome((TalkEvent("overlay", self._memory_text()),))
         if line == "/plan":
             return TalkOutcome((TalkEvent("overlay", self._plan_text()),))
+        if line == "/response" or line == "/reply":
+            return TalkOutcome((TalkEvent("overlay", self._model_response_text()),))
         if line == "/prompt":
             return TalkOutcome((TalkEvent("overlay", self._prompt_text()),))
         if line.startswith("/prompt/"):
@@ -312,14 +394,10 @@ class TalkSession:
                 )
             )
         chosen = packs.set(self.subject_id, parts[1].strip())
-        return TalkOutcome(
-            (
-                TalkEvent(
-                    "notice",
-                    f"写法改为 {display.get(chosen, chosen)}（已记住；提示词里仍只称匠石）",
-                ),
-            )
-        )
+        note = f"写法改为 {display.get(chosen, chosen)}（已记住；提示词里仍只称匠石）"
+        if chosen != current:
+            note += "。注意：有素材才会写小说片场——切换后若素材不足，会先按木头继续攒素材，够了再写场景。"
+        return TalkOutcome((TalkEvent("notice", note),))
 
     def _current_object_id(self) -> str | None:
         profile = self.process.profiles.get(self.speaker)
@@ -478,6 +556,7 @@ class TalkSession:
                 return TalkOutcome((TalkEvent("notice", f"调用失败：{exc}"),))
             self.last_line = line
             self.last_plan = result.response_plan
+            self.last_assembled = result.current_state
             timing = result.timing or getattr(
                 self.process, "last_activity_timing", None
             )
@@ -494,11 +573,20 @@ class TalkSession:
                 speech_text = spoken or "（本轮未开口）"
             embodied = result.response_plan.embodied_text().strip()
             view = self.process.activity_ledger.current_context_view(self.subject_id)
-            meta = (
-                f"[{result.response_plan.mode}；"
-                f"{result.speaker.label}/{result.speaker.status}；"
-                f"动作：{embodied or '无动作'}；"
-                f"活跃区 v{view.version} 段{len(view.segment_refs)}]"
+            recall_n, recall_reason = recall_status(result.current_state)
+            meta = format_turn_meta(
+                mode=result.response_plan.mode,
+                speaker_label=result.speaker.label,
+                speaker_status=result.speaker.status,
+                embodied=embodied,
+                recall_count=recall_n,
+                recall_reason=recall_reason,
+                zone_blocks=_zone_block_count(self.process, self.subject_id),
+                ledger_version=view.version,
+                boot=getattr(self.process, "last_boot", "否") or "否",
+                delivery=_delivery_label(
+                    getattr(self.process, "last_memory_control", None)
+                ),
             )
             return TalkOutcome(
                 (
@@ -530,16 +618,134 @@ class TalkSession:
         if not pack_id and hasattr(self.process, "style_packs"):
             pack_id = self.process.style_packs.get(self.subject_id)
         pack_label = DISPLAY_NAMES.get(pack_id, pack_id or "")
+        zone_n = _zone_block_count(self.process, self.subject_id)
         lines = [
             f"对象 {preview.speaker.label} {preview.speaker.status} {preview.speaker.object_id}",
-            f"活跃区 v{view.version} {pack_label} {len(view.context_text or '')}字",
+            f"写法 {pack_label or '木头'}；片场 {zone_n} 块；木头账本 v{view.version} {len(view.context_text or '')}字",
         ]
-        body = view.context_text.strip()
-        lines.append(body if body else "（活跃区为空）")
+        render = getattr(getattr(self.process, "zone_store", None), "render", None)
+        zone_text = render(self.subject_id) if callable(render) else ""
+        lines.append("片场：")
+        lines.append(zone_text.strip() if zone_text and zone_text.strip() else "（空）")
+        lines.append("木头账本：")
+        body = (view.context_text or "").strip()
+        lines.append(body if body else "（空）")
         lines.append("装载：")
         for report in preview.assembled.source_report:
-            lines.append(f"  {report.source}: {len(report.loaded_ids)} 条")
+            if report.source == "memory":
+                count, reason = recall_status(preview.assembled)
+                suffix = f"（{reason}）" if reason else ""
+                skipped = (
+                    f"，跳过 {len(report.skipped_ids)}"
+                    if report.skipped_ids and count
+                    else ""
+                )
+                lines.append(f"  memory: {count} 条{suffix}{skipped}")
+                continue
+            skipped = f"，跳过 {len(report.skipped_ids)}" if report.skipped_ids else ""
+            err = f"，错误：{report.error}" if report.error else ""
+            lines.append(
+                f"  {report.source}: {len(report.loaded_ids)} 条{skipped}{err}"
+            )
         return "\n".join(lines)
+
+    def _last_text(self) -> str:
+        assembled = self.last_assembled
+        if assembled is None:
+            return "这一轮还没有。先说一句再 /last。"
+        n, reason = recall_status(assembled)
+        lines = [f"本轮输入：{assembled.input_text}"]
+        header = f"回忆 {n} 条"
+        if reason:
+            header += f"（{reason}）"
+        lines.append(header)
+        fragments = _memory_fragments(assembled)
+        if not fragments:
+            lines.append("（无）")
+        else:
+            for item in fragments:
+                label = getattr(item, "id", "") or ""
+                content = (getattr(item, "content", "") or "").strip() or "（空正文）"
+                lines.append(f"- {label}")
+                lines.append(content)
+        report = _memory_source_report(assembled)
+        if report is not None and report.skipped_ids:
+            lines.append("跳过：" + "、".join(report.skipped_ids))
+        if report is not None and report.error:
+            lines.append(f"组装错误：{report.error}")
+        boot = getattr(self.process, "last_boot", "否") or "否"
+        lines.append(f"boot {boot}")
+        render = getattr(getattr(self.process, "zone_store", None), "render", None)
+        zone_text = render(self.subject_id) if callable(render) else ""
+        lines.append("本轮后片场：")
+        lines.append(zone_text.strip() if zone_text and zone_text.strip() else "（空）")
+        return "\n".join(lines)
+
+    def _memory_text(self) -> str:
+        ledger = getattr(self.process, "activity_ledger", None)
+        if ledger is None or not hasattr(ledger, "list_ingest_entries"):
+            return "当前运行没有经历账本。"
+        from jshi.experienceledger import ConsumerKind
+
+        cursor = ledger.consumer_cursor(self.subject_id, ConsumerKind.MEMORY)
+        head = ledger.head_sequence(self.subject_id)
+        lines = [f"记忆游标 {cursor} / 账本末段 {head}"]
+        this_turn = getattr(self.process, "last_memory_control", None)
+        if this_turn is not None:
+            decision = getattr(this_turn, "decision", None)
+            reason = getattr(decision, "reason", "") or ""
+            lines.append(
+                f"本轮投递 {this_turn.status}"
+                + (f"（{reason}）" if reason else "")
+            )
+            if this_turn.error:
+                lines.append(f"错误：{this_turn.error}")
+        entries = list(ledger.list_ingest_entries(self.subject_id) or ())
+        if not entries:
+            lines.append("尚无落库记录。")
+            return "\n".join(lines)
+        last = entries[-1]
+        when = last.ingested_at.isoformat() if last.ingested_at else "未完成"
+        lines.append(
+            f"最近一批 {last.status} id={last.ingest_id[:8]} 于 {when}"
+        )
+        if last.reason:
+            lines.append(f"原因：{last.reason}")
+        event_ids = tuple(last.memory_event_ids or ())
+        if not event_ids:
+            lines.append("本批无封存事件 id。")
+            return "\n".join(lines)
+        lines.append(f"事件 {len(event_ids)} 条：")
+        for event_id, text in self._ingest_event_texts(event_ids):
+            lines.append(f"- {event_id}")
+            lines.append(text)
+        return "\n".join(lines)
+
+    def _ingest_event_texts(self, event_ids: tuple[str, ...]) -> list[tuple[str, str]]:
+        backend = getattr(getattr(self.process, "memory", None), "_backend", None)
+        pipeline = getattr(backend, "_pipeline", None)
+        repo = getattr(pipeline, "event_repo", None)
+        rows: list[tuple[str, str]] = []
+        for event_id in event_ids:
+            if repo is None:
+                rows.append((event_id, "（当前后端不能按 id 取正文）"))
+                continue
+            try:
+                event = repo.get(event_id)
+            except Exception as exc:  # noqa: BLE001
+                rows.append((event_id, f"（读取失败：{exc}）"))
+                continue
+            if event is None:
+                rows.append((event_id, "（库中无此条）"))
+                continue
+            summaries = getattr(event, "summaries", None) or {}
+            text = (
+                summaries.get("L1")
+                or getattr(event, "content_raw", None)
+                or ""
+            ).strip() or "（无摘要）"
+            rows.append((event_id, text))
+        return rows
 
     def _plan_text(self) -> str:
         plan = self.last_plan
@@ -551,6 +757,45 @@ class TalkSession:
             return "\n".join(lines)
         for item in plan.items:
             lines.append(f"  [{item.channel}] {item.text}")
+        return "\n".join(lines)
+
+    def _model_response_text(self) -> str:
+        resp = getattr(self.process, "last_model_response", None)
+        if resp is None:
+            return "这一轮还没有回应。先说一句再 /response。"
+        plan = resp.response_plan
+        lines = [f"mode: {plan.mode}", f"reason: {plan.reason or '（无）'}"]
+        verbal = plan.verbal_text().strip()
+        embodied = plan.embodied_text().strip()
+        lines.append(f"语言: {verbal or '（无）'}")
+        lines.append(f"动作: {embodied or '（无动作）'}")
+        edits = getattr(resp, "zone_edit", ()) or ()
+        if edits:
+            lines.append("片场 edit:")
+            for op in edits:
+                name = op.get("op")
+                bid = op.get("id")
+                if name == "del":
+                    lines.append(f"  - del {bid}")
+                elif name == "mod":
+                    lines.append(f"  - mod {bid} → {op.get('text', '')}")
+                else:
+                    lines.append(f"  - {name} {bid}")
+        scene = getattr(resp, "scene", ()) or ()
+        if scene:
+            lines.append(f"写场景（{len(scene)} 块）:")
+            for i, block in enumerate(scene, 1):
+                lines.append(f"  B{i}  {block}")
+        rc = getattr(resp, "rewritten_context", "") or ""
+        if rc:
+            lines.append(f"现场: {rc[:200]}{'…' if len(rc) > 200 else ''}")
+        # 本轮更新后的片场（对话记录，含回话）
+        render = getattr(getattr(self.process, "zone_store", None), "render", None)
+        if callable(render):
+            zone_text = render(self.subject_id)
+            if zone_text:
+                lines.append("本轮后片场：")
+                lines.extend(zone_text.splitlines())
         return "\n".join(lines)
 
     def _prompt_parts(self) -> tuple[str, str] | str:
@@ -582,6 +827,14 @@ class TalkSession:
             style_instruction, style_first = self.process._style_fields(
                 self.subject_id, assembled.context_view
             )
+            persona_instruction, persona_schema, boot, _zone = (
+                self.process._persona_fields(self.subject_id, assembled)
+            )
+            persona_user_text = (
+                self.process._persona_user_text(assembled, boot=boot)
+                if persona_instruction
+                else ""
+            )
             req = ModelRequest(
                 purpose="subject_activity",
                 input_text=query,
@@ -591,6 +844,10 @@ class TalkSession:
                 governing_rules=self.process._governing_rules(self.subject_id),
                 style_instruction=style_instruction,
                 style_first=style_first,
+                persona_instruction=persona_instruction,
+                persona_schema=persona_schema,
+                boot=boot,
+                persona_user_text=persona_user_text,
                 context=self.process._model_context(
                     self.subject_id,
                     assembled.recalled,

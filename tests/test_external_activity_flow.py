@@ -408,8 +408,8 @@ def test_talk_loop_two_turns_persist_object_and_zone(tmp_path, monkeypatch, caps
     profiles = ObjectProfileRepository(data_dir / "subject.sqlite3")
     found = profiles.find_by_names("dp")
     assert len(found) == 1
-    assert "活跃区 v1" in out
-    assert "活跃区 v2" in out
+    assert "木头 v1" in out
+    assert "木头 v2" in out
 
 
 def test_talk_remembers_speaker_in_session(tmp_path, monkeypatch, capsys):

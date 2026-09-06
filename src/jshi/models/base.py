@@ -36,6 +36,14 @@ class ModelRequest:
     style_instruction: str = ""
     # 程序判定：本轮是否该风格的首次编写（空现场或刚切换）。
     style_first: bool = False
+    # 非木头人格：整份 system 提示词（已渲染）；空则沿用 skill 默认 instruction。
+    persona_instruction: str = ""
+    # 非木头人格：输出 JSON Schema；None 则沿用 skill 默认 schema。
+    persona_schema: Mapping[str, Any] | None = None
+    # 非木头人格：是否一次性 boot（写场景，无片场时）。
+    boot: bool = False
+    # 非木头人格：已预渲染的 user 文本（片场/输入/回忆 或 boot 素材）；空则由 build_user 正常拼。
+    persona_user_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -148,6 +156,12 @@ class ModelResponse:
     importance_ranking: tuple[ImportanceRank, ...] = ()
     memory_ratings: MemoryRatings = field(default_factory=MemoryRatings)
     rewritten_context: str = ""
+    # 非木头人格：片场增量 edit（del/mod by 块号）。
+    zone_edit: tuple[Mapping[str, Any], ...] = ()
+    # 非木头人格：一次性 boot（写场景）产出的开场块。
+    scene: tuple[str, ...] = ()
+    # 非木头人格：boot 产出的价值叙述（独立字段，独立字数上限）。
+    value_narration: str = ""
 
     @property
     def text(self) -> str:
@@ -176,6 +190,9 @@ class ModelResponse:
         memory_ratings: MemoryRatings | None = None,
         rewritten_context: str = "",
         *,
+        zone_edit: tuple[Mapping[str, Any], ...] = (),
+        scene: tuple[str, ...] = (),
+        value_narration: str = "",
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
     ) -> None:
@@ -207,6 +224,9 @@ class ModelResponse:
             memory_ratings if memory_ratings is not None else MemoryRatings(),
         )
         object.__setattr__(self, "rewritten_context", rewritten_context or "")
+        object.__setattr__(self, "zone_edit", tuple(zone_edit))
+        object.__setattr__(self, "scene", tuple(scene))
+        object.__setattr__(self, "value_narration", value_narration or "")
 
 
 class ModelPort(Protocol):

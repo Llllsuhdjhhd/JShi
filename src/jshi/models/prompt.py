@@ -93,6 +93,9 @@ def build_system(request: ModelRequest) -> str:
 def build_user(request: ModelRequest) -> str:
     if not _is_cognition(request):
         return request.input_text
+    persona = (getattr(request, "persona_user_text", "") or "").strip()
+    if persona:
+        return persona
     speaker = request.speaker
     label = speaker.label.strip() if speaker and speaker.label.strip() else "对方"
     parts: list[str] = [f"【说话人】{label}"]

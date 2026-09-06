@@ -130,17 +130,36 @@ class Skill(ABC, Generic[T]):
         return f"{self._model.name}@{self.version}"
 
     def system_extra(self, request: ModelRequest | None = None) -> str:
-        """skill 注入 system 的规则与紧凑 JSON Schema。本轮材料由适配器放进 user。"""
-        instruction = (
-            self._render_instruction(request) if request is not None else self.instruction
+        """skill 注入 system 的规则与紧凑 JSON Schema。本轮材料由适配器放进 user。
+
+        非木头人格：优先用 ``request.persona_instruction``（已渲染）与
+        ``request.persona_schema`` 顶掉 skill 默认。
+        """
+        persona = (
+            getattr(request, "persona_instruction", "") or ""
+            if request is not None
+            else ""
         )
+        if persona:
+            instruction = persona
+        else:
+            instruction = (
+                self._render_instruction(request)
+                if request is not None
+                else self.instruction
+            )
+        schema = self.schema
+        if request is not None:
+            persona_schema = getattr(request, "persona_schema", None)
+            if persona_schema:
+                schema = persona_schema
         schema_doc = json.dumps(
-            self.schema, ensure_ascii=False, separators=(",", ":")
+            schema, ensure_ascii=False, separators=(",", ":")
         )
         return (
             f"{instruction}\n"
             "请严格按下面的 JSON Schema 输出：只输出一个 JSON 对象，不要任何解释文字，"
-            "枚举字段（mode / channel / conclusion 等）必须取枚举值。\n"
+            "枚举字段必须取枚举值。\n"
             f"JSON Schema：{schema_doc}"
         )
 

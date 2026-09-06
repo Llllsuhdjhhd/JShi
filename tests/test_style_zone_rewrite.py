@@ -18,6 +18,9 @@ from jshi.style import (
     builtin_packs,
     instruction_for,
     is_first_style_turn,
+    is_persona,
+    schema_for,
+    zone_chars_for,
 )
 from jshi.subject import SubjectProcess, SubjectRepository
 
@@ -123,13 +126,17 @@ def test_register_pack_without_changing_pipeline():
         StylePack(
             pack_id="extra",
             display_name="额外",
-            instruction_first="首次槽",
-            instruction_continue="续写槽",
+            instruction="【你的任务】\n额外人格的整份提示词。",
+            schema={"type": "object"},
+            zone_chars=123,
         )
     )
-    assert instruction_for("extra", first=True, registry=registry) == "首次槽"
-    assert instruction_for("extra", first=False, registry=registry) == "续写槽"
-    assert instruction_for(WOOD, first=True, registry=registry) == ""
+    assert instruction_for("extra", registry=registry) == "【你的任务】\n额外人格的整份提示词。"
+    assert schema_for("extra", registry=registry) == {"type": "object"}
+    assert zone_chars_for("extra", registry=registry) == 123
+    assert is_persona("extra", registry=registry) is True
+    assert instruction_for(WOOD, registry=registry) == ""
+    assert is_persona(WOOD, registry=registry) is False
 
 
 def test_empty_zone_selects_first_slot(tmp_path):

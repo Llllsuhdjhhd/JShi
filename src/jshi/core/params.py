@@ -35,6 +35,12 @@ WORKING_SET_LIMIT_CHARS: int = 1500
 # 普通价值装载占活跃区字符预算的比例。按字截断；binding 边界不占此预算。
 VALUE_LOAD_RATIO: float = 1 / 5
 
+# 苏西坡（小说家人格）片场预算：固定约 2000 字，独立于木头活跃区。
+SUXIPO_ZONE_CHARS: int = 2000
+
+# 人格「价值叙述」字数上限：boot 时单独生成、独立于片场预算。
+VALUE_NARRATION_CHARS: int = 300
+
 
 def _base_window(context_window: int | None = None) -> int:
     return (
@@ -55,6 +61,18 @@ def working_set_limit(context_window: int | None = None) -> int:
     不随模型窗口放大。``context_window`` 保留签名，当前忽略。
     """
     return max(1, int(WORKING_SET_LIMIT_CHARS))
+
+
+def suxipo_zone_chars(context_window: int | None = None) -> int:
+    """苏西坡片场字符上限：固定约 2000 字，独立于木头活跃区。"""
+    del context_window
+    return max(1, int(SUXIPO_ZONE_CHARS))
+
+
+def value_narration_chars(context_window: int | None = None) -> int:
+    """人格「价值叙述」字数上限：boot 时单独生成，独立于片场预算。"""
+    del context_window
+    return max(1, int(VALUE_NARRATION_CHARS))
 
 
 def value_load_char_budget(active_zone: int | None = None) -> int:
@@ -83,10 +101,14 @@ __all__ = [
     "ACTIVE_ZONE_CHARS",
     "ACTIVE_ZONE_RATIO",
     "DEFAULT_MODEL_CONTEXT_WINDOW",
+    "SUXIPO_ZONE_CHARS",
     "VALUE_CATALOG_REFRESH_SECONDS",
     "VALUE_LOAD_RATIO",
+    "VALUE_NARRATION_CHARS",
     "WORKING_SET_LIMIT_CHARS",
     "active_zone_chars",
+    "suxipo_zone_chars",
+    "value_narration_chars",
     "value_load_char_budget",
     "working_set_limit",
 ]

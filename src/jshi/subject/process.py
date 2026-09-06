@@ -77,7 +77,18 @@ from jshi.recognition import (
 )
 from jshi.reflection import PlaceholderReflection, ReflectionPort
 from jshi.privilege import PromptRuleStore
-from jshi.style import StylePackStore, instruction_for, is_first_style_turn
+from jshi.style import (
+    StylePackStore,
+    ZoneStore,
+    boot_instruction_for,
+    boot_schema_for,
+    instruction_for,
+    is_first_style_turn,
+    is_persona,
+    schema_for,
+    value_narration_chars_for,
+    zone_chars_for,
+)
 from jshi.memory.traces import JsonlRecallTraceStore, RecallTrace
 
 from .domain import (
@@ -222,11 +233,15 @@ class SubjectProcess:
         effectiveness: EffectivenessPort | None = None,
         style_packs: StylePackStore | None = None,
         recall_traces: JsonlRecallTraceStore | None = None,
+        zone_store: ZoneStore | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
         self.cognition = cognition
         self.last_activity_timing: ActivityTiming | None = None
+        self.last_model_response = None
+        self.last_boot: str = "否"
+        self.last_memory_control = None
         self._segment_short_map: dict[str, str] = {}
         self._memory_short_map: dict[str, str] = {}
         self.memory = memory or MemoryShell(InProcessMemoryBackend(repository))
@@ -280,6 +295,7 @@ class SubjectProcess:
         )
         self.style_packs = style_packs or StylePackStore()
         self.recall_traces = recall_traces or JsonlRecallTraceStore()
+        self.zone_store = zone_store or ZoneStore()
         self.reflection = reflection or PlaceholderReflection(self)
 
     # ------------------------------------------------------------------
@@ -363,6 +379,8 @@ class SubjectProcess:
         on_reply: Callable[[str], None] | None = None,
     ) -> SubjectActivityResult:
         clock = StepClock()
+        self.last_boot = "否"
+        self.last_memory_control = None
         # 阶段① 对象必填校验 → 对象解析 → 置信度门禁 → 落位
         self._require_object_source(object_ref, channel, carriers)
         speaker = self.recognition.resolve(
@@ -546,10 +564,13 @@ class SubjectProcess:
         self.repository.add_cognitive_content(perception)
 
         clock.mark("④建活动")
+        # 阶段④.5：非木头人格首次（无片场）→ boot 写场景
+        self._maybe_boot(subject_id, current)
         # 阶段⑤ 认知活动（一次调用；不执行同轮补召回）
         response, working_recalled = self._cognize(
             subject_id, activity, current, perception, clock=clock, on_reply=on_reply
         )
+        self.last_model_response = response
         activity, final_statuses, _ = self.mark_activity_response_status(
             subject_id,
             activity,
@@ -647,14 +668,20 @@ class SubjectProcess:
             )
         clock.mark("⑥行动")
         pack_id = self.style_packs.get(subject_id)
-        self.activity_ledger.save_rewritten_context(
-            subject_id,
-            getattr(response, "rewritten_context", "") or "",
-            speaker_object_id=(
-                speaker.object_id if speaker is not None else None
-            ),
-            style_pack_id=pack_id,
-        )
+        registry = getattr(self.style_packs, "registry", None)
+        if is_persona(pack_id, registry=registry) and self._persona_ready(
+            subject_id, current
+        ):
+            self._apply_zone_edit(subject_id, response, current)
+        else:
+            self.activity_ledger.save_rewritten_context(
+                subject_id,
+                getattr(response, "rewritten_context", "") or "",
+                speaker_object_id=(
+                    speaker.object_id if speaker is not None else None
+                ),
+                style_pack_id=pack_id,
+            )
 
         clock.mark("16编排")
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
@@ -677,6 +704,7 @@ class SubjectProcess:
             logger.exception("effectiveness run_due failed")
         if close_result.handoff_to_memory_control:
             memory_result = self.memory_control.run_async(subject_id)
+            self.last_memory_control = memory_result
             self.evaluation.emit(
                 EvaluationEvent(
                     event_id=f"eval-memory-{activity.id}",
@@ -777,7 +805,7 @@ class SubjectProcess:
     def _style_fields(
         self, subject_id: str, view
     ) -> tuple[str, bool]:
-        """选当前包的写法槽：空现场或刚换包走 first，否则 continue。正文由风格包填。"""
+        """旧「写法槽」已废弃：人格自带整份提示词，注入槽恒空。first 仅供审计。"""
         pack_id = self.style_packs.get(subject_id)
         text = ""
         zone_pack = ""
@@ -785,8 +813,205 @@ class SubjectProcess:
             text = getattr(view, "context_text", "") or ""
             zone_pack = getattr(view, "style_pack_id", "") or ""
         first = is_first_style_turn(text, zone_pack, pack_id)
+        return "", first
+
+    def _persona_fields(
+        self,
+        subject_id: str,
+        current: AssembledCurrentState | None = None,
+    ) -> tuple[str, Mapping | None, bool, int]:
+        """非木头人格：返回 (instruction, schema, boot, zone_chars)。
+
+        选了人格就用人格的整份提示词（不因素材不足退回木头）。
+        boot 标志 = 当前无片场；真正发 boot 请求只在 ``_maybe_boot``，
+        且仅当片场仍为空。
+        """
+        del current
+        pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
-        return instruction_for(pack_id, first=first, registry=registry), first
+        if not is_persona(pack_id, registry=registry):
+            return "", None, False, 0
+        zone_chars = zone_chars_for(pack_id, registry=registry)
+        instruction = instruction_for(pack_id, registry=registry).replace(
+            "{zone_chars}", str(zone_chars)
+        )
+        return (
+            instruction,
+            schema_for(pack_id, registry=registry),
+            self.zone_store.empty(subject_id),
+            zone_chars,
+        )
+
+    def _material_chars(self, current: AssembledCurrentState) -> int:
+        """木头攒下的素材字数：账本原文(活跃区) + 回忆 + 价值。"""
+        total = 0
+        subject_id = current.subject_state.subject_id
+        for segment in self.activity_ledger.list_experiences(subject_id):
+            total += len(segment.text_raw or "")
+        for fragment in current.fragments:
+            if getattr(fragment, "source", None) == "memory":
+                total += len(str(getattr(fragment, "content", "") or ""))
+        for value in current.subject_state.salient_values:
+            total += len(str(value or ""))
+        return total
+
+    def _persona_ready(self, subject_id: str, current: AssembledCurrentState) -> bool:
+        """人格本轮该不该生效：已有片场，或素材量已达预算一半。"""
+        if not self.zone_store.empty(subject_id):
+            return True
+        pack_id = self.style_packs.get(subject_id)
+        registry = getattr(self.style_packs, "registry", None)
+        zone_chars = zone_chars_for(pack_id, registry=registry)
+        return self._material_chars(current) >= zone_chars // 2
+
+    def _memory_lines(self, fragments: Sequence[AssemblyFragment]) -> list[str]:
+        """把组装里的 memory 片段转成「（名字）正文」行。"""
+        lines: list[str] = []
+        for fragment in fragments:
+            if getattr(fragment, "source", None) != "memory":
+                continue
+            content = str(getattr(fragment, "content", "") or "").strip()
+            if not content:
+                continue
+            label = self._object_display(getattr(fragment, "object_id", None))
+            lines.append(f"（{label}）{content}" if label else content)
+        return lines
+
+    def _persona_user_text(
+        self, current: AssembledCurrentState, *, boot: bool
+    ) -> str:
+        label = current.speaker.label if current.speaker else "对方"
+        memories = self._memory_lines(current.fragments)
+        if boot:
+            return self._boot_user_text(current, label, memories)
+        scene = self.zone_store.render(current.subject_state.subject_id)
+        parts = [f"【此时的片场】\n{scene or '（片场为空）'}"]
+        parts.append(f"【此时的输入】\n{label}：{current.input_text}")
+        if memories:
+            parts.append("【你此时的回忆】\n" + "\n".join(memories))
+        return "\n\n".join(parts)
+
+    def _boot_user_text(
+        self,
+        current: AssembledCurrentState,
+        label: str,
+        memories: Sequence[str],
+    ) -> str:
+        subject_id = current.subject_state.subject_id
+        parts: list[str] = []
+        active: list[str] = []
+        # 只取最近一段素材窗口，避免拿全量历史拖慢 boot / 触发超时。
+        recent: list[tuple[datetime | None, str]] = []
+        total = 0
+        for segment in reversed(self.activity_ledger.list_experiences(subject_id)):
+            text = (segment.text_raw or "").strip()
+            if not text:
+                continue
+            total += len(text)
+            recent.append((segment.occurred_at, text))
+            if total >= 1200 or len(recent) >= 12:
+                break
+        for when, text in reversed(recent):
+            when_label = f"[{_iso(when)}] " if when else ""
+            active.append(f"{when_label}{text}")
+        if active:
+            parts.append("【素材·活跃区】\n" + "\n".join(active))
+        if memories:
+            parts.append("【素材·回忆】\n" + "\n".join(memories))
+        values = [
+            str(item).strip()
+            for item in current.subject_state.salient_values
+            if str(item).strip()
+        ]
+        if values:
+            parts.append("【素材·价值】\n" + "\n".join(values))
+        if not parts:
+            parts.append(f"【素材·活跃区】\n{label}：{current.input_text}")
+        return "\n\n".join(parts)
+
+    def _maybe_boot(self, subject_id: str, current: AssembledCurrentState) -> None:
+        """非木头人格且无片场：跑一次性 boot（写场景）并存入块级片场。
+
+        已有片场不得再 boot：``_persona_ready`` 在已有现场时为真（本轮走
+        续写），不能当作 boot 条件，否则会整份覆盖现场。
+        """
+        pack_id = self.style_packs.get(subject_id)
+        registry = getattr(self.style_packs, "registry", None)
+        if not is_persona(pack_id, registry=registry):
+            return
+        if not self.zone_store.empty(subject_id):
+            return
+        if not self._persona_ready(subject_id, current):
+            return
+        boot_instruction = boot_instruction_for(pack_id, registry=registry)
+        boot_instruction = boot_instruction.replace(
+            "{zone_chars}", str(zone_chars_for(pack_id, registry=registry))
+        )
+        boot_schema = boot_schema_for(pack_id, registry=registry)
+        if not boot_instruction or not boot_schema:
+            return
+        speaker = current.speaker
+        model_speaker = None
+        if speaker is not None:
+            model_speaker = ModelSpeaker(
+                object_id=speaker.object_id,
+                label=speaker.label,
+                aliases=speaker.aliases,
+                status=speaker.status,
+                reason=speaker.reason,
+            )
+        request = ModelRequest(
+            purpose="subject_activity",
+            input_text=current.input_text,
+            subject_state=current.subject_state,
+            speaker=model_speaker,
+            persona_instruction=boot_instruction,
+            persona_schema=boot_schema,
+            boot=True,
+            persona_user_text=self._persona_user_text(current, boot=True),
+        )
+        try:
+            response = self.cognition.generate(request)
+            scene = getattr(response, "scene", ())
+            self.last_boot = "是"
+        except Exception:
+            logger.exception("boot scene failed")
+            self.last_boot = "失败"
+            return
+        if not self.zone_store.empty(subject_id):
+            return
+        # 价值叙述是人格给定的固定文本，不经模型生成。
+        value = (registry or self.style_packs.registry).resolve(pack_id).value_narration
+        if scene or value:
+            value_cap = value_narration_chars_for(pack_id, registry=registry)
+            self.zone_store.boot(subject_id, value=value, scene=scene, value_cap=value_cap)
+
+    def _apply_zone_edit(
+        self,
+        subject_id: str,
+        response,
+        current: AssembledCurrentState,
+    ) -> None:
+        """人格轮：应用 edit，再追加本轮输入与回应。"""
+        plan = response.response_plan
+        reply = plan.verbal_text().strip()
+        action = plan.embodied_text().strip()
+        parts: list[str] = []
+        if reply:
+            parts.append(f"我说：“{reply}”")
+        if action:
+            parts.append(action)
+        reply_block = " ".join(parts).strip()
+        label = current.speaker.label if current.speaker else "对方"
+        inbound = (current.input_text or "").strip()
+        input_block = f"{label}说：“{inbound}”" if inbound else ""
+        self.zone_store.apply_edit(
+            subject_id,
+            getattr(response, "zone_edit", ()) or (),
+            append_blocks=tuple(
+                item for item in (input_block, reply_block) if item
+            ),
+        )
 
     def _cognize_once(
         self,
@@ -813,6 +1038,14 @@ class SubjectProcess:
         style_instruction, style_first = self._style_fields(
             current.subject_state.subject_id, current.context_view
         )
+        persona_instruction, persona_schema, _boot, _zone_chars = self._persona_fields(
+            current.subject_state.subject_id, current
+        )
+        persona_user_text = (
+            self._persona_user_text(current, boot=False)
+            if persona_instruction
+            else ""
+        )
         request = ModelRequest(
             purpose="subject_activity",
             input_text=current.input_text,
@@ -824,6 +1057,9 @@ class SubjectProcess:
             ),
             style_instruction=style_instruction,
             style_first=style_first,
+            persona_instruction=persona_instruction,
+            persona_schema=persona_schema,
+            persona_user_text=persona_user_text,
             context=self._model_context(
                 current.subject_state.subject_id,
                 working_recalled,
@@ -831,6 +1067,9 @@ class SubjectProcess:
                 current.context_view,
             ),
         )
+        if persona_instruction:
+            # 非木头人格走整份 JSON（简单契约），不流式提前开口。
+            return self.cognition.generate(request)
         if on_reply is not None and hasattr(self.cognition, "generate_stream"):
             return self.cognition.generate_stream(request, on_reply=on_reply)
         return self.cognition.generate(request)
