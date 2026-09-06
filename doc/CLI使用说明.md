@@ -203,6 +203,8 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 | `/last`              | 上一轮实际装上的回忆全文与当时片场。还没说过话则提示先说一句 |
 | `/memory`            | 最近一次 30 落库：游标、ingest 状态、封存事件摘要 |
 | `/plan`              | 上一轮认知的 `response_plan`（mode、条目）。还没说过话则提示先说一句 |
+| `/response`          | 上一轮解析后的易读拆分（mode、语言、动作、edit、拼好的片场） |
+| `/response_raw`      | 上一轮模型原文，解析前的那一串。不调模型 |
 | `/prompt` `/prompt/区块名` | 看即将发给模型的 system 与 user（不调模型）。`/prompt/区块名` 只看单个区块（见 §2.2）。全屏里在后台组装，底栏会显示「正在组装提示词…」；第一次可能较慢（记忆后端加载），不是死机。不要用 Ctrl+P。 |
 | `/timing` `/timing n` | 回看上一轮（或最近 n 轮）各步耗时。对话默认不显示。关窗口即丢 |
 | `/quit` `/exit` `/q` | 退出循环                                         |
@@ -226,7 +228,7 @@ python -m pip install -e C:\Users\40575\Desktop\prog\Jshi_memory
 - `木头 vN`：经历账本上的工作上下文版本（`subject.sqlite3`），与片场不是同一份。
 - `boot`：本轮是否跑了一次性写场景。
 - `投递`：本轮 30 的结果。落库正文用 `/memory`。
-- `/last`、`/memory` 是斜杠命令，只印在对话壳里，不进主链路、不写经历。
+- `/last`、`/memory`、`/response`、`/response_raw` 是斜杠命令，只印在对话壳里，不进主链路、不写经历。
 
 ### 2.1 重启后会丢什么
 

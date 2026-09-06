@@ -26,6 +26,7 @@ TALK_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("/memory", "", "最近一次记忆落库（全文）"),
     ("/plan", "", "看上一轮 05 的 response_plan 条目"),
     ("/response", "", "看上一轮模型回复（易读）"),
+    ("/response_raw", "", "看上一轮模型原文（解析前）"),
     ("/prompt", "", "看即将发给模型的 system 与 user"),
     ("/timing", "轮数", "上一轮各步耗时（可 /timing 5；默认不刷屏）"),
     ("/login", "密码", "超级权限登录"),
@@ -337,6 +338,8 @@ class TalkSession:
             return TalkOutcome((TalkEvent("overlay", self._plan_text()),))
         if line == "/response" or line == "/reply":
             return TalkOutcome((TalkEvent("overlay", self._model_response_text()),))
+        if line == "/response_raw":
+            return TalkOutcome((TalkEvent("overlay", self._model_raw_text()),))
         if line == "/prompt":
             return TalkOutcome((TalkEvent("overlay", self._prompt_text()),))
         if line.startswith("/prompt/"):
@@ -797,6 +800,15 @@ class TalkSession:
                 lines.append("本轮后片场：")
                 lines.extend(zone_text.splitlines())
         return "\n".join(lines)
+
+    def _model_raw_text(self) -> str:
+        resp = getattr(self.process, "last_model_response", None)
+        if resp is None:
+            return "这一轮还没有回应。先说一句再 /response_raw。"
+        raw = (getattr(resp, "raw_text", "") or "").strip()
+        if not raw:
+            return "这一轮没有保存模型原文。"
+        return raw
 
     def _prompt_parts(self) -> tuple[str, str] | str:
         from dataclasses import replace

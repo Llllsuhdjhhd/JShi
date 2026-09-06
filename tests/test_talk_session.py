@@ -183,6 +183,7 @@ def test_plan_and_context_do_not_create_activity(tmp_path):
     context = session.handle("/context")
     last = session.handle("/last")
     memory = session.handle("/memory")
+    raw = session.handle("/response_raw")
     assert counted.experience_calls == 1
     assert plan.events[0].kind == "overlay"
     assert "mode=" in plan.events[0].text
@@ -195,6 +196,8 @@ def test_plan_and_context_do_not_create_activity(tmp_path):
     assert "回忆 " in last.events[0].text
     assert memory.events[0].kind == "overlay"
     assert "记忆游标" in memory.events[0].text
+    assert raw.events[0].kind == "overlay"
+    assert "我听见了：第一句" in raw.events[0].text
 
 
 def test_busy_rejects_second_utterance(tmp_path):

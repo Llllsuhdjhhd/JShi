@@ -178,6 +178,8 @@ def test_persona_parse_maps_fields():
     assert resp.response_plan.embodied_text() == "把镇纸压了压"
     assert resp.response_plan.reason == "接住他这句"
     assert resp.zone_edit == ({"op": "del", "id": "B2"},)
+    assert '"reply"' in resp.raw_text
+    assert "风再大，信也跑不了。" in resp.raw_text
 
 
 def test_persona_silent_mode_drops_verbal():

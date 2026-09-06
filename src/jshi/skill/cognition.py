@@ -413,16 +413,19 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
     def run(self, request: ModelRequest) -> ModelResponse:
         req = replace(request, system_extra=self.system_extra(request))
         raw = self._model.generate(req)
+        raw_text = raw.text or ""
         try:
-            data = parse_json_object(raw.text)
+            data = parse_json_object(raw_text)
         except SkillError:
-            return self._fallback(raw.text)
+            return self._fallback(raw_text)
         if getattr(request, "boot", False):
-            return _boot_to_model_response(data, model=self.model_tag)
+            return _boot_to_model_response(data, model=self.model_tag).with_raw(raw_text)
         if getattr(request, "persona_schema", None):
-            return _persona_to_model_response(data, model=self.model_tag)
+            return _persona_to_model_response(data, model=self.model_tag).with_raw(
+                raw_text
+            )
         response = self.parse(data)
-        return _bind_speaker_fields(response, request)
+        return _bind_speaker_fields(response, request).with_raw(raw_text)
 
     def _fallback(self, raw_text: str) -> ModelResponse:
         # 解析失败：区分两种情况。
@@ -442,6 +445,7 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
                     reason="structured_output_failed_but_prose_salvaged",
                     items=(ResponseItem(channel="verbal", text=raw),),
                 ),
+                raw_text=raw,
             )
         metadata: dict[str, str] = {"skill_fallback": "non_json"}
         if preview:
@@ -454,4 +458,5 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
                 reason="structured_output_failed",
                 items=(),
             ),
+            raw_text=raw,
         )

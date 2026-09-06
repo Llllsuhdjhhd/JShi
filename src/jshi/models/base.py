@@ -162,6 +162,8 @@ class ModelResponse:
     scene: tuple[str, ...] = ()
     # 非木头人格：boot 产出的价值叙述（独立字段，独立字数上限）。
     value_narration: str = ""
+    # 模型原文（解析前）。空 = 未保存。
+    raw_text: str = ""
 
     @property
     def text(self) -> str:
@@ -193,6 +195,7 @@ class ModelResponse:
         zone_edit: tuple[Mapping[str, Any], ...] = (),
         scene: tuple[str, ...] = (),
         value_narration: str = "",
+        raw_text: str = "",
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
     ) -> None:
@@ -227,6 +230,12 @@ class ModelResponse:
         object.__setattr__(self, "zone_edit", tuple(zone_edit))
         object.__setattr__(self, "scene", tuple(scene))
         object.__setattr__(self, "value_narration", value_narration or "")
+        object.__setattr__(self, "raw_text", raw_text or "")
+
+    def with_raw(self, raw_text: str) -> ModelResponse:
+        """把解析前的原文挂到这份响应上（同一对象，不另造一份）。"""
+        object.__setattr__(self, "raw_text", raw_text or "")
+        return self
 
 
 class ModelPort(Protocol):

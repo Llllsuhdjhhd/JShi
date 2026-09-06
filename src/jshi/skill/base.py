@@ -203,11 +203,15 @@ class Skill(ABC, Generic[T]):
         """执行 skill：把角色/说明并入 system（system_extra），input_text 保持任务。"""
         req = replace(request, system_extra=self.system_extra(request))
         raw = self._model.generate(req)
+        raw_text = raw.text or ""
         try:
-            data = parse_json_object(raw.text)
+            data = parse_json_object(raw_text)
         except SkillError:
-            return self._fallback(raw.text)
-        return self.parse(data)
+            return self._fallback(raw_text)
+        parsed = self.parse(data)
+        if hasattr(parsed, "with_raw"):
+            return parsed.with_raw(raw_text)
+        return parsed
 
     def run_stream(
         self,
@@ -246,11 +250,16 @@ class Skill(ABC, Generic[T]):
                     if text:
                         on_reply(text)
         except Exception:
-            return self._fallback("".join(raw))
+            text = "".join(raw)
+            return self._fallback(text)
+        text = "".join(raw)
         try:
-            return self.parse(data)
+            parsed = self.parse(data)
         except SkillError:
-            return self._fallback("".join(raw))
+            return self._fallback(text)
+        if hasattr(parsed, "with_raw"):
+            return parsed.with_raw(text)
+        return parsed
 
 
 class SkillModelPort(ModelPort):
