@@ -50,7 +50,7 @@ alwaysApply: true
 
 - 模型配置在 `.env`(gitignore,不提交):`JSHI_MODEL_ENDPOINT=https://api.deepseek.com/v1/chat/completions`、
   `JSHI_MODEL_API_KEY=sk-...`、`JSHI_MODEL_NAME=deepseek-v4-flash`;记忆后端 `JSHI_MEMORY_BACKEND=rems3`。
-  思考开关 `JSHI_MODEL_THINKING`（默认 `disabled`；`enabled` 打开）。V4 Flash 接口默认开思考，不写会在后台写思维链，对话能慢到一分钟。
+  思考档位 `JSHI_MODEL_THINKING`（默认 `disabled`；`low` / `high` / `max`；`enabled` 等同 `high`）。V4 Flash 接口默认开思考，不写会在后台写思维链，对话能慢到一分钟。
 - **cmd 里 `talk.cmd` 的注释必须 ASCII**：UTF-8 中文注释在 GBK 的 cmd 里可能被拆成假命令（例如 `'TH' 不是内部或外部命令`），对话仍会继续。
 - **句向量加载的进度条 / Bert LOAD REPORT / flash attention 警告**：`load_rems()` 里已压掉，不应再进对话窗口。
 - **rems 是邻仓**:`C:\Users\40575\Desktop\prog\Jshi_memory\src\rems`(已 import-able)。它的参数要在那里 grep。

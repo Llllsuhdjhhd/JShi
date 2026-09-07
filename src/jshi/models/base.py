@@ -383,20 +383,30 @@ def _provider_usage_metadata(result: Mapping[str, Any]) -> dict[str, Any]:
     return meta
 
 
-def model_thinking_type() -> str:
-    """DeepSeek V4 默认开思考。未设置时关闭；.env 里 ``JSHI_MODEL_THINKING=enabled`` 打开。"""
+def model_thinking_fields() -> dict[str, Any]:
+    """DeepSeek V4 思考档位，写入 Chat Completions 请求体。
+
+    ``JSHI_MODEL_THINKING``（默认 ``disabled``）：
+
+    - ``disabled`` / ``off`` / ``0`` / ``false`` / ``no``：关闭思考
+    - ``low`` / ``high`` / ``max``：开思考并设 ``reasoning_effort``
+    - ``enabled`` / ``on`` / ``1`` / ``true`` / ``yes`` / ``medium``：等同 ``high``
+    """
     raw = (os.getenv("JSHI_MODEL_THINKING") or "disabled").strip().lower()
     if raw in {"disabled", "off", "0", "false", "no"}:
-        return "disabled"
-    if raw in {"enabled", "on", "1", "true", "yes"}:
-        return "enabled"
+        return {"thinking": {"type": "disabled"}}
+    if raw in {"enabled", "on", "1", "true", "yes", "medium", "high"}:
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
+    if raw in {"low", "max"}:
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": raw}
     raise ValueError(
-        f"JSHI_MODEL_THINKING 只接受 disabled 或 enabled，收到 {raw!r}"
+        "JSHI_MODEL_THINKING 只接受 disabled / low / high / max"
+        f"（enabled 等同 high），收到 {raw!r}"
     )
 
 
 def _chat_payload(model: str, request: ModelRequest, *, stream: bool = False) -> bytes:
-    """Chat Completions 请求体。思考开关见 ``model_thinking_type``。"""
+    """Chat Completions 请求体。思考档位见 ``model_thinking_fields``。"""
     from jshi.models.prompt import build_system, build_user
 
     body: dict[str, Any] = {
@@ -405,7 +415,7 @@ def _chat_payload(model: str, request: ModelRequest, *, stream: bool = False) ->
             {"role": "system", "content": build_system(request)},
             {"role": "user", "content": build_user(request)},
         ],
-        "thinking": {"type": model_thinking_type()},
+        **model_thinking_fields(),
     }
     if stream:
         body["stream"] = True

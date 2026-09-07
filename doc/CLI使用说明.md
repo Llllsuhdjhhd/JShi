@@ -141,15 +141,15 @@ JSHI_MODEL_NAME=deepseek-chat
 
 `ENDPOINT` 必须是完整的 `.../v1/chat/completions`，不能只填站点根地址。三项都有才走远程模型；缺一则 Echo。
 
-DeepSeek V4 Flash **默认会先写一段隐藏思维链**，对话会慢一截。本仓默认关掉。要打开时在 `.env` 加一行（改完须重启 `talk`）：
+DeepSeek V4 Flash **默认会先写一段隐藏思维链**，对话会慢一截。本仓默认关掉。要打开或调档位时在 `.env` 加一行（改完须重启 `talk`）：
 
 ```text
-JSHI_MODEL_THINKING=enabled
+JSHI_MODEL_THINKING=high
 ```
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `JSHI_MODEL_THINKING` | `disabled` | `disabled` 关闭思考（快）；`enabled` 打开。也可写 `on` / `off` |
+| `JSHI_MODEL_THINKING` | `disabled` | `disabled` 关闭思考（快）；`low` / `high` / `max` 开思考并设强度。`enabled` / `on` 等同 `high`；也可写 `off` |
 
 ### 1.4 记忆后端
 

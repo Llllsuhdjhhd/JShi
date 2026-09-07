@@ -241,6 +241,7 @@ def test_openai_compatible_disables_thinking(monkeypatch) -> None:
     body = captured["body"]
     assert isinstance(body, dict)
     assert body["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in body
     assert "stream" not in body
     assert response.text == '{"mode":"respond"}'
 
@@ -266,6 +267,42 @@ def test_openai_compatible_thinking_can_be_enabled(monkeypatch) -> None:
     body = captured["body"]
     assert isinstance(body, dict)
     assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == "high"
+
+
+@pytest.mark.parametrize(
+    ("env_value", "effort"),
+    [
+        ("low", "low"),
+        ("high", "high"),
+        ("max", "max"),
+        ("medium", "high"),
+    ],
+)
+def test_openai_compatible_thinking_effort_levels(
+    monkeypatch, env_value: str, effort: str
+) -> None:
+    monkeypatch.setenv("JSHI_MODEL_THINKING", env_value)
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN201
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeChatResponse(
+            json.dumps(
+                {"choices": [{"message": {"content": "{}"}}]}
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("jshi.models.base.urlopen", fake_urlopen)
+    OpenAICompatibleModel(
+        "https://api.deepseek.com/v1/chat/completions",
+        "sk-test",
+        "deepseek-v4-flash",
+    ).generate(_request())
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == effort
 
 
 def test_openai_compatible_thinking_rejects_unknown(monkeypatch) -> None:
@@ -301,5 +338,6 @@ def test_openai_compatible_stream_also_disables_thinking(monkeypatch) -> None:
     body = captured["body"]
     assert isinstance(body, dict)
     assert body["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in body
     assert body["stream"] is True
     assert chunks == ["你好"]

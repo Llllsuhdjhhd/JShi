@@ -1,9 +1,10 @@
 """单独打 DeepSeek Chat Completions，不走匠石认知主链路。
 
-对比同一份提示词在三种请求下的墙钟时间和用量：
+对比同一份提示词在不同请求下的墙钟时间和用量：
   omit      不传 thinking（旧适配器；V4 Flash 此时默认开思考）
-  disabled  显式关闭思考  thinking.type=disabled（现行适配器）
-  enabled   显式打开思考  thinking.type=enabled
+  disabled  显式关闭思考  thinking.type=disabled
+  enabled   开思考 + reasoning_effort=high（等同 high）
+  low/high/max  开思考并设对应 reasoning_effort
 
 默认用 .jshi 里现成的斯密斯提示词 + 片场拼一份接近 /prompt 的材料；
 加 --from-jshi 则走 TalkSession._prompt_parts，与对话里 /prompt 同一份。
@@ -262,7 +263,10 @@ def _post(
 VARIANTS: dict[str, dict[str, Any]] = {
     "omit": {},
     "disabled": {"thinking": {"type": "disabled"}},
-    "enabled": {"thinking": {"type": "enabled"}},
+    "enabled": {"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
+    "low": {"thinking": {"type": "enabled"}, "reasoning_effort": "low"},
+    "high": {"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
+    "max": {"thinking": {"type": "enabled"}, "reasoning_effort": "max"},
 }
 
 
@@ -271,7 +275,7 @@ def main() -> int:
     parser.add_argument(
         "--variants",
         default="disabled,omit",
-        help="逗号分隔：omit / disabled / enabled，默认 disabled,omit（先跑快的）"
+        help="逗号分隔：omit / disabled / enabled / low / high / max，默认 disabled,omit（先跑快的）"
     )
     parser.add_argument("--query", default="", help="本轮用户句；缺省用最近一次非「你好」的召回查询")
     parser.add_argument("--from-jshi", action="store_true", help="用 TalkSession 组装与 /prompt 相同的提示词")
