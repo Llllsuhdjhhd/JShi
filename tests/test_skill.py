@@ -16,6 +16,7 @@ from jshi.skill import (
     SkillError,
     SkillModelPort,
     SkillRegistry,
+    WriteZoneSkill,
     parse_json_object,
 )
 
@@ -79,7 +80,8 @@ def test_cognition_skill_produces_usage_segments(tmp_path):
     assert "working_set_limit" in resp.response_plan.verbal_text()
     assert resp.context_assessment.focus == ("seg-12",)
     assert resp.object_assessment.conclusion == "confirm"
-    assert resp.rewritten_context == "对方定口径。承诺仍在。"
+    # 回复调用不再产出写场（写场已独立到 WriteZoneSkill）。
+    assert resp.rewritten_context == ""
     assert resp.object_assessment.object_id == "OBJ-DP"
     assert resp.recall_requests[0].level == 2
     # 第 5 用途段"重要性排序"（给 14，占位）
@@ -102,16 +104,16 @@ def test_instruction_keeps_rules_without_examples():
     assert "【关于输入】" in text
     assert "【价值】" in text
     assert "【回应方式】" in text
-    assert "【现场】" in text
+    assert "【对象确认】" in text
     assert "【输出格式】" in text
     assert "{values}" in text
-    assert "{active_zone_chars}" in text
     assert "{style_instruction}" in text
     assert "{speaker_label}" not in text
     assert "不伤害人类" in text
     assert "respond（回话）" in text
     assert "ignore（忽略）" in text
-    assert "rewritten_context" in text
+    # 回复调用不再写场；写场在 WriteZoneSkill。
+    assert "rewritten_context" not in text
     assert "才提出 recall_requests" not in text
     assert "追加评价与召回" not in text
     assert "对象确认" in text
@@ -147,11 +149,15 @@ def test_object_assessment_name_is_resolved_to_speaker_id():
 
 
 def test_rewrite_replaces_patch_in_instruction():
-    system = CognitionSkill(FakeModel(_payload())).system_extra(make_request())
-    assert "【现场】" in system
-    assert "rewritten_context" in system
-    assert "才提出 recall_requests" not in system
-    assert "追加评价与召回" not in system
+    # 回复调用(①)：system 不再含写场契约。
+    reply_system = CognitionSkill(FakeModel(_payload())).system_extra(make_request())
+    assert "【现场】" not in reply_system
+    assert "rewritten_context" not in reply_system
+    assert "才提出 recall_requests" not in reply_system
+    assert "追加评价与召回" not in reply_system
+    # 写场调用(②)：WriteZoneSkill 给出整份重写指令。
+    write_instruction = WriteZoneSkill.instruction
+    assert "rewritten_context" in write_instruction
 
 
 def test_skill_framework_is_reused_by_other_skills():

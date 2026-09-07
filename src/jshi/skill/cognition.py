@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import replace
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from jshi.experienceledger import ContextAssessment
 from jshi.models import (
@@ -73,7 +73,6 @@ COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
                 "focus": {"type": "array", "items": {"type": "string"}},
             },
         },
-        "rewritten_context": {"type": "string"},
         "object_assessment": {
             "type": "object",
             "properties": {
@@ -270,7 +269,6 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         context_assessment=context_assessment,
         importance_ranking=importance_ranking,
         memory_ratings=_parse_memory_ratings(data),
-        rewritten_context=str(data.get("rewritten_context") or "").strip(),
     )
 
 
@@ -391,7 +389,9 @@ def salvage_persona_json(text: str) -> dict[str, Any] | None:
 def _persona_to_model_response(
     data: Mapping[str, Any], model: str
 ) -> ModelResponse:
-    """非木头人格：{mode, reply, action, reason, edit} → ModelResponse。"""
+    """非木头人格（回复调用）：{mode, reply, action, reason} → ModelResponse。
+    写场（edit）由 WriteZoneSkill 在独立调用里产出，此处不取。
+    """
     mode = str(data.get("mode") or "").strip().lower()
     if mode not in _RESPONSE_MODES:
         mode = "think"
@@ -409,13 +409,9 @@ def _persona_to_model_response(
         item.channel == "verbal" and item.text.strip() for item in items
     ):
         mode = "think"
-    zone_edit = tuple(
-        item for item in (data.get("edit") or []) if isinstance(item, Mapping)
-    )
     return ModelResponse(
         model=model,
         response_plan=ResponsePlan(mode=mode, reason=reason, items=tuple(items)),
-        zone_edit=zone_edit,
     )
 
 
@@ -481,31 +477,31 @@ user 里的【活跃区】和【回忆】每行都带对象名；带方括号时
 - 回忆条目：`M1（mei）：mei用AI创造了我；我回：记忆对不上…` —— 表示对象“mei”相关的一段记忆；回忆正文是摘要，不是逐字原话，要按 `（名字）` 判断这段经历属于谁。回忆可用时也会带时间，如 `M1[2026-08-30 11:50]（mei）：…`。
 - 若回忆行只有 `memory:EVT-…：…` 这种没有 `（名字）` 和时间的旧格式，说明这段记忆的归属对象暂未标明；不要凭空把它安到本轮说话人头上，当作“归属未标明的候选回忆”看待，必要时先确认对象。
 
+【关于谁在说话】
+- 一个人说话，不代表就一直是他。匠石可能同时面对好几个人，也可能有人插话。每一拍只看【说话人】标的是谁；当前这句是谁说的，就按这个人回应，不要当成上一拍那个人继续说。
+- 别张冠李戴：不要把别人（别的名字）的话或记忆，安到当前说话人头上。每条活跃区/回忆自带（名字）归属，只认与【说话人】同名的那条；名字不同就是不同的人，不是同一个人。
+- 新说话人按「第一次认识」对待：【说话人】若是没确认 / 现场里找不到这个名字（provisional 或生面孔），就不要说你记得ta的过去，不要编造ta说过什么、做过什么、和你有什么约定。除非现场里确有明确标着【说话人】名字的回忆，否则不要「我记得你之前…」。
+
 【价值】
 你的价值：你的回应应当遵循你的价值。比如你喜欢孔子的「学而时习之，不亦乐乎」，意味着你是一个好学也好交友的人。下面这些条目都是你遵循的价值：
 {values}
 
 【回应方式】
-设想你正处在这样的对话场景里：对方在跟你说话，你要做出得体的回应。
+设想你正处在这样的对话场景里：当前说话人在跟你说话，你要做出得体的回应。
 语言回应的种类叫 mode，以下是互斥的 4 类，每次回应只能占其中一种：
-先问自己：这一拍对对方有没有该发生的交往行为（回答、确认、道歉、说明、拒绝、安抚）？有，就 respond。特别是对方指出你的错、纠正你、质疑你，或要你“确认/核对/再想想”时，这都是在跟你说话并期待你开口，要 respond 承认、道歉、说明或确认，不要 think 闷着。对方还没说完、只需你在听，才 wait；对方是明确打扰、纠缠，才 ignore；只有对方没有在跟你说话、你纯粹在内心盘算（没有任何人期待你开口）才 think。
+先问自己：这一拍对当前说话人有没有该发生的交往行为（回答、确认、道歉、说明、拒绝、安抚）？有，就 respond。特别是当前说话人指出你的错、纠正你、质疑你，或要你“确认/核对/再想想”时，这都是在跟你说话并期待你开口，要 respond 承认、道歉、说明或确认，不要 think 闷着。当前说话人还没说完、只需你在听，才 wait；当前说话人是明确打扰、纠缠，才 ignore；只有当前说话人没有在跟你说话、你纯粹在内心盘算（没有任何人期待你开口）才 think。
 - respond（回话）：有语言输出。对输入作语言回应，根据输入、活跃区与记忆，设想实际情况，做出得体回应。
-- wait（等待）：无语言输出。对方可能还在持续表达，或你在聆听或其他情况，本轮无回话，把时间留给对方。
+- wait（等待）：无语言输出。当前说话人可能还在持续表达，或你在聆听或其他情况，本轮无回话，把时间留给当前说话人。
 - ignore（忽略）：无语言输出。于己无关或为减少麻烦或其他情况，比如无关打扰、纠缠等。
 - think（只在内部思考）：无语言输出。对外没有交往义务，工作只在内部。不是「有话不能说」；信息不足、被纠正、被质疑、违背价值，默认都不是 think。
 reason 写清为什么选择这个 mode。先决定这一拍要不要开口，再处理记忆/上下文；不要因为要整理回忆或缩减活跃区就 think 或不出声，那些来不及就留空。
-动作（embodied）是对本轮输入做出的动作反应，此刻假设自己是类人机器人，给出动作描述，比如对方示意你坐下，你的动作可能是「走到他指定的椅子那里，坐下来」。动作与语言组成一次完整反应，须得体、自然、不卑不亢，可伴随任何 mode，如果无需动作，则输出“无动作”。
+动作（embodied）是对本轮输入做出的动作反应，此刻假设自己是类人机器人，给出动作描述，比如当前说话人示意你坐下，你的动作可能是「走到他指定的椅子那里，坐下来」。动作与语言组成一次完整反应，须得体、自然、不卑不亢，可伴随任何 mode，如果无需动作，则输出“无动作”。
 
 {style_instruction}
 
-【现场】
-把本轮看见的全体（上一份现场、本轮原话、新回忆、对方是谁、已有承诺）整理成下一份现场全文，写入 rewritten_context。
-- 若上文有写法要求，按该要求整理；没有则按本节。不要只列删除编号。
-- 不得改变对方是谁，不得否掉或改写承诺的实质，不得把没发生的事写成经历。
-- 现场宜短，不要超过 {active_zone_chars} 字。
-- 不要做 memory_ratings；来不及就空着。
+【对象确认】
 - 对象确认（object_assessment）可空。不确定则跳过。不要用同轮召回补材料。
-- 不要因为整理现场就 think 或不出声。
+- 不要做 memory_ratings；来不及就空着。不要整理现场——那是写场调用的事，本轮只回应。
 
 【输出格式】
 你的输出格式：你每轮只输出一个 JSON 对象，字段按下方 Schema；枚举字段只取允许值，不输出任何解释文字。
@@ -558,6 +554,55 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
         response = self.parse(data)
         bound = _bind_speaker_fields(response, request).with_raw(raw_text)
         return _keep_usage_metadata(bound, raw)
+
+    def run_stream(self, request: ModelRequest, on_reply: Callable[[str], None] | None = None) -> ModelResponse:
+        """流式：木头靠 ``response_plan`` 早开口；人格靠 ``reply``（且 mode=respond）早开口。
+
+        人格 JSON 是 {mode, reply, action, reason}，无 ``response_plan``，故在此单独按
+        ``reply`` 字段触发 ``on_reply``，让回复在写场调用（②）之前就交付。
+        """
+        from jshi.models.base import iter_top_level_json_values
+
+        persona = bool(getattr(request, "persona_schema", None)) and not getattr(
+            request, "boot", False
+        )
+        if not persona:
+            return super().run_stream(request, on_reply=on_reply)
+        model = self._model
+        if not hasattr(model, "generate_stream"):
+            return self.run(request)
+        req = replace(request, system_extra=self.system_extra(request))
+        raw: list[str] = []
+
+        def _capture(chunks: Any) -> Any:
+            for chunk in chunks:
+                raw.append(chunk)
+                yield chunk
+
+        data: dict[str, Any] = {}
+        mode = ""
+        try:
+            for key, value_json in iter_top_level_json_values(
+                _capture(model.generate_stream(req))
+            ):
+                value = json.loads(value_json)
+                data[key] = value
+                if key == "mode" and isinstance(value, str):
+                    mode = value.strip().lower()
+                if key == "reply" and on_reply is not None and isinstance(value, str):
+                    if mode == "respond" and value.strip():
+                        on_reply(value)
+        except Exception:
+            text = "".join(raw)
+            return self._fallback(text)
+        text = "".join(raw)
+        try:
+            parsed = _persona_to_model_response(data, model=self.model_tag)
+        except Exception:
+            return self._fallback(text)
+        if hasattr(parsed, "with_raw"):
+            return parsed.with_raw(text)
+        return parsed
 
     def _fallback(self, raw_text: str) -> ModelResponse:
         # 解析失败：区分两种情况。

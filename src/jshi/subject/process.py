@@ -83,11 +83,13 @@ from jshi.style import (
     boot_instruction_for,
     boot_schema_for,
     format_zone_budget_note,
-    instruction_for,
     is_first_style_turn,
     is_persona,
-    schema_for,
+    reply_instruction_for,
+    reply_schema_for,
     value_narration_chars_for,
+    write_instruction_for,
+    write_schema_for,
     zone_chars_for,
 )
 from jshi.memory.traces import JsonlRecallTraceStore, RecallTrace
@@ -263,12 +265,16 @@ class SubjectProcess:
         style_packs: StylePackStore | None = None,
         recall_traces: JsonlRecallTraceStore | None = None,
         zone_store: ZoneStore | None = None,
+        write_zone: ModelPort | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
         self.cognition = cognition
+        # 写场（②）独立端口：注入时走两调用；未注入退回单调用（保旧契约可跑）。
+        self.write_zone = write_zone
         self.last_activity_timing: ActivityTiming | None = None
         self.last_model_response = None
+        self.last_write_response = None
         self.last_boot: str = "否"
         self.last_memory_control = None
         self._segment_short_map: dict[str, str] = {}
@@ -710,14 +716,23 @@ class SubjectProcess:
         clock.mark("⑥行动")
         pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
+        # 写场：两调用时由独立 write_zone 产出；未注入则读回复响应的写场字段（单调用兼容）。
+        write_result = (
+            self._write_zone(
+                subject_id, activity, current, response, speaker, working_recalled
+            )
+            if self.write_zone is not None
+            else response
+        )
+        self.last_write_response = write_result
         if is_persona(pack_id, registry=registry) and self._persona_ready(
             subject_id, current
         ):
-            self._apply_zone_edit(subject_id, response, current)
+            self._apply_zone_edit(subject_id, response, current, write_result)
         else:
             self.activity_ledger.save_rewritten_context(
                 subject_id,
-                getattr(response, "rewritten_context", "") or "",
+                getattr(write_result, "rewritten_context", "") or "",
                 speaker_object_id=(
                     speaker.object_id if speaker is not None else None
                 ),
@@ -873,12 +888,12 @@ class SubjectProcess:
         if not is_persona(pack_id, registry=registry):
             return "", None, False, 0
         zone_chars = zone_chars_for(pack_id, registry=registry)
-        instruction = instruction_for(pack_id, registry=registry).replace(
-            "{zone_chars}", str(zone_chars)
+        instruction = reply_instruction_for(
+            pack_id, registry=registry, zone_chars=zone_chars
         )
         return (
             instruction,
-            schema_for(pack_id, registry=registry),
+            reply_schema_for(pack_id, registry=registry),
             self.zone_store.empty(subject_id),
             zone_chars,
         )
@@ -1045,11 +1060,16 @@ class SubjectProcess:
     def _apply_zone_edit(
         self,
         subject_id: str,
-        response,
+        reply_response,
         current: AssembledCurrentState,
+        write_result,
     ) -> None:
-        """人格轮：应用 edit，再追加本轮输入与回应。"""
-        plan = response.response_plan
+        """人格轮：应用写场的 edit，再追加本轮输入与回应。
+
+        回复（「我说：…」）取自 ``reply_response``（认知⑤ 的结果）；edit 取自
+        ``write_result``（写场② 的结果）。两次调用下二者分离，故分开传。
+        """
+        plan = reply_response.response_plan
         reply = plan.verbal_text().strip()
         action = plan.embodied_text().strip()
         parts: list[str] = []
@@ -1063,7 +1083,7 @@ class SubjectProcess:
         input_block = f"{label}说：“{inbound}”" if inbound else ""
         self.zone_store.apply_edit(
             subject_id,
-            getattr(response, "zone_edit", ()) or (),
+            getattr(write_result, "zone_edit", ()) or (),
             append_blocks=tuple(
                 item for item in (input_block, reply_block) if item
             ),
@@ -1123,12 +1143,118 @@ class SubjectProcess:
                 current.context_view,
             ),
         )
-        if persona_instruction:
-            # 非木头人格走整份 JSON（简单契约），不流式提前开口。
-            return self.cognition.generate(request)
         if on_reply is not None and hasattr(self.cognition, "generate_stream"):
+            # 木头 & 人格都走流式提前开口：人格由 CognitionSkill.run_stream 按 reply 触发。
             return self.cognition.generate_stream(request, on_reply=on_reply)
         return self.cognition.generate(request)
+
+    def _wood_write_user_text(
+        self, current: AssembledCurrentState, reply_text: str
+    ) -> str:
+        """木头写场调用的 user：与写场提示词逐项对应（含上一份现场 / 本轮原话 / 你的回应 / 新回忆 / 说话人）。
+
+        ``build_user`` 遇非空 ``persona_user_text`` 会原样返回，故木头写场用它承载
+        「你的回应」这一项（否则 ``build_user`` 只渲染 说话人/活跃区/回忆/本轮，丢掉落回应）。
+        """
+        label = current.speaker.label if current.speaker else "对方"
+        parts: list[str] = [f"【说话人】{label}"]
+        prev = (
+            current.context_view.context_text.strip()
+            if current.context_view is not None and current.context_view.context_text
+            else ""
+        )
+        if prev:
+            parts.append(f"【上一份现场】\n{prev}")
+        parts.append(f"【本轮原话】{label}：{current.input_text}")
+        if reply_text:
+            parts.append(f"【你的回应】我说：{reply_text}")
+        memories = self._memory_lines(current.fragments)
+        if memories:
+            parts.append("【本轮新回忆】\n" + "\n".join(memories))
+        return "\n".join(parts)
+
+    def _write_zone(
+        self,
+        subject_id: str,
+        activity: Activity,
+        current: AssembledCurrentState,
+        response,
+        speaker: SpeakerCandidate | None,
+        working_recalled: Sequence[RecalledFragment],
+    ) -> ModelResponse:
+        """写场调用（②）：木头整份 ``rewritten_context`` / 人格 `edit`。
+
+        与回复调用独立：本轮回复已由调用①交出（``response_plan``），这里只整理现场/片场。
+        失败重试一次；仍失败 → 空写场结果（木头沿用上一份 / 人格片场不动），不吞回复。
+        """
+        del activity
+        pack_id = self.style_packs.get(subject_id)
+        registry = getattr(self.style_packs, "registry", None)
+        persona = is_persona(pack_id, registry=registry)
+        model_speaker = None
+        if speaker is not None:
+            model_speaker = ModelSpeaker(
+                object_id=speaker.object_id,
+                label=speaker.label,
+                aliases=speaker.aliases,
+                status=speaker.status,
+                reason=speaker.reason,
+            )
+        reply_text = (
+            response.response_plan.verbal_text().strip()
+            if response.response_plan is not None
+            else ""
+        )
+        if persona:
+            persona_instruction = write_instruction_for(
+                pack_id,
+                registry=registry,
+                zone_chars=zone_chars_for(pack_id, registry=registry),
+            )
+            persona_schema = write_schema_for(pack_id, registry=registry)
+            persona_user_text = self._persona_user_text(current, boot=False)
+        else:
+            persona_instruction = ""
+            persona_schema = None
+            persona_user_text = self._wood_write_user_text(current, reply_text)
+
+        context = self._model_context(
+            subject_id, working_recalled, current.fragments, current.context_view
+        )
+        if reply_text:
+            # 木头整份重写需要知道本轮回应（写"我说：…"），并入上下文。
+            context = (*context, {"kind": "subject_reply", "text": reply_text})
+
+        request = ModelRequest(
+            purpose="write_zone",
+            input_text=current.input_text,
+            subject_state=current.subject_state,
+            speaker=model_speaker,
+            now=datetime.now().astimezone(),
+            governing_rules=self._governing_rules(subject_id),
+            style_instruction="",
+            style_first=False,
+            persona_instruction=persona_instruction,
+            persona_schema=persona_schema,
+            persona_user_text=persona_user_text,
+            context=context,
+        )
+        try:
+            return self.write_zone.generate(request)
+        except Exception:
+            logger.exception("write_zone attempt 1 failed, retrying")
+            try:
+                return self.write_zone.generate(request)
+            except Exception:
+                logger.exception(
+                    "write_zone attempt 2 failed; keeping previous zone"
+                )
+                return ModelResponse(
+                    model=getattr(self.write_zone, "name", "write_zone"),
+                    metadata={"skill_fallback": "write_zone_retry_failed"},
+                    rewritten_context="",
+                    zone_edit=(),
+                )
 
     def _cognize(
         self,

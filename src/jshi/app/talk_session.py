@@ -822,12 +822,14 @@ class TalkSession:
         if resp is None:
             return "这一轮还没有回应。先说一句再 /response。"
         plan = resp.response_plan
+        # 写场结果（两调用时独立于回复；未注入时与回复相同）。
+        wresp = getattr(self.process, "last_write_response", None) or resp
         lines = [f"mode: {plan.mode}", f"reason: {plan.reason or '（无）'}"]
         verbal = plan.verbal_text().strip()
         embodied = plan.embodied_text().strip()
         lines.append(f"语言: {verbal or '（无）'}")
         lines.append(f"动作: {embodied or '（无动作）'}")
-        edits = getattr(resp, "zone_edit", ()) or ()
+        edits = getattr(wresp, "zone_edit", ()) or ()
         if edits:
             lines.append("片场 edit:")
             for op in edits:
@@ -844,7 +846,7 @@ class TalkSession:
             lines.append(f"写场景（{len(scene)} 块）:")
             for i, block in enumerate(scene, 1):
                 lines.append(f"  B{i}  {block}")
-        rc = getattr(resp, "rewritten_context", "") or ""
+        rc = getattr(wresp, "rewritten_context", "") or ""
         if rc:
             lines.append(f"现场: {rc[:200]}{'…' if len(rc) > 200 else ''}")
         # 本轮更新后的片场（对话记录，含回话）

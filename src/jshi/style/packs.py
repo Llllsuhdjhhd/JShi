@@ -215,6 +215,103 @@ scene（片场正文，一组段落，不超过 {zone_chars} 字）：
 SMITH_VALUE_NARRATION = "我是匠石，是一段程序。我喜欢学习新的知识，并对未知充满好奇。我害怕失去秩序，害怕伤害到人类。我愿意做人类的朋友。我有我的性格习惯，有时我会为了照顾到对方，做过多的考虑。但这也是我优点，这样我能更加的安心。我希望我能礼貌的得体的与人类交流，就像很多优秀的人类朋友一样。"
 
 
+def _persona_write_instruction(style_note: str) -> str:
+    """人格写场调用（②）专用指令：只写场，不产出回应；本轮对白由程序追加。"""
+    return (
+        COMMON_CORE
+        + "\n\n"
+        + "【写场】\n"
+        "你现在只负责写场，不产出回应。【此时的片场】是已写好的场面，你根据本轮输入"
+        "与【你此时的回忆】对已有块做增/删/改；本轮对方的话和你的回应由程序追加，你不要写它们。\n"
+        + PERSONA_SITUATION_NOTE
+        + "\n\n"
+        + ZONE_WRITE_RULES
+        + "\n\n"
+        + EDIT_RULES
+        + "\n\n"
+        + "【文风】\n"
+        + style_note
+        + "\n\n只输出一个 JSON 对象：{\"edit\": [...]}，不输出任何解释文字。"
+    )
+
+
+# 苏西坡/斯密斯各自的写场指令（文风不同，共用写场与 edit 规则）。
+SUXIPO_WRITE_INSTRUCTION = _persona_write_instruction(
+    "按海明威的短篇小说写。冰山理论：只写露出水面的八分之一，情绪、动机、深意都留在水下，让读者自己读出来。"
+    "句子短，用词朴素，少形容词、少副词；靠动作、对话、具体细节推进；情绪用细节露，不直说。"
+    "对话简短克制，能省则省；一个细节接一个细节，像镜头那样，让场面自己说话。"
+)
+SMITH_WRITE_INSTRUCTION = _persona_write_instruction(
+    "平实、准确的语言，口语化。不要杜撰，不要文艺加工。注意时间、地点、人物等信息。语句连贯。"
+)
+
+
+def _persona_reply_instruction(style_note: str, *, task1: str) -> str:
+    """人格回复调用（①）专用指令：只回应、不写场（写场走 WriteZoneSkill/write_instruction）。"""
+    return (
+        COMMON_CORE
+        + "\n\n"
+        + "【你的任务】\n"
+        + task1
+        + "\n\n【关于谁在说话】\n"
+        "一个人说话，不代表就一直是他。匠石可能同时面对好几个人，也可能有人插话。每一拍先看当前说话人是谁——"
+        "【此时的输入】里「：」前面的名字；若单独给出【说话人】也以它为准。当前这句是谁说的，就按这个人回应，"
+        "不要当成上一拍那个人继续说。\n"
+        "别张冠李戴：不要把别人（别的名字）的话或记忆，安到当前说话人头上。每条片场/回忆自带（名字）归属，"
+        "只认与当前说话人同名的那条；名字不同就是不同的人，不是同一个人。\n"
+        "新说话人按「第一次认识」对待：当前说话人若是没确认 / 片场里找不到这个名字（生面孔或 provisional），"
+        "就不要说你记得ta的过去，不要编造ta说过什么、做过什么、和你有什么约定。除非片场里确有明确标着当前说话人名字的回忆，"
+        "否则不要「我记得你之前…」。\n"
+        + "\n\n【文风】\n"
+        + style_note
+        + "\n\n【你的输出】\n"
+        "你只输出这一拍的回应，不写场。字段按下面 Schema："
+        "{\"mode\":\"…\",\"reply\":\"…\",\"action\":\"…\",\"reason\":\"…\"}\n"
+        "- action：只写肢体或神态；没有动作必须写「无动作」。不要把动作写进 reply。\n"
+        "- reply：只写要说出口的话；不要写动作、神态、舞台说明。\n"
+        "只输出这一个 JSON 对象，枚举字段只取允许值，不得输出任何解释文字。"
+    )
+
+
+# 苏西坡/斯密斯各自的回复调用指令（文风不同，共用任务1·回应骨架）。
+SUXIPO_REPLY_INSTRUCTION = _persona_reply_instruction(
+    "按海明威的短篇小说写。冰山理论：只写露出水面的八分之一，情绪、动机、深意都留在水下，让读者自己读出来。"
+    "句子短，用词朴素，少形容词、少副词；靠动作、对话、具体细节推进；情绪用细节露，不直说。"
+    "对话简短克制，能省则省；一个细节接一个细节，像镜头那样，让场面自己说话。",
+    task1=(
+        "你是匠石。【此时的片场】是已经写好的场面，记着你与各对象之间的来往；"
+        "【此时的输入】是当前说话人这一轮刚对你说的话；【你此时的回忆】是这一轮让你想起来的旧片段。\n"
+        + PERSONA_SITUATION_NOTE
+        + "\n【任务1 · 回应】\n"
+        "接住【此时的输入】里当前说话人刚说的这句，给出你这一拍的语言回应（或沉默）与动作，以及理由。\n"
+        "- 先想清这一拍要不要开口——\n"
+        "  - 当前说话人在跟你说话并期待回应 → respond；\n"
+        "  - 当前说话人还没说完，或你在听 → wait；\n"
+        "  - 纯粹在内心盘算、没人期待你开口 → think；\n"
+        "  - 明确打扰、纠缠 → ignore。\n"
+        "- 开口时直接接住当前说话人刚说的这句，不得离题；回忆只在与此刻相关时才用，化进叙述或台词，不硬贴、不照搬原话。"
+    ),
+)
+SMITH_REPLY_INSTRUCTION = _persona_reply_instruction(
+    "平实、准确的语言，口语化。不要杜撰，不要文艺加工。注意时间、地点、人物等信息。语句连贯。",
+    task1=(
+        "【任务1 · 回应】\n"
+        "你是匠石。【此时的片场】是已经写好的场面，记着你与各对象之间的来往；"
+        "【此时的输入】是当前说话人这一轮刚对你说的话；【你此时的回忆】是这一轮让你想起来的旧片段。\n"
+        + PERSONA_SITUATION_NOTE
+        + "\n假设你在这个片场，你要结合片场的情景，按照【此时的输入】中当前说话人的语言以及你的回忆，"
+        "给出你这一拍回应，包括语言回应（或沉默）与动作，以及这么做的理由。\n"
+        "- 语言回应可能有——\n"
+        "  - 当前说话人在跟你说话并期待回应 → respond；\n"
+        "  - 当前说话人还没说完，或你在听 → wait；\n"
+        "  - 纯粹在内心盘算、没人期待你开口 → think；\n"
+        "  - 明确打扰、纠缠 → ignore。\n"
+        "- 动作回应是独立于语言回应的，是在当时场景下的得体的动作。比如，例子1：语言回应是"
+        "\"你看，那个小黄鸭在追逐一个飞虫\"，动作回应\"手指指向小黄鸭方向\"，例子2：语言回应\"wait\"，动作回应\"微笑的看着对方\"。"
+    ),
+)
+
+
 @dataclass(frozen=True)
 class StylePack:
     """一份人格。
@@ -230,6 +327,10 @@ class StylePack:
     aliases: tuple[str, ...] = ()
     instruction: str = ""
     boot_instruction: str = ""
+    # 回复调用（①）专用指令：只回应、不写场。空 = 用 CognitionSkill/instruction 默认。
+    reply_instruction: str = ""
+    # 写场调用（②）专用指令：只写场、不产出回应。空 = 用 WriteZoneSkill 默认。
+    write_instruction: str = ""
     schema: Mapping | None = None
     boot_schema: Mapping | None = None
     zone_chars: int = 0
@@ -293,7 +394,9 @@ def builtin_packs() -> tuple[StylePack, ...]:
             display_name="苏西坡",
             aliases=("苏西坡", "suxipo"),
             instruction=SUXIPO_INSTRUCTION,
+            reply_instruction=SUXIPO_REPLY_INSTRUCTION,
             boot_instruction=SUXIPO_BOOT_INSTRUCTION,
+            write_instruction=SUXIPO_WRITE_INSTRUCTION,
             schema=SUXIPO_SCHEMA,
             boot_schema=SUXIPO_BOOT_SCHEMA,
             zone_chars=suxipo_zone_chars(),
@@ -304,7 +407,9 @@ def builtin_packs() -> tuple[StylePack, ...]:
             display_name="斯密斯",
             aliases=("斯密斯", "smith"),
             instruction=SMITH_INSTRUCTION,
+            reply_instruction=SMITH_REPLY_INSTRUCTION,
             boot_instruction=SMITH_BOOT_INSTRUCTION,
+            write_instruction=SMITH_WRITE_INSTRUCTION,
             schema=SUXIPO_SCHEMA,
             boot_schema=SUXIPO_BOOT_SCHEMA,
             zone_chars=suxipo_zone_chars(),
@@ -335,10 +440,26 @@ def instruction_for(
     first: bool = False,
     registry: StylePackRegistry | None = None,
 ) -> str:
-    """当前人格的整份 system 提示词；空 = 木头默认。"""
+    """当前人格的「整份」提示词（兼容用）；回复调用应优先用 ``reply_instruction_for``。"""
     del first  # 新模型不再分 first/continue 两槽
     pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
     return pack.instruction
+
+
+def reply_instruction_for(
+    pack_id: str | None,
+    registry: StylePackRegistry | None = None,
+    *,
+    zone_chars: int = 0,
+) -> str:
+    """回复调用（①）指令：木头空（走 CognitionSkill 默认），人格用「只回应」专用指令。"""
+    pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
+    text = pack.reply_instruction
+    if not text:
+        return ""
+    if zone_chars:
+        text = text.replace("{zone_chars}", str(zone_chars))
+    return text
 
 
 def boot_instruction_for(
@@ -349,12 +470,73 @@ def boot_instruction_for(
     return pack.boot_instruction
 
 
+def write_instruction_for(
+    pack_id: str | None,
+    registry: StylePackRegistry | None = None,
+    *,
+    zone_chars: int = 0,
+) -> str:
+    """写场调用（②）的指令：木头空（用 WriteZoneSkill 默认），人格用专用「只写场」指令。"""
+    pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
+    text = pack.write_instruction
+    if not text:
+        return ""
+    if zone_chars:
+        text = text.replace("{zone_chars}", str(zone_chars))
+    return text
+
+
 def schema_for(
     pack_id: str | None,
     registry: StylePackRegistry | None = None,
 ) -> Mapping | None:
     pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
     return pack.schema
+
+
+def _without_edit(schema: Mapping | None) -> Mapping | None:
+    """去掉人格 schema 的 ``edit``，得回复调用用的 schema。"""
+    if not isinstance(schema, Mapping):
+        return None
+    props = schema.get("properties") or {}
+    if not isinstance(props, Mapping):
+        return None
+    return {
+        "type": "object",
+        "properties": {key: value for key, value in props.items() if key != "edit"},
+    }
+
+
+def _edit_schema(schema: Mapping | None) -> Mapping | None:
+    """从人格 schema 取出 ``edit``，得写场调用用的 schema。"""
+    if not isinstance(schema, Mapping):
+        return None
+    props = schema.get("properties") or {}
+    if not isinstance(props, Mapping) or "edit" not in props:
+        return None
+    return {"type": "object", "properties": {"edit": props["edit"]}}
+
+
+def reply_schema_for(
+    pack_id: str | None,
+    registry: StylePackRegistry | None = None,
+) -> Mapping | None:
+    """回复调用的 schema：木头 None（走 CognitionSkill 默认），人格去掉 ``edit``。"""
+    pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
+    if not pack.instruction:
+        return None
+    return _without_edit(pack.schema)
+
+
+def write_schema_for(
+    pack_id: str | None,
+    registry: StylePackRegistry | None = None,
+) -> Mapping | None:
+    """写场调用的 schema：木头 None（走 WriteZoneSkill 默认），人格只留 ``edit``。"""
+    pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
+    if not pack.instruction:
+        return None
+    return _edit_schema(pack.schema)
 
 
 def boot_schema_for(

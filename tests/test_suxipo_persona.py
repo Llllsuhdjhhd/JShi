@@ -206,7 +206,8 @@ def test_persona_parse_maps_fields():
     assert resp.response_plan.verbal_text() == "风再大，信也跑不了。"
     assert resp.response_plan.embodied_text() == "把镇纸压了压"
     assert resp.response_plan.reason == "接住他这句"
-    assert resp.zone_edit == ({"op": "del", "id": "B2"},)
+    # 回复调用不再写场：edit 由 WriteZoneSkill 独立产出。
+    assert resp.zone_edit == ()
     assert '"reply"' in resp.raw_text
     assert "风再大，信也跑不了。" in resp.raw_text
 
@@ -247,7 +248,8 @@ def test_persona_partial_json_fallback_keeps_reply():
     assert resp.metadata.get("skill_fallback") == "persona_partial_json"
     assert resp.response_plan.mode == "respond"
     assert resp.response_plan.verbal_text().startswith("好，我展开说")
-    assert resp.zone_edit == ({"op": "del", "id": "B14"},)
+    # 回复调用不再写场：edit 由 WriteZoneSkill 独立产出。
+    assert resp.zone_edit == ()
 
 
 def test_persona_silent_mode_drops_verbal():

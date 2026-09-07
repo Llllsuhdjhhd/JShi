@@ -19,6 +19,7 @@ from .base import (
     parse_json_object,
 )
 from .cognition import COGNITION_JSON_SCHEMA, CognitionSkill, salvage_persona_json
+from .zone import WOOD_WRITE_INSTRUCTION, WOOD_WRITE_SCHEMA, WriteZoneSkill
 
 __all__ = [
     "COGNITION_JSON_SCHEMA",
@@ -27,6 +28,7 @@ __all__ = [
     "SkillError",
     "SkillModelPort",
     "SkillRegistry",
+    "WriteZoneSkill",
     "parse_json_object",
     "salvage_persona_json",
 ]

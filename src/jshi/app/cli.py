@@ -15,7 +15,7 @@ from jshi.memory.traces import JsonlRecallTraceStore
 from jshi.models import EchoModel, ModelPort, OpenAICompatibleModel
 from jshi.privilege import PromptRuleStore, SuperPermissionStore
 from jshi.recognition import CarrierEntry, ObjectProfile, new_object_id
-from jshi.skill import CognitionSkill, SkillModelPort
+from jshi.skill import CognitionSkill, SkillModelPort, WriteZoneSkill
 from jshi.style import StylePackStore, ZoneStore
 from jshi.subject import (
     EpistemicStatus,
@@ -69,7 +69,7 @@ def _load_local_env() -> None:
             os.environ.setdefault(key, value)
 
 
-def _model_from_environment() -> ModelPort:
+def _model_from_environment() -> tuple[ModelPort, ModelPort]:
     endpoint = os.getenv("JSHI_MODEL_ENDPOINT")
     api_key = os.getenv("JSHI_MODEL_API_KEY")
     model = os.getenv("JSHI_MODEL_NAME")
@@ -77,8 +77,11 @@ def _model_from_environment() -> ModelPort:
         base = OpenAICompatibleModel(endpoint, api_key, model)
     else:
         base = EchoModel()
-    # 05 认知走结构化 skill（JSON Schema + 解析 + 降级）；reflection 等内部活动走裸模型。
-    return SkillModelPort(CognitionSkill(base))
+    # 05 认知(回复调用)走结构化 skill；reflection 等内部活动走裸模型。
+    cognition = SkillModelPort(CognitionSkill(base))
+    # 05 写场(调用②)独立 skill：回复调用不再产出写场。
+    write_zone = SkillModelPort(WriteZoneSkill(base), apply_to=("write_zone",))
+    return cognition, write_zone
 
 
 def _runtime(
@@ -96,10 +99,11 @@ def _runtime(
     )
     if type(backend).__name__ != "InProcessMemoryBackend":
         print(f"[jshi] memory backend: {type(backend).__name__}", file=sys.stderr)
+    cognition, write_zone = _model_from_environment()
     process = SubjectProcess(
         subjects,
         identities,
-        _model_from_environment(),
+        cognition,
         memory=MemoryShell(backend),
         activity_ledger=SqliteExperienceLedger(data_dir / "subject.sqlite3"),
         prompt_rules=prompt_rules,
@@ -108,6 +112,7 @@ def _runtime(
         style_packs=StylePackStore(data_dir / "style_pack.json"),
         recall_traces=JsonlRecallTraceStore(data_dir / "recall_traces.jsonl"),
         zone_store=ZoneStore(data_dir / "zone.json"),
+        write_zone=write_zone,
     )
     return process, identities, subjects
 
@@ -377,6 +382,13 @@ def main() -> None:
         try:
             carriers = tuple(_parse_carrier(item) for item in args.carrier)
             objects = _parse_objects(args.object)
+            reply_shown = {"done": False}
+
+            def _early_reply(text: str) -> None:
+                # 回复一经生成即打印（早于写场 16 编排），符合「回复给、编排在后」。
+                reply_shown["done"] = True
+                print(text, flush=True)
+
             result = process.experience(
                 args.subject_id,
                 args.text,
@@ -384,11 +396,13 @@ def main() -> None:
                 channel=args.channel,
                 carriers=carriers,
                 objects=objects,
+                on_reply=_early_reply,
             )
         except ValueError as exc:
             print(f"错误：{exc}")
             return
-        print(result.action_text)
+        if not reply_shown["done"]:
+            print(result.action_text)
         print(f"[活动 {result.activity.id}；mode {result.response_plan.mode}]")
     elif args.command in {"talk", "chat"}:
         _run_talk(process, identities, args, super_permissions)
