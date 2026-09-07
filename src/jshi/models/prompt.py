@@ -54,15 +54,39 @@ def _now_label(now: datetime | None) -> str:
 
 
 def _time_label(raw: object) -> str:
-    """把 ISO 时间戳渲染成紧凑的本地时间标签（无则空）。"""
+    """把发生时间渲染成紧凑的本地时间标签（无则空）。
+
+    接受 ``datetime`` 或 ISO 字符串。
+    """
     if not raw:
         return ""
-    try:
-        value = datetime.fromisoformat(str(raw))
-    except (TypeError, ValueError):
-        return ""
+    if isinstance(raw, datetime):
+        value = raw
+    else:
+        try:
+            value = datetime.fromisoformat(str(raw))
+        except (TypeError, ValueError):
+            return ""
     local = value.astimezone() if value.tzinfo is not None else value
     return f"{local:%Y-%m-%d %H:%M}"
+
+
+def format_memory_line(
+    content: str, *, label: str = "", occurred_at: object = None
+) -> str:
+    """人格/组装侧回忆一行：可选 ``[时间]（名字）正文``。"""
+    text = (content or "").strip()
+    if not text:
+        return ""
+    when = _time_label(occurred_at)
+    name = (label or "").strip()
+    if when and name:
+        return f"[{when}]（{name}）{text}"
+    if when:
+        return f"[{when}]{text}"
+    if name:
+        return f"（{name}）{text}"
+    return text
 
 
 def build_system(request: ModelRequest) -> str:

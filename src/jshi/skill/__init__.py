@@ -18,7 +18,7 @@ from .base import (
     SkillRegistry,
     parse_json_object,
 )
-from .cognition import COGNITION_JSON_SCHEMA, CognitionSkill
+from .cognition import COGNITION_JSON_SCHEMA, CognitionSkill, salvage_persona_json
 
 __all__ = [
     "COGNITION_JSON_SCHEMA",
@@ -28,4 +28,5 @@ __all__ = [
     "SkillModelPort",
     "SkillRegistry",
     "parse_json_object",
+    "salvage_persona_json",
 ]

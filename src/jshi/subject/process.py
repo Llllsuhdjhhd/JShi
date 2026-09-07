@@ -906,7 +906,9 @@ class SubjectProcess:
         return self._material_chars(current) >= zone_chars // 2
 
     def _memory_lines(self, fragments: Sequence[AssemblyFragment]) -> list[str]:
-        """把组装里的 memory 片段转成「（名字）正文」行。"""
+        """把组装里的 memory 片段转成「[时间]（名字）正文」行。"""
+        from jshi.models.prompt import format_memory_line
+
         lines: list[str] = []
         for fragment in fragments:
             if getattr(fragment, "source", None) != "memory":
@@ -915,7 +917,13 @@ class SubjectProcess:
             if not content:
                 continue
             label = self._object_display(getattr(fragment, "object_id", None))
-            lines.append(f"（{label}）{content}" if label else content)
+            line = format_memory_line(
+                content,
+                label=label,
+                occurred_at=getattr(fragment, "occurred_at", None),
+            )
+            if line:
+                lines.append(line)
         return lines
 
     def _persona_user_text(

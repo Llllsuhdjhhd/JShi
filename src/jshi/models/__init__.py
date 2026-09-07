@@ -14,7 +14,8 @@ from .base import (
     ResponseItem,
     ResponsePlan,
 )
-from .prompt import build_system, build_user
+from .prompt import build_system, build_user, format_memory_line
+
 
 __all__ = [
     "EchoModel",
@@ -33,4 +34,5 @@ __all__ = [
     "ResponsePlan",
     "build_system",
     "build_user",
+    "format_memory_line",
 ]

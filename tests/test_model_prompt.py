@@ -341,3 +341,16 @@ def test_openai_compatible_stream_also_disables_thinking(monkeypatch) -> None:
     assert "reasoning_effort" not in body
     assert body["stream"] is True
     assert chunks == ["你好"]
+
+
+def test_format_memory_line_includes_time_and_label() -> None:
+    from jshi.models import format_memory_line
+
+    when = datetime(2026, 9, 7, 12, 30)
+    assert (
+        format_memory_line("五年级可读西游记", label="lux", occurred_at=when)
+        == "[2026-09-07 12:30]（lux）五年级可读西游记"
+    )
+    assert format_memory_line("无归属", occurred_at=when) == "[2026-09-07 12:30]无归属"
+    assert format_memory_line("只有名", label="lux") == "（lux）只有名"
+    assert format_memory_line("  ") == ""

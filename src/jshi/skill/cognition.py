@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import replace
 from typing import Any, Mapping
 
@@ -26,7 +28,7 @@ from jshi.models import (
     ResponsePlan,
 )
 
-from .base import Skill, SkillError, parse_json_object
+from .base import Skill, SkillError, _strip_markdown_fences, parse_json_object
 
 _RESPONSE_MODES = frozenset({"respond", "think", "ignore", "wait"})
 _SILENT_MODES = frozenset({"think", "ignore", "wait"})
@@ -36,6 +38,11 @@ _RELEVANCE = frozenset({"related", "partial", "unrelated"})
 _USED_IN_REPLY = frozenset({"unused", "alluded", "relied"})
 _OBJECT_FIT = frozenset({"match", "other", "none"})
 _COVERAGE = frozenset({"sufficient", "thin", "missing"})
+
+_NEXT_KEY = re.compile(
+    r'\s*,?\s*"(?:mode|action|reply|reason|edit)"\s*:',
+    re.IGNORECASE,
+)
 
 # 认知 skill 的结构化输出契约（JSON Schema 形状）。
 COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
@@ -297,6 +304,90 @@ def _bind_speaker_fields(response: ModelResponse, request: ModelRequest) -> Mode
     )
 
 
+def _extract_persona_string(text: str, key: str) -> str | None:
+    """抽出人格 JSON 里某个字符串字段；引号未合上也尽量收到下一字段前。"""
+    pattern = re.compile(rf'"{re.escape(key)}"\s*:\s*"', re.IGNORECASE)
+    match = pattern.search(text)
+    if not match:
+        return None
+    start = match.end()
+    index = start
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            index += 2
+            continue
+        if char == '"':
+            return text[start:index]
+        # 半截字符串：下一字段已出现（常见于 reply 未合上就写 reason）
+        nxt = _NEXT_KEY.match(text[index:])
+        if nxt is not None:
+            return text[start:index].rstrip().rstrip(",").rstrip('"')
+        index += 1
+    return text[start:].rstrip().rstrip("}").rstrip(",").rstrip('"').rstrip()
+
+
+def _extract_persona_edit(text: str) -> list[Any]:
+    """抽出 edit 数组；解不出则空列表（回话优先，片场可下轮再压）。"""
+    match = re.search(r'"edit"\s*:\s*\[', text, re.IGNORECASE)
+    if not match:
+        return []
+    start = match.end() - 1
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                chunk = text[start : index + 1]
+                try:
+                    data = json.loads(chunk)
+                except (ValueError, json.JSONDecodeError):
+                    return []
+                return data if isinstance(data, list) else []
+    return []
+
+
+def salvage_persona_json(text: str) -> dict[str, Any] | None:
+    """人格输出几乎是 JSON 但不合规时，抢救 mode/action/reply/reason/edit。
+
+    宁可丢掉不完整的 edit，也要保住非空 reply，避免整轮降成静默 think。
+    """
+    raw = _strip_markdown_fences((text or "").strip())
+    if "{" not in raw:
+        return None
+    mode = (_extract_persona_string(raw, "mode") or "").strip().lower()
+    action = (_extract_persona_string(raw, "action") or "").strip()
+    reply = (_extract_persona_string(raw, "reply") or "").strip()
+    reason = (_extract_persona_string(raw, "reason") or "").strip()
+    edit = _extract_persona_edit(raw)
+    if not reply and not edit and mode not in _RESPONSE_MODES:
+        return None
+    if mode not in _RESPONSE_MODES:
+        mode = "respond" if reply else "think"
+    return {
+        "mode": mode,
+        "action": action,
+        "reply": reply,
+        "reason": reason or "persona_partial_json",
+        "edit": edit,
+    }
+
+
 def _persona_to_model_response(
     data: Mapping[str, Any], model: str
 ) -> ModelResponse:
@@ -439,6 +530,20 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
         try:
             data = parse_json_object(raw_text)
         except SkillError:
+            persona = bool(getattr(request, "persona_schema", None)) and not getattr(
+                request, "boot", False
+            )
+            if persona:
+                salvaged = salvage_persona_json(raw_text)
+                if salvaged is not None:
+                    response = _persona_to_model_response(
+                        salvaged, model=self.model_tag
+                    ).with_raw(raw_text)
+                    meta = dict(response.metadata or {})
+                    meta["skill_fallback"] = "persona_partial_json"
+                    meta["raw_preview"] = (raw_text or "")[:120]
+                    object.__setattr__(response, "metadata", meta)
+                    return _keep_usage_metadata(response, raw)
             return _keep_usage_metadata(self._fallback(raw_text), raw)
         if getattr(request, "boot", False):
             return _keep_usage_metadata(

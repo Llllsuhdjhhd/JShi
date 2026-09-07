@@ -82,11 +82,17 @@ def test_suxipo_pack_content_and_contract():
     assert "【文风】" in instruction
     assert "海明威" in instruction
     assert "不要填 id" in instruction
-    assert '"edit": []' in instruction
+    assert '"edit":[]' in instruction or '"edit": []' in instruction
     assert "已超限时不得交空 edit" in instruction
     assert "删哪一块、改哪一块由你判断" in instruction
     assert "几条都重要" in instruction
     assert "本轮对方的话和你的回应由程序追加" in instruction
+    assert '"action":"…"' in instruction or '"action":"微微点头"' in instruction
+    assert "不要把动作写进 reply" in instruction
+    assert "正例" in instruction
+    assert "反例" in instruction
+    assert "留意时间、地点" in instruction
+    assert "[时间]" in instruction
     # 配置名不进提示词
     assert "苏西坡" not in instruction
     assert "suxipo" not in instruction
@@ -161,10 +167,12 @@ def test_smith_instruction_uses_shared_edit_rules():
     instruction = instruction_for(SMITH)
     assert instruction == SMITH_INSTRUCTION
     assert "不要填 id" in instruction
-    assert '"edit": []' in instruction
+    assert '"edit":[]' in instruction or '"edit": []' in instruction
     assert "已超限时不得交空 edit" in instruction
     assert "删哪一块、改哪一块由你判断" in instruction
     assert "本轮对方的话和你的回应由程序追加" in instruction
+    assert "不要把动作写进 reply" in instruction
+    assert "留意时间、地点" in instruction
     assert "斯密斯" not in instruction
 
 
@@ -201,6 +209,45 @@ def test_persona_parse_maps_fields():
     assert resp.zone_edit == ({"op": "del", "id": "B2"},)
     assert '"reply"' in resp.raw_text
     assert "风再大，信也跑不了。" in resp.raw_text
+
+
+def test_salvage_persona_json_recovers_unclosed_reply():
+    from jshi.skill import salvage_persona_json
+
+    broken = (
+        '{"mode": "respond", "reply": "好，我展开说。放下手看向lux。\n\n'
+        '"reason": "对方要我展开。",\n\n'
+        '"edit": [{"op": "del", "id": "B2"}]\n]}'
+    )
+    data = salvage_persona_json(broken)
+    assert data is not None
+    assert data["mode"] == "respond"
+    assert data["reply"].startswith("好，我展开说")
+    assert "reason" not in data["reply"]
+    assert data["reason"] == "对方要我展开。"
+    assert data["edit"] == [{"op": "del", "id": "B2"}]
+
+
+def test_persona_partial_json_fallback_keeps_reply():
+    class FakeRawModel:
+        name = "fake-raw"
+
+        def generate(self, request: ModelRequest) -> ModelResponse:
+            text = (
+                '{"mode": "respond", "reply": "好，我展开说。放下手看向lux。\n\n'
+                '"reason": "对方要我展开。",\n'
+                '"edit": [{"op": "del", "id": "B14"}]\n]}'
+            )
+            return ModelResponse(text=text, model=self.name)
+
+    skill = CognitionSkill(FakeRawModel())
+    resp = skill.run(
+        _request(persona_instruction=SUXIPO_INSTRUCTION, persona_schema=SUXIPO_SCHEMA)
+    )
+    assert resp.metadata.get("skill_fallback") == "persona_partial_json"
+    assert resp.response_plan.mode == "respond"
+    assert resp.response_plan.verbal_text().startswith("好，我展开说")
+    assert resp.zone_edit == ({"op": "del", "id": "B14"},)
 
 
 def test_persona_silent_mode_drops_verbal():
