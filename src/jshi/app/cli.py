@@ -398,12 +398,30 @@ def _parser() -> argparse.ArgumentParser:
     )
     grant_super.add_argument("object", help="对象名或 object_id")
     grant_super.add_argument("--password", required=True, help="登录密码")
+
+    tool = commands.add_parser(
+        "tool", help="进行一次工具使用（演示；默认 stub 引擎，--engine pi 用 Pi）"
+    )
+    tool.add_argument("subject_id", help="主体 id")
+    tool.add_argument("--need", default="", help="为什么用工具（人话）")
+    tool.add_argument("--template", default="echo", help="选用的工具模板")
+    tool.add_argument(
+        "--engine",
+        choices=["stub", "pi"],
+        default="stub",
+        help="引擎：stub（默认，确定性）/ pi（RPC，需已装 Pi）",
+    )
+    tool.add_argument("--params", default="", help="JSON 参数（可选）")
     return parser
 
 
 def main() -> None:
     _load_local_env()
     args = _parser().parse_args()
+    # tool 是独立演示：不依赖主体运行时，避免为它构建记忆后端 / 模型端口。
+    if args.command == "tool":
+        _run_tool(args)
+        return
     process, identities, subjects = _runtime(args.data_dir)
     super_permissions = SuperPermissionStore(args.data_dir / "super_permissions.json")
 
@@ -723,6 +741,60 @@ def _run_grant_super(process, store, args) -> None:
         print(f"错误：{exc}")
         return
     print(f"已授予超级权限：{profile.label}（{profile.object_id}）")
+
+
+def _run_tool(args) -> None:
+    """工具使用演示：默认 StubEngine（确定性）；--engine pi 用 Pi RPC 引擎。"""
+    from jshi.tool import PiEngine, StubEngine, ToolModule, ToolRequest
+
+    params: dict = {}
+    raw_params = (args.params or "").strip()
+    if raw_params:
+        try:
+            loaded = json.loads(raw_params)
+        except ValueError as exc:
+            print(f"错误：--params 须为 JSON（{exc}）")
+            return
+        if not isinstance(loaded, dict):
+            print("错误：--params 须为 JSON 对象")
+            return
+        params = loaded
+
+    request = ToolRequest(
+        subject_id=args.subject_id,
+        need=args.need,
+        template=args.template,
+        params=params,
+        expected_result="演示工具使用",
+    )
+    if args.engine == "pi":
+        module = ToolModule(PiEngine())
+    else:
+        module = ToolModule(StubEngine())
+
+    print(f"引擎：{module.engine_name}；可用模板：{list(module.list_templates())}")
+    outcome = module.submit(request)
+    for item in outcome.feedback:
+        if item.kind.value == "estimate":
+            est = item.estimate
+            print(
+                f"[estimate] benefit={est.benefit or ''} "
+                f"cost={est.cost_est} time={est.time_est_ms}ms"
+            )
+        elif item.kind.value == "progress":
+            prog = item.progress
+            print(
+                f"[progress] stage={prog.stage} step={prog.step} "
+                f"partial={prog.partial[:60]!r}"
+            )
+        elif item.kind.value == "result":
+            res = item.result
+            print(
+                f"[result] status={res.status.value} ideal={res.ideal} "
+                f"summary={res.summary}"
+            )
+            print(f"  result={dict(res.result)}")
+    print(f"终态：{outcome.result.status.value}；request_id={outcome.request_id}")
 
 
 def _parse_carrier(raw: str) -> CarrierEntry:
