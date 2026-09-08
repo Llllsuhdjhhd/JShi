@@ -275,9 +275,12 @@ class SkillModelPort(ModelPort):
         skill: Skill[ModelResponse],
         *,
         apply_to: tuple[str, ...] = ("subject_activity",),
+        streaming: bool = True,
     ) -> None:
         self._skill = skill
         self._apply_to = apply_to
+        # 该 skill 是否走流式（早开口）；由 SkillProfile.streaming 控制。
+        self.streaming = streaming
 
     @property
     def name(self) -> str:
@@ -293,6 +296,9 @@ class SkillModelPort(ModelPort):
         request: ModelRequest,
         on_reply: Callable[[str], None] | None = None,
     ) -> ModelResponse:
+        # 关流式：直接走 generate（回复回落、早开口失效），仍走 skill.run / 底层裸模型。
+        if not self.streaming:
+            return self.generate(request)
         if request.purpose in self._apply_to:
             return self._skill.run_stream(request, on_reply=on_reply)
         return self._skill.run(request)

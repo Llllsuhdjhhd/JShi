@@ -12,7 +12,8 @@ from jshi.experienceledger import SqliteExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.memory import MemoryShell, RecallStrategyStore, build_memory_backend
 from jshi.memory.traces import JsonlRecallTraceStore
-from jshi.models import EchoModel, ModelPort, OpenAICompatibleModel
+from jshi.core.skillconfig import SkillConfigStore, SkillProfile, build_model_port
+from jshi.models import ModelPort
 from jshi.privilege import PromptRuleStore, SuperPermissionStore
 from jshi.recognition import CarrierEntry, ObjectProfile, new_object_id
 from jshi.skill import CognitionSkill, SkillModelPort, WriteZoneSkill
@@ -69,18 +70,56 @@ def _load_local_env() -> None:
             os.environ.setdefault(key, value)
 
 
-def _model_from_environment() -> tuple[ModelPort, ModelPort]:
-    endpoint = os.getenv("JSHI_MODEL_ENDPOINT")
-    api_key = os.getenv("JSHI_MODEL_API_KEY")
-    model = os.getenv("JSHI_MODEL_NAME")
-    if endpoint and api_key and model:
-        base = OpenAICompatibleModel(endpoint, api_key, model)
+def _skill_port(
+    profile: SkillProfile,
+    skill_cls,
+    *,
+    apply_to: tuple[str, ...],
+) -> ModelPort:
+    """按 skill profile 造 ``SkillModelPort``：模型(含 thinking) + 可覆盖版本 + 流式开关。"""
+    port = build_model_port(profile)
+    kwargs = {"version": profile.version} if profile.version else {}
+    return SkillModelPort(
+        skill_cls(port, **kwargs),
+        apply_to=apply_to,
+        streaming=profile.streaming,
+    )
+
+
+def _skills_config_path() -> Path | None:
+    """返回 per-skill 配置 JSON 路径：优先 ``JSHI_SKILLS_FILE``，否则仓库根/当前目录的 ``skills.json``。"""
+    explicit = os.getenv("JSHI_SKILLS_FILE")
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit))
     else:
-        base = EchoModel()
-    # 05 认知(回复调用)走结构化 skill；reflection 等内部活动走裸模型。
-    cognition = SkillModelPort(CognitionSkill(base))
+        candidates.append(Path.cwd() / "skills.json")
+        repo = Path(__file__).resolve().parents[3]
+        if (repo / "pyproject.toml").exists():
+            candidates.append(repo / "skills.json")
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _model_from_environment() -> tuple[ModelPort, ModelPort]:
+    # 每 skill 独立配置：默认用 env（JSHI_MODEL_*）；skills.json 存在则按它（缺省字段回退 env）。
+    store = SkillConfigStore()
+    skills_path = _skills_config_path()
+    if skills_path is not None:
+        store.load_file(skills_path)
+    cognition = _skill_port(
+        store.profile("cognition"),
+        CognitionSkill,
+        apply_to=("subject_activity",),
+    )
     # 05 写场(调用②)独立 skill：回复调用不再产出写场。
-    write_zone = SkillModelPort(WriteZoneSkill(base), apply_to=("write_zone",))
+    write_zone = _skill_port(
+        store.profile("write_zone"),
+        WriteZoneSkill,
+        apply_to=("write_zone",),
+    )
     return cognition, write_zone
 
 

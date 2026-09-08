@@ -383,29 +383,51 @@ def _provider_usage_metadata(result: Mapping[str, Any]) -> dict[str, Any]:
     return meta
 
 
-def model_thinking_fields() -> dict[str, Any]:
-    """DeepSeek V4 思考档位，写入 Chat Completions 请求体。
+def model_thinking_fields(
+    thinking: str | None = None,
+    reasoning_effort: str | None = None,
+) -> dict[str, Any]:
+    """DeepSeek 思考档位：``thinking``(enabled/disabled) + ``reasoning_effort``(low/high/max)。
 
-    ``JSHI_MODEL_THINKING``（默认 ``disabled``）：
-
-    - ``disabled`` / ``off`` / ``0`` / ``false`` / ``no``：关闭思考
-    - ``low`` / ``high`` / ``max``：开思考并设 ``reasoning_effort``
-    - ``enabled`` / ``on`` / ``1`` / ``true`` / ``yes`` / ``medium``：等同 ``high``
+    - ``thinking`` 未给时回退全局环境 ``JSHI_MODEL_THINKING``（兼容旧单值 disabled/low/high/max）。
+    - ``thinking=disabled``：思考关闭。
+    - ``thinking=enabled`` + ``reasoning_effort``：思考开启并按强度（``medium``/``xhigh`` 映射为 ``high``）。
     """
-    raw = (os.getenv("JSHI_MODEL_THINKING") or "disabled").strip().lower()
-    if raw in {"disabled", "off", "0", "false", "no"}:
+    if thinking is None:
+        raw = (os.getenv("JSHI_MODEL_THINKING") or "").strip().lower()
+        if raw in {"disabled", "off", "0", "false", "no"} or raw == "":
+            thinking, reasoning_effort = "disabled", reasoning_effort or "high"
+        elif raw == "low":
+            thinking, reasoning_effort = "enabled", "low"
+        elif raw == "max":
+            thinking, reasoning_effort = "enabled", "max"
+        else:  # enabled/on/yes/medium/high/xhigh
+            thinking, reasoning_effort = "enabled", reasoning_effort or "high"
+    t = str(thinking or "enabled").strip().lower() or "enabled"
+    e = str(reasoning_effort or "high").strip().lower() or "high"
+    if t in {"disabled", "off", "0", "false", "no"}:
         return {"thinking": {"type": "disabled"}}
-    if raw in {"enabled", "on", "1", "true", "yes", "medium", "high"}:
-        return {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
-    if raw in {"low", "max"}:
-        return {"thinking": {"type": "enabled"}, "reasoning_effort": raw}
-    raise ValueError(
-        "JSHI_MODEL_THINKING 只接受 disabled / low / high / max"
-        f"（enabled 等同 high），收到 {raw!r}"
-    )
+    if t not in {"enabled", "on", "1", "true", "yes"}:
+        raise ValueError(f"thinking 只接受 enabled/disabled，收到 {t!r}")
+    if e in {"medium", "xhigh"}:
+        e = "high"
+    if e not in {"low", "high", "max"}:
+        raise ValueError(
+            f"reasoning_effort 只接受 low/high/max（medium/xhigh 映射为 high），收到 {e!r}"
+        )
+    return {"thinking": {"type": "enabled"}, "reasoning_effort": e}
 
 
-def _chat_payload(model: str, request: ModelRequest, *, stream: bool = False) -> bytes:
+def _chat_payload(
+    model: str,
+    request: ModelRequest,
+    *,
+    stream: bool = False,
+    thinking: str | None = None,
+    reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
+    response_format: str = "",
+) -> bytes:
     """Chat Completions 请求体。思考档位见 ``model_thinking_fields``。"""
     from jshi.models.prompt import build_system, build_user
 
@@ -415,8 +437,12 @@ def _chat_payload(model: str, request: ModelRequest, *, stream: bool = False) ->
             {"role": "system", "content": build_system(request)},
             {"role": "user", "content": build_user(request)},
         ],
-        **model_thinking_fields(),
+        **model_thinking_fields(thinking, reasoning_effort),
     }
+    if max_tokens:
+        body["max_tokens"] = max_tokens
+    if response_format:
+        body["response_format"] = {"type": response_format}
     if stream:
         body["stream"] = True
     return json.dumps(body).encode("utf-8")
@@ -425,17 +451,37 @@ def _chat_payload(model: str, request: ModelRequest, *, stream: bool = False) ->
 class OpenAICompatibleModel:
     """Minimal adapter for providers exposing an OpenAI-compatible chat endpoint."""
 
-    def __init__(self, endpoint: str, api_key: str, model: str) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str,
+        model: str,
+        thinking: str | None = None,
+        reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
+        response_format: str = "",
+    ) -> None:
         self.endpoint = endpoint
         self.api_key = api_key
         self._model = model
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort
+        self.max_tokens = max_tokens
+        self.response_format = response_format
 
     @property
     def name(self) -> str:
         return self._model
 
     def generate(self, request: ModelRequest) -> ModelResponse:
-        payload = _chat_payload(self._model, request)
+        payload = _chat_payload(
+            self._model,
+            request,
+            thinking=self.thinking,
+            reasoning_effort=self.reasoning_effort,
+            max_tokens=self.max_tokens,
+            response_format=self.response_format,
+        )
         http_request = Request(
             self.endpoint,
             data=payload,
@@ -459,7 +505,15 @@ class OpenAICompatibleModel:
         与 ``generate`` 同一套 system/user;只额外加 ``stream: True`` 并按 SSE
         (``data: {...}``)逐行读。对 ``[DONE]`` 终止。
         """
-        payload = _chat_payload(self._model, request, stream=True)
+        payload = _chat_payload(
+            self._model,
+            request,
+            stream=True,
+            thinking=self.thinking,
+            reasoning_effort=self.reasoning_effort,
+            max_tokens=self.max_tokens,
+            response_format=self.response_format,
+        )
         http_request = Request(
             self.endpoint,
             data=payload,

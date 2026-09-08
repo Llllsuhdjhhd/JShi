@@ -1,0 +1,34 @@
+{
+  "skills": {
+    "cognition": {
+      "model": "deepseek-v4-flash",
+      "vendor": "deepseek",
+      "thinking": "enabled",
+      "reasoning_effort": "low",
+      "max_tokens": "",
+      "response_format": "",
+      "streaming": true,
+      "version": ""
+    },
+    "write_zone": {
+      "model": "deepseek-v4-flash",
+      "vendor": "deepseek",
+      "thinking": "enabled",
+      "reasoning_effort": "high",
+      "max_tokens": "",
+      "response_format": "",
+      "streaming": false,
+      "version": ""
+    },
+    "reflection": {
+      "model": "deepseek-v4-flash",
+      "vendor": "deepseek",
+      "thinking": "",
+      "reasoning_effort": "",
+      "max_tokens": "",
+      "response_format": "",
+      "streaming": false,
+      "version": ""
+    }
+  }
+}
