@@ -638,7 +638,7 @@ def main() -> int:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=ROOT / ".pytest" / "live-loop" / "probe-zone",
+        default=ROOT / ".tmp" / "live-loop" / "probe-zone",
     )
     args = parser.parse_args()
 

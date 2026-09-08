@@ -5,7 +5,7 @@
   conda run -n py3125 python tests/live/memory_loop.py --goal "提升回忆质量" --seed 3 --recall 3 --speaker 火星人
   conda run -n py3125 python tests/live/memory_loop.py --scenario tests/live/scenarios/mars-quality.json
   conda run -n py3125 python tests/live/memory_loop.py --scenario tests/live/scenarios/mars-ingest.json --one
-  conda run -n py3125 python tests/live/memory_loop.py --continue .pytest/live-loop/<run-id> --one
+  conda run -n py3125 python tests/live/memory_loop.py --continue .tmp/live-loop/<run-id> --one
 
 --one：只跑下一轮然后退出，便于改完代码再继续。
 --pause：同进程内每轮结束后等回车；改代码须停掉再 --continue。
@@ -29,14 +29,14 @@ ROOT = Path(__file__).resolve().parents[2]
 def _forbid_test_store(data_dir: Path) -> None:
     """火星人与 lux 同一份正式库，落库不得写进测试目录。"""
     resolved = data_dir.resolve()
-    for base in (ROOT / ".pytest", ROOT / "tests"):
+    for base in (ROOT / ".tmp", ROOT / ".pytest", ROOT / "tests"):
         try:
             resolved.relative_to(base.resolve())
         except ValueError:
             continue
         raise SystemExit(
             "落库必须用正式目录 .jshi（与 lux 同一份），"
-            f"不要写到 {base.name}。"
+            f"不要写到临时目录或 tests（命中 {base}）。"
         )
 
 
@@ -726,7 +726,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "  python tests/live/memory_loop.py --scenario tests/live/scenarios/mars-quality.json\n"
             "例：落库 3 轮、每轮看结果再改：\n"
             "  python tests/live/memory_loop.py --scenario tests/live/scenarios/mars-ingest.json --one\n"
-            "  python tests/live/memory_loop.py --continue .pytest/live-loop/<id> --one"
+            "  python tests/live/memory_loop.py --continue .tmp/live-loop/<id> --one"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -776,7 +776,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="不触发 30 投递（积压很大、REMS 会长时间不返回时用）",
     )
-    parser.add_argument("--out", help="报告目录，默认 .pytest/live-loop/<时间>")
+    parser.add_argument("--out", help="报告目录，默认 .tmp/live-loop/<时间>")
     return parser.parse_args(argv)
 
 
@@ -797,7 +797,7 @@ def main(argv: list[str] | None = None) -> int:
             plan["skip_ingest"] = True
     else:
         plan = _plan_from_args(args)
-        out_dir = Path(args.out) if args.out else ROOT / ".pytest" / "live-loop" / _now_id()
+        out_dir = Path(args.out) if args.out else ROOT / ".tmp" / "live-loop" / _now_id()
         plan["out_dir"] = str(out_dir.resolve())
         _save(plan, out_dir)
 

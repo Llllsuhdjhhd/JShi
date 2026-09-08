@@ -13,7 +13,7 @@
 
   conda run -n py3125 python tests/live/probe_deepseek_thinking.py
   conda run -n py3125 python tests/live/probe_deepseek_thinking.py --from-jshi
-  conda run -n py3125 python tests/live/probe_deepseek_thinking.py --prompt-file .pytest/live-loop/probe-thinking/prompt.json
+  conda run -n py3125 python tests/live/probe_deepseek_thinking.py --prompt-file .tmp/live-loop/probe-thinking/prompt.json
 """
 
 from __future__ import annotations
@@ -284,7 +284,7 @@ def main() -> int:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=ROOT / ".pytest" / "live-loop" / "probe-thinking",
+        default=ROOT / ".tmp" / "live-loop" / "probe-thinking",
     )
     args = parser.parse_args()
 

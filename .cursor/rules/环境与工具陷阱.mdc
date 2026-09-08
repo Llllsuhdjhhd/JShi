@@ -40,10 +40,11 @@ alwaysApply: true
   **判定方法**:看输出有没有 `FAILED` / `AssertionError`——有才是真失败;`E`+`PermissionError` 是环境问题。
 - **沙箱禁止写 `AppData\Local\Temp\...`**:`tempfile.TemporaryDirectory`、pytest 的 `tmp_path` 在那里写/枚举会被拒
   (`[sandbox: file access denied under workspace-write mode]`),导致 `write_examples` 等拿到 PermissionError。
-  **解决**:临时目录放进**工作区**(e.g. `.pytest/xxx`),或用 `--basetemp` 指到工作区;要判定 tmp_path 用例本体,
-  直接给测试函数传一个工作区内的 Path 来跑,绕过 pytest 的 basetemp。
-- pytest 配置在 `pyproject.toml`(`testpaths=["tests"]`,`addopts=["--basetemp=.pytest/tmp"]`)。
-  干净跑法:`python -m pytest <files> -q -p no:cacheprovider --basetemp <工作区目录>`。
+  **解决**:临时目录放进**工作区** `.tmp/`（e.g. `.tmp/pytest/xxx`），或用 `--basetemp` 指到工作区；要判定 tmp_path 用例本体，
+  直接给测试函数传一个工作区内的 Path 来跑，绕过 pytest 的 basetemp。
+- pytest 配置在 `pyproject.toml`（`testpaths=["tests"]`，`addopts=["--basetemp=.tmp/pytest/tmp"]`）。
+  干净跑法：`python -m pytest <files> -q -p no:cacheprovider --basetemp <工作区目录>`。
+  正式对话数据仍用 `.jshi/`；探测/临时 data-dir 用 `.tmp/data/<名>/`，不要在根目录再造 `.jshi-*`。
 - **对话/记忆实测用 conda `py3125`，不要用 PATH 上的 `python`**。后者是 base，`import torch` 报 `WinError 1114`（`c10.dll`），REMS 语义召回一开始就把整次 `recall` 打断，词法/对象路也走不到。`talk.cmd` 若存在 `%USERPROFILE%\anaconda3\envs\py3125\python.exe` 会用它。命令行：`conda activate py3125` 或 `conda run -n py3125 python ...`（仍要 `PYTHONPATH=src`）。`py3125` 的 torch 2.4.1 可正常 `torch.zeros(1)`。
 
 ## 4. 模型 / rems(邻仓)

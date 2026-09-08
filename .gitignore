@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+.tmp/
+# 旧临时根（历史残留，可整目录删）
 .pytest/
 .pytest_cache/
 .pytest-tmp*/

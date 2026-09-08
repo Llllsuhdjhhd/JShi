@@ -19,6 +19,6 @@ conda run -n py3125 python -m pytest -q                                        #
 conda run -n py3125 python -m pytest tests/test_recognition_profile.py -q      # 单个模块
 ```
 
-缓存与临时文件统一在仓库根下的 `.pytest/`（已忽略），不必再手写 `--basetemp`。
+缓存与临时文件统一在仓库根下的 `.tmp/`（已忽略）：pytest 用 `.tmp/pytest/`，探测报告用 `.tmp/live-loop/`，临时 data-dir 用 `.tmp/data/<名>/`。不要写进 `tests/`，也不必再手写 `--basetemp`。
 
 `smoke/` 存放可查看的冒烟测试数据库（见 [smoke/README.md](smoke/README.md)）。`idiot/` 为《白痴》场景测试树，当前搁置。

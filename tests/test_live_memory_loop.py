@@ -168,15 +168,15 @@ def test_flash_cost_offpeak():
 
 
 def test_parse_args_accepts_continue_and_one():
-    args = parse_args(["--continue", ".pytest/live-loop/x", "--one"])
-    assert args.continue_dir == ".pytest/live-loop/x"
+    args = parse_args(["--continue", ".tmp/live-loop/x", "--one"])
+    assert args.continue_dir == ".tmp/live-loop/x"
     assert args.one is True
 
 
-def test_forbid_test_store_rejects_pytest_dir():
+def test_forbid_test_store_rejects_tmp_dir():
     try:
         memory_loop._forbid_test_store(
-            Path(__file__).resolve().parents[1] / ".pytest" / "mars-live"
+            Path(__file__).resolve().parents[1] / ".tmp" / "mars-live"
         )
     except SystemExit as exc:
         assert ".jshi" in str(exc)
