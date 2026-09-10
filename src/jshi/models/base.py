@@ -146,6 +146,16 @@ class MemoryRatings:
         return bool(self.items or self.coverage or (self.gap_query or "").strip())
 
 
+@dataclass(frozen=True)
+class ToolCallIntent:
+    """05 回复 JSON 里可选的工具发起；不是整份 ``tool.ToolRequest``。"""
+
+    need: str
+    template: str = ""
+    params: Mapping[str, Any] = field(default_factory=dict)
+    expected_result: str = ""
+
+
 @dataclass(frozen=True, init=False)
 class ModelResponse:
     model: str
@@ -165,6 +175,8 @@ class ModelResponse:
     value_narration: str = ""
     # 模型原文（解析前）。空 = 未保存。
     raw_text: str = ""
+    # 可选：本轮要发起的工具定义。空 = 不用工具。
+    tool_request: ToolCallIntent | None = None
 
     @property
     def text(self) -> str:
@@ -197,6 +209,7 @@ class ModelResponse:
         scene: tuple[str, ...] = (),
         value_narration: str = "",
         raw_text: str = "",
+        tool_request: ToolCallIntent | None = None,
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
     ) -> None:
@@ -232,6 +245,7 @@ class ModelResponse:
         object.__setattr__(self, "scene", tuple(scene))
         object.__setattr__(self, "value_narration", value_narration or "")
         object.__setattr__(self, "raw_text", raw_text or "")
+        object.__setattr__(self, "tool_request", tool_request)
 
     def with_raw(self, raw_text: str) -> ModelResponse:
         """把解析前的原文挂到这份响应上（同一对象，不另造一份）。"""

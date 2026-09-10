@@ -26,7 +26,9 @@ from jshi.models import (
     RecallRequest,
     ResponseItem,
     ResponsePlan,
+    ToolCallIntent,
 )
+from jshi.tool.hang import NEED_MIN_CHARS
 
 from .base import Skill, SkillError, _strip_markdown_fences, parse_json_object
 
@@ -129,6 +131,15 @@ COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
                 "gap_query": {"type": "string"},
             },
         },
+        "tool_request": {
+            "type": "object",
+            "properties": {
+                "need": {"type": "string"},
+                "template": {"type": "string"},
+                "params": {"type": "object"},
+                "expected_result": {"type": "string"},
+            },
+        },
     },
 }
 
@@ -188,6 +199,28 @@ def _parse_memory_ratings(data: Mapping[str, Any]) -> MemoryRatings:
         coverage=coverage,
         gap_query=str(raw.get("gap_query") or "").strip(),
     )
+
+
+def _parse_tool_request(data: Mapping[str, Any]) -> ToolCallIntent | None:
+    """可选 tool_request；解析失败或 need 过短则当空。"""
+    raw = data.get("tool_request")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        need = str(raw.get("need") or "").strip()
+        if len(need) < NEED_MIN_CHARS:
+            return None
+        params = raw.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        return ToolCallIntent(
+            need=need,
+            template=str(raw.get("template") or "").strip(),
+            params=params,
+            expected_result=str(raw.get("expected_result") or "").strip(),
+        )
+    except Exception:
+        return None
 
 
 def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
@@ -269,6 +302,7 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         context_assessment=context_assessment,
         importance_ranking=importance_ranking,
         memory_ratings=_parse_memory_ratings(data),
+        tool_request=_parse_tool_request(data),
     )
 
 
@@ -299,6 +333,7 @@ def _bind_speaker_fields(response: ModelResponse, request: ModelRequest) -> Mode
         importance_ranking=response.importance_ranking,
         memory_ratings=response.memory_ratings,
         rewritten_context=response.rewritten_context,
+        tool_request=response.tool_request,
     )
 
 
@@ -412,6 +447,7 @@ def _persona_to_model_response(
     return ModelResponse(
         model=model,
         response_plan=ResponsePlan(mode=mode, reason=reason, items=tuple(items)),
+        tool_request=_parse_tool_request(data),
     )
 
 
@@ -502,6 +538,7 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
 【对象确认】
 - 对象确认（object_assessment）可空。不确定则跳过。不要用同轮召回补材料。
 - 不要做 memory_ratings；来不及就空着。不要整理现场——那是写场调用的事，本轮只回应。
+需要用工具则填 tool_request（need / template / params），否则不要此键。
 
 【输出格式】
 你的输出格式：你每轮只输出一个 JSON 对象，字段按下方 Schema；枚举字段只取允许值，不输出任何解释文字。

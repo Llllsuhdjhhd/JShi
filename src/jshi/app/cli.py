@@ -412,6 +412,16 @@ def _parser() -> argparse.ArgumentParser:
         help="引擎：stub（默认，确定性）/ pi（RPC，需已装 Pi）",
     )
     tool.add_argument("--params", default="", help="JSON 参数（可选）")
+    tool.add_argument(
+        "--hang",
+        action="store_true",
+        help="同步跑完后写入记挂账本（{data-dir}/hang.jsonl）",
+    )
+    tool.add_argument(
+        "--object-id",
+        default="",
+        help="记挂所属对象（配合 --hang）",
+    )
     return parser
 
 
@@ -746,6 +756,7 @@ def _run_grant_super(process, store, args) -> None:
 def _run_tool(args) -> None:
     """工具使用演示：默认 StubEngine（确定性）；--engine pi 用 Pi RPC 引擎。"""
     from jshi.tool import PiEngine, StubEngine, ToolModule, ToolRequest
+    from jshi.tool.hang import HangStore
 
     params: dict = {}
     raw_params = (args.params or "").strip()
@@ -760,13 +771,30 @@ def _run_tool(args) -> None:
             return
         params = loaded
 
-    request = ToolRequest(
-        subject_id=args.subject_id,
-        need=args.need,
-        template=args.template,
-        params=params,
-        expected_result="演示工具使用",
-    )
+    hang_record = None
+    if getattr(args, "hang", False):
+        store = HangStore(args.data_dir / "hang.jsonl")
+        hang_record = store.create(
+            subject_id=args.subject_id,
+            object_id=getattr(args, "object_id", "") or "",
+            need=args.need,
+            template=args.template,
+            field_ref={"activity_id": "", "zone_kind": "wood", "zone_rev": ""},
+            origin="external_05",
+        )
+    else:
+        store = None
+
+    request_kwargs: dict = {
+        "subject_id": args.subject_id,
+        "need": args.need,
+        "template": args.template,
+        "params": params,
+        "expected_result": "演示工具使用",
+    }
+    if hang_record is not None:
+        request_kwargs["request_id"] = hang_record.request_id
+    request = ToolRequest(**request_kwargs)
     if args.engine == "pi":
         module = ToolModule(PiEngine())
     else:
@@ -795,6 +823,12 @@ def _run_tool(args) -> None:
             )
             print(f"  result={dict(res.result)}")
     print(f"终态：{outcome.result.status.value}；request_id={outcome.request_id}")
+    if store is not None and hang_record is not None:
+        updated = store.append_feedback(hang_record.task_id, outcome.feedback)
+        print(
+            f"记挂：task_id={hang_record.task_id} "
+            f"notify_caller={getattr(updated, 'notify_caller', False)}"
+        )
 
 
 def _parse_carrier(raw: str) -> CarrierEntry:

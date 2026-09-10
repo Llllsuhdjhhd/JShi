@@ -61,6 +61,7 @@ from jshi.objects import InProcessObjectSystem, ObjectSystemPort
 from jshi.models import (
     ModelPort,
     ModelRequest,
+    ModelResponse,
     ModelSpeaker,
     ObjectAssessment,
     RecallRequest,
@@ -93,6 +94,16 @@ from jshi.style import (
     zone_chars_for,
 )
 from jshi.memory.traces import JsonlRecallTraceStore, RecallTrace
+from jshi.tool import (
+    AskMode,
+    NEED_MIN_CHARS,
+    StubEngine,
+    ToolModule,
+    ToolOrigin,
+    ToolRequest,
+    ToolRunner,
+)
+from jshi.tool.hang import HangStore
 
 from .domain import (
     ALLOWED_EPISTEMIC_TRANSITIONS,
@@ -266,12 +277,18 @@ class SubjectProcess:
         recall_traces: JsonlRecallTraceStore | None = None,
         zone_store: ZoneStore | None = None,
         write_zone: ModelPort | None = None,
+        hang_store: HangStore | None = None,
+        tool_runner: ToolRunner | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
         self.cognition = cognition
         # 写场（②）独立端口：注入时走两调用；未注入退回单调用（保旧契约可跑）。
         self.write_zone = write_zone
+        self.hang_store = hang_store or HangStore(repository.path.parent / "hang.jsonl")
+        self.tool_runner = tool_runner or ToolRunner(
+            ToolModule(StubEngine()), self.hang_store
+        )
         self.last_activity_timing: ActivityTiming | None = None
         self.last_model_response = None
         self.last_write_response = None
@@ -740,6 +757,7 @@ class SubjectProcess:
             )
 
         clock.mark("16编排")
+        self._start_hang_if_requested(subject_id, activity, speaker, response)
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
         close_result = self.activity_close.close(
             subject_id,
@@ -1255,6 +1273,55 @@ class SubjectProcess:
                     rewritten_context="",
                     zone_edit=(),
                 )
+
+    def _start_hang_if_requested(
+        self,
+        subject_id: str,
+        activity: Activity,
+        speaker: SpeakerCandidate | None,
+        response: ModelResponse,
+    ) -> None:
+        """有有效 tool_request 则入账并后台执行；不阻塞本轮收尾。"""
+        intent = getattr(response, "tool_request", None)
+        if intent is None or len((intent.need or "").strip()) < NEED_MIN_CHARS:
+            return
+        object_id = (speaker.object_id if speaker is not None else "") or ""
+        if not object_id:
+            return
+        pack_id = self.style_packs.get(subject_id)
+        registry = getattr(self.style_packs, "registry", None)
+        persona = is_persona(pack_id, registry=registry)
+        if persona:
+            zone_kind = "persona"
+            zone_rev = activity.id
+        else:
+            zone_kind = "wood"
+            view = self.active_zone.load(subject_id)
+            zone_rev = str(view.version) if getattr(view, "version", 0) else activity.id
+        record = self.hang_store.create(
+            subject_id=subject_id,
+            object_id=object_id,
+            need=intent.need,
+            template=intent.template or "",
+            field_ref={
+                "activity_id": activity.id,
+                "zone_kind": zone_kind,
+                "zone_rev": str(zone_rev),
+            },
+            origin="external_05",
+        )
+        request = ToolRequest(
+            request_id=record.request_id,
+            subject_id=subject_id,
+            activity_id=activity.id,
+            origin=ToolOrigin.EXTERNAL_05,
+            need=intent.need,
+            template=intent.template or "",
+            params=dict(intent.params or {}),
+            expected_result=intent.expected_result or "",
+            ask=AskMode.EXECUTE,
+        )
+        self.tool_runner.start(request, record.task_id)
 
     def _cognize(
         self,

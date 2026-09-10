@@ -3,14 +3,22 @@
 - ``ToolEngine``：工具使用引擎（可替换）。工具目录 / 包管理由引擎负责
   （Pi 用 ``get_commands`` / skills / packages），匠石侧不维护自己的注册表。
 - ``ToolModule``：收 ``ToolRequest``，经引擎跑，返回反馈流 + 终态结果。
+- ``ToolRunner``：后台跑 ``submit``，把反馈写入记挂；失败写成 ``result/failed``。
 """
 
 from __future__ import annotations
 
+import logging
+import threading
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 from .contract import FeedbackKind, ToolFeedback, ToolRequest, ToolResult, ToolStatus
+
+if TYPE_CHECKING:
+    from .hang import HangStore
+
+logger = logging.getLogger(__name__)
 
 
 class ToolEngine(Protocol):
@@ -88,3 +96,47 @@ class ToolModule:
             feedback=tuple(feedback),
             result=result,
         )
+
+
+class ToolRunner:
+    """后台执行：``start`` 立刻返回；跑完把反馈写入 ``HangStore``。
+
+    失败写成一条 ``result`` / ``failed``，不抛到主链路。测试用 ``drain_for_tests`` join。
+    """
+
+    def __init__(self, module: ToolModule, store: HangStore) -> None:
+        self.module = module
+        self.store = store
+        self._lock = threading.Lock()
+        self._threads: list[threading.Thread] = []
+
+    def start(self, request: ToolRequest, hang_id: str) -> None:
+        thread = threading.Thread(
+            target=self._run,
+            args=(request, hang_id),
+            name=f"tool-hang-{hang_id[:8]}",
+            daemon=True,
+        )
+        with self._lock:
+            self._threads.append(thread)
+        thread.start()
+
+    def _run(self, request: ToolRequest, hang_id: str) -> None:
+        try:
+            outcome = self.module.submit(request)
+            self.store.append_feedback(hang_id, outcome.feedback)
+        except Exception as exc:
+            logger.exception("tool runner failed; writing failed result")
+            failed = ToolFeedback(
+                request_id=request.request_id,
+                kind=FeedbackKind.RESULT,
+                result=ToolResult(status=ToolStatus.FAILED, error=str(exc)),
+            )
+            self.store.append_feedback(hang_id, (failed,))
+
+    def drain_for_tests(self, timeout: float = 5.0) -> None:
+        with self._lock:
+            threads = list(self._threads)
+            self._threads.clear()
+        for thread in threads:
+            thread.join(timeout)

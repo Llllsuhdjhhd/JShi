@@ -152,6 +152,15 @@ SUXIPO_SCHEMA: Mapping = {
         "reply": {"type": "string"},
         "action": {"type": "string"},
         "reason": {"type": "string"},
+        "tool_request": {
+            "type": "object",
+            "properties": {
+                "need": {"type": "string"},
+                "template": {"type": "string"},
+                "params": {"type": "object"},
+                "expected_result": {"type": "string"},
+            },
+        },
         "edit": {
             "type": "array",
             "items": {
