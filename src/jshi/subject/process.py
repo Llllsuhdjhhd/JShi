@@ -34,6 +34,7 @@ from jshi.assembly import (
     ObjectSource,
     PersonalWorldSource,
     SourceLoadReport,
+    ToolSource,
 )
 from jshi.attention import ChancePort, PlaceholderChance
 from jshi.core import SubjectState
@@ -95,13 +96,10 @@ from jshi.style import (
 )
 from jshi.memory.traces import JsonlRecallTraceStore, RecallTrace
 from jshi.tool import (
-    AskMode,
-    NEED_MIN_CHARS,
     StubEngine,
     ToolModule,
-    ToolOrigin,
-    ToolRequest,
     ToolRunner,
+    ToolService,
 )
 from jshi.tool.hang import HangStore
 
@@ -191,6 +189,7 @@ class AssembledCurrentState:
     fragments: tuple[AssemblyFragment, ...] = ()
     source_report: tuple[SourceLoadReport, ...] = ()
     speaker: AssemblySpeaker | None = None
+    tool_input: str = ""
 
 
 @dataclass(frozen=True)
@@ -279,16 +278,26 @@ class SubjectProcess:
         write_zone: ModelPort | None = None,
         hang_store: HangStore | None = None,
         tool_runner: ToolRunner | None = None,
+        tool_service: ToolService | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
         self.cognition = cognition
         # 写场（②）独立端口：注入时走两调用；未注入退回单调用（保旧契约可跑）。
         self.write_zone = write_zone
-        self.hang_store = hang_store or HangStore(repository.path.parent / "hang.jsonl")
-        self.tool_runner = tool_runner or ToolRunner(
-            ToolModule(StubEngine()), self.hang_store
-        )
+        data_dir = repository.path.parent
+        if tool_service is not None:
+            self.tool_service = tool_service
+        else:
+            store = hang_store or HangStore(data_dir / "hang.jsonl")
+            runner = tool_runner or ToolRunner(ToolModule(StubEngine()), store)
+            self.tool_service = ToolService(
+                hang_store=store,
+                runner=runner,
+                intake_path=data_dir / "tool.jsonl",
+            )
+        self.hang_store = self.tool_service.hang_store
+        self.tool_runner = self.tool_service.runner
         self.last_activity_timing: ActivityTiming | None = None
         self.last_model_response = None
         self.last_write_response = None
@@ -339,6 +348,7 @@ class SubjectProcess:
                 MemorySource(
                     repository, memory=self.memory, profiles=self.profiles
                 ),
+                ToolSource(self.tool_service),
             ),
             chance=self.chance,
         )
@@ -394,6 +404,7 @@ class SubjectProcess:
             recalled=(),
             fragments=working_set.fragments,
             source_report=working_set.report,
+            tool_input=working_set.tool_input,
         )
 
     def preview_state(
@@ -757,7 +768,7 @@ class SubjectProcess:
             )
 
         clock.mark("16编排")
-        self._start_hang_if_requested(subject_id, activity, speaker, response)
+        self._intake_tool_if_requested(subject_id, activity, speaker, response)
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
         close_result = self.activity_close.close(
             subject_id,
@@ -960,7 +971,11 @@ class SubjectProcess:
         return lines
 
     def _persona_user_text(
-        self, current: AssembledCurrentState, *, boot: bool
+        self,
+        current: AssembledCurrentState,
+        *,
+        boot: bool,
+        include_tool: bool = True,
     ) -> str:
         label = current.speaker.label if current.speaker else "对方"
         memories = self._memory_lines(current.fragments)
@@ -978,6 +993,9 @@ class SubjectProcess:
         parts.append(f"【此时的输入】\n{label}：{current.input_text}")
         if memories:
             parts.append("【你此时的回忆】\n" + "\n".join(memories))
+        extra = (current.tool_input or "").strip() if include_tool else ""
+        if extra:
+            parts.append(extra)
         return "\n\n".join(parts)
 
     def _boot_user_text(
@@ -1154,6 +1172,7 @@ class SubjectProcess:
             persona_instruction=persona_instruction,
             persona_schema=persona_schema,
             persona_user_text=persona_user_text,
+            tool_input=current.tool_input,
             context=self._model_context(
                 current.subject_state.subject_id,
                 working_recalled,
@@ -1230,7 +1249,9 @@ class SubjectProcess:
                 zone_chars=zone_chars_for(pack_id, registry=registry),
             )
             persona_schema = write_schema_for(pack_id, registry=registry)
-            persona_user_text = self._persona_user_text(current, boot=False)
+            persona_user_text = self._persona_user_text(
+                current, boot=False, include_tool=False
+            )
         else:
             persona_instruction = ""
             persona_schema = None
@@ -1274,16 +1295,16 @@ class SubjectProcess:
                     zone_edit=(),
                 )
 
-    def _start_hang_if_requested(
+    def _intake_tool_if_requested(
         self,
         subject_id: str,
         activity: Activity,
         speaker: SpeakerCandidate | None,
         response: ModelResponse,
     ) -> None:
-        """有有效 tool_request 则入账并后台执行；不阻塞本轮收尾。"""
-        intent = getattr(response, "tool_request", None)
-        if intent is None or len((intent.need or "").strip()) < NEED_MIN_CHARS:
+        """有工具指示则交接给 200；不等策划、不等执行。"""
+        intent = getattr(response, "tool_intent", None)
+        if intent is None:
             return
         object_id = (speaker.object_id if speaker is not None else "") or ""
         if not object_id:
@@ -1298,11 +1319,12 @@ class SubjectProcess:
             zone_kind = "wood"
             view = self.active_zone.load(subject_id)
             zone_rev = str(view.version) if getattr(view, "version", 0) else activity.id
-        record = self.hang_store.create(
+        self.tool_service.intake(
             subject_id=subject_id,
             object_id=object_id,
-            need=intent.need,
-            template=intent.template or "",
+            activity_id=activity.id,
+            need=intent.need or "",
+            verbal=verbal_text(response.response_plan),
             field_ref={
                 "activity_id": activity.id,
                 "zone_kind": zone_kind,
@@ -1310,18 +1332,6 @@ class SubjectProcess:
             },
             origin="external_05",
         )
-        request = ToolRequest(
-            request_id=record.request_id,
-            subject_id=subject_id,
-            activity_id=activity.id,
-            origin=ToolOrigin.EXTERNAL_05,
-            need=intent.need,
-            template=intent.template or "",
-            params=dict(intent.params or {}),
-            expected_result=intent.expected_result or "",
-            ask=AskMode.EXECUTE,
-        )
-        self.tool_runner.start(request, record.task_id)
 
     def _cognize(
         self,
@@ -1558,6 +1568,8 @@ class SubjectProcess:
 
         m_counter = 0
         for fragment in fragments:
+            if fragment.source == "tool":
+                continue
             if fragment.source == "memory":
                 m_counter += 1
                 short_id = f"M{m_counter}"

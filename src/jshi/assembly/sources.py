@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from jshi.personalworld import PersonalWorldPort
     from jshi.recognition import ObjectProfileRepository
     from jshi.subject.repository import SubjectRepository
+    from jshi.tool.service import ToolService
 
 
 def speaker_summary(speaker: AssemblySpeaker) -> str:
@@ -255,3 +256,35 @@ class MemorySource:
         if not label:
             return text
         return memory_display_text(text, label=label, aliases=aliases)
+
+
+class ToolSource:
+    """200 可见反馈源：只读 list_visible，正文原样交给组装器的 tool_input。"""
+
+    name = "tool"
+    status = "implemented"
+
+    def __init__(self, service: ToolService) -> None:
+        self._service = service
+
+    def load(self, ctx: AssemblyContext) -> LoadResult:
+        speaker = ctx.speaker
+        if speaker is None or not speaker.object_id:
+            return LoadResult()
+        items = self._service.list_visible(ctx.subject_id, speaker.object_id)
+        fragments = tuple(
+            AssemblyFragment(
+                source="tool",
+                id=f"tool:{item.id}",
+                content=item.summary,
+                kind=item.kind,
+                object_id=item.object_id,
+                status="active",
+                importance=0.6,
+                source_ids=(item.id,),
+                always=False,
+            )
+            for item in items
+            if (item.summary or "").strip()
+        )
+        return LoadResult(fragments=fragments)

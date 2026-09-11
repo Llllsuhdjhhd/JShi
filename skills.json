@@ -29,6 +29,26 @@
       "response_format": "",
       "streaming": false,
       "version": ""
+    },
+    "tool_plan": {
+      "model": "deepseek-v4-flash",
+      "vendor": "deepseek",
+      "thinking": "disabled",
+      "reasoning_effort": "",
+      "max_tokens": "",
+      "response_format": "",
+      "streaming": false,
+      "version": ""
+    },
+    "tool_wrap": {
+      "model": "deepseek-v4-flash",
+      "vendor": "deepseek",
+      "thinking": "disabled",
+      "reasoning_effort": "",
+      "max_tokens": "",
+      "response_format": "",
+      "streaming": false,
+      "version": ""
     }
   }
 }

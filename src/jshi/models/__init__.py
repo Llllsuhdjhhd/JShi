@@ -13,7 +13,7 @@ from .base import (
     RecallRequest,
     ResponseItem,
     ResponsePlan,
-    ToolCallIntent,
+    ToolUseIntent,
 )
 from .prompt import build_system, build_user, format_memory_line
 
@@ -33,7 +33,7 @@ __all__ = [
     "RecallRequest",
     "ResponseItem",
     "ResponsePlan",
-    "ToolCallIntent",
+    "ToolUseIntent",
     "build_system",
     "build_user",
     "format_memory_line",

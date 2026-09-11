@@ -16,7 +16,15 @@ from jshi.core.skillconfig import SkillConfigStore, SkillProfile, build_model_po
 from jshi.models import ModelPort
 from jshi.privilege import PromptRuleStore, SuperPermissionStore
 from jshi.recognition import CarrierEntry, ObjectProfile, new_object_id
-from jshi.skill import CognitionSkill, SkillModelPort, WriteZoneSkill
+from jshi.skill import (
+    CognitionSkill,
+    SkillModelPort,
+    SkillPlanner,
+    ToolPlanSkill,
+    ToolWrapSkill,
+    WriteZoneSkill,
+)
+from jshi.tool import HangStore, StubEngine, ToolModule, ToolRunner, ToolService, load_catalog
 from jshi.style import StylePackStore, ZoneStore
 from jshi.subject import (
     EpistemicStatus,
@@ -103,7 +111,7 @@ def _skills_config_path() -> Path | None:
     return None
 
 
-def _model_from_environment() -> tuple[ModelPort, ModelPort]:
+def _model_from_environment() -> tuple[ModelPort, ModelPort, SkillConfigStore]:
     # 每 skill 独立配置：默认用 env（JSHI_MODEL_*）；skills.json 存在则按它（缺省字段回退 env）。
     store = SkillConfigStore()
     skills_path = _skills_config_path()
@@ -120,7 +128,21 @@ def _model_from_environment() -> tuple[ModelPort, ModelPort]:
         WriteZoneSkill,
         apply_to=("write_zone",),
     )
-    return cognition, write_zone
+    return cognition, write_zone, store
+
+
+def _tool_service(data_dir: Path, store: SkillConfigStore) -> ToolService:
+    hang = HangStore(data_dir / "hang.jsonl")
+    runner = ToolRunner(ToolModule(StubEngine()), hang)
+    plan_skill = ToolPlanSkill(build_model_port(store.profile("tool_plan")))
+    wrap_skill = ToolWrapSkill(build_model_port(store.profile("tool_wrap")))
+    return ToolService(
+        hang,
+        runner,
+        planner=SkillPlanner(plan_skill, catalog=load_catalog()),
+        wrap_skill=wrap_skill,
+        intake_path=data_dir / "tool.jsonl",
+    )
 
 
 def _runtime(
@@ -138,7 +160,7 @@ def _runtime(
     )
     if type(backend).__name__ != "InProcessMemoryBackend":
         print(f"[jshi] memory backend: {type(backend).__name__}", file=sys.stderr)
-    cognition, write_zone = _model_from_environment()
+    cognition, write_zone, skill_store = _model_from_environment()
     process = SubjectProcess(
         subjects,
         identities,
@@ -152,6 +174,7 @@ def _runtime(
         recall_traces=JsonlRecallTraceStore(data_dir / "recall_traces.jsonl"),
         zone_store=ZoneStore(data_dir / "zone.json"),
         write_zone=write_zone,
+        tool_service=_tool_service(data_dir, skill_store),
     )
     return process, identities, subjects
 
@@ -827,7 +850,7 @@ def _run_tool(args) -> None:
         updated = store.append_feedback(hang_record.task_id, outcome.feedback)
         print(
             f"记挂：task_id={hang_record.task_id} "
-            f"notify_caller={getattr(updated, 'notify_caller', False)}"
+            f"visible={getattr(updated, 'visible', False)}"
         )
 
 

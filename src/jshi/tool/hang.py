@@ -1,7 +1,7 @@
-"""记挂账本（210 存储占位）：建任务、写反馈、按对象列出、注销。
+"""记挂账本（210）：建任务、写反馈、按对象列出、注销。
 
-本轮无模型思考。叫醒用规则：终态 RESULT 且非 propose_only 拒绝 → ``notify_caller``。
-存储与 ``subject.sqlite3`` 分开，默认 ``{data-dir}/hang.jsonl``。
+只收阶段性事实，不包装、不策划。``visible`` / ``summary`` 由 200 写回。
+读旧键 ``notify_caller`` 当作 ``visible``。存储与 ``subject.sqlite3`` 分开。
 """
 
 from __future__ import annotations
@@ -42,7 +42,9 @@ class HangRecord:
     field_ref: Mapping[str, str] = field(default_factory=dict)
     note: str = ""
     feedback: tuple[ToolFeedback, ...] = ()
-    notify_caller: bool = False
+    visible: bool = False
+    summary: str = ""
+    wrap_meta: Mapping[str, str] = field(default_factory=dict)
     updated_at: datetime = field(default_factory=utc_now)
 
 
@@ -53,15 +55,25 @@ def truncate_note(need: str, limit: int = NOTE_MAX_CHARS) -> str:
     return text[:limit]
 
 
-def should_notify(feedback: Sequence[ToolFeedback]) -> bool:
-    """终态 RESULT 叫醒；propose_only 的 rejected 不叫醒；纯 progress 不叫醒。"""
-    for item in feedback:
-        if item.kind is not FeedbackKind.RESULT or item.result is None:
-            continue
-        if item.result.status is ToolStatus.REJECTED:
-            continue
+def is_stage_fact(item: ToolFeedback) -> bool:
+    """有内容的阶段性成果或终态。无文本的 start 心跳不算。"""
+    if item.kind is FeedbackKind.RESULT and item.result is not None:
         return True
+    if item.kind is FeedbackKind.PROGRESS and item.progress is not None:
+        return bool((item.progress.partial or "").strip())
     return False
+
+
+def rule_wrap_from_item(item: ToolFeedback) -> tuple[bool, str] | None:
+    """无包装 skill 时的占位：非拒绝的 RESULT → 可见短句。"""
+    if item.kind is not FeedbackKind.RESULT or item.result is None:
+        return None
+    if item.result.status is ToolStatus.REJECTED:
+        return None
+    text = (item.result.summary or item.result.error or "").strip()
+    if not text:
+        text = item.result.status.value
+    return True, truncate_note(text)
 
 
 def _feedback_to_dict(item: ToolFeedback) -> dict[str, Any]:
@@ -200,7 +212,9 @@ def _record_to_dict(record: HangRecord) -> dict[str, Any]:
         "field_ref": dict(record.field_ref),
         "note": record.note,
         "feedback": [_feedback_to_dict(item) for item in record.feedback],
-        "notify_caller": record.notify_caller,
+        "visible": record.visible,
+        "summary": record.summary,
+        "wrap_meta": dict(record.wrap_meta),
         "updated_at": record.updated_at.isoformat(),
     }
 
@@ -214,6 +228,10 @@ def _record_from_dict(data: Mapping[str, Any]) -> HangRecord:
     field_ref = data.get("field_ref") or {}
     if not isinstance(field_ref, Mapping):
         field_ref = {}
+    wrap_meta = data.get("wrap_meta") or {}
+    if not isinstance(wrap_meta, Mapping):
+        wrap_meta = {}
+    visible = bool(data.get("visible", data.get("notify_caller", False)))
     return HangRecord(
         task_id=str(data.get("task_id") or new_id()),
         request_id=str(data.get("request_id") or ""),
@@ -226,7 +244,9 @@ def _record_from_dict(data: Mapping[str, Any]) -> HangRecord:
         field_ref={str(key): str(value) for key, value in field_ref.items()},
         note=str(data.get("note") or ""),
         feedback=feedback,
-        notify_caller=bool(data.get("notify_caller", False)),
+        visible=visible,
+        summary=str(data.get("summary") or ""),
+        wrap_meta={str(key): str(value) for key, value in wrap_meta.items()},
         updated_at=_dt(data.get("updated_at")),
     )
 
@@ -296,7 +316,9 @@ class HangStore:
             field_ref=dict(field_ref or {}),
             note=truncate_note(need),
             feedback=(),
-            notify_caller=False,
+            visible=False,
+            summary="",
+            wrap_meta={},
             updated_at=utc_now(),
         )
         with self._lock:
@@ -313,20 +335,52 @@ class HangStore:
             if record is None:
                 return None
             merged = record.feedback + incoming
+            updated = replace(record, feedback=merged, updated_at=utc_now())
+            self._records[task_id] = updated
+            self._dump()
+            return updated
+
+    def set_wrap(
+        self,
+        task_id: str,
+        *,
+        visible: bool,
+        summary: str,
+        wrap_meta: Mapping[str, str] | None = None,
+    ) -> HangRecord | None:
+        with self._lock:
+            record = self._records.get(task_id)
+            if record is None:
+                return None
             if record.status == "cancelled":
-                updated = replace(record, feedback=merged, updated_at=utc_now())
-            else:
-                notify = should_notify(merged) or record.notify_caller
                 updated = replace(
                     record,
-                    feedback=merged,
-                    notify_caller=notify,
-                    status="notified" if notify else record.status,
+                    summary=summary,
+                    wrap_meta=dict(wrap_meta or record.wrap_meta),
+                    updated_at=utc_now(),
+                )
+            else:
+                updated = replace(
+                    record,
+                    visible=visible,
+                    summary=summary if visible else record.summary,
+                    wrap_meta=dict(wrap_meta or {}),
+                    status="notified" if visible else record.status,
                     updated_at=utc_now(),
                 )
             self._records[task_id] = updated
             self._dump()
             return updated
+
+    def list_for(self, subject_id: str, object_id: str) -> tuple[HangRecord, ...]:
+        with self._lock:
+            items = [
+                record
+                for record in self._records.values()
+                if record.subject_id == subject_id and record.object_id == object_id
+            ]
+        items.sort(key=lambda item: item.updated_at, reverse=True)
+        return tuple(items)
 
     def list_open(self, subject_id: str, object_id: str) -> tuple[HangRecord, ...]:
         with self._lock:

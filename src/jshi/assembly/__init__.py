@@ -13,6 +13,7 @@ from .sources import (
     MemorySource,
     ObjectSource,
     PersonalWorldSource,
+    ToolSource,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "ObjectSource",
     "PersonalWorldSource",
     "SourceLoadReport",
+    "ToolSource",
 ]

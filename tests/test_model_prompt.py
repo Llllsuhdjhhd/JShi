@@ -123,6 +123,13 @@ def test_build_user_has_one_zone_and_no_object_id():
     assert "memory:dup" not in user
 
 
+def test_build_user_includes_tool_feedback_as_is():
+    req = replace(_request(), tool_input="明天北京有雨，下午转阴。")
+    user = build_user(req)
+    assert "【在途工具】" not in user
+    assert "明天北京有雨，下午转阴。" in user
+
+
 def test_build_user_distinguishes_ambiguous_names_without_object_id():
     req = _request(
         speaker=ModelSpeaker(

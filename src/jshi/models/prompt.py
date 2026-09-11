@@ -147,6 +147,9 @@ def build_user(request: ModelRequest) -> str:
                 for mid, mlabel, text, time_label in memories
             )
         )
+    extra = (getattr(request, "tool_input", "") or "").strip()
+    if extra:
+        parts.append(extra)
     parts.append(f"【本轮】\n{label}：{request.input_text}")
     return "\n".join(parts)
 
@@ -232,3 +235,5 @@ def _memories(
         seen_ids.add(memory_id)
         rows.append((memory_id, memory_label, text, time_label))
     return rows
+
+

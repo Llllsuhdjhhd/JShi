@@ -36,7 +36,7 @@ class AssemblyContext:
 class AssemblyFragment:
     """统一装载片段：各源输出的归一化视图（进模型上下文）。"""
 
-    source: str  # identity | object | activity | personal | memory
+    source: str  # identity | object | activity | personal | memory | tool
     id: str
     content: str
     kind: str

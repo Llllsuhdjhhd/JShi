@@ -19,6 +19,8 @@ from .base import (
     parse_json_object,
 )
 from .cognition import COGNITION_JSON_SCHEMA, CognitionSkill, salvage_persona_json
+from .tool_plan import TOOL_PLAN_SCHEMA, SkillPlanner, ToolPlanSkill
+from .tool_wrap import TOOL_WRAP_SCHEMA, ToolWrapSkill, WrapResult
 from .zone import WOOD_WRITE_INSTRUCTION, WOOD_WRITE_SCHEMA, WriteZoneSkill
 
 __all__ = [
@@ -27,7 +29,13 @@ __all__ = [
     "Skill",
     "SkillError",
     "SkillModelPort",
+    "SkillPlanner",
     "SkillRegistry",
+    "TOOL_PLAN_SCHEMA",
+    "TOOL_WRAP_SCHEMA",
+    "ToolPlanSkill",
+    "ToolWrapSkill",
+    "WrapResult",
     "WriteZoneSkill",
     "parse_json_object",
     "salvage_persona_json",

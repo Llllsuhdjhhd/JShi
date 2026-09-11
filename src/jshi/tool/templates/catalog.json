@@ -1,0 +1,24 @@
+{
+  "templates": [
+    {
+      "name": "generic",
+      "intent_slot": "要用工具完成的意图",
+      "time_note": "时长未知时写未知，不要编造精确秒数",
+      "cost_note": "费用未知时留空",
+      "result_note": "期望的结果形态，一句话",
+      "exception_note": "可能失败、超时、无权限、工具不存在",
+      "params": {},
+      "expected_shape": "一句可核对的事实"
+    },
+    {
+      "name": "echo",
+      "intent_slot": "回显需求，仅测试",
+      "time_note": "占位，约即时",
+      "cost_note": "无费用",
+      "result_note": "原文回显",
+      "exception_note": "几乎不失败",
+      "params": {},
+      "expected_shape": "与 need 相同的短句"
+    }
+  ]
+}

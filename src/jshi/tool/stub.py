@@ -81,3 +81,6 @@ class StubEngine:
             ),
         )
         return (estimate, progress, result_fb)
+
+    def iter_execute(self, request: ToolRequest):
+        yield from self.execute(request)

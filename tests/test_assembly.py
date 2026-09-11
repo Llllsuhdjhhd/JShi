@@ -1,6 +1,6 @@
 """03 状态组装测试。
 
-覆盖：五源对接、对象三件套、本轮输入不成分片、
+覆盖：六源对接（含 200 另一路输入）、对象三件套、本轮输入不成分片、
 工作集上限不裁常驻、记忆源对象过滤与名字 join、单源失败隔离、
 记账与 preview 只读。
 """
@@ -87,6 +87,7 @@ def test_process_assembly_builds_fragments_and_report(tmp_path):
         "activity",
         "personal",
         "memory",
+        "tool",
     }
     assert "epistemic" not in report
     assert report["object"].status == "implemented"
@@ -344,6 +345,7 @@ def test_current_state_assembled_records_sources(tmp_path):
         "activity",
         "personal",
         "memory",
+        "tool",
     }
     assert all(item["status"] in {"implemented", "placeholder"} for item in sources)
     assert records[0].content["label"] == "user"
@@ -354,7 +356,7 @@ def test_preview_state_reports_sources_and_stays_read_only(tmp_path):
 
     preview = process.preview_state("stone", "你好", object_ref="user")
 
-    assert len(preview.assembled.source_report) == 5
+    assert len(preview.assembled.source_report) == 6
     assert repository.list_history("stone") == ()
 
 

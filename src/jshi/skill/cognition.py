@@ -26,9 +26,8 @@ from jshi.models import (
     RecallRequest,
     ResponseItem,
     ResponsePlan,
-    ToolCallIntent,
+    ToolUseIntent,
 )
-from jshi.tool.hang import NEED_MIN_CHARS
 
 from .base import Skill, SkillError, _strip_markdown_fences, parse_json_object
 
@@ -131,15 +130,8 @@ COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
                 "gap_query": {"type": "string"},
             },
         },
-        "tool_request": {
-            "type": "object",
-            "properties": {
-                "need": {"type": "string"},
-                "template": {"type": "string"},
-                "params": {"type": "object"},
-                "expected_result": {"type": "string"},
-            },
-        },
+        "use_tool": {"type": "boolean"},
+        "need": {"type": "string"},
     },
 }
 
@@ -201,26 +193,35 @@ def _parse_memory_ratings(data: Mapping[str, Any]) -> MemoryRatings:
     )
 
 
-def _parse_tool_request(data: Mapping[str, Any]) -> ToolCallIntent | None:
-    """可选 tool_request；解析失败或 need 过短则当空。"""
-    raw = data.get("tool_request")
-    if not isinstance(raw, dict):
+def _as_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _parse_tool_intent(data: Mapping[str, Any]) -> ToolUseIntent | None:
+    """可选 use_tool + need。旧键 tool_request 忽略。过短 need 仍解析，交给 200 策划失败。"""
+    use_tool = _as_bool(data.get("use_tool"))
+    need = str(data.get("need") or "").strip()
+    nested = data.get("tool")
+    if isinstance(nested, dict):
+        if use_tool is None:
+            use_tool = _as_bool(nested.get("use_tool"))
+        if not need:
+            need = str(nested.get("need") or "").strip()
+    if use_tool is False:
         return None
-    try:
-        need = str(raw.get("need") or "").strip()
-        if len(need) < NEED_MIN_CHARS:
-            return None
-        params = raw.get("params")
-        if not isinstance(params, dict):
-            params = {}
-        return ToolCallIntent(
-            need=need,
-            template=str(raw.get("template") or "").strip(),
-            params=params,
-            expected_result=str(raw.get("expected_result") or "").strip(),
-        )
-    except Exception:
-        return None
+    if use_tool is True:
+        return ToolUseIntent(need=need)
+    if need:
+        return ToolUseIntent(need=need)
+    return None
 
 
 def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
@@ -302,7 +303,7 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         context_assessment=context_assessment,
         importance_ranking=importance_ranking,
         memory_ratings=_parse_memory_ratings(data),
-        tool_request=_parse_tool_request(data),
+        tool_intent=_parse_tool_intent(data),
     )
 
 
@@ -333,7 +334,7 @@ def _bind_speaker_fields(response: ModelResponse, request: ModelRequest) -> Mode
         importance_ranking=response.importance_ranking,
         memory_ratings=response.memory_ratings,
         rewritten_context=response.rewritten_context,
-        tool_request=response.tool_request,
+        tool_intent=response.tool_intent,
     )
 
 
@@ -447,7 +448,7 @@ def _persona_to_model_response(
     return ModelResponse(
         model=model,
         response_plan=ResponsePlan(mode=mode, reason=reason, items=tuple(items)),
-        tool_request=_parse_tool_request(data),
+        tool_intent=_parse_tool_intent(data),
     )
 
 
@@ -538,7 +539,9 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
 【对象确认】
 - 对象确认（object_assessment）可空。不确定则跳过。不要用同轮召回补材料。
 - 不要做 memory_ratings；来不及就空着。不要整理现场——那是写场调用的事，本轮只回应。
-需要用工具则填 tool_request（need / template / params），否则不要此键。
+
+若本轮另有一段工具反馈（尚未对对方说）：具体怎么处理由你决定；在合适的时候告诉对方他先前问的结果。不要当成活跃区里已经说过，也不要当成对方刚说的话。不要无故再为同一件事调用工具。
+需要用工具则设 use_tool 为 true，并写一句 need；口头须说出工具需求。不要填 template / params。不用则不要这些键。
 
 【输出格式】
 你的输出格式：你每轮只输出一个 JSON 对象，字段按下方 Schema；枚举字段只取允许值，不输出任何解释文字。
@@ -549,7 +552,7 @@ reason 写清为什么选择这个 mode。先决定这一拍要不要开口，�
         self,
         model: ModelPort,
         *,
-        version: str = "v10",
+        version: str = "v12",
     ) -> None:
         super().__init__(model, version=version)
 

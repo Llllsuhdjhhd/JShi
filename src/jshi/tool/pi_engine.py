@@ -13,11 +13,9 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from .contract import (
-    AskMode,
-    Budget,
     FeedbackKind,
     ToolEstimate,
     ToolFeedback,
@@ -71,7 +69,7 @@ class PiEngine:
             self._base_args(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             bufsize=1,
@@ -127,11 +125,10 @@ class PiEngine:
     # ------------------------------------------------------------------
 
     def execute(self, request: ToolRequest) -> tuple[ToolFeedback, ...]:
-        """向 Pi 发一次 prompt，令其用 ``request.template`` 工具满足 ``request.need``。
+        return tuple(self.iter_execute(request))
 
-        返回反馈流：synthetic estimate -> 由 ``tool_execution_*`` 事件转出的
-        progress / result。结果只作候选反馈，不写长期状态。
-        """
+    def iter_execute(self, request: ToolRequest) -> Iterator[ToolFeedback]:
+        """边读边交出反馈。未映射的事件（含思维链）丢掉。"""
         estimate = ToolFeedback(
             request_id=request.request_id,
             kind=FeedbackKind.ESTIMATE,
@@ -141,10 +138,11 @@ class PiEngine:
                 need_confirm=request.permission.require_confirm,
             ),
         )
+        yield estimate
 
         prompt = self._build_prompt(request)
         proc = self._spawn()
-        feedback: list[ToolFeedback] = [estimate]
+        saw_result = False
         try:
             self._send(proc, {"id": request.request_id, "type": "prompt", "message": prompt})
             assert proc.stdout is not None
@@ -158,23 +156,22 @@ class PiEngine:
                     continue
                 converted = self._convert_event(request, event)
                 if converted is not None:
-                    feedback.append(converted)
+                    if converted.kind is FeedbackKind.RESULT:
+                        saw_result = True
+                    yield converted
                 if event.get("type") == "agent_settled":
                     break
         finally:
             self._close(proc)
 
-        if not any(item.kind is FeedbackKind.RESULT for item in feedback):
-            feedback.append(
-                ToolFeedback(
-                    request_id=request.request_id,
-                    kind=FeedbackKind.RESULT,
-                    result=ToolResult(
-                        status=ToolStatus.FAILED, error="Pi 会话未产出工具结果"
-                    ),
-                )
+        if not saw_result:
+            yield ToolFeedback(
+                request_id=request.request_id,
+                kind=FeedbackKind.RESULT,
+                result=ToolResult(
+                    status=ToolStatus.FAILED, error="Pi 会话未产出工具结果"
+                ),
             )
-        return tuple(feedback)
 
     def _build_prompt(self, request: ToolRequest) -> str:
         params = json.dumps(request.params, ensure_ascii=False) if request.params else "{}"

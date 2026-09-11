@@ -75,7 +75,7 @@ def _payload() -> dict:
 def test_cognition_skill_produces_usage_segments(tmp_path):
     skill = CognitionSkill(FakeModel(_payload()))
     resp = skill.run(make_request())
-    assert resp.model == "deepseek-flash@v10"  # I-004：模型 + skill 版本
+    assert resp.model == "deepseek-flash@v12"  # I-004：模型 + skill 版本
     assert resp.response_plan.mode == "respond"
     assert "working_set_limit" in resp.response_plan.verbal_text()
     assert resp.context_assessment.focus == ("seg-12",)
@@ -105,6 +105,8 @@ def test_instruction_keeps_rules_without_examples():
     assert "【价值】" in text
     assert "【回应方式】" in text
     assert "【对象确认】" in text
+    assert "【在途工具】" not in text
+    assert "在合适的时候告诉对方" in text
     assert "【输出格式】" in text
     assert "{values}" in text
     assert "{style_instruction}" in text
@@ -313,7 +315,7 @@ def test_skill_model_port_routes_subject_activity_but_not_reflection():
     port = SkillModelPort(skill)
 
     subject = port.generate(make_request())
-    assert subject.model == "deepseek-flash@v10"
+    assert subject.model == "deepseek-flash@v12"
     assert subject.response_plan.mode == "respond"
     assert subject.context_assessment.focus == ("seg-12",)
 

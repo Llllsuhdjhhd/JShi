@@ -3,7 +3,7 @@
 - ``ToolEngine``：工具使用引擎（可替换）。工具目录 / 包管理由引擎负责
   （Pi 用 ``get_commands`` / skills / packages），匠石侧不维护自己的注册表。
 - ``ToolModule``：收 ``ToolRequest``，经引擎跑，返回反馈流 + 终态结果。
-- ``ToolRunner``：后台跑 ``submit``，把反馈写入记挂；失败写成 ``result/failed``。
+- ``ToolRunner``：后台跑执行，把反馈**逐条**写入记挂；失败写成 ``result/failed``。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Protocol, TYPE_CHECKING
+from typing import Callable, Protocol, TYPE_CHECKING
 
 from .contract import FeedbackKind, ToolFeedback, ToolRequest, ToolResult, ToolStatus
 
@@ -79,7 +79,7 @@ class ToolModule:
         return self.engine.list_templates()
 
     def submit(self, request: ToolRequest) -> ToolUseOutcome:
-        feedback = self.engine.execute(request)
+        feedback = tuple(self.iter_feedback(request))
         terminal = next(
             (
                 item.result
@@ -93,20 +93,36 @@ class ToolModule:
         )
         return ToolUseOutcome(
             request_id=request.request_id,
-            feedback=tuple(feedback),
+            feedback=feedback,
             result=result,
         )
 
+    def iter_feedback(self, request: ToolRequest):
+        engine = self.engine
+        iterator = getattr(engine, "iter_execute", None)
+        if callable(iterator):
+            yield from iterator(request)
+            return
+        yield from engine.execute(request)
+
 
 class ToolRunner:
-    """后台执行：``start`` 立刻返回；跑完把反馈写入 ``HangStore``。
+    """后台执行：``start`` 立刻返回；反馈逐条写入 ``HangStore``。
 
+    ``on_feedback(task_id, item)`` 由 200 接包装队列。未注入时用规则占位写 ``visible``。
     失败写成一条 ``result`` / ``failed``，不抛到主链路。测试用 ``drain_for_tests`` join。
     """
 
-    def __init__(self, module: ToolModule, store: HangStore) -> None:
+    def __init__(
+        self,
+        module: ToolModule,
+        store: HangStore,
+        *,
+        on_feedback: Callable[[str, ToolFeedback], None] | None = None,
+    ) -> None:
         self.module = module
         self.store = store
+        self.on_feedback = on_feedback
         self._lock = threading.Lock()
         self._threads: list[threading.Thread] = []
 
@@ -121,10 +137,24 @@ class ToolRunner:
             self._threads.append(thread)
         thread.start()
 
+    def _apply_item(self, hang_id: str, item: ToolFeedback) -> None:
+        self.store.append_feedback(hang_id, (item,))
+        hook = self.on_feedback
+        if hook is not None:
+            hook(hang_id, item)
+            return
+        from .hang import rule_wrap_from_item
+
+        wrapped = rule_wrap_from_item(item)
+        if wrapped is None:
+            return
+        visible, summary = wrapped
+        self.store.set_wrap(hang_id, visible=visible, summary=summary)
+
     def _run(self, request: ToolRequest, hang_id: str) -> None:
         try:
-            outcome = self.module.submit(request)
-            self.store.append_feedback(hang_id, outcome.feedback)
+            for item in self.module.iter_feedback(request):
+                self._apply_item(hang_id, item)
         except Exception as exc:
             logger.exception("tool runner failed; writing failed result")
             failed = ToolFeedback(
@@ -132,7 +162,7 @@ class ToolRunner:
                 kind=FeedbackKind.RESULT,
                 result=ToolResult(status=ToolStatus.FAILED, error=str(exc)),
             )
-            self.store.append_feedback(hang_id, (failed,))
+            self._apply_item(hang_id, failed)
 
     def drain_for_tests(self, timeout: float = 5.0) -> None:
         with self._lock:

@@ -45,6 +45,8 @@ class ModelRequest:
     boot: bool = False
     # 非木头人格：已预渲染的 user 文本（片场/输入/回忆 或 boot 素材）；空则由 build_user 正常拼。
     persona_user_text: str = ""
+    # 200 交出的人话，03 原样装入；空则本路不出现。
+    tool_input: str = ""
 
 
 @dataclass(frozen=True)
@@ -147,13 +149,10 @@ class MemoryRatings:
 
 
 @dataclass(frozen=True)
-class ToolCallIntent:
-    """05 回复 JSON 里可选的工具发起；不是整份 ``tool.ToolRequest``。"""
+class ToolUseIntent:
+    """05 只用指示：要用工具 + 一句 need。不填定义。"""
 
-    need: str
-    template: str = ""
-    params: Mapping[str, Any] = field(default_factory=dict)
-    expected_result: str = ""
+    need: str = ""
 
 
 @dataclass(frozen=True, init=False)
@@ -175,8 +174,8 @@ class ModelResponse:
     value_narration: str = ""
     # 模型原文（解析前）。空 = 未保存。
     raw_text: str = ""
-    # 可选：本轮要发起的工具定义。空 = 不用工具。
-    tool_request: ToolCallIntent | None = None
+    # 可选：本轮要用工具的指示。空 = 不用。
+    tool_intent: ToolUseIntent | None = None
 
     @property
     def text(self) -> str:
@@ -209,7 +208,7 @@ class ModelResponse:
         scene: tuple[str, ...] = (),
         value_narration: str = "",
         raw_text: str = "",
-        tool_request: ToolCallIntent | None = None,
+        tool_intent: ToolUseIntent | None = None,
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
     ) -> None:
@@ -245,7 +244,7 @@ class ModelResponse:
         object.__setattr__(self, "scene", tuple(scene))
         object.__setattr__(self, "value_narration", value_narration or "")
         object.__setattr__(self, "raw_text", raw_text or "")
-        object.__setattr__(self, "tool_request", tool_request)
+        object.__setattr__(self, "tool_intent", tool_intent)
 
     def with_raw(self, raw_text: str) -> ModelResponse:
         """把解析前的原文挂到这份响应上（同一对象，不另造一份）。"""

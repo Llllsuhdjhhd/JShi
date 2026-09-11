@@ -56,6 +56,20 @@ PERSONA_SITUATION_NOTE = (
     "地点若写在叙述里也要认清，不另开字段。"
 )
 
+PERSONA_TOOL_NOTE = (
+    "若本轮另有一段工具反馈（口吻可能像你要说的话，尚未对对方说）："
+    "具体怎么处理由你决定；在合适的时候告诉对方他先前问的结果。"
+    "不要当成片场里已经说过，也不要当成对方刚说的话。"
+    "不要无故再为同一件事调用工具。\n"
+    "【任务2 · 工具】（若要用才做）\n"
+    "需要外部世界、当前片场和回忆不够、能用一句话说清时，才调用。调用则输出：\n"
+    '- "use_tool": true\n'
+    '- "need": "一句话：为什么用、要什么"\n'
+    "need 不是工具名、不是参数、不是模板名。不要填 template / params。\n"
+    "任务1必须是 respond，reply 里说出这句需求。禁止只打标、对人一声不吭。\n"
+    "不用则不要这两个键。已有工具反馈时，不要无故再开同样一条。"
+)
+
 # 人格输出契约：字段顺序、reply/action 分家、正反例（斯密斯 / 苏西坡共用）
 PERSONA_OUTPUT_RULES = """【你的输出】
 你这一轮的两件事（回应 + 写场）都写进**同一个 JSON 对象**，字段在顶层，按下面**固定顺序**，不要拆成两个对象、不要包在任务名下面：
@@ -152,15 +166,8 @@ SUXIPO_SCHEMA: Mapping = {
         "reply": {"type": "string"},
         "action": {"type": "string"},
         "reason": {"type": "string"},
-        "tool_request": {
-            "type": "object",
-            "properties": {
-                "need": {"type": "string"},
-                "template": {"type": "string"},
-                "params": {"type": "object"},
-                "expected_result": {"type": "string"},
-            },
-        },
+        "use_tool": {"type": "boolean"},
+        "need": {"type": "string"},
         "edit": {
             "type": "array",
             "items": {
@@ -262,6 +269,8 @@ def _persona_reply_instruction(style_note: str, *, task1: str) -> str:
         + "\n\n"
         + "【你的任务】\n"
         + task1
+        + "\n"
+        + PERSONA_TOOL_NOTE
         + "\n\n【关于谁在说话】\n"
         "一个人说话，不代表就一直是他。匠石可能同时面对好几个人，也可能有人插话。每一拍先看当前说话人是谁——"
         "【此时的输入】里「：」前面的名字；若单独给出【说话人】也以它为准。当前这句是谁说的，就按这个人回应，"
@@ -274,8 +283,9 @@ def _persona_reply_instruction(style_note: str, *, task1: str) -> str:
         + "\n\n【文风】\n"
         + style_note
         + "\n\n【你的输出】\n"
-        "你只输出这一拍的回应，不写场。字段按下面 Schema："
-        "{\"mode\":\"…\",\"reply\":\"…\",\"action\":\"…\",\"reason\":\"…\"}\n"
+        "你只输出这一拍的回应，不写场。只输出任务1；若做了任务2，把两键加在同一对象里。\n"
+        "不用工具：{\"mode\":\"…\",\"reply\":\"…\",\"action\":\"…\",\"reason\":\"…\"}\n"
+        "要用工具：{\"mode\":\"respond\",\"reply\":\"…\",\"action\":\"…\",\"reason\":\"…\",\"use_tool\":true,\"need\":\"…\"}\n"
         "- action：只写肢体或神态；没有动作必须写「无动作」。不要把动作写进 reply。\n"
         "- reply：只写要说出口的话；不要写动作、神态、舞台说明。\n"
         "只输出这一个 JSON 对象，枚举字段只取允许值，不得输出任何解释文字。"

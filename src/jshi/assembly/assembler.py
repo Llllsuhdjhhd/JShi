@@ -29,6 +29,7 @@ class AssembledWorkingSet:
     speaker: AssemblySpeaker | None = None
     personal_items: tuple[object, ...] = ()
     report: tuple[SourceLoadReport, ...] = ()
+    tool_input: str = ""
 
 
 class CurrentStateAssembler:
@@ -81,16 +82,20 @@ class CurrentStateAssembler:
         #  - memory：单独一档，"受预算但仍可被裁" —— 占用同一上限，但在普通条目之前先分配，
         #    背景不会把它挤掉；memory 自身超限时仍会被裁。
         #  - ordinary：普通条目（个人世界普通价值等）—— 最低档，预算不足时先裁。
+        #  - tool：不进工作集分片，原样并成 tool_input（03 不改写 200 的正文）。
         #
         # 先按档位收集，再按"memory → ordinary"顺序分配预算；被裁的计入 skipped。
         protected_frags: list[AssemblyFragment] = []
         memory_frags: list[AssemblyFragment] = []
+        tool_frags: list[AssemblyFragment] = []
         ordinary_frags: list[AssemblyFragment] = []
         for fragment in fragments:
             if fragment.always or fragment.source in _PROTECTED_SOURCES:
                 protected_frags.append(fragment)
             elif fragment.source == "memory":
                 memory_frags.append(fragment)
+            elif fragment.source == "tool":
+                tool_frags.append(fragment)
             else:
                 ordinary_frags.append(fragment)
 
@@ -105,6 +110,11 @@ class CurrentStateAssembler:
             kept.append(fragment)
             budget_left -= max(len(fragment.content), 1)
         kept_fragments = tuple(kept)
+        tool_input = "\n".join(
+            fragment.content.strip()
+            for fragment in tool_frags
+            if fragment.content.strip()
+        )
 
         reports = tuple(
             SourceLoadReport(
@@ -112,7 +122,9 @@ class CurrentStateAssembler:
                 status=source.status,
                 loaded_ids=tuple(
                     fragment.id
-                    for fragment in kept_fragments
+                    for fragment in (
+                        tool_frags if source.name == "tool" else kept_fragments
+                    )
                     if fragment.source == source.name
                 ),
                 skipped_ids=tuple(skipped_by_source.get(source.name, ())),
@@ -130,6 +142,7 @@ class CurrentStateAssembler:
             context_view=ctx.context_view,
             personal_items=tuple(personal_raw),
             report=reports,
+            tool_input=tool_input,
         )
         return self.chance.apply("assemble", working_set)
 
