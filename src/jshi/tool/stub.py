@@ -1,6 +1,6 @@
-"""确定性占位引擎：给 pytest 与 demo。工具目录固定，反馈流 = estimate -> progress -> result。
+"""确定性占位引擎：给 pytest 与 demo。工具目录固定，反馈流 = progress -> result。
 
-用「引擎」而非匠石注册表：目录由引擎返回（可替换）。
+报价由 200/205 写入记挂，引擎不 yield estimate。
 """
 
 from __future__ import annotations
@@ -8,7 +8,6 @@ from __future__ import annotations
 from .contract import (
     AskMode,
     FeedbackKind,
-    ToolEstimate,
     ToolFeedback,
     ToolProgress,
     ToolRequest,
@@ -20,9 +19,8 @@ from .contract import (
 class StubEngine:
     """确定性占位工具引擎。
 
-    - ``list_templates`` 固定返回一个占位工具（默认 ``echo``）。
-    - ``execute`` 依请求产出一条确定性的反馈流：estimate -> progress -> result。
-      结果回显 ``request.need``（或 ``params``），用于验证契约与闭环。
+    - ``list_templates`` / ``list_commands`` 固定返回一个占位工具（默认 ``echo``）。
+    - ``execute`` 产出 progress -> result。结果回显 ``request.need``（或 ``params``）。
     """
 
     name = "stub"
@@ -33,24 +31,15 @@ class StubEngine:
     def list_templates(self) -> tuple[str, ...]:
         return (self._tool_name,)
 
+    def list_commands(self) -> tuple[dict[str, str], ...]:
+        return ({"name": self._tool_name, "description": "回显 need，仅测试"},)
+
     def execute(self, request: ToolRequest) -> tuple[ToolFeedback, ...]:
-        tool = request.template or self._tool_name
+        tool = request.command or request.template or self._tool_name
         echo_value = str(
             request.params.get("value") if isinstance(request.params.get("value"), str) else request.need
         )
 
-        estimate = ToolFeedback(
-            request_id=request.request_id,
-            kind=FeedbackKind.ESTIMATE,
-            estimate=ToolEstimate(
-                cost_est=0.0,
-                time_est_ms=1,
-                resource_est={"tokens": 1},
-                benefit=f"用占位工具 {tool} 跑一次",
-                downside="占位工具，无真实副作用",
-                need_confirm=False,
-            ),
-        )
         progress = ToolFeedback(
             request_id=request.request_id,
             kind=FeedbackKind.PROGRESS,
@@ -80,7 +69,8 @@ class StubEngine:
                 error="" if ok else "propose_only 未获执行许可",
             ),
         )
-        return (estimate, progress, result_fb)
+        return (progress, result_fb)
 
-    def iter_execute(self, request: ToolRequest):
+    def iter_execute(self, request: ToolRequest, cancel=None):
+        del cancel
         yield from self.execute(request)

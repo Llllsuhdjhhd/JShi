@@ -45,6 +45,7 @@ class RulePlanner:
             origin=origin,
             need=need,
             template="echo",
+            command="echo",
             params={},
             ask=AskMode.EXECUTE,
         )

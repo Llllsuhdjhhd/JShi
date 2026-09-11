@@ -117,6 +117,7 @@ class ToolService:
         record = self.intake_store.get(intake_id)
         if record is None or record.status == "cancelled":
             return
+        tag = self._planner_tag()
         try:
             planned = self.planner.plan(record)
         except Exception:
@@ -125,6 +126,7 @@ class ToolService:
                 intake_id,
                 status="failed",
                 plan_error="策划出错",
+                meta={"model_tag": tag} if tag else {},
             )
             return
         current = self.intake_store.get(intake_id)
@@ -135,12 +137,18 @@ class ToolService:
                 intake_id,
                 status="failed",
                 plan_error=planned.message,
+                meta={"model_tag": tag} if tag else {},
             )
             return
-        self._launch(current, planned)
+        self._launch(current, planned, plan_tag=tag)
 
-    def _launch(self, intake: IntakeRecord, request: ToolRequest) -> None:
-        self.intake_store.update(intake.intake_id, status="planned")
+    def _planner_tag(self) -> str:
+        skill = getattr(self.planner, "skill", None)
+        return str(getattr(skill, "model_tag", "") or "")
+
+    def _launch(
+        self, intake: IntakeRecord, request: ToolRequest, *, plan_tag: str = ""
+    ) -> None:
         hang = self.hang_store.create(
             subject_id=intake.subject_id,
             object_id=intake.object_id,
@@ -149,12 +157,14 @@ class ToolService:
             field_ref=intake.field_ref,
             origin=intake.origin,
             request_id=request.request_id,
+            meta={"plan_model_tag": plan_tag} if plan_tag else {},
         )
         bound = replace(
             request,
             request_id=hang.request_id,
             subject_id=intake.subject_id,
             activity_id=intake.activity_id or request.activity_id,
+            field_ref=dict(intake.field_ref) or dict(request.field_ref),
         )
         est_meta = bound.meta.get("estimate") if isinstance(bound.meta, Mapping) else {}
         if not isinstance(est_meta, Mapping):
@@ -173,11 +183,15 @@ class ToolService:
             ),
         )
         self.hang_store.append_feedback(hang.task_id, (estimate,))
+        launched_meta = dict(intake.meta)
+        if plan_tag:
+            launched_meta["model_tag"] = plan_tag
         self.intake_store.update(
             intake.intake_id,
             status="launched",
             request_id=hang.request_id,
             task_id=hang.task_id,
+            meta=launched_meta,
         )
         self.runner.start(bound, hang.task_id)
 
@@ -189,7 +203,12 @@ class ToolService:
             if wrapped is None:
                 return
             visible, summary = wrapped
-            self.hang_store.set_wrap(task_id, visible=visible, summary=summary)
+            self.hang_store.set_wrap(
+                task_id,
+                visible=visible,
+                summary=summary,
+                terminal=item.kind is FeedbackKind.RESULT,
+            )
             return
         with self._wrap_lock:
             self._wrap_pending.setdefault(task_id, []).append(item)
@@ -249,15 +268,18 @@ class ToolService:
             self.hang_store.set_wrap(
                 task_id,
                 visible=True,
-                summary=truncate_note(text),
+                summary=text,
                 wrap_meta={"source": "fallback"},
+                terminal=True,
             )
             return
+        terminal = any(item.kind is FeedbackKind.RESULT for item in batch)
         self.hang_store.set_wrap(
             task_id,
             visible=bool(result.visible) and bool((result.summary or "").strip()),
             summary=(result.summary or "").strip(),
             wrap_meta={"model_tag": getattr(skill, "model_tag", "")},
+            terminal=terminal,
         )
 
     def list_visible(
@@ -300,6 +322,7 @@ class ToolService:
         found = False
         hang = self.hang_store.get(item_id)
         if hang is not None:
+            self.runner.cancel(item_id)
             self.hang_store.cancel(item_id)
             found = True
             twin = self.intake_store.get_by_task_id(item_id)
@@ -310,6 +333,7 @@ class ToolService:
             self.intake_store.cancel(item_id)
             found = True
             if intake.task_id:
+                self.runner.cancel(intake.task_id)
                 self.hang_store.cancel(intake.task_id)
         return found
 

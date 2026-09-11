@@ -1,4 +1,4 @@
-"""205 策划 skill：选模板、填参数、写估价。"""
+"""205 策划 skill：选模板、填参数、写估价；若有引擎目录则再选命令名。"""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ TOOL_PLAN_SCHEMA: Mapping[str, Any] = {
     "properties": {
         "ok": {"type": "boolean"},
         "template": {"type": "string"},
+        "command": {"type": "string"},
         "params": {"type": "object"},
         "estimate": {
             "type": "object",
@@ -41,11 +42,12 @@ class ToolPlanSkill(Skill[PlanResult]):
     version = "v1"
     schema = TOOL_PLAN_SCHEMA
     instruction = """你是匠石的工具策划，不是对说话的那一轮认知。
-根据意图选一个定义模板，填参数和估价槽。
-不要点名编造目录里没有的模板。
+根据意图选一个匠石侧定义模板（catalog），填参数、估价槽和 expected_result。
+若任务含 engine_tools，另选其中已有的 command（引擎命令名），不要编造，也不要把模板名当成命令名。
+不要点名编造目录里没有的模板或命令。
 外部路径已经对人说过需求的，定义须与那句一致，不要另起一套。
 填不出就失败，写出一句给匠石自己看的原因，不要装成已经在跑。
-任务 JSON 含 need、verbal、catalog。"""
+任务 JSON 含 need、verbal、object_id、field_ref、catalog、engine_tools。"""
 
     def parse(self, data: Mapping[str, Any]) -> PlanResult:
         if not bool(data.get("ok")):
@@ -63,6 +65,7 @@ class ToolPlanSkill(Skill[PlanResult]):
             ask = AskMode.EXECUTE
         return ToolRequest(
             template=template,
+            command=str(data.get("command") or "").strip(),
             params=dict(params),
             need="",
             expected_result=str(data.get("expected_result") or ""),
@@ -86,15 +89,23 @@ class ToolPlanSkill(Skill[PlanResult]):
         self,
         intake: IntakeRecord,
         catalog: Sequence[Mapping[str, Any]],
+        engine_tools: Sequence[Mapping[str, Any]] = (),
     ) -> PlanResult:
         names = {str(item.get("name") or "") for item in catalog}
+        engine_names = {
+            str(item.get("name") or "").strip()
+            for item in engine_tools
+            if str(item.get("name") or "").strip()
+        }
         request: ModelRequest = tool_skill_request(
             intake.subject_id,
             {
                 "need": intake.need,
                 "verbal": intake.verbal,
                 "object_id": intake.object_id,
+                "field_ref": dict(intake.field_ref),
                 "catalog": list(catalog),
+                "engine_tools": list(engine_tools),
             },
         )
         planned = self.run(request)
@@ -102,6 +113,16 @@ class ToolPlanSkill(Skill[PlanResult]):
             return planned
         if planned.template not in names:
             return PlanFailure("所选模板不在目录中")
+        command = (planned.command or "").strip()
+        if engine_names:
+            if not command and planned.template in engine_names:
+                command = planned.template
+            if not command and len(engine_names) == 1:
+                command = next(iter(engine_names))
+            if not command:
+                return PlanFailure("未选择引擎命令")
+            if command not in engine_names:
+                return PlanFailure("所选命令不在引擎目录中")
         origin = ToolOrigin.EXTERNAL_05
         raw_origin = (intake.origin or "").strip()
         if raw_origin:
@@ -116,6 +137,7 @@ class ToolPlanSkill(Skill[PlanResult]):
             origin=origin,
             need=intake.need,
             template=planned.template,
+            command=command,
             params=planned.params,
             expected_result=planned.expected_result,
             ask=planned.ask,
@@ -130,9 +152,25 @@ class SkillPlanner:
         self,
         skill: ToolPlanSkill,
         catalog: Sequence[Mapping[str, Any]] | None = None,
+        engine_tools: Sequence[Mapping[str, Any]] | None = None,
+        engine: Any = None,
     ) -> None:
         self.skill = skill
         self.catalog = tuple(catalog or ())
+        self.engine = engine
+        self._tools_fixed = engine_tools is not None
+        self.engine_tools = tuple(engine_tools or ())
+
+    def _resolve_tools(self) -> tuple[Mapping[str, Any], ...]:
+        if self._tools_fixed:
+            return self.engine_tools
+        if self.engine is None:
+            return ()
+        from jshi.tool.catalog import engine_tools as read_engine_tools
+
+        self.engine_tools = read_engine_tools(self.engine)
+        self._tools_fixed = True
+        return self.engine_tools
 
     def plan(self, intake: IntakeRecord) -> PlanResult:
-        return self.skill.plan_intake(intake, self.catalog)
+        return self.skill.plan_intake(intake, self.catalog, self._resolve_tools())

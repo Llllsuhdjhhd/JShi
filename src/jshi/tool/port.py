@@ -31,9 +31,10 @@ class ToolEngine(Protocol):
         ...
 
     def execute(self, request: ToolRequest) -> tuple[ToolFeedback, ...]:
-        """执行一次工具使用，返回反馈流（estimate / progress / result）。
+        """执行一次工具使用，返回反馈流（progress / result）。
 
-        引擎只产出候选结果与过程反馈，不写匠石长期状态（D-004）。
+        引擎不 yield estimate；报价由 200/205 写入记挂。
+        引擎只产出过程反馈与候选结果，不写匠石长期状态（D-004）。
         """
         ...
 
@@ -97,11 +98,17 @@ class ToolModule:
             result=result,
         )
 
-    def iter_feedback(self, request: ToolRequest):
+    def iter_feedback(self, request: ToolRequest, cancel=None):
         engine = self.engine
         iterator = getattr(engine, "iter_execute", None)
         if callable(iterator):
-            yield from iterator(request)
+            if cancel is None:
+                yield from iterator(request)
+                return
+            try:
+                yield from iterator(request, cancel=cancel)
+            except TypeError:
+                yield from iterator(request)
             return
         yield from engine.execute(request)
 
@@ -110,7 +117,7 @@ class ToolRunner:
     """后台执行：``start`` 立刻返回；反馈逐条写入 ``HangStore``。
 
     ``on_feedback(task_id, item)`` 由 200 接包装队列。未注入时用规则占位写 ``visible``。
-    失败写成一条 ``result`` / ``failed``，不抛到主链路。测试用 ``drain_for_tests`` join。
+    ``cancel(task_id)`` 置位该次会话，引擎应停子进程。失败写成 ``result/failed``。
     """
 
     def __init__(
@@ -125,17 +132,26 @@ class ToolRunner:
         self.on_feedback = on_feedback
         self._lock = threading.Lock()
         self._threads: list[threading.Thread] = []
+        self._cancels: dict[str, threading.Event] = {}
 
     def start(self, request: ToolRequest, hang_id: str) -> None:
+        cancel = threading.Event()
         thread = threading.Thread(
             target=self._run,
-            args=(request, hang_id),
+            args=(request, hang_id, cancel),
             name=f"tool-hang-{hang_id[:8]}",
             daemon=True,
         )
         with self._lock:
             self._threads.append(thread)
+            self._cancels[hang_id] = cancel
         thread.start()
+
+    def cancel(self, hang_id: str) -> None:
+        with self._lock:
+            flag = self._cancels.get(hang_id)
+        if flag is not None:
+            flag.set()
 
     def _apply_item(self, hang_id: str, item: ToolFeedback) -> None:
         self.store.append_feedback(hang_id, (item,))
@@ -149,12 +165,28 @@ class ToolRunner:
         if wrapped is None:
             return
         visible, summary = wrapped
-        self.store.set_wrap(hang_id, visible=visible, summary=summary)
+        self.store.set_wrap(
+            hang_id, visible=visible, summary=summary, terminal=True
+        )
 
-    def _run(self, request: ToolRequest, hang_id: str) -> None:
+    def _run(
+        self, request: ToolRequest, hang_id: str, cancel: threading.Event
+    ) -> None:
+        wrote_result = False
         try:
-            for item in self.module.iter_feedback(request):
+            for item in self.module.iter_feedback(request, cancel=cancel):
                 self._apply_item(hang_id, item)
+                if item.kind is FeedbackKind.RESULT:
+                    wrote_result = True
+            if cancel.is_set() and not wrote_result:
+                self._apply_item(
+                    hang_id,
+                    ToolFeedback(
+                        request_id=request.request_id,
+                        kind=FeedbackKind.RESULT,
+                        result=ToolResult(status=ToolStatus.ABORTED, error="已取消"),
+                    ),
+                )
         except Exception as exc:
             logger.exception("tool runner failed; writing failed result")
             failed = ToolFeedback(
@@ -163,6 +195,9 @@ class ToolRunner:
                 result=ToolResult(status=ToolStatus.FAILED, error=str(exc)),
             )
             self._apply_item(hang_id, failed)
+        finally:
+            with self._lock:
+                self._cancels.pop(hang_id, None)
 
     def drain_for_tests(self, timeout: float = 5.0) -> None:
         with self._lock:
@@ -170,3 +205,4 @@ class ToolRunner:
             self._threads.clear()
         for thread in threads:
             thread.join(timeout)
+

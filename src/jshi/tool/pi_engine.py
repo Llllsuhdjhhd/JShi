@@ -2,22 +2,22 @@
 
 - 工具目录 / 包管理：由 Pi 负责（skills / extensions / ``pi list`` / ``get_commands``）。
   匠石侧**不建自己的工具注册表**，只通过本引擎查目录、驱动执行。
-- 对齐：《doc/design/工具使用.md》§6.1「借引擎，不借循环」——Pi 只局限在工具模块内，
-  匠石主循环与契约不变；D-004：只出候选结果 + 过程反馈，不写匠石长期状态。
-- 前置：需装 Pi（``npm install -g --ignore-scripts @earendil-works/pi-coding-agent``）
-  并配置 provider / 模型。本适配为 **live 验证**，未在单元测试覆盖（单测用 StubEngine）。
-- 注意：RPC 用严格 LF 分隔的 JSONL；请勿用会把 Unicode 分隔符当换行的通用行读取器。
+- 对齐：《doc/design/工具使用.md》——Pi 只局限在工具模块内；报价由 200/205 写，
+  本引擎只译事件、报真实进度。D-004：不写匠石长期状态。
+- 前置：需装 Pi 并配置 provider / 模型。主流程默认仍 Stub；``JSHI_TOOL_ENGINE=pi`` 才接本引擎。
+- RPC 用严格 LF 分隔的 JSONL。
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from typing import Any, Iterator, Mapping
 
 from .contract import (
     FeedbackKind,
-    ToolEstimate,
     ToolFeedback,
     ToolProgress,
     ToolRequest,
@@ -28,7 +28,7 @@ from .contract import (
 
 class PiEngine:
     """把 ``ToolRequest`` 翻译成 Pi RPC 的一次 prompt，把 ``tool_execution_*``
-    事件翻译成 ``ToolFeedback``，最终回灌。"""
+    事件翻译成 ``ToolFeedback``。不 yield estimate。"""
 
     name = "pi"
 
@@ -41,17 +41,15 @@ class PiEngine:
         executable: str = "pi",
         timeout_s: float = 120.0,
         extra_args: tuple[str, ...] = (),
+        list_timeout_s: float = 5.0,
     ) -> None:
         self.provider = provider
         self.model = model
         self.api_key = api_key
         self.executable = executable
         self.timeout_s = timeout_s
+        self.list_timeout_s = list_timeout_s
         self.extra_args = tuple(extra_args)
-
-    # ------------------------------------------------------------------
-    # 进程与协议
-    # ------------------------------------------------------------------
 
     def _base_args(self) -> list[str]:
         args = [self.executable, "--mode", "rpc", "--no-session"]
@@ -81,72 +79,118 @@ class PiEngine:
         proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
         proc.stdin.flush()
 
-    def _read_events(self, proc: subprocess.Popen) -> "list[Mapping[str, Any]]":
+    @staticmethod
+    def _kill(proc: subprocess.Popen) -> None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    def _arm_watchdog(
+        self,
+        proc: subprocess.Popen,
+        *,
+        cancel: threading.Event | None = None,
+        timeout_s: float | None = None,
+    ) -> tuple[threading.Event, dict[str, str]]:
+        """墙钟超时或 cancel 时杀掉子进程，让 stdout 读循环退出。"""
+        stop = threading.Event()
+        reason: dict[str, str] = {"stop": ""}
+        limit = self.timeout_s if timeout_s is None else timeout_s
+
+        def watch() -> None:
+            deadline = time.monotonic() + max(0.05, limit)
+            while not stop.wait(0.05):
+                if proc.poll() is not None:
+                    return
+                if cancel is not None and cancel.is_set():
+                    reason["stop"] = "cancelled"
+                    self._kill(proc)
+                    return
+                if time.monotonic() >= deadline:
+                    reason["stop"] = "timeout"
+                    self._kill(proc)
+                    return
+
+        thread = threading.Thread(target=watch, name="pi-watchdog", daemon=True)
+        thread.start()
+        return stop, reason
+
+    def _read_events(
+        self, proc: subprocess.Popen, timeout_s: float | None = None
+    ) -> list[Mapping[str, Any]]:
+        stop, _reason = self._arm_watchdog(proc, timeout_s=timeout_s)
         events: list[Mapping[str, Any]] = []
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except ValueError:
-                continue
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    continue
+        finally:
+            stop.set()
         return events
 
-    # ------------------------------------------------------------------
-    # 目录
-    # ------------------------------------------------------------------
-
     def list_templates(self) -> tuple[str, ...]:
-        """向 Pi 查一次 ``get_commands``，取 skill / extension 命令名作为工具模板清单。
+        return tuple(item["name"] for item in self.list_commands())
 
-        Pi 未装或不可用时抛出异常（调用方决定降级到 StubEngine 或报错）。
-        """
-        proc = self._spawn()
+    def list_commands(self) -> tuple[Mapping[str, str], ...]:
+        """``get_commands``：name + description。失败或超时返回空，205 仍可读匠石槽位。"""
+        try:
+            proc = self._spawn()
+        except OSError:
+            return ()
         try:
             self._send(proc, {"id": "list", "type": "get_commands"})
-            events = self._read_events(proc)
+            events = self._read_events(proc, timeout_s=self.list_timeout_s)
+        except Exception:
+            return ()
         finally:
             self._close(proc)
-        names: list[str] = []
+        found: list[Mapping[str, str]] = []
         for event in events:
             if event.get("type") != "response" or event.get("command") != "get_commands":
                 continue
             data = event.get("data") or {}
             for cmd in data.get("commands") or ():
-                name = cmd.get("name")
-                if name:
-                    names.append(name)
-        return tuple(names)
-
-    # ------------------------------------------------------------------
-    # 执行
-    # ------------------------------------------------------------------
+                if not isinstance(cmd, Mapping):
+                    continue
+                name = str(cmd.get("name") or "").strip()
+                if not name:
+                    continue
+                description = str(
+                    cmd.get("description") or cmd.get("detail") or ""
+                ).strip()
+                found.append({"name": name, "description": description})
+        return tuple(found)
 
     def execute(self, request: ToolRequest) -> tuple[ToolFeedback, ...]:
         return tuple(self.iter_execute(request))
 
-    def iter_execute(self, request: ToolRequest) -> Iterator[ToolFeedback]:
-        """边读边交出反馈。未映射的事件（含思维链）丢掉。"""
-        estimate = ToolFeedback(
-            request_id=request.request_id,
-            kind=FeedbackKind.ESTIMATE,
-            estimate=ToolEstimate(
-                benefit=f"用 Pi 工具 {request.template or '(auto)'} 满足：{request.need}",
-                downside="Pi 为 LLM 驱动，成本 / 时间取决于模型",
-                need_confirm=request.permission.require_confirm,
-            ),
-        )
-        yield estimate
-
+    def iter_execute(
+        self,
+        request: ToolRequest,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[ToolFeedback]:
+        """边读边交出反馈。未映射事件丢掉。不 yield estimate。"""
         prompt = self._build_prompt(request)
         proc = self._spawn()
         saw_result = False
+        stop, reason = self._arm_watchdog(proc, cancel=cancel)
         try:
             self._send(proc, {"id": request.request_id, "type": "prompt", "message": prompt})
             assert proc.stdout is not None
             for raw in proc.stdout:
+                if cancel is not None and cancel.is_set():
+                    break
                 line = raw.strip()
                 if not line:
                     continue
@@ -162,23 +206,44 @@ class PiEngine:
                 if event.get("type") == "agent_settled":
                     break
         finally:
+            stop.set()
             self._close(proc)
 
-        if not saw_result:
+        if saw_result:
+            return
+        if reason.get("stop") == "cancelled" or (cancel is not None and cancel.is_set()):
             yield ToolFeedback(
                 request_id=request.request_id,
                 kind=FeedbackKind.RESULT,
-                result=ToolResult(
-                    status=ToolStatus.FAILED, error="Pi 会话未产出工具结果"
-                ),
+                result=ToolResult(status=ToolStatus.ABORTED, error="已取消"),
             )
+            return
+        if reason.get("stop") == "timeout":
+            yield ToolFeedback(
+                request_id=request.request_id,
+                kind=FeedbackKind.RESULT,
+                result=ToolResult(status=ToolStatus.FAILED, error="工具执行超时"),
+            )
+            return
+        yield ToolFeedback(
+            request_id=request.request_id,
+            kind=FeedbackKind.RESULT,
+            result=ToolResult(status=ToolStatus.FAILED, error="Pi 会话未产出工具结果"),
+        )
 
     def _build_prompt(self, request: ToolRequest) -> str:
         params = json.dumps(request.params, ensure_ascii=False) if request.params else "{}"
+        command = (request.command or "").strip() or "（由你选用）"
+        field_ref = (
+            json.dumps(dict(request.field_ref), ensure_ascii=False)
+            if request.field_ref
+            else "（无）"
+        )
         return (
-            f"请使用工具模板 {request.template or '（由你选用）'} 完成下面的需求，"
+            f"请使用工具 {command} 完成下面的需求，"
             f"参数：{params}。\n\n需求：{request.need}\n"
-            f"期望结果：{request.expected_result or '（未指定）'}"
+            f"期望结果：{request.expected_result or '（未指定）'}\n"
+            f"现场引用：{field_ref}"
         )
 
     def _convert_event(
@@ -254,6 +319,10 @@ class PiEngine:
         try:
             if proc.stdin:
                 proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.kill()
         except Exception:
             pass
         try:

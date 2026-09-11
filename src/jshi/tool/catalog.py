@@ -41,3 +41,22 @@ def load_catalog(path: str | Path | None = None) -> tuple[Mapping[str, Any], ...
     if not isinstance(items, list):
         return ()
     return tuple(item for item in items if isinstance(item, Mapping) and item.get("name"))
+
+
+def engine_tools(engine: Any) -> tuple[Mapping[str, Any], ...]:
+    """引擎侧工具内容目录（name + description）。读不到、超时或抛错则空。"""
+    try:
+        listing = getattr(engine, "list_commands", None)
+        if callable(listing):
+            items = listing()
+            return tuple(
+                item
+                for item in items
+                if isinstance(item, Mapping) and str(item.get("name") or "").strip()
+            )
+        names = getattr(engine, "list_templates", None)
+        if not callable(names):
+            return ()
+        return tuple({"name": name, "description": ""} for name in names())
+    except Exception:
+        return ()

@@ -88,7 +88,9 @@ class ToolRequest:
     turn: int = 0
     origin: ToolOrigin = ToolOrigin.EXTERNAL_05
     need: str = ""  # 为什么用工具（人话）
-    template: str = ""  # 选哪个模板（工具定义方式，可替换）
+    template: str = ""  # 匠石侧定义模板名（槽位说明）
+    command: str = ""  # 引擎侧工具内容名（Pi command / skill）；空则由引擎自选
+    field_ref: Mapping[str, str] = field(default_factory=dict)  # 现场引用；206 提示词保留，不删
     params: Mapping[str, Any] = field(default_factory=dict)
     budget: Budget = field(default_factory=Budget)
     permission: PermissionContext = field(default_factory=PermissionContext)

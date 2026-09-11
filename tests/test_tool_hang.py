@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 import threading
+import time
 from pathlib import Path
 
 from jshi.identity import IdentityProfile, IdentityRepository
@@ -30,8 +32,10 @@ from jshi.tool import (
     ToolRunner,
     ToolService,
     ToolStatus,
+    engine_tools,
     load_catalog,
 )
+from jshi.tool.hang import NOTE_MAX_CHARS
 
 
 class _PlanModel:
@@ -150,7 +154,7 @@ def test_hang_stub_feedback_notifies_on_result(tmp_path: Path) -> None:
     done = store.get(record.task_id)
     assert done is not None
     kinds = [item.kind for item in done.feedback]
-    assert kinds == [FeedbackKind.ESTIMATE, FeedbackKind.PROGRESS, FeedbackKind.RESULT]
+    assert kinds == [FeedbackKind.PROGRESS, FeedbackKind.RESULT]
     assert done.visible is True
     assert done.status == "notified"
     assert done.summary
@@ -445,7 +449,8 @@ class _StreamEngine:
     def list_templates(self):
         return ("echo",)
 
-    def iter_execute(self, request: ToolRequest):
+    def iter_execute(self, request: ToolRequest, cancel=None):
+        del cancel
         yield ToolFeedback(
             request_id=request.request_id,
             kind=FeedbackKind.PROGRESS,
@@ -677,6 +682,9 @@ def test_plan_skill_ok_creates_hang(tmp_path: Path) -> None:
     hangs = store.list_for("stone", result.speaker.object_id)
     assert len(hangs) == 1
     assert hangs[0].template == "echo"
+    assert hangs[0].meta.get("plan_model_tag") == "json-port@v1"
+    intakes = service.intake_store.list_for("stone", result.speaker.object_id)
+    assert intakes[0].meta.get("model_tag") == "json-port@v1"
     visible = service.list_visible("stone", result.speaker.object_id)
     assert len(visible) == 1
     assert visible[0].kind == "hang"
@@ -719,3 +727,355 @@ def test_pi_engine_drops_unmapped_events_and_stderr_is_devnull() -> None:
 
     source = inspect.getsource(PiEngine._spawn)
     assert "DEVNULL" in source
+
+
+class _CaptureEngine(StubEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last: ToolRequest | None = None
+
+    def execute(self, request: ToolRequest):
+        self.last = request
+        return super().execute(request)
+
+
+class _BlockingStdout:
+    def __init__(self) -> None:
+        self._closed = threading.Event()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> str:
+        self._closed.wait(timeout=30)
+        raise StopIteration
+
+    def close(self) -> None:
+        self._closed.set()
+
+
+class _FakePopen:
+    def __init__(self, lines: tuple[str, ...] = (), *, hang: bool = False) -> None:
+        self.stdin = io.StringIO()
+        self.returncode = None
+        self.stdout = _BlockingStdout() if hang else iter(lines)
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+        closer = getattr(self.stdout, "close", None)
+        if closer is not None:
+            closer()
+
+    def terminate(self) -> None:
+        self.kill()
+
+
+def test_service_writes_exactly_one_estimate(tmp_path: Path) -> None:
+    process, _repository, store, service = _runtime(
+        tmp_path,
+        tool_intent=ToolUseIntent(need="查一下天气"),
+    )
+    result = process.experience("stone", "明天天气怎样", object_ref="user")
+    service.drain_for_tests()
+    hang = store.list_for("stone", result.speaker.object_id)[0]
+    kinds = [item.kind for item in hang.feedback]
+    assert kinds.count(FeedbackKind.ESTIMATE) == 1
+    assert kinds[0] is FeedbackKind.ESTIMATE
+
+
+def test_wrap_truncates_long_summary(tmp_path: Path) -> None:
+    wrap = ToolWrapSkill(_JsonPort({"visible": True, "summary": "啊" * 200}))
+    process, _repository, store, service = _runtime(
+        tmp_path,
+        tool_intent=ToolUseIntent(need="查一下天气"),
+        wrap_skill=wrap,
+    )
+    result = process.experience("stone", "明天天气怎样", object_ref="user")
+    service.drain_for_tests()
+    done = store.list_for("stone", result.speaker.object_id)[0]
+    assert len(done.summary) == NOTE_MAX_CHARS
+    visible = service.list_visible("stone", result.speaker.object_id)
+    assert visible
+    assert len(visible[0].summary) == NOTE_MAX_CHARS
+
+
+def test_progress_wrap_keeps_status_open(tmp_path: Path) -> None:
+    wrap = ToolWrapSkill(_JsonPort({"visible": True, "summary": "还在查"}))
+    process, _repository, store, service = _runtime(
+        tmp_path,
+        tool_intent=ToolUseIntent(need="查一下天气"),
+        wrap_skill=wrap,
+        engine=_StreamEngine(),
+    )
+    result = process.experience("stone", "明天天气怎样", object_ref="user")
+    service.drain_planning_for_tests()
+    engine = process.tool_runner.module.engine
+    assert isinstance(engine, _StreamEngine)
+    assert engine.after_progress.wait(timeout=5)
+    deadline = time.monotonic() + 3
+    mid = None
+    while time.monotonic() < deadline:
+        hangs = store.list_for("stone", result.speaker.object_id)
+        if hangs and hangs[0].visible:
+            mid = hangs[0]
+            break
+        time.sleep(0.05)
+    assert mid is not None
+    assert mid.status == "open"
+    assert service.list_visible("stone", result.speaker.object_id)
+    engine.go_result.set()
+    service.drain_for_tests()
+    done = store.get(mid.task_id)
+    assert done is not None
+    assert done.status == "notified"
+
+
+def test_hang_jsonl_is_append_only(tmp_path: Path) -> None:
+    path = tmp_path / "hang.jsonl"
+    store = HangStore(path)
+    record = store.create(subject_id="stone", object_id="OBJ-A", need="查一下")
+    store.set_wrap(record.task_id, visible=True, summary="一句", terminal=True)
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) >= 2
+    loaded = HangStore(path)
+    got = loaded.get(record.task_id)
+    assert got is not None
+    assert got.visible is True
+    assert got.status == "notified"
+    assert got.summary == "一句"
+
+
+def test_plan_skill_rejects_unknown_command(tmp_path: Path) -> None:
+    planner = SkillPlanner(
+        ToolPlanSkill(
+            _JsonPort({"ok": True, "template": "echo", "command": "not-a-command"})
+        ),
+        catalog=load_catalog(),
+        engine_tools=({"name": "echo", "description": "回显"},),
+    )
+    process, _repository, store, service = _runtime(
+        tmp_path,
+        tool_intent=ToolUseIntent(need="查一下天气"),
+        planner=planner,
+    )
+    result = process.experience("stone", "明天天气怎样", object_ref="user")
+    service.drain_for_tests()
+    assert store.list_for("stone", result.speaker.object_id) == ()
+    visible = service.list_visible("stone", result.speaker.object_id)
+    assert visible
+    assert "引擎目录" in visible[0].summary
+
+
+def test_plan_skill_single_engine_command_fills_in(tmp_path: Path) -> None:
+    engine = _CaptureEngine()
+    planner = SkillPlanner(
+        ToolPlanSkill(_JsonPort({"ok": True, "template": "generic"})),
+        catalog=load_catalog(),
+        engine_tools=engine_tools(engine),
+    )
+    process, _repository, store, service = _runtime(
+        tmp_path,
+        tool_intent=ToolUseIntent(need="查一下天气"),
+        planner=planner,
+        engine=engine,
+    )
+    result = process.experience("stone", "明天天气怎样", object_ref="user")
+    service.drain_for_tests()
+    hangs = store.list_for("stone", result.speaker.object_id)
+    assert len(hangs) == 1
+    assert engine.last is not None
+    assert engine.last.command == "echo"
+    assert engine.last.field_ref.get("zone_kind") == "wood"
+
+
+def test_pi_engine_streams_recorded_events() -> None:
+    from jshi.tool.pi_engine import PiEngine
+
+    lines = (
+        json.dumps(
+            {
+                "type": "tool_execution_update",
+                "toolName": "echo",
+                "partialResult": {"content": [{"type": "text", "text": "半段"}]},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        json.dumps(
+            {
+                "type": "tool_execution_end",
+                "toolName": "echo",
+                "isError": False,
+                "result": {"content": [{"type": "text", "text": "完成"}]},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        json.dumps({"type": "agent_settled"}, ensure_ascii=False) + "\n",
+    )
+    engine = PiEngine()
+    engine._spawn = lambda: _FakePopen(lines)
+    kinds = []
+    progress_before_result = False
+    saw_progress = False
+    for item in engine.iter_execute(ToolRequest(need="x", command="echo")):
+        kinds.append(item.kind)
+        if item.kind is FeedbackKind.PROGRESS:
+            saw_progress = True
+        if item.kind is FeedbackKind.RESULT:
+            progress_before_result = saw_progress
+    assert progress_before_result
+    assert FeedbackKind.ESTIMATE not in kinds
+    assert kinds[-1] is FeedbackKind.RESULT
+    prompt = engine._build_prompt(
+        ToolRequest(
+            need="x",
+            command="echo",
+            expected_result="一句",
+            field_ref={"zone_kind": "wood"},
+        )
+    )
+    assert "echo" in prompt
+    assert "一句" in prompt
+    assert "wood" in prompt
+
+
+def test_pi_engine_timeout_writes_failed_result() -> None:
+    from jshi.tool.pi_engine import PiEngine
+
+    engine = PiEngine(timeout_s=0.2)
+    engine._spawn = lambda: _FakePopen(hang=True)
+    items = list(engine.iter_execute(ToolRequest(need="x", command="echo")))
+    assert items
+    assert items[-1].kind is FeedbackKind.RESULT
+    assert items[-1].result is not None
+    assert items[-1].result.status is ToolStatus.FAILED
+    assert "超时" in items[-1].result.error
+
+
+def test_cancel_stops_pi_session(tmp_path: Path) -> None:
+    from jshi.tool.pi_engine import PiEngine
+
+    engine = PiEngine(timeout_s=30)
+    holder: dict[str, _FakePopen] = {}
+
+    def spawn() -> _FakePopen:
+        proc = _FakePopen(hang=True)
+        holder["p"] = proc
+        return proc
+
+    engine._spawn = spawn
+    store = HangStore(tmp_path / "hang.jsonl")
+    runner = ToolRunner(ToolModule(engine), store)
+    record = store.create(subject_id="stone", object_id="OBJ-A", need="查一下")
+    runner.start(
+        ToolRequest(request_id=record.request_id, need="查一下", command="echo"),
+        record.task_id,
+    )
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and "p" not in holder:
+        time.sleep(0.02)
+    assert "p" in holder
+    runner.cancel(record.task_id)
+    runner.drain_for_tests()
+    assert holder["p"].returncode is not None
+    done = store.get(record.task_id)
+    assert done is not None
+    terminal = next(
+        item.result
+        for item in reversed(done.feedback)
+        if item.kind is FeedbackKind.RESULT and item.result is not None
+    )
+    assert terminal.status is ToolStatus.ABORTED
+    assert "取消" in terminal.error
+
+
+def test_pi_list_commands_timeout_returns_empty() -> None:
+    from jshi.tool.pi_engine import PiEngine
+
+    engine = PiEngine(timeout_s=120, list_timeout_s=0.2)
+    engine._spawn = lambda: _FakePopen(hang=True)
+    started = time.monotonic()
+    assert engine.list_commands() == ()
+    assert time.monotonic() - started < 3
+
+
+def test_planner_lists_engine_tools_lazily() -> None:
+    class _CountEngine(StubEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def list_commands(self):
+            self.calls += 1
+            return super().list_commands()
+
+    engine = _CountEngine()
+    planner = SkillPlanner(
+        ToolPlanSkill(_JsonPort({"ok": True, "template": "echo", "command": "echo"})),
+        catalog=load_catalog(),
+        engine=engine,
+    )
+    assert engine.calls == 0
+    from jshi.tool.intake import IntakeRecord
+
+    planned = planner.plan(
+        IntakeRecord(
+            intake_id="in-1",
+            subject_id="stone",
+            object_id="OBJ-A",
+            need="查一下天气",
+        )
+    )
+    from jshi.tool.plan import PlanFailure
+
+    assert not isinstance(planned, PlanFailure)
+    assert engine.calls == 1
+    assert planned.command == "echo"
+
+
+def _workspace_tmp(name: str) -> Path:
+    root = Path(__file__).resolve().parents[1] / ".tmp" / "tool-ws" / name
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / str(time.time_ns())
+    path.mkdir()
+    return path
+
+
+def test_service_wrap_contract_without_tmp_path() -> None:
+    """不走 pytest tmp_path，避免本机 basetemp scandir 把验收标成 ERROR。"""
+    folder = _workspace_tmp("wrap-contract")
+    store = HangStore(folder / "hang.jsonl")
+    engine = _StreamEngine()
+    runner = ToolRunner(ToolModule(engine), store)
+    wrap = ToolWrapSkill(_JsonPort({"visible": True, "summary": "啊" * 200}))
+    service = ToolService(
+        store,
+        runner,
+        wrap_skill=wrap,
+        intake_path=folder / "tool.jsonl",
+    )
+    service.intake(subject_id="stone", object_id="OBJ-A", need="查一下天气")
+    service.drain_planning_for_tests()
+    assert engine.after_progress.wait(timeout=5)
+    deadline = time.monotonic() + 3
+    mid = None
+    while time.monotonic() < deadline:
+        hangs = store.list_for("stone", "OBJ-A")
+        if hangs and hangs[0].visible:
+            mid = hangs[0]
+            break
+        time.sleep(0.05)
+    assert mid is not None
+    kinds = [item.kind for item in mid.feedback]
+    assert kinds.count(FeedbackKind.ESTIMATE) == 1
+    assert mid.status == "open"
+    engine.go_result.set()
+    service.drain_for_tests()
+    done = store.get(mid.task_id)
+    assert done is not None
+    assert len(done.summary) == NOTE_MAX_CHARS
+    assert done.status == "notified"

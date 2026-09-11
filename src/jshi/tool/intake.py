@@ -39,10 +39,11 @@ class IntakeRecord:
     need: str = ""
     verbal: str = ""
     field_ref: Mapping[str, str] = field(default_factory=dict)
-    status: str = "received"  # received | planned | failed | launched | cancelled
+    status: str = "received"  # received | failed | launched | cancelled
     plan_error: str = ""
     request_id: str = ""
     task_id: str = ""
+    meta: Mapping[str, str] = field(default_factory=dict)
     updated_at: datetime = field(default_factory=utc_now)
 
 
@@ -60,6 +61,7 @@ def _record_to_dict(record: IntakeRecord) -> dict[str, Any]:
         "plan_error": record.plan_error,
         "request_id": record.request_id,
         "task_id": record.task_id,
+        "meta": dict(record.meta),
         "updated_at": record.updated_at.isoformat(),
     }
 
@@ -81,6 +83,12 @@ def _record_from_dict(data: Mapping[str, Any]) -> IntakeRecord:
         plan_error=str(data.get("plan_error") or ""),
         request_id=str(data.get("request_id") or ""),
         task_id=str(data.get("task_id") or ""),
+        meta={
+            str(key): str(value)
+            for key, value in (data.get("meta") or {}).items()
+        }
+        if isinstance(data.get("meta"), Mapping)
+        else {},
         updated_at=_dt(data.get("updated_at")),
     )
 
@@ -111,16 +119,11 @@ class IntakeStore:
             record = _record_from_dict(data)
             self._records[record.intake_id] = record
 
-    def _dump(self) -> None:
+    def _append(self, record: IntakeRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [
-            json.dumps(_record_to_dict(record), ensure_ascii=False)
-            for record in self._records.values()
-        ]
-        body = "\n".join(lines)
-        if body:
-            body += "\n"
-        self.path.write_text(body, encoding="utf-8")
+        line = json.dumps(_record_to_dict(record), ensure_ascii=False) + "\n"
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
 
     def get(self, intake_id: str) -> IntakeRecord | None:
         with self._lock:
@@ -161,7 +164,7 @@ class IntakeStore:
         )
         with self._lock:
             self._records[record.intake_id] = record
-            self._dump()
+            self._append(record)
         return record
 
     def update(self, intake_id: str, **changes: Any) -> IntakeRecord | None:
@@ -171,7 +174,7 @@ class IntakeStore:
                 return None
             updated = replace(record, updated_at=utc_now(), **changes)
             self._records[intake_id] = updated
-            self._dump()
+            self._append(updated)
             return updated
 
     def list_for(self, subject_id: str, object_id: str) -> tuple[IntakeRecord, ...]:

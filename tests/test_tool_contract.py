@@ -10,11 +10,13 @@ from jshi.tool import (
     Budget,
     FeedbackKind,
     PermissionContext,
+    PiEngine,
     StubEngine,
     ToolModule,
     ToolOrigin,
     ToolRequest,
     ToolStatus,
+    engine_tools,
 )
 from jshi.tool.port import ToolUseOutcome
 
@@ -63,10 +65,20 @@ def test_stub_feedback_stream_order() -> None:
     outcome = ToolModule(StubEngine()).submit(_request())
     kinds = [item.kind for item in outcome.feedback]
     assert kinds == [
-        FeedbackKind.ESTIMATE,
         FeedbackKind.PROGRESS,
         FeedbackKind.RESULT,
     ]
+
+
+def test_engine_does_not_yield_estimate() -> None:
+    outcome = ToolModule(StubEngine()).submit(_request())
+    assert outcome.estimate is None
+
+
+def test_engine_tools_from_stub() -> None:
+    items = engine_tools(StubEngine())
+    assert items[0]["name"] == "echo"
+    assert items[0]["description"]
 
 
 def test_stub_result_echoes_need() -> None:
@@ -85,6 +97,7 @@ def test_engine_catalog() -> None:
     engine = StubEngine()
     assert engine.name == "stub"
     assert engine.list_templates() == ("echo",)
+    assert engine.list_commands()[0]["name"] == "echo"
 
 
 def test_tool_module_uses_engine_catalog() -> None:
@@ -100,7 +113,7 @@ def test_feedback_envelope_meta_and_version() -> None:
     for item in outcome.feedback:
         assert item.version == "v1"
         assert item.request_id == outcome.request_id
-    assert outcome.estimate is not None
+    assert outcome.estimate is None
     assert outcome.progress
     assert outcome.result_feedback is not None
 
@@ -109,7 +122,19 @@ def test_outcome_helpers() -> None:
     req = _request()
     outcome: ToolUseOutcome = ToolModule(StubEngine()).submit(req)
     assert outcome.request_id == req.request_id
-    assert outcome.estimate is not None and outcome.estimate.kind is FeedbackKind.ESTIMATE
+    assert outcome.estimate is None
     assert all(item.kind is FeedbackKind.PROGRESS for item in outcome.progress)
     assert outcome.result.status is ToolStatus.OK
     assert outcome.result_feedback is not None and outcome.result_feedback.kind is FeedbackKind.RESULT
+
+
+class _BoomListEngine:
+    name = "boom"
+
+    def list_commands(self):
+        raise FileNotFoundError("nope")
+
+
+def test_engine_tools_swallows_listing_errors() -> None:
+    assert engine_tools(_BoomListEngine()) == ()
+    assert engine_tools(PiEngine(executable="pi-does-not-exist-xyz")) == ()

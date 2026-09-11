@@ -131,15 +131,29 @@ def _model_from_environment() -> tuple[ModelPort, ModelPort, SkillConfigStore]:
     return cognition, write_zone, store
 
 
+def _tool_engine():
+    name = (os.getenv("JSHI_TOOL_ENGINE") or "stub").strip().lower()
+    if name == "pi":
+        from jshi.tool import PiEngine
+
+        return PiEngine()
+    return StubEngine()
+
+
 def _tool_service(data_dir: Path, store: SkillConfigStore) -> ToolService:
     hang = HangStore(data_dir / "hang.jsonl")
-    runner = ToolRunner(ToolModule(StubEngine()), hang)
+    engine = _tool_engine()
+    runner = ToolRunner(ToolModule(engine), hang)
     plan_skill = ToolPlanSkill(build_model_port(store.profile("tool_plan")))
     wrap_skill = ToolWrapSkill(build_model_port(store.profile("tool_wrap")))
     return ToolService(
         hang,
         runner,
-        planner=SkillPlanner(plan_skill, catalog=load_catalog()),
+        planner=SkillPlanner(
+            plan_skill,
+            catalog=load_catalog(),
+            engine=engine,
+        ),
         wrap_skill=wrap_skill,
         intake_path=data_dir / "tool.jsonl",
     )
@@ -812,6 +826,7 @@ def _run_tool(args) -> None:
         "subject_id": args.subject_id,
         "need": args.need,
         "template": args.template,
+        "command": args.template,
         "params": params,
         "expected_result": "演示工具使用",
     }

@@ -36,7 +36,7 @@ class HangRecord:
     subject_id: str
     object_id: str
     origin: str = "external_05"
-    status: str = "open"  # open | notified | cancelled
+    status: str = "open"  # open | notified（终态可见包装后）| cancelled
     need: str = ""
     template: str = ""
     field_ref: Mapping[str, str] = field(default_factory=dict)
@@ -45,6 +45,7 @@ class HangRecord:
     visible: bool = False
     summary: str = ""
     wrap_meta: Mapping[str, str] = field(default_factory=dict)
+    meta: Mapping[str, str] = field(default_factory=dict)
     updated_at: datetime = field(default_factory=utc_now)
 
 
@@ -215,6 +216,7 @@ def _record_to_dict(record: HangRecord) -> dict[str, Any]:
         "visible": record.visible,
         "summary": record.summary,
         "wrap_meta": dict(record.wrap_meta),
+        "meta": dict(record.meta),
         "updated_at": record.updated_at.isoformat(),
     }
 
@@ -231,6 +233,9 @@ def _record_from_dict(data: Mapping[str, Any]) -> HangRecord:
     wrap_meta = data.get("wrap_meta") or {}
     if not isinstance(wrap_meta, Mapping):
         wrap_meta = {}
+    meta = data.get("meta") or {}
+    if not isinstance(meta, Mapping):
+        meta = {}
     visible = bool(data.get("visible", data.get("notify_caller", False)))
     return HangRecord(
         task_id=str(data.get("task_id") or new_id()),
@@ -247,6 +252,7 @@ def _record_from_dict(data: Mapping[str, Any]) -> HangRecord:
         visible=visible,
         summary=str(data.get("summary") or ""),
         wrap_meta={str(key): str(value) for key, value in wrap_meta.items()},
+        meta={str(key): str(value) for key, value in meta.items()},
         updated_at=_dt(data.get("updated_at")),
     )
 
@@ -277,16 +283,11 @@ class HangStore:
             record = _record_from_dict(data)
             self._records[record.task_id] = record
 
-    def _dump(self) -> None:
+    def _append(self, record: HangRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [
-            json.dumps(_record_to_dict(record), ensure_ascii=False)
-            for record in self._records.values()
-        ]
-        body = "\n".join(lines)
-        if body:
-            body += "\n"
-        self.path.write_text(body, encoding="utf-8")
+        line = json.dumps(_record_to_dict(record), ensure_ascii=False) + "\n"
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
 
     def get(self, task_id: str) -> HangRecord | None:
         with self._lock:
@@ -303,6 +304,7 @@ class HangStore:
         origin: str = "external_05",
         request_id: str = "",
         task_id: str = "",
+        meta: Mapping[str, str] | None = None,
     ) -> HangRecord:
         record = HangRecord(
             task_id=task_id or new_id(),
@@ -319,11 +321,12 @@ class HangStore:
             visible=False,
             summary="",
             wrap_meta={},
+            meta=dict(meta or {}),
             updated_at=utc_now(),
         )
         with self._lock:
             self._records[record.task_id] = record
-            self._dump()
+            self._append(record)
         return record
 
     def append_feedback(
@@ -337,7 +340,7 @@ class HangStore:
             merged = record.feedback + incoming
             updated = replace(record, feedback=merged, updated_at=utc_now())
             self._records[task_id] = updated
-            self._dump()
+            self._append(updated)
             return updated
 
     def set_wrap(
@@ -347,7 +350,9 @@ class HangStore:
         visible: bool,
         summary: str,
         wrap_meta: Mapping[str, str] | None = None,
+        terminal: bool = False,
     ) -> HangRecord | None:
+        summary = truncate_note(summary)
         with self._lock:
             record = self._records.get(task_id)
             if record is None:
@@ -360,16 +365,19 @@ class HangStore:
                     updated_at=utc_now(),
                 )
             else:
+                status = record.status
+                if visible and terminal:
+                    status = "notified"
                 updated = replace(
                     record,
                     visible=visible,
                     summary=summary if visible else record.summary,
                     wrap_meta=dict(wrap_meta or {}),
-                    status="notified" if visible else record.status,
+                    status=status,
                     updated_at=utc_now(),
                 )
             self._records[task_id] = updated
-            self._dump()
+            self._append(updated)
             return updated
 
     def list_for(self, subject_id: str, object_id: str) -> tuple[HangRecord, ...]:
@@ -383,6 +391,7 @@ class HangStore:
         return tuple(items)
 
     def list_open(self, subject_id: str, object_id: str) -> tuple[HangRecord, ...]:
+        """仍为 open 的账本。主流程用 ``list_visible``；本口留给测试与巡检。"""
         with self._lock:
             items = [
                 record
@@ -401,5 +410,5 @@ class HangStore:
                 return None
             updated = replace(record, status="cancelled", updated_at=utc_now())
             self._records[task_id] = updated
-            self._dump()
+            self._append(updated)
             return updated

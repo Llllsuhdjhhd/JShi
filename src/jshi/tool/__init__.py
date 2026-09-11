@@ -26,7 +26,7 @@ from .hang import (
     is_stage_fact,
     rule_wrap_from_item,
 )
-from .catalog import load_catalog
+from .catalog import engine_tools, load_catalog
 from .intake import IntakeRecord, IntakeStore
 from .plan import PlanFailure, RulePlanner
 from .port import ToolEngine, ToolModule, ToolRunner, ToolUseOutcome
@@ -49,6 +49,7 @@ __all__ = [
     "PlanFailure",
     "RulePlanner",
     "StubEngine",
+    "engine_tools",
     "is_stage_fact",
     "load_catalog",
     "rule_wrap_from_item",
