@@ -459,6 +459,22 @@ def _parser() -> argparse.ArgumentParser:
         default="",
         help="记挂所属对象（配合 --hang）",
     )
+
+    tool_log = commands.add_parser(
+        "tool-log",
+        help="查看工具过程（05 指示不在此；读交接/记挂/包装）",
+    )
+    tool_log.add_argument(
+        "subject_id",
+        nargs="?",
+        default=None,
+        help="主体 id；省略则用上次会话",
+    )
+    tool_log.add_argument("--speaker", default=None, help="对象名；省略则用上次 /speaker")
+    tool_log.add_argument("--object-id", default="", help="直接给 object_id")
+    tool_log.add_argument("--id", default="", help="intake_id 或 task_id")
+    tool_log.add_argument("--list", action="store_true", help="只列一览")
+    tool_log.add_argument("--raw", action="store_true", help="引擎反馈少截断")
     return parser
 
 
@@ -468,6 +484,9 @@ def main() -> None:
     # tool 是独立演示：不依赖主体运行时，避免为它构建记忆后端 / 模型端口。
     if args.command == "tool":
         _run_tool(args)
+        return
+    if args.command == "tool-log":
+        _run_tool_log(args)
         return
     process, identities, subjects = _runtime(args.data_dir)
     super_permissions = SuperPermissionStore(args.data_dir / "super_permissions.json")
@@ -788,6 +807,63 @@ def _run_grant_super(process, store, args) -> None:
         print(f"错误：{exc}")
         return
     print(f"已授予超级权限：{profile.label}（{profile.object_id}）")
+
+
+def _run_tool_log(args) -> None:
+    """只读交接与记挂，不调模型、不跑引擎。"""
+    from jshi.app.talk_session import load_session
+    from jshi.recognition import ObjectProfileRepository
+    from jshi.tool import HangStore, StubEngine, ToolModule, ToolRunner, ToolService
+    from jshi.tool.intake import IntakeStore
+    from jshi.tool.view import format_tool_process
+
+    stored = load_session(args.data_dir)
+    subject_id = (args.subject_id or stored.get("subject_id") or "").strip()
+    if not subject_id:
+        print("错误：未指定主体。")
+        return
+    object_id = (getattr(args, "object_id", "") or "").strip()
+    speaker = (args.speaker or stored.get("speaker") or "").strip()
+    hang = HangStore(args.data_dir / "hang.jsonl")
+    intake = IntakeStore(args.data_dir / "tool.jsonl")
+    service = ToolService(
+        hang,
+        ToolRunner(ToolModule(StubEngine()), hang),
+        intake_store=intake,
+    )
+    if not object_id and speaker:
+        profiles = ObjectProfileRepository(args.data_dir / "subject.sqlite3")
+        profile = profiles.get(speaker)
+        if profile is None:
+            matches = profiles.find_by_names(speaker)
+            profile = matches[0] if len(matches) == 1 else None
+        if profile is not None:
+            object_id = profile.object_id
+        elif not args.list:
+            print(
+                f"错误：对象 {speaker} 无法唯一对应档案。"
+                "请加 --object-id，或先 /tool list。"
+            )
+            return
+    if not object_id and not args.list:
+        objects = {item.object_id for item in intake.list_for_subject(subject_id)}
+        objects.update(item.object_id for item in hang.list_for_subject(subject_id))
+        if len(objects) == 1:
+            object_id = next(iter(objects))
+        elif objects:
+            print("多个对象有工具账本，请加 --speaker 或 --object-id：")
+            for oid in sorted(objects):
+                print(f"  {oid}")
+            return
+    text = format_tool_process(
+        service,
+        subject_id=subject_id,
+        object_id=object_id,
+        item_id=getattr(args, "id", "") or "",
+        listing=bool(args.list) or not object_id,
+        raw=bool(args.raw),
+    )
+    print(text)
 
 
 def _run_tool(args) -> None:

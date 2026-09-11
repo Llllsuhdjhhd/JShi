@@ -30,6 +30,7 @@ TALK_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("/response_raw", "", "看上一轮模型原文（解析前）"),
     ("/prompt", "", "看即将发给模型的 system 与 user"),
     ("/timing", "轮数", "上一轮各步耗时（可 /timing 5；默认不刷屏）"),
+    ("/tool", "list|raw|id", "看工具过程：05 指示、200 交接、引擎反馈、记挂与包装"),
     ("/login", "密码", "超级权限登录"),
     ("/logout", "", "退出超级权限"),
     ("/rule", "内容", "写入提示词【附加规则】"),
@@ -361,6 +362,8 @@ class TalkSession:
             return TalkOutcome((TalkEvent("overlay", self._prompt_section(name)),))
         if line == "/timing" or line.startswith("/timing "):
             return self._handle_timing(line)
+        if line == "/tool" or line.startswith("/tool "):
+            return TalkOutcome((TalkEvent("overlay", self._tool_text(line)),))
         if line.startswith("/"):
             return TalkOutcome((TalkEvent("notice", "未知命令。输入 /help"),))
         return self._handle_utterance(line)
@@ -866,6 +869,55 @@ class TalkSession:
         if not raw:
             return "这一轮没有保存模型原文。"
         return raw
+
+    def _tool_text(self, line: str) -> str:
+        from jshi.tool.view import format_tool_process
+
+        service = getattr(self.process, "tool_service", None)
+        if service is None:
+            return "当前过程没有工具模块。"
+        parts = line.split()
+        listing = False
+        raw = False
+        item_id = ""
+        for token in parts[1:]:
+            if token == "list":
+                listing = True
+            elif token == "raw":
+                raw = True
+            elif token == "last":
+                continue
+            elif token == "help":
+                return (
+                    "用法：/tool           当前对象最近一次过程\n"
+                    "      /tool list      交接与记挂一览\n"
+                    "      /tool raw       引擎反馈少截断\n"
+                    "      /tool <id>      按 intake_id 或 task_id 看一本"
+                )
+            else:
+                item_id = token
+        object_id = self._current_object_id() or ""
+        if not object_id:
+            return "当前对象未匹配到唯一档案，无法按对象查看。"
+        resp = getattr(self.process, "last_model_response", None)
+        intent = getattr(resp, "tool_intent", None) if resp is not None else None
+        last_use_tool = None if resp is None else intent is not None
+        last_need = getattr(intent, "need", "") or ""
+        last_verbal = ""
+        plan = self.last_plan
+        if plan is not None:
+            last_verbal = plan.verbal_text().strip()
+        return format_tool_process(
+            service,
+            subject_id=self.subject_id,
+            object_id=object_id,
+            last_use_tool=last_use_tool,
+            last_need=last_need,
+            last_verbal=last_verbal,
+            item_id=item_id,
+            listing=listing,
+            raw=raw,
+        )
 
     def _prompt_parts(self) -> tuple[str, str] | str:
         from dataclasses import replace

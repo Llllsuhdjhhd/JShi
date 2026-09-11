@@ -390,6 +390,16 @@ class HangStore:
         items.sort(key=lambda item: item.updated_at, reverse=True)
         return tuple(items)
 
+    def list_for_subject(self, subject_id: str) -> tuple[HangRecord, ...]:
+        with self._lock:
+            items = [
+                record
+                for record in self._records.values()
+                if record.subject_id == subject_id
+            ]
+        items.sort(key=lambda item: item.updated_at, reverse=True)
+        return tuple(items)
+
     def list_open(self, subject_id: str, object_id: str) -> tuple[HangRecord, ...]:
         """仍为 open 的账本。主流程用 ``list_visible``；本口留给测试与巡检。"""
         with self._lock:

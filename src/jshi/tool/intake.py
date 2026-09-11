@@ -187,5 +187,15 @@ class IntakeStore:
         items.sort(key=lambda item: item.updated_at, reverse=True)
         return tuple(items)
 
+    def list_for_subject(self, subject_id: str) -> tuple[IntakeRecord, ...]:
+        with self._lock:
+            items = [
+                record
+                for record in self._records.values()
+                if record.subject_id == subject_id
+            ]
+        items.sort(key=lambda item: item.updated_at, reverse=True)
+        return tuple(items)
+
     def cancel(self, intake_id: str) -> IntakeRecord | None:
         return self.update(intake_id, status="cancelled")

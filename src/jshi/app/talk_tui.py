@@ -86,7 +86,7 @@ class TalkApp(App[None]):
             return "正在组装提示词…"
         if line == "/context":
             return "正在预览上下文…"
-        if line in {"/last", "/memory", "/memory_raw"}:
+        if line in {"/last", "/memory", "/memory_raw", "/tool"} or line.startswith("/tool "):
             return "正在读取…"
         if line.startswith("/"):
             return "处理中…"

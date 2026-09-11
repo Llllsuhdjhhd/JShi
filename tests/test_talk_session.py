@@ -196,6 +196,7 @@ def test_plan_and_context_do_not_create_activity(tmp_path):
     memory = session.handle("/memory")
     memory_raw = session.handle("/memory_raw")
     raw = session.handle("/response_raw")
+    tool_help = session.handle("/tool help")
     assert counted.experience_calls == 1
     assert plan.events[0].kind == "overlay"
     assert "mode=" in plan.events[0].text
@@ -213,6 +214,8 @@ def test_plan_and_context_do_not_create_activity(tmp_path):
     assert "第一句" in memory_raw.events[0].text
     assert raw.events[0].kind == "overlay"
     assert "我听见了：第一句" in raw.events[0].text
+    assert tool_help.events[0].kind == "overlay"
+    assert "/tool list" in tool_help.events[0].text
 
 
 def test_memory_raw_empty_when_cursor_at_head(tmp_path):
