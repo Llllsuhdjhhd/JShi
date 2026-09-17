@@ -2442,6 +2442,23 @@ def test_wrap_payload_carries_ideal_flag(tmp_path: Path) -> None:
     assert "占位" in payload["ideal_note"]
 
 
+def test_created_tool_name_is_normalized_before_ledger() -> None:
+    """造工具的名字要在落账前规范化。
+
+    2026-09-17 实测：模型给 ``weather_forecast``，Pi 那边造出 ``weather-forecast``，
+    账本按原样记了带下划线的那个，于是账本 / 引擎技能名 / tool_metrics 的 key 三处对不上。
+    """
+    from jshi.tool.contract import normalize_tool_name
+
+    spec = ToolPlanSkill._parse_create(
+        {"create_tool": {"tool_name": "weather_forecast", "tool_intent": "查天气"}},
+        AskMode.CREATE_TOOL,
+    )
+    assert spec is not None
+    assert spec.tool_name == "weather-forecast"
+    assert spec.tool_name == normalize_tool_name("weather_forecast")
+
+
 def test_pi_prompt_uses_official_skill_command_form() -> None:
     """技能按 Pi 官方形式调用：``/skill:<name> <args>``。
 

@@ -15,6 +15,7 @@ from jshi.tool.contract import (
     ToolRequest,
     budget_to_dict,
     new_id,
+    normalize_tool_name,
 )
 from jshi.tool.discovery import (
     LOOKUP_MAX_ROUNDS,
@@ -297,7 +298,8 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
         )
         feedback_raw = raw.get("feedback_plan")
         return CreateToolSpec(
-            tool_name=str(raw.get("tool_name") or "").strip(),
+            # 落账前就规范化，保证账本 / 引擎 / 实测统计三处同名。
+            tool_name=normalize_tool_name(str(raw.get("tool_name") or "")),
             tool_intent=str(raw.get("tool_intent") or "").strip(),
             params_schema=dict(schema_raw) if isinstance(schema_raw, Mapping) else {},
             expected_output=str(raw.get("expected_output") or "").strip(),

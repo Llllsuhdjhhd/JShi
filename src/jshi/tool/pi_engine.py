@@ -29,6 +29,7 @@ from .contract import (
     ToolRequest,
     ToolResult,
     ToolStatus,
+    normalize_tool_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,10 +101,7 @@ def _compact_shell_summary(parts: list[str], *, limit: int = 1500) -> str:
 
 def _skill_name(raw: str) -> str:
     """把模型给的造工具名规范成 Pi skill name（小写、数字、连字符）。"""
-    value = (raw or "").strip().lower()
-    value = re.sub(r"[^a-z0-9]+", "-", value)
-    value = re.sub(r"-{2,}", "-", value).strip("-")
-    return value[:64] or "generated-tool"
+    return normalize_tool_name(raw)
 
 
 def _usage_from_event(event: Mapping[str, Any]) -> Mapping[str, Any]:

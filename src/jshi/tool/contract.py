@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -21,6 +22,18 @@ def utc_now() -> datetime:
 
 def new_id() -> str:
     return str(uuid4())
+
+
+def normalize_tool_name(raw: str) -> str:
+    """把模型给的造工具名规范化成引擎可用的技能名（小写、数字、连字符）。
+
+    规范只能做一次，而且要在**落账之前**：否则账本记 ``weather_forecast``、
+    Pi 那边造出 ``weather-forecast``、实测统计又按账本的名字分组，三处对不上。
+    """
+    value = (raw or "").strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    value = re.sub(r"-{2,}", "-", value).strip("-")
+    return value[:64] or "generated-tool"
 
 
 class ToolOrigin(StrEnum):
