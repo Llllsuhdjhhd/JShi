@@ -1,0 +1,603 @@
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
+from urllib.request import Request, urlopen
+
+from jshi.core import SubjectState
+from jshi.experienceledger.port import ContextAssessment
+
+
+@dataclass(frozen=True)
+class ModelSpeaker:
+    object_id: str
+    label: str
+    aliases: tuple[str, ...] = ()
+    status: str = "provisional"
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ModelRequest:
+    purpose: str
+    input_text: str
+    subject_state: SubjectState
+    speaker: ModelSpeaker | None = None
+    context: tuple[Mapping[str, Any], ...] = ()
+    # skill 注入的系统级说明（角色锚定 + 输出 schema + 示例）；由适配器并入 system。
+    system_extra: str = ""
+    # 本轮“现在”时刻；渲染提示词时给出相对时间锚点（如“昨天”）。
+    now: datetime | None = None
+    # 超级权限用户写入的附加规则（已格式化），渲染进 system 的【附加规则】。
+    governing_rules: tuple[str, ...] = ()
+    # 当前风格包的写法要求（不含配置名）。空则只用 skill 里的【现场】。
+    style_instruction: str = ""
+    # 程序判定：本轮是否该风格的首次编写（空现场或刚切换）。
+    style_first: bool = False
+    # 非木头人格：整份 system 提示词（已渲染）；空则沿用 skill 默认 instruction。
+    persona_instruction: str = ""
+    # 非木头人格：输出 JSON Schema；None 则沿用 skill 默认 schema。
+    persona_schema: Mapping[str, Any] | None = None
+    # 非木头人格：是否一次性 boot（写场景，无片场时）。
+    boot: bool = False
+    # 非木头人格：已预渲染的 user 文本（片场/输入/回忆 或 boot 素材）；空则由 build_user 正常拼。
+    persona_user_text: str = ""
+    # 本轮刺激：speech（对方原话）/ idle（闲时，无新原话）。
+    stimulus: str = "speech"
+    # 200 交出的人话，03 原样装入；空则本路不出现。
+    tool_input: str = ""
+    # 工具热状态（进行中 + 近时终态）；空则本路不出现。供 05 判断是否再开工具。
+    tool_hot_state: str = ""
+
+
+@dataclass(frozen=True)
+class RecallRequest:
+    """追加召回请求：认知活动发现一次装载不够时由模型结构化提出。"""
+
+    query: str
+    budget: int = 3
+    object_ids: tuple[str, ...] = ()
+    anchor_event_ids: tuple[str, ...] = ()
+    level: int = 1  # 回忆档位 1–9（09 未实现档位语义，本期占位记录）
+
+
+@dataclass(frozen=True)
+class ResponseItem:
+    channel: str  # verbal | embodied
+    text: str = ""
+
+
+# 片场里未说出口念头的固定前缀（程序追加；提示词同文）。
+UNSAID_ZONE_PREFIX = "（未开口）"
+
+
+def format_unsaid_zone_block(text: str) -> str:
+    """把 unsaid 正文收成片场块；已带前缀则不重复加。"""
+    body = (text or "").strip()
+    if not body:
+        return ""
+    if body.startswith(UNSAID_ZONE_PREFIX):
+        return body
+    return f"{UNSAID_ZONE_PREFIX}{body}"
+
+
+def format_speech_with_action(spoken: str, embodied: str) -> str:
+    """语言与动作合成一条对用户可见的回应；都没有则「本轮未开口」。"""
+    speech = (spoken or "").strip()
+    action = (embodied or "").strip()
+    if action == "无动作":
+        action = ""
+    if speech and action:
+        return f"{speech}（动作：{action}）"
+    if speech:
+        return speech
+    if action:
+        return f"（动作：{action}）"
+    return "（本轮未开口）"
+
+
+@dataclass(frozen=True)
+class ResponsePlan:
+    mode: str  # respond | think | ignore | wait
+    reason: str = ""
+    items: tuple[ResponseItem, ...] = ()
+    # 想过但未对对象说出口的内容；任意 mode 可有。程序记成「（未开口）…」进片场。
+    unsaid: str = ""
+
+    def verbal_text(self) -> str:
+        if self.mode in {"think", "ignore", "wait"}:
+            return ""
+        for item in self.items:
+            if item.channel == "verbal" and item.text.strip():
+                return item.text
+        return ""
+
+    def has_embodied(self) -> bool:
+        return any(item.channel == "embodied" for item in self.items)
+
+    def embodied_text(self) -> str:
+        for item in self.items:
+            if item.channel == "embodied" and item.text.strip():
+                return item.text
+        return ""
+
+    def unsaid_text(self) -> str:
+        return (self.unsaid or "").strip()
+
+
+@dataclass(frozen=True)
+class ObjectAssessment:
+    """认知阶段（阶段⑤）对说话人候选的判定。"""
+
+    conclusion: str  # confirm | deny | uncertain
+    object_id: str | None = None
+    label: str | None = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class RecallEvaluation:
+    """追加召回后、下一轮响应中对上一轮回忆的评价（程序容忍缺失）。"""
+
+    usefulness: str  # related | partial | unrelated
+    redundant: bool = False
+    need_more: bool = False
+    level_feedback: str = "ok"  # too_low | ok | too_high
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class ImportanceRank:
+    """05 的第 5 用途段"重要性排序"：给 14 统计用（当前占位，14 未接管）。"""
+
+    id: str
+    importance: float = 0.0
+    reason: str = ""
+
+
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class MemoryRating:
+    """对一条已在场回忆的现场打分。"""
+
+    ref: str
+    relevance: str = "unrelated"
+    helps_understanding: int = 0
+    used_in_reply: str = "unused"
+    misleading: bool = False
+    redundant: bool = False
+    object_fit: str = "none"
+
+
+@dataclass(frozen=True)
+class MemoryRatings:
+    """本轮对已在场回忆的整轮打分；无在场回忆则为空。"""
+
+    items: tuple[MemoryRating, ...] = ()
+    coverage: str = ""
+    gap_query: str = ""
+
+    def has_content(self) -> bool:
+        return bool(self.items or self.coverage or (self.gap_query or "").strip())
+
+
+@dataclass(frozen=True)
+class ToolUseIntent:
+    """05 只用指示：要用工具 + 一句 need。不填定义。"""
+
+    need: str = ""
+
+
+@dataclass(frozen=True, init=False)
+class ModelResponse:
+    model: str
+    metadata: Mapping[str, Any] | None = None
+    response_plan: ResponsePlan = field(default_factory=lambda: ResponsePlan(mode="respond"))
+    recall_requests: tuple[RecallRequest, ...] = ()
+    object_assessment: ObjectAssessment | None = None
+    context_assessment: ContextAssessment = field(default_factory=ContextAssessment)
+    importance_ranking: tuple[ImportanceRank, ...] = ()
+    memory_ratings: MemoryRatings = field(default_factory=MemoryRatings)
+    rewritten_context: str = ""
+    # 非木头人格：片场增量 edit（del/mod by 块号）。
+    zone_edit: tuple[Mapping[str, Any], ...] = ()
+    # 非木头人格：一次性 boot（写场景）产出的开场块。
+    scene: tuple[str, ...] = ()
+    # 非木头人格：boot 产出的价值叙述（独立字段，独立字数上限）。
+    value_narration: str = ""
+    # 模型原文（解析前）。空 = 未保存。
+    raw_text: str = ""
+    # 可选：本轮要用工具的指示。空 = 不用。
+    tool_intent: ToolUseIntent | None = None
+
+    @property
+    def text(self) -> str:
+        for item in self.response_plan.items:
+            if item.channel == "verbal":
+                return item.text
+        return ""
+
+    @property
+    def response_statuses(self) -> tuple[str, ...]:
+        statuses = [self.response_plan.mode]
+        for item in self.response_plan.items:
+            if item.channel not in statuses:
+                statuses.append(item.channel)
+        return tuple(statuses)
+
+    def __init__(
+        self,
+        model: str,
+        metadata: Mapping[str, Any] | None = None,
+        response_plan: ResponsePlan | None = None,
+        recall_requests: tuple[RecallRequest, ...] = (),
+        object_assessment: ObjectAssessment | None = None,
+        context_assessment: ContextAssessment | None = None,
+        importance_ranking: tuple[ImportanceRank, ...] = (),
+        memory_ratings: MemoryRatings | None = None,
+        rewritten_context: str = "",
+        *,
+        zone_edit: tuple[Mapping[str, Any], ...] = (),
+        scene: tuple[str, ...] = (),
+        value_narration: str = "",
+        raw_text: str = "",
+        tool_intent: ToolUseIntent | None = None,
+        text: str | None = None,
+        response_statuses: tuple[str, ...] = (),
+    ) -> None:
+        if response_plan is None:
+            items: list[ResponseItem] = []
+            if text:
+                items.append(ResponseItem(channel="verbal", text=text))
+            if "embodied" in response_statuses and not any(
+                item.channel == "embodied" for item in items
+            ):
+                items.append(ResponseItem(channel="embodied", text=""))
+            mode = "respond" if items else "think"
+            response_plan = ResponsePlan(mode=mode, items=tuple(items))
+
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "metadata", metadata)
+        object.__setattr__(self, "response_plan", response_plan)
+        object.__setattr__(self, "recall_requests", recall_requests)
+        object.__setattr__(self, "object_assessment", object_assessment)
+        object.__setattr__(
+            self,
+            "context_assessment",
+            context_assessment if context_assessment is not None else ContextAssessment(),
+        )
+        object.__setattr__(self, "importance_ranking", importance_ranking)
+        object.__setattr__(
+            self,
+            "memory_ratings",
+            memory_ratings if memory_ratings is not None else MemoryRatings(),
+        )
+        object.__setattr__(self, "rewritten_context", rewritten_context or "")
+        object.__setattr__(self, "zone_edit", tuple(zone_edit))
+        object.__setattr__(self, "scene", tuple(scene))
+        object.__setattr__(self, "value_narration", value_narration or "")
+        object.__setattr__(self, "raw_text", raw_text or "")
+        object.__setattr__(self, "tool_intent", tool_intent)
+
+    def with_raw(self, raw_text: str) -> ModelResponse:
+        """把解析前的原文挂到这份响应上（同一对象，不另造一份）。"""
+        object.__setattr__(self, "raw_text", raw_text or "")
+        return self
+
+
+class ModelPort(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    def generate(self, request: ModelRequest) -> ModelResponse: ...
+
+
+class EchoModel:
+    """Offline deterministic model for framework tests and smoke runs."""
+
+    name = "echo"
+
+    def generate(self, request: ModelRequest) -> ModelResponse:
+        if request.purpose in {"inner", "reflection"}:
+            return ModelResponse(
+                text=f"我正在回顾：{request.input_text}",
+                model=self.name,
+            )
+        payload = {
+            "response_plan": {
+                "mode": "respond",
+                "reason": "offline echo",
+                "items": [
+                    {
+                        "channel": "verbal",
+                        "text": f"我听见了：{request.input_text}",
+                    }
+                ],
+            },
+            "context_assessment": {"remove": [], "drop_recall": [], "focus": []},
+            "rewritten_context": request.input_text,
+        }
+        return ModelResponse(
+            text=json.dumps(payload, ensure_ascii=False),
+            model=self.name,
+        )
+
+
+def iter_top_level_json_values(chunks: Iterator[str]) -> Iterator[tuple[str, str]]:
+    """边到边地提取 JSON 对象顶层成员。
+
+    ``chunks`` 按序产出原始文本(流式 content 分片)。每有一个顶层 ``key: value`` 完整
+    到达就 ``yield (key, value_json)``。用标准 ``raw_decode`` 逐成员解析,自然处理字符串、
+    转义、嵌套对象/数组与标量。容忍 ``{`` 之前的 ```json 围栏/空白以及对象闭合后的余文。
+    """
+
+    buffer = ""
+    decoder = json.JSONDecoder()
+    idx = 0
+    root_open_at: int | None = None
+    pending_key: str | None = None
+    stage = 0  # 0 expect key, 1 expect colon, 2 expect value
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        buffer += chunk
+        if root_open_at is None:
+            start = buffer.find("{")
+            if start < 0:
+                continue
+            root_open_at = start
+            idx = root_open_at + 1
+        while True:
+            if stage == 0:
+                while idx < len(buffer) and buffer[idx] in " \t\r\n,":
+                    idx += 1
+                if idx >= len(buffer):
+                    break
+                if buffer[idx] == "}":
+                    return  # root object closed
+                if buffer[idx] != '"':
+                    break
+                try:
+                    key, key_end = decoder.raw_decode(buffer, idx)
+                except json.JSONDecodeError:
+                    break  # key 未完整,等更多分片
+                pending_key = key
+                idx = key_end
+                stage = 1
+                continue
+            if stage == 1:
+                while idx < len(buffer) and buffer[idx] in " \t\r\n":
+                    idx += 1
+                if idx >= len(buffer):
+                    break
+                if buffer[idx] != ":":
+                    break
+                idx += 1
+                stage = 2
+                continue
+            # stage == 2: expect value
+            while idx < len(buffer) and buffer[idx] in " \t\r\n":
+                idx += 1
+            if idx >= len(buffer):
+                break
+            try:
+                _value, value_end = decoder.raw_decode(buffer, idx)
+            except json.JSONDecodeError:
+                break  # value 尚未完整,等更多分片(stage 仍为 2)
+            yield (pending_key, buffer[idx:value_end])
+            pending_key = None
+            stage = 0
+            idx = value_end
+
+
+def _verbal_text(plan: Mapping[str, Any]) -> str:
+    """从 ``response_plan`` 段取口头文本;非 respond 或空则返回空串。"""
+    mode = (plan.get("mode") or "").strip()
+    if mode not in {"respond"}:
+        return ""
+    for item in plan.get("items") or ():
+        if isinstance(item, Mapping) and item.get("channel") == "verbal":
+            text = (item.get("text") or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _provider_usage_metadata(result: Mapping[str, Any]) -> dict[str, Any]:
+    """从 Chat Completions JSON 抽出用量，供账单估算。缺字段则省略。"""
+    usage = result.get("usage") or {}
+    if not isinstance(usage, Mapping):
+        usage = {}
+    details = usage.get("prompt_tokens_details") or {}
+    if not isinstance(details, Mapping):
+        details = {}
+    cached = usage.get("prompt_cache_hit_tokens")
+    if cached is None:
+        cached = details.get("cached_tokens")
+    meta: dict[str, Any] = {"provider_response_id": result.get("id")}
+    if usage.get("prompt_tokens") is not None:
+        meta["prompt_tokens"] = usage.get("prompt_tokens")
+    if usage.get("completion_tokens") is not None:
+        meta["completion_tokens"] = usage.get("completion_tokens")
+    if usage.get("total_tokens") is not None:
+        meta["total_tokens"] = usage.get("total_tokens")
+    if cached is not None:
+        meta["cached_tokens"] = cached
+    if usage:
+        meta["usage"] = dict(usage)
+    return meta
+
+
+def model_thinking_fields(
+    thinking: str | None = None,
+    reasoning_effort: str | None = None,
+) -> dict[str, Any]:
+    """DeepSeek 思考档位：``thinking``(enabled/disabled) + ``reasoning_effort``(low/high/max)。
+
+    - ``thinking`` 未给时回退全局环境 ``JSHI_MODEL_THINKING``（兼容旧单值 disabled/low/high/max）。
+    - ``thinking=disabled``：思考关闭。
+    - ``thinking=enabled`` + ``reasoning_effort``：思考开启并按强度（``medium``/``xhigh`` 映射为 ``high``）。
+    """
+    if thinking is None:
+        raw = (os.getenv("JSHI_MODEL_THINKING") or "").strip().lower()
+        if raw in {"disabled", "off", "0", "false", "no"} or raw == "":
+            thinking, reasoning_effort = "disabled", reasoning_effort or "high"
+        elif raw == "low":
+            thinking, reasoning_effort = "enabled", "low"
+        elif raw == "max":
+            thinking, reasoning_effort = "enabled", "max"
+        elif raw in {"enabled", "on", "1", "true", "yes", "medium", "high", "xhigh"}:
+            thinking, reasoning_effort = "enabled", reasoning_effort or "high"
+        else:
+            # 拼错的环境变量不能让请求悄悄发出去：早失败、说清收什么。
+            raise ValueError(
+                "JSHI_MODEL_THINKING 只接受 "
+                "disabled/off/0/false/no、low、enabled/on/1/true/yes、medium、high、max、xhigh，"
+                f"收到 {raw!r}"
+            )
+    t = str(thinking or "enabled").strip().lower() or "enabled"
+    e = str(reasoning_effort or "high").strip().lower() or "high"
+    if t in {"disabled", "off", "0", "false", "no"}:
+        return {"thinking": {"type": "disabled"}}
+    if t not in {"enabled", "on", "1", "true", "yes"}:
+        raise ValueError(f"thinking 只接受 enabled/disabled，收到 {t!r}")
+    if e in {"medium", "xhigh"}:
+        e = "high"
+    if e not in {"low", "high", "max"}:
+        raise ValueError(
+            f"reasoning_effort 只接受 low/high/max（medium/xhigh 映射为 high），收到 {e!r}"
+        )
+    return {"thinking": {"type": "enabled"}, "reasoning_effort": e}
+
+
+def _chat_payload(
+    model: str,
+    request: ModelRequest,
+    *,
+    stream: bool = False,
+    thinking: str | None = None,
+    reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
+    response_format: str = "",
+) -> bytes:
+    """Chat Completions 请求体。思考档位见 ``model_thinking_fields``。"""
+    from jshi.models.prompt import build_system, build_user
+
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": build_system(request)},
+            {"role": "user", "content": build_user(request)},
+        ],
+        **model_thinking_fields(thinking, reasoning_effort),
+    }
+    if max_tokens:
+        body["max_tokens"] = max_tokens
+    if response_format:
+        body["response_format"] = {"type": response_format}
+    if stream:
+        body["stream"] = True
+    return json.dumps(body).encode("utf-8")
+
+
+class OpenAICompatibleModel:
+    """Minimal adapter for providers exposing an OpenAI-compatible chat endpoint."""
+
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str,
+        model: str,
+        thinking: str | None = None,
+        reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
+        response_format: str = "",
+    ) -> None:
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self._model = model
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort
+        self.max_tokens = max_tokens
+        self.response_format = response_format
+
+    @property
+    def name(self) -> str:
+        return self._model
+
+    def generate(self, request: ModelRequest) -> ModelResponse:
+        payload = _chat_payload(
+            self._model,
+            request,
+            thinking=self.thinking,
+            reasoning_effort=self.reasoning_effort,
+            max_tokens=self.max_tokens,
+            response_format=self.response_format,
+        )
+        http_request = Request(
+            self.endpoint,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(http_request, timeout=60) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return ModelResponse(
+            text=result["choices"][0]["message"]["content"],
+            model=self.name,
+            metadata=_provider_usage_metadata(result),
+        )
+
+    def generate_stream(self, request: ModelRequest) -> Iterator[str]:
+        """流式产内容分片(`choices[0].delta.content`),供"边到边"消费。
+
+        与 ``generate`` 同一套 system/user;只额外加 ``stream: True`` 并按 SSE
+        (``data: {...}``)逐行读。对 ``[DONE]`` 终止。
+        """
+        payload = _chat_payload(
+            self._model,
+            request,
+            stream=True,
+            thinking=self.thinking,
+            reasoning_effort=self.reasoning_effort,
+            max_tokens=self.max_tokens,
+            response_format=self.response_format,
+        )
+        http_request = Request(
+            self.endpoint,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(http_request, timeout=60) as response:
+            for line in response:
+                raw = line.decode("utf-8") if isinstance(line, bytes) else str(line)
+                text = raw.strip()
+                if not text or not text.startswith("data:"):
+                    continue
+                data = text[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except ValueError:
+                    continue
+                choices = event.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    yield content

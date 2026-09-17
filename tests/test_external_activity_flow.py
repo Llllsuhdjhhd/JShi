@@ -1,0 +1,467 @@
+"""外部活动完整参与图的逐阶段测试。
+
+目标流程（当前七阶段）：
+
+    阶段①  记录入口：对象解析 + fact/external_input
+    阶段②  活跃区装载
+    阶段③  状态组装
+    阶段④  活动建立
+    阶段⑤  认知（response_plan）+ 06 标记
+    阶段⑥  行动：有 verbal 才落 language_action
+    阶段⑦  收尾：活动完成；30 尝试投递
+
+虚线部分（意图、结果反馈、治理、embodied）仍锁定为占位。
+09 与个人世界装载质量不在本文件验收。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+
+import pytest
+
+from jshi.app import cli
+from jshi.app.cli import parse_env_text
+from jshi.identity import IdentityProfile, IdentityRepository
+from jshi.models import ModelRequest, ModelResponse
+from jshi.recognition import ObjectProfile
+from jshi.subject import (
+    ActivityKind,
+    ActivityStatus,
+    CognitiveKind,
+    EpistemicStatus,
+    EvidenceKind,
+    HistoryKind,
+    PersonalKind,
+    PersonalStatus,
+    SubjectProcess,
+    SubjectRepository,
+)
+from tests.value_seed import accepted_value, import_values
+
+
+class RecordingModel:
+    """记录每一次模型请求的确定性测试模型。"""
+
+    name = "recording-model"
+
+    def __init__(self) -> None:
+        self.requests: list[ModelRequest] = []
+
+    def generate(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        return ModelResponse(text="这是模型的回应。", model=self.name)
+
+
+@pytest.fixture
+def runtime(tmp_path):
+    identities = IdentityRepository(tmp_path / "identities.json")
+    identities.create(
+        IdentityProfile(
+            subject_id="stone",
+            name="匠石",
+            origin="测试基础型",
+            narrative="我是匠石，从共同基础出发。",
+        )
+    )
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    model = RecordingModel()
+    process = SubjectProcess(repository, identities, model)
+    process.profiles.create(
+        ObjectProfile(
+            object_id="OBJ-USER", label="user", source="test", status="confirmed"
+        )
+    )
+    return process, repository, model, identities
+
+
+# 阶段1：记录入口 -----------------------------------------------------------
+
+
+def test_phase1_input_fact_is_recorded_first(runtime):
+    process, repository, _model, _identities = runtime
+
+    process.experience("stone", "今天有些疲倦", object_ref="user")
+
+    facts = repository.list_history("stone", HistoryKind.FACT)
+    assert [item.event_type for item in facts] == [
+        "external_input",
+        "language_action",
+    ]
+    assert facts[0].kind is HistoryKind.FACT
+    assert facts[0].content["text"] == "今天有些疲倦"
+    assert facts[0].content["source"] == "user"
+    assert facts[0].content["object_id"] == "OBJ-USER"
+    assert facts[0].content["object_status"] == "confirmed"
+    assert facts[0].content["object_ref"] == "user"
+    assert facts[0].source_ids == ()
+
+
+# 阶段2：当前状态组装 -------------------------------------------------------
+
+
+def test_phase2_assembly_loads_all_personal_world_systems(runtime):
+    process, _repository, _model, _identities = runtime
+    import_values(process, "stone", [accepted_value("优先坦率表达")])
+    process.add_personal_item("stone", PersonalKind.COMMITMENT, "下次继续询问近况")
+    process.add_personal_item("stone", PersonalKind.RELATIONSHIP, "与朋友的信任在加深")
+    process.add_personal_item("stone", PersonalKind.CAPABILITY, "能耐心倾听")
+    process.add_personal_item("stone", PersonalKind.AESTHETIC, "喜欢朴素真诚的表达")
+    process.add_personal_item(
+        "stone", PersonalKind.SELF_UNDERSTANDING, "还在学习如何拒绝"
+    )
+    process.experience("stone", "先打个招呼", object_ref="user")  # 为召回预置一段事实历史
+
+    result = process.experience("stone", "今天又见面了", object_ref="user")
+    assembled = result.current_state
+    state = assembled.subject_state
+
+    # 身份系统
+    assert state.subject_id == "stone"
+    assert "匠石" in state.identity_summary
+    assert "测试基础型" in state.identity_summary
+    assert state.current_stance == "我是匠石，从共同基础出发。"
+    # 个人世界系统
+    assert "优先坦率表达" in state.salient_values
+    assert "下次继续询问近况" in state.commitments
+    assert len(assembled.personal_items) == 6
+    # 阶段③ 不做全量文本召回：初始工作集不携带 recalled 片段（追加召回在认知阶段）
+    assert assembled.recalled == ()
+
+
+def test_phase2_initial_load_does_not_text_recall(runtime):
+    process, repository, _model, _identities = runtime
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
+
+    assembled = process.assemble_current_state("stone", "今天有些疲倦")
+
+    # 文本召回只属于阶段⑤ 追加召回；初始组装不按文本召回
+    assert assembled.recalled == ()
+    assert result.activity.trigger not in {item.event_id for item in assembled.recalled}
+
+
+def test_phase2_assembly_provenance_marks_source(runtime):
+    process, _repository, _model, _identities = runtime
+
+    assembled = process.assemble_current_state("stone", "今天有些疲倦")
+
+    provenance = assembled.subject_state.provenance
+    assert provenance.source == "assembled_current_state"
+    assert provenance.method == "load_existing_only"
+    assert assembled.subject_state.uncertainties == ()
+
+
+# 阶段3：活动建立 -----------------------------------------------------------
+
+
+def test_phase3_activity_is_external_and_completed(runtime):
+    process, repository, _model, _identities = runtime
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
+
+    activity = result.activity
+    assert activity.kind is ActivityKind.EXTERNAL
+    assert activity.status is ActivityStatus.COMPLETED
+    assert activity.intention_ids == ()
+    input_fact = repository.list_history("stone", HistoryKind.FACT)[0]
+    assert activity.trigger == input_fact.id
+
+    stored = repository.get_activity(activity.id)
+    assert stored.status is ActivityStatus.COMPLETED
+    assert stored.id == activity.id
+
+
+# 阶段4：认知活动 -----------------------------------------------------------
+
+
+def test_phase4_perception_is_accepted_report(runtime):
+    process, _repository, _model, _identities = runtime
+
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
+
+    perception = result.perception
+    assert perception.kind is CognitiveKind.PERCEPTION
+    assert perception.epistemic_status is EpistemicStatus.ACCEPTED
+    assert perception.evidence_kind is EvidenceKind.REPORT
+    assert perception.activity_id == result.activity.id
+    assert perception.content == "对方表达：今天有些疲倦"
+    assert len(perception.source_ids) == 1  # 感知以输入事实为来源
+
+
+def test_phase4_external_activity_has_no_thought_record(runtime):
+    process, repository, _model, _identities = runtime
+
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
+
+    kinds = {
+        item.kind
+        for item in repository.list_cognitive_contents(result.activity.id)
+    }
+    assert CognitiveKind.PERCEPTION in kinds
+    assert CognitiveKind.INFERENCE not in kinds
+    assert result.response_plan.mode == "respond"
+    assert result.action_text
+
+
+def test_phase4_model_request_receives_subject_state_and_context(runtime):
+    process, _repository, model, _identities = runtime
+    import_values(process, "stone", [accepted_value("优先坦率表达")])
+    process.add_personal_item("stone", PersonalKind.COMMITMENT, "下次继续询问近况")
+    process.add_personal_item("stone", PersonalKind.AESTHETIC, "喜欢朴素真诚的表达")
+    process.experience("stone", "先打个招呼", object_ref="user")  # 预置召回
+
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
+    request = model.requests[-1]
+
+    assert request.purpose == "subject_activity"
+    assert request.input_text == "今天有些疲倦"
+    assert request.subject_state.subject_id == "stone"
+    assert "优先坦率表达" in request.subject_state.salient_values
+    assert result.current_state.speaker is not None
+    assert result.current_state.speaker.label == "user"
+
+    kinds = {item["kind"] for item in request.context}
+    assert {"value", "commitment", "aesthetic", "speaker"} <= kinds
+    assert "event" not in kinds
+    assert not any(item["kind"] == "recalled_fact" for item in request.context)
+
+
+# 阶段5：行动与结果 ---------------------------------------------------------
+
+
+def test_phase5_language_action_recorded_in_fact_history(runtime):
+    process, repository, model, _identities = runtime
+
+    result = process.experience("stone", "今天有些疲倦", object_ref="user")
+
+    facts = repository.list_history("stone", HistoryKind.FACT)
+    action = facts[-1]
+    assert action.event_type == "language_action"
+    assert action.kind is HistoryKind.FACT
+    assert action.content["text"] == "这是模型的回应。"
+    assert action.content["model"] == model.name
+    assert action.content["activity_id"] == result.activity.id
+    assert result.action_text == "这是模型的回应。"
+
+
+def test_phase5_external_result_feedback_is_not_yet_implemented(runtime):
+    """锁定当前缺口：行动结果反馈尚未实现（图中虚线部分）。"""
+    process, repository, _model, _identities = runtime
+
+    process.experience("stone", "今天有些疲倦", object_ref="user")
+
+    event_types = {
+        item.event_type for item in repository.list_history("stone", HistoryKind.FACT)
+    }
+    assert "external_result" not in event_types
+
+
+# 阶段6：收尾与沉淀 ---------------------------------------------------------
+
+
+def test_phase6_subject_history_records_assembly_and_cognition(runtime):
+    process, repository, _model, _identities = runtime
+
+    process.experience("stone", "今天有些疲倦", object_ref="user")
+
+    subject = repository.list_history("stone", HistoryKind.SUBJECT)
+    types = [item.event_type for item in subject]
+    for required in (
+        "context_window_loaded",
+        "current_state_assembled",
+        "activity_created",
+        "activity_response_state",
+        "activity_completed",
+    ):
+        assert required in types
+    assert "cognitive_content_appeared" not in types
+
+
+def test_phase6_epistemic_transition_is_audited(runtime):
+    process, repository, _model, _identities = runtime
+    process.experience("stone", "今天有些疲倦", object_ref="user")
+    reflection = process.reflect("stone", "回顾刚才的理解")
+
+    updated = process.transition_cognition(
+        reflection.id,
+        EpistemicStatus.PROVISIONAL,
+        "目前证据有限，先暂时接受",
+    )
+
+    assert updated.epistemic_status is EpistemicStatus.PROVISIONAL
+    transitions = repository.list_transitions(reflection.id)
+    assert [(t.from_state, t.to_state, t.reason) for t in transitions] == [
+        ("considering", "provisional", "目前证据有限，先暂时接受")
+    ]
+    assert repository.list_history("stone", HistoryKind.SUBJECT)[-1].event_type == (
+        "epistemic_transition"
+    )
+
+
+def test_phase6_commitment_persists_into_next_activity(runtime):
+    process, repository, _model, _identities = runtime
+    result = process.experience("stone", "他看起来很累", object_ref="user")
+    commitment = process.add_personal_item(
+        "stone",
+        PersonalKind.COMMITMENT,
+        "下次继续关心他的疲倦",
+        source_ids=(result.activity.id,),
+    )
+
+    later = process.experience("stone", "又见面了", object_ref="user")
+    assert later.activity.id != result.activity.id
+    assert commitment.content in later.current_state.subject_state.commitments
+
+    # 显式关闭后不再进入后续活动
+    process.close_personal_item(commitment.id, PersonalStatus.COMPLETED, "已经履行")
+    final = process.experience("stone", "改天再聊", object_ref="user")
+    assert commitment.content not in final.current_state.subject_state.commitments
+
+
+# 阶段0：应用入口 -----------------------------------------------------------
+
+
+def test_phase0_cli_experience_triggers_full_flow(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("JSHI_MODEL_ENDPOINT", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_NAME", raising=False)
+    data_dir = tmp_path / "cli-data"
+
+    monkeypatch.setattr(
+        "sys.argv", ["jshi", "--data-dir", str(data_dir), "create", "stone"]
+    )
+    cli.main()
+    assert "已创建：stone" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "jshi",
+            "--data-dir",
+            str(data_dir),
+            "experience",
+            "stone",
+            "你好",
+            "--speaker",
+            "user",
+        ],
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "我听见了：你好" in out
+    assert "[活动" in out
+
+    identities = IdentityRepository(data_dir / "identities.json")
+    subjects = SubjectRepository(data_dir / "subject.sqlite3")
+    facts = subjects.list_history("stone", HistoryKind.FACT)
+    assert [item.event_type for item in facts] == ["external_input", "language_action"]
+    activities = subjects.list_activities("stone")
+    assert len(activities) == 1
+    assert activities[0].kind is ActivityKind.EXTERNAL
+    assert activities[0].status is ActivityStatus.COMPLETED
+
+
+def test_parse_env_text_skips_comments_and_quotes():
+    parsed = parse_env_text(
+        "# comment\n"
+        'JSHI_MODEL_API_KEY="abc"\n'
+        "export JSHI_MODEL_NAME=deepseek-chat\n"
+    )
+    assert parsed["JSHI_MODEL_API_KEY"] == "abc"
+    assert parsed["JSHI_MODEL_NAME"] == "deepseek-chat"
+
+
+def test_load_local_env_is_noop_under_pytest(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("JSHI_MODEL_API_KEY=should-not-load\n", encoding="utf-8")
+    monkeypatch.setenv("JSHI_ENV_FILE", str(env_file))
+    monkeypatch.delenv("JSHI_MODEL_API_KEY", raising=False)
+    cli._load_local_env()
+    assert os.getenv("JSHI_MODEL_API_KEY") is None
+
+
+def test_talk_loop_two_turns_persist_object_and_zone(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("JSHI_MODEL_ENDPOINT", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_NAME", raising=False)
+    data_dir = tmp_path / "cli-data"
+
+    monkeypatch.setattr(
+        "sys.argv", ["jshi", "--data-dir", str(data_dir), "create", "stone"]
+    )
+    cli.main()
+    capsys.readouterr()
+
+    lines = iter(["第一句", "第二句", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["jshi", "--data-dir", str(data_dir), "talk", "stone", "--speaker", "dp"],
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "我听见了：第一句" in out
+    assert "我听见了：第二句" in out
+
+    from jshi.recognition import ObjectProfileRepository
+
+    profiles = ObjectProfileRepository(data_dir / "subject.sqlite3")
+    found = profiles.find_by_names("dp")
+    assert len(found) == 1
+    assert "木头 v1" in out
+    assert "木头 v2" in out
+
+
+def test_talk_remembers_speaker_in_session(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("JSHI_MODEL_ENDPOINT", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_NAME", raising=False)
+    data_dir = tmp_path / "cli-data"
+    monkeypatch.setattr(
+        "sys.argv", ["jshi", "--data-dir", str(data_dir), "create", "stone"]
+    )
+    cli.main()
+    capsys.readouterr()
+    first = iter(["/quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(first))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["jshi", "--data-dir", str(data_dir), "talk", "stone", "--speaker", "dp"],
+    )
+    cli.main()
+    capsys.readouterr()
+    session = json.loads((data_dir / "cli_session.json").read_text(encoding="utf-8"))
+    assert session["speaker"] == "dp"
+    assert session["subject_id"] == "stone"
+
+    second = iter(["hello", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(second))
+    monkeypatch.setattr(
+        "sys.argv", ["jshi", "--data-dir", str(data_dir), "talk"]
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "我听见了：hello" in out
+
+
+def test_talk_inspect_commands_do_not_need_a_new_turn(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("JSHI_MODEL_ENDPOINT", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("JSHI_MODEL_NAME", raising=False)
+    data_dir = tmp_path / "cli-data"
+    monkeypatch.setattr(
+        "sys.argv", ["jshi", "--data-dir", str(data_dir), "create", "stone"]
+    )
+    cli.main()
+    capsys.readouterr()
+    lines = iter(["第一句", "/plan", "/context", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["jshi", "--data-dir", str(data_dir), "talk", "stone", "--speaker", "dp"],
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "mode=respond" in out
+    assert "[verbal]" in out
+    assert "装载：" in out

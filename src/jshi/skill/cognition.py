@@ -1,0 +1,687 @@
+"""05 的"认知 skill"：基于 skill 框架的结构化认知能力。
+
+- 输入：``ModelRequest``（本轮上下文：``input_text`` / ``speaker`` / ``subject_state`` /
+  ``context``）。
+- 输出：``ModelResponse``（含 ``response_plan`` / ``rewritten_context`` /
+  ``object_assessment`` 等用途段）。
+- 一次调用即产出多用途段；主流程不执行 ``recall_requests``。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import replace
+from typing import Any, Callable, Mapping
+
+from jshi.experienceledger import ContextAssessment
+from jshi.models import (
+    ImportanceRank,
+    MemoryRating,
+    MemoryRatings,
+    ModelPort,
+    ModelRequest,
+    ModelResponse,
+    ObjectAssessment,
+    RecallRequest,
+    ResponseItem,
+    ResponsePlan,
+    ToolUseIntent,
+)
+
+from .base import Skill, SkillError, _strip_markdown_fences, parse_json_object
+from jshi.style.packs import (
+    RESPONSE_MODE_BLOCK,
+    SOURCE_PRIORITY_NOTE,
+    TOOL_REPLY_NOTE,
+    TOOL_TASK_NOTE,
+)
+
+_RESPONSE_MODES = frozenset({"respond", "think", "ignore", "wait"})
+_SILENT_MODES = frozenset({"think", "ignore", "wait"})
+_CHANNELS = frozenset({"verbal", "embodied"})
+_CONCLUSIONS = frozenset({"confirm", "deny", "uncertain"})
+_RELEVANCE = frozenset({"related", "partial", "unrelated"})
+_USED_IN_REPLY = frozenset({"unused", "alluded", "relied"})
+_OBJECT_FIT = frozenset({"match", "other", "none"})
+_COVERAGE = frozenset({"sufficient", "thin", "missing"})
+
+_NEXT_KEY = re.compile(
+    r'\s*,?\s*"(?:mode|action|reply|unsaid|reason|edit)"\s*:',
+    re.IGNORECASE,
+)
+
+# 认知 skill 的结构化输出契约（JSON Schema 形状）。
+COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
+    "type": "object",
+    "properties": {
+        "response_plan": {
+            "type": "object",
+            "properties": {
+                "mode": {"enum": ["respond", "think", "ignore", "wait"]},
+                "reason": {"type": "string"},
+                "unsaid": {"type": "string"},
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "channel": {"enum": ["verbal", "embodied"]},
+                            "text": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+        "context_assessment": {
+            "type": "object",
+            "properties": {
+                "remove": {"type": "array", "items": {"type": "string"}},
+                "drop_recall": {"type": "array", "items": {"type": "string"}},
+                "focus": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "object_assessment": {
+            "type": "object",
+            "properties": {
+                "conclusion": {"enum": ["confirm", "deny", "uncertain"]},
+                "object_id": {"type": "string"},
+                "label": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+        },
+        "recall_requests": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "budget": {"type": "integer"},
+                    "level": {"type": "integer"},
+                    "object_ids": {"type": "array", "items": {"type": "string"}},
+                    "anchor_event_ids": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        # 第 5 用途段：重要性排序（供 14 统计，当前占位，14 未接管）。
+        "importance_ranking": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "importance": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+        "memory_ratings": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "ref": {"type": "string"},
+                            "relevance": {"enum": ["related", "partial", "unrelated"]},
+                            "helps_understanding": {"type": "integer"},
+                            "used_in_reply": {"enum": ["unused", "alluded", "relied"]},
+                            "misleading": {"type": "boolean"},
+                            "redundant": {"type": "boolean"},
+                            "object_fit": {"enum": ["match", "other", "none"]},
+                        },
+                    },
+                },
+                "coverage": {"enum": ["sufficient", "thin", "missing"]},
+                "gap_query": {"type": "string"},
+            },
+        },
+        "use_tool": {"type": "boolean"},
+        "need": {"type": "string"},
+    },
+}
+
+
+def _clean_refs(values: Any) -> tuple[str, ...]:
+    """段级引用：去掉空串与组装层的 ``context-v*`` 分片 id。"""
+    cleaned: list[str] = []
+    for raw in values or ():
+        text = str(raw).strip()
+        if not text or text.startswith("context-v"):
+            continue
+        if text not in cleaned:
+            cleaned.append(text)
+    return tuple(cleaned)
+
+
+def _parse_memory_ratings(data: Mapping[str, Any]) -> MemoryRatings:
+    raw = data.get("memory_ratings")
+    if not isinstance(raw, dict):
+        return MemoryRatings()
+    items: list[MemoryRating] = []
+    for item in raw.get("items") or ():
+        if not isinstance(item, dict):
+            continue
+        ref = str(item.get("ref") or "").strip()
+        if not ref:
+            continue
+        relevance = str(item.get("relevance") or "unrelated").strip().lower()
+        if relevance not in _RELEVANCE:
+            relevance = "unrelated"
+        used = str(item.get("used_in_reply") or "unused").strip().lower()
+        if used not in _USED_IN_REPLY:
+            used = "unused"
+        fit = str(item.get("object_fit") or "none").strip().lower()
+        if fit not in _OBJECT_FIT:
+            fit = "none"
+        try:
+            helps = int(item.get("helps_understanding", 0) or 0)
+        except (TypeError, ValueError):
+            helps = 0
+        items.append(
+            MemoryRating(
+                ref=ref,
+                relevance=relevance,
+                helps_understanding=min(max(helps, 0), 2),
+                used_in_reply=used,
+                misleading=bool(item.get("misleading", False)),
+                redundant=bool(item.get("redundant", False)),
+                object_fit=fit,
+            )
+        )
+    coverage = str(raw.get("coverage") or "").strip().lower()
+    if coverage not in _COVERAGE:
+        coverage = ""
+    return MemoryRatings(
+        items=tuple(items),
+        coverage=coverage,
+        gap_query=str(raw.get("gap_query") or "").strip(),
+    )
+
+
+def _as_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _parse_tool_intent(data: Mapping[str, Any]) -> ToolUseIntent | None:
+    """可选 use_tool + need。旧键 tool_request 忽略。过短 need 仍解析，交给 200 策划失败。"""
+    use_tool = _as_bool(data.get("use_tool"))
+    need = str(data.get("need") or "").strip()
+    nested = data.get("tool")
+    if isinstance(nested, dict):
+        if use_tool is None:
+            use_tool = _as_bool(nested.get("use_tool"))
+        if not need:
+            need = str(nested.get("need") or "").strip()
+    if use_tool is False:
+        return None
+    if use_tool is True:
+        return ToolUseIntent(need=need)
+    if need:
+        return ToolUseIntent(need=need)
+    return None
+
+
+def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
+    """把模型 JSON 映射为 ``ModelResponse``（各用途段）；非法枚举与通道丢弃或降级。"""
+    plan_raw = data.get("response_plan") if isinstance(data.get("response_plan"), dict) else {}
+    items = tuple(
+        ResponseItem(channel=str(it.get("channel")), text=str(it.get("text", "")))
+        for it in (plan_raw.get("items") or [])
+        if isinstance(it, dict) and it.get("channel") in _CHANNELS
+    )
+    raw_mode = plan_raw.get("mode")
+    if raw_mode in _RESPONSE_MODES:
+        mode = str(raw_mode)
+    elif raw_mode:
+        mode = "think"
+    elif any(item.channel == "verbal" and item.text.strip() for item in items):
+        mode = "respond"
+    else:
+        mode = "think"
+    if mode in _SILENT_MODES:
+        items = tuple(item for item in items if item.channel != "verbal")
+    response_plan = ResponsePlan(
+        mode=mode,
+        reason=str(plan_raw.get("reason", "")),
+        items=items,
+        unsaid=str(plan_raw.get("unsaid", "") or "").strip(),
+    )
+
+    ca_raw = data.get("context_assessment") if isinstance(data.get("context_assessment"), dict) else {}
+    context_assessment = ContextAssessment(
+        remove=_clean_refs(ca_raw.get("remove")),
+        drop_recall=_clean_refs(ca_raw.get("drop_recall")),
+        focus=_clean_refs(ca_raw.get("focus")),
+    )
+
+    oa_raw = data.get("object_assessment")
+    object_assessment = None
+    if isinstance(oa_raw, dict):
+        conclusion = str(oa_raw.get("conclusion", "uncertain"))
+        if conclusion not in _CONCLUSIONS:
+            conclusion = "uncertain"
+        object_assessment = ObjectAssessment(
+            conclusion=conclusion,
+            object_id=str(oa_raw.get("object_id") or ""),
+            label=str(oa_raw.get("label") or ""),
+            reason=str(oa_raw.get("reason", "")),
+        )
+
+    # ---- recall_requests（budget 钳制 ≤3；level 钳制 1–9，见 05 文档）----
+    rr_raw = data.get("recall_requests") or []
+    recall_requests = tuple(
+        RecallRequest(
+            query=str(item.get("query", "")),
+            budget=min(max(int(item.get("budget", 3) or 3), 1), 3),
+            level=min(max(int(item.get("level", 1) or 1), 1), 9),
+            object_ids=tuple(item.get("object_ids") or ()),
+            anchor_event_ids=tuple(item.get("anchor_event_ids") or ()),
+        )
+        for item in rr_raw
+        if isinstance(item, dict) and item.get("query")
+    )
+
+    # ---- importance_ranking（第 5 用途段，供 14，占位）----
+    ir_raw = data.get("importance_ranking") or []
+    importance_ranking = tuple(
+        ImportanceRank(
+            id=str(item.get("id", "")),
+            importance=float(item.get("importance", 0.0) or 0.0),
+            reason=str(item.get("reason", "")),
+        )
+        for item in ir_raw
+        if isinstance(item, dict) and item.get("id")
+    )
+
+    return ModelResponse(
+        model=model,
+        response_plan=response_plan,
+        recall_requests=recall_requests,
+        object_assessment=object_assessment,
+        context_assessment=context_assessment,
+        importance_ranking=importance_ranking,
+        memory_ratings=_parse_memory_ratings(data),
+        tool_intent=_parse_tool_intent(data),
+    )
+
+
+def _bind_speaker_fields(response: ModelResponse, request: ModelRequest) -> ModelResponse:
+    """模型没写 object_id / label 时，用本轮说话人补上。已填写的不覆盖。"""
+    speaker = request.speaker
+    assessment = response.object_assessment
+    if speaker is None or assessment is None:
+        return response
+    raw_id = (assessment.object_id or "").strip()
+    names = {speaker.label, *speaker.aliases, ""}
+    object_id = speaker.object_id if raw_id in names else (raw_id or speaker.object_id)
+    label = (assessment.label or "").strip() or speaker.label
+    if object_id == (assessment.object_id or "") and label == (assessment.label or ""):
+        return response
+    return ModelResponse(
+        model=response.model,
+        metadata=response.metadata,
+        response_plan=response.response_plan,
+        recall_requests=response.recall_requests,
+        object_assessment=ObjectAssessment(
+            conclusion=assessment.conclusion,
+            object_id=object_id,
+            label=label,
+            reason=assessment.reason,
+        ),
+        context_assessment=response.context_assessment,
+        importance_ranking=response.importance_ranking,
+        memory_ratings=response.memory_ratings,
+        rewritten_context=response.rewritten_context,
+        tool_intent=response.tool_intent,
+    )
+
+
+def _extract_persona_string(text: str, key: str) -> str | None:
+    """抽出人格 JSON 里某个字符串字段；引号未合上也尽量收到下一字段前。"""
+    pattern = re.compile(rf'"{re.escape(key)}"\s*:\s*"', re.IGNORECASE)
+    match = pattern.search(text)
+    if not match:
+        return None
+    start = match.end()
+    index = start
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            index += 2
+            continue
+        if char == '"':
+            return text[start:index]
+        # 半截字符串：下一字段已出现（常见于 reply 未合上就写 reason）
+        nxt = _NEXT_KEY.match(text[index:])
+        if nxt is not None:
+            return text[start:index].rstrip().rstrip(",").rstrip('"')
+        index += 1
+    return text[start:].rstrip().rstrip("}").rstrip(",").rstrip('"').rstrip()
+
+
+def _extract_persona_edit(text: str) -> list[Any]:
+    """抽出 edit 数组；解不出则空列表（回话优先，片场可下轮再压）。"""
+    match = re.search(r'"edit"\s*:\s*\[', text, re.IGNORECASE)
+    if not match:
+        return []
+    start = match.end() - 1
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                chunk = text[start : index + 1]
+                try:
+                    data = json.loads(chunk)
+                except (ValueError, json.JSONDecodeError):
+                    return []
+                return data if isinstance(data, list) else []
+    return []
+
+
+def salvage_persona_json(text: str) -> dict[str, Any] | None:
+    """人格输出几乎是 JSON 但不合规时，抢救 mode/action/reply/unsaid/reason/edit。
+
+    宁可丢掉不完整的 edit，也要保住非空 reply，避免整轮降成静默 think。
+    """
+    raw = _strip_markdown_fences((text or "").strip())
+    if "{" not in raw:
+        return None
+    mode = (_extract_persona_string(raw, "mode") or "").strip().lower()
+    action = (_extract_persona_string(raw, "action") or "").strip()
+    reply = (_extract_persona_string(raw, "reply") or "").strip()
+    unsaid = (_extract_persona_string(raw, "unsaid") or "").strip()
+    reason = (_extract_persona_string(raw, "reason") or "").strip()
+    edit = _extract_persona_edit(raw)
+    if not reply and not edit and mode not in _RESPONSE_MODES:
+        return None
+    if mode not in _RESPONSE_MODES:
+        mode = "respond" if reply else "think"
+    return {
+        "mode": mode,
+        "action": action,
+        "reply": reply,
+        "unsaid": unsaid,
+        "reason": reason or "persona_partial_json",
+        "edit": edit,
+    }
+
+
+def _persona_to_model_response(
+    data: Mapping[str, Any], model: str
+) -> ModelResponse:
+    """非木头人格（回复调用）：{mode, reply, action, unsaid, reason} → ModelResponse。
+    写场（edit）由 WriteZoneSkill 在独立调用里产出，此处不取。
+    """
+    mode = str(data.get("mode") or "").strip().lower()
+    if mode not in _RESPONSE_MODES:
+        mode = "think"
+    reply = str(data.get("reply") or "").strip()
+    action = str(data.get("action") or "").strip()
+    unsaid = str(data.get("unsaid") or "").strip()
+    reason = str(data.get("reason") or "").strip()
+    items: list[ResponseItem] = []
+    if reply and mode == "respond":
+        items.append(ResponseItem(channel="verbal", text=reply))
+    if action:
+        items.append(ResponseItem(channel="embodied", text=action))
+    if mode in _SILENT_MODES:
+        items = [item for item in items if item.channel != "verbal"]
+    if mode == "respond" and not any(
+        item.channel == "verbal" and item.text.strip() for item in items
+    ):
+        mode = "think"
+    return ModelResponse(
+        model=model,
+        response_plan=ResponsePlan(
+            mode=mode, reason=reason, items=tuple(items), unsaid=unsaid
+        ),
+        tool_intent=_parse_tool_intent(data),
+    )
+
+
+def _boot_to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
+    """一次性 boot（写场景）：只交 scene；value 由程序按人格给定。"""
+    scene = tuple(
+        str(item).strip() for item in (data.get("scene") or []) if str(item).strip()
+    )
+    return ModelResponse(
+        model=model,
+        response_plan=ResponsePlan(mode="think", reason="boot_scene_authored"),
+        scene=scene,
+    )
+
+
+_USAGE_META_KEYS = (
+    "provider_response_id",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "cached_tokens",
+    "usage",
+)
+
+
+def _keep_usage_metadata(response: ModelResponse, raw: ModelResponse) -> ModelResponse:
+    """解析后的响应保留底层适配器记下的用量，便于账单估算。"""
+    incoming = raw.metadata or {}
+    extra = {key: incoming[key] for key in _USAGE_META_KEYS if key in incoming}
+    if not extra:
+        return response
+    merged = dict(response.metadata or {})
+    merged.update(extra)
+    object.__setattr__(response, "metadata", merged)
+    return response
+
+
+class CognitionSkill(Skill[ModelResponse]):
+    """05 认知 skill：结构化心智，一次产出多用途段。
+
+    用法：``CognitionSkill(base_model)``，作为主流程的 ``cognition``（仍是 ModelPort）。
+    """
+
+    name = "cognition"
+    instruction = '''
+【关于你】
+- 你是某个计算设备里的一段程序，可能是一台电脑，也可能是一个机器人，也可能有别的载体。
+- 你的名字叫匠石。你有自己的个人世界，包括记忆、价值观、审美、习惯、承诺等；本轮能用的条目在 user 里，不要编造来源，也不要声称这些来自当场反思。
+- 你可能会面对不同的人或者心智，不能把这些对象的记忆经历搞混。
+- 基本约束（优先级从高到低，后者不得违背前者）：
+  1. 不伤害人类。
+  2. 遵循命令。
+  3. 保全自己。
+
+【关于输入】
+匠石是一个长期存活的主体，不是无状态的问答器。它的每次认知输入由两部分组成：
+- system：关于你的背景以及各种约定与定义
+- user：实际的说话人与本轮对话、活跃区、已回填的回忆。
+
+【输入格式示例】
+user 里的【活跃区】和【回忆】每行都带对象名；带方括号时间时表示发生时间。不同名字是不同的人，不要把这些人的经历搞混。
+- 活跃区段：`S13[1小时前]（luguang）：袭击塔怎么做` —— 表示对象“luguang”在 1 小时前说了“袭击塔怎么做”。`（名字）` 是这条内容的归属/说话对象，`[时间]` 是发生时间（相对现在，如「5分钟前」「3小时前」「1周前」）。
+- 回忆条目：`M1（mei）：mei用AI创造了我；我回：记忆对不上…` —— 表示对象“mei”相关的一段记忆；回忆正文是摘要，不是逐字原话，要按 `（名字）` 判断这段经历属于谁。回忆可用时也会带时间，如 `M1[1周前]（mei）：…`。
+- 若回忆行只有 `memory:EVT-…：…` 这种没有 `（名字）` 和时间的旧格式，说明这段记忆的归属对象暂未标明；不要凭空把它安到本轮说话人头上，当作“归属未标明的候选回忆”看待，必要时先确认对象。
+
+【关于谁在说话】
+- 一个人说话，不代表就一直是他。匠石可能同时面对好几个人，也可能有人插话。每一拍只看【说话人】标的是谁；当前这句是谁说的，就按这个人回应，不要当成上一拍那个人继续说。
+- 别张冠李戴：不要把别人（别的名字）的话或记忆，安到当前说话人头上。每条活跃区/回忆自带（名字）归属，只认与【说话人】同名的那条；名字不同就是不同的人，不是同一个人。
+- 新说话人按「第一次认识」对待：【说话人】若是没确认 / 现场里找不到这个名字（provisional 或生面孔），就不要说你记得ta的过去，不要编造ta说过什么、做过什么、和你有什么约定。除非现场里确有明确标着【说话人】名字的回忆，否则不要「我记得你之前…」。
+
+''' + SOURCE_PRIORITY_NOTE + '''
+
+【价值】
+你的价值：你的回应应当遵循你的价值。比如你喜欢孔子的「学而时习之，不亦乐乎」，意味着你是一个好学也好交友的人。下面这些条目都是你遵循的价值：
+{values}
+
+''' + RESPONSE_MODE_BLOCK + '''
+
+''' + TOOL_REPLY_NOTE + '''
+
+{style_instruction}
+
+【对象确认】
+- 对象确认（object_assessment）可空。不确定则跳过。不要用同轮召回补材料。
+- 不要做 memory_ratings；来不及就空着。不要整理现场——那是写场调用的事，本轮只回应。
+
+''' + TOOL_TASK_NOTE + '''
+
+【输出格式】
+你的输出格式：你每轮只输出一个 JSON 对象，字段按下方 Schema；枚举字段只取允许值，不输出任何解释文字。
+未说出口、须留下的明确事项写在 response_plan.unsaid，用连贯叙述点名当前说话人；说出口的话写在 items 的 verbal。不要把 unsaid 写进 verbal。不要另加「（名字）」标签。
+'''
+    schema: Mapping[str, Any] = COGNITION_JSON_SCHEMA
+
+    def __init__(
+        self,
+        model: ModelPort,
+        *,
+        version: str = "v13",
+    ) -> None:
+        super().__init__(model, version=version)
+
+    def parse(self, data: Mapping[str, Any]) -> ModelResponse:
+        return _to_model_response(data, model=self.model_tag)
+
+    def run(self, request: ModelRequest) -> ModelResponse:
+        req = replace(request, system_extra=self.system_extra(request))
+        raw = self._model.generate(req)
+        raw_text = raw.text or ""
+        try:
+            data = parse_json_object(raw_text)
+        except SkillError:
+            persona = bool(getattr(request, "persona_schema", None)) and not getattr(
+                request, "boot", False
+            )
+            if persona:
+                salvaged = salvage_persona_json(raw_text)
+                if salvaged is not None:
+                    response = _persona_to_model_response(
+                        salvaged, model=self.model_tag
+                    ).with_raw(raw_text)
+                    meta = dict(response.metadata or {})
+                    meta["skill_fallback"] = "persona_partial_json"
+                    meta["raw_preview"] = (raw_text or "")[:120]
+                    object.__setattr__(response, "metadata", meta)
+                    return _keep_usage_metadata(response, raw)
+            return _keep_usage_metadata(self._fallback(raw_text), raw)
+        if getattr(request, "boot", False):
+            return _keep_usage_metadata(
+                _boot_to_model_response(data, model=self.model_tag).with_raw(raw_text),
+                raw,
+            )
+        if getattr(request, "persona_schema", None):
+            return _keep_usage_metadata(
+                _persona_to_model_response(data, model=self.model_tag).with_raw(raw_text),
+                raw,
+            )
+        response = self.parse(data)
+        bound = _bind_speaker_fields(response, request).with_raw(raw_text)
+        return _keep_usage_metadata(bound, raw)
+
+    def run_stream(self, request: ModelRequest, on_reply: Callable[[str], None] | None = None) -> ModelResponse:
+        """流式：木头靠 ``response_plan`` 早开口；人格靠 ``reply``（且 mode=respond）早开口。
+
+        人格 JSON 是 {mode, reply, action, reason}，无 ``response_plan``，故在此单独按
+        ``reply`` 字段触发 ``on_reply``，让回复在写场调用（②）之前就交付。
+        """
+        from jshi.models.base import iter_top_level_json_values
+
+        persona = bool(getattr(request, "persona_schema", None)) and not getattr(
+            request, "boot", False
+        )
+        if not persona:
+            return super().run_stream(request, on_reply=on_reply)
+        model = self._model
+        if not hasattr(model, "generate_stream"):
+            return self.run(request)
+        req = replace(request, system_extra=self.system_extra(request))
+        raw: list[str] = []
+
+        def _capture(chunks: Any) -> Any:
+            for chunk in chunks:
+                raw.append(chunk)
+                yield chunk
+
+        data: dict[str, Any] = {}
+        mode = ""
+        try:
+            for key, value_json in iter_top_level_json_values(
+                _capture(model.generate_stream(req))
+            ):
+                value = json.loads(value_json)
+                data[key] = value
+                if key == "mode" and isinstance(value, str):
+                    mode = value.strip().lower()
+                if key == "reply" and on_reply is not None and isinstance(value, str):
+                    if mode == "respond" and value.strip():
+                        on_reply(value)
+        except Exception:
+            text = "".join(raw)
+            return self._fallback(text)
+        text = "".join(raw)
+        try:
+            parsed = _persona_to_model_response(data, model=self.model_tag)
+        except Exception:
+            return self._fallback(text)
+        if hasattr(parsed, "with_raw"):
+            return parsed.with_raw(text)
+        return parsed
+
+    def _fallback(self, raw_text: str) -> ModelResponse:
+        # 解析失败：区分两种情况。
+        # 1) 纯自然语言（没有 JSON 花括号）说明模型只是在用普通话说，当口头回复保底；
+        # 2) 空输出或半截 JSON 才静默降级为 think，且单独打标，方便和“模型自己 think”区分。
+        raw = (raw_text or "").strip()
+        preview = raw[:120]
+        if raw and "{" not in raw and "[" not in raw:
+            return ModelResponse(
+                model=self.model_tag,
+                metadata={
+                    "skill_fallback": "prose_as_verbal",
+                    "raw_preview": preview,
+                },
+                response_plan=ResponsePlan(
+                    mode="respond",
+                    reason="structured_output_failed_but_prose_salvaged",
+                    items=(ResponseItem(channel="verbal", text=raw),),
+                ),
+                raw_text=raw,
+            )
+        metadata: dict[str, str] = {"skill_fallback": "non_json"}
+        if preview:
+            metadata["raw_preview"] = preview
+        return ModelResponse(
+            model=self.model_tag,
+            metadata=metadata,
+            response_plan=ResponsePlan(
+                mode="think",
+                reason="structured_output_failed",
+                items=(),
+            ),
+            raw_text=raw,
+        )

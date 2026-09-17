@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.tmp/
+# 旧临时根（历史残留，可整目录删）
+.pytest/
+.pytest_cache/
+.pytest-tmp*/
+.venv/
+.jshi/
+.jshi-*/
+.jshi-try/
+.env
+.env.local
+logs/
+dist/
+build/
+
+# 《白痴》测试：本地详细报告（样例可放 reports/archive/）
+tests/idiot/reports/*
+!tests/idiot/reports/README.md
+!tests/idiot/reports/_template.md
+!tests/idiot/reports/archive/
+!tests/idiot/reports/archive/**
+/rems_quality
+tests/cc.mermaid

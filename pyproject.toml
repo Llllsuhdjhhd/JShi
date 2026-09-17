@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jshi"
+version = "0.1.0"
+description = "Subject-process experiment for a long-lived AI companion."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+talk = ["textual>=0.86,<9"]
+# 标记用：真正的引擎是邻仓 `rems`，请另执行 pip install -e <Jshi_memory>
+memory-rems = []
+
+[project.scripts]
+jshi = "jshi.app.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jshi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+cache_dir = ".tmp/pytest/cache"
+addopts = ["--basetemp=.tmp/pytest/tmp"]
+markers = [
+    "rems: optional live Jshi_memory backend (set JSHI_TEST_REMS=1)",
+]
