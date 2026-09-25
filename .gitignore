@@ -6,7 +6,11 @@ __pycache__/
 .pytest_cache/
 .pytest-tmp*/
 .venv/
-.jshi/
+# .jshi/ 可入库作会话样例；超大/易变文件仍忽略
+.jshi/hang.jsonl
+.jshi/rems/rems.db-wal
+.jshi/rems/rems.db-shm
+.jshi/rems/qdrant/.lock
 .jshi-*/
 .jshi-try/
 .env

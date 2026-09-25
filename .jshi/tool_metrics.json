@@ -1,0 +1,42 @@
+{
+  "weather_query": {
+    "command": "weather_query",
+    "runs": 5,
+    "sum_time_ms": 5.0,
+    "sum_cost": 0.0,
+    "sum_tokens": 0.0,
+    "avg_time_ms": 1.0,
+    "avg_cost": 0.0,
+    "avg_tokens": 0.0
+  },
+  "skill:get-weather": {
+    "command": "skill:get-weather",
+    "runs": 9,
+    "sum_time_ms": 200921.0,
+    "sum_cost": 0.0014580272000000003,
+    "sum_tokens": 49015.0,
+    "avg_time_ms": 22324.555555555555,
+    "avg_cost": 0.00016200302222222225,
+    "avg_tokens": 5446.111111111111
+  },
+  "skill:web-search": {
+    "command": "skill:web-search",
+    "runs": 10,
+    "sum_time_ms": 266165.0,
+    "sum_cost": 0.0034870696000000004,
+    "sum_tokens": 78464.0,
+    "avg_time_ms": 26616.5,
+    "avg_cost": 0.00034870696,
+    "avg_tokens": 7846.4
+  },
+  "skill:exchange-rate": {
+    "command": "skill:exchange-rate",
+    "runs": 3,
+    "sum_time_ms": 108077.0,
+    "sum_cost": 0.0009318344,
+    "sum_tokens": 22368.0,
+    "avg_time_ms": 36025.666666666664,
+    "avg_cost": 0.00031061146666666665,
+    "avg_tokens": 7456.0
+  }
+}
