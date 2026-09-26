@@ -590,9 +590,7 @@ class PiEngine:
         full = (
             shell_joined or shell_fallback or assistant_text or tool_fallback or ""
         ).strip()
-        if len(full) > 4000:
-            full = full[:4000].rstrip() + "…"
-        # summary 给包装：多段均分，不能只截开头 200 字（否则汇率落在后面就丢了）。
+        # 完整终态留给 200 的结果包装器；摘要只作短候选，不替代原文。
         short = _compact_shell_summary(shell_ok_parts, limit=1500)
         if not short:
             short = full[:1500] if full else ""

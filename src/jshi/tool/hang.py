@@ -27,6 +27,7 @@ from .stage import ToolStageEvent
 
 OPEN_LIST_CAP = 8
 NOTE_MAX_CHARS = 80
+PROGRESS_NOTE_MAX_CHARS = 30
 NEED_MIN_CHARS = 2
 
 
@@ -61,9 +62,9 @@ class HangRecord:
     summary: str = ""
     wrap_meta: Mapping[str, str] = field(default_factory=dict)
     meta: Mapping[str, str] = field(default_factory=dict)
-    # 交付：这句已经写进该对象的片场。非空后不再走 tool_input（避免同一句出现两次）。
+    # 送达标记：该条工具材料已进入对象主流程，避免同一进度重复作为新信息呈现。
     delivered_at: datetime | None = None
-    # 交付时写进片场的工具块正文，供人工比对；块号由渲染重排，不在此记录。
+    # 送入主流程时的正文；当前主路径不写片场，因此通常为空。
     delivered_block: str = ""
     # 05 对这一次工具反馈的回应（回写，只增）：{"turn", "mode", "reply", "action", "text"}。
     responses: tuple[Mapping[str, Any], ...] = ()
@@ -455,8 +456,9 @@ class HangStore:
         summary: str,
         wrap_meta: Mapping[str, str] | None = None,
         terminal: bool = False,
+        summary_limit: int = NOTE_MAX_CHARS,
     ) -> HangRecord | None:
-        summary = truncate_note(summary)
+        summary = truncate_note(summary, limit=summary_limit)
         with self._lock:
             record = self._records.get(task_id)
             if record is None:

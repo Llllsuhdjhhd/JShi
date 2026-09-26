@@ -46,7 +46,7 @@ class IntakeRecord:
     task_id: str = ""
     meta: Mapping[str, str] = field(default_factory=dict)
     stages: tuple[ToolStageEvent, ...] = ()
-    # 交付：策划失败句也已经写进该对象的片场。非空后不再走 tool_input。
+    # 送达标记：策划失败摘要已进入对象主流程。
     delivered_at: datetime | None = None
     delivered_block: str = ""
     updated_at: datetime = field(default_factory=utc_now)
@@ -233,7 +233,7 @@ class IntakeStore:
     def set_delivered(
         self, intake_id: str, *, block: str = ""
     ) -> IntakeRecord | None:
-        """记：这条失败句已写进该对象的片场。之后不再走 ``tool_input``。"""
+        """记：这条失败摘要已送入对象主流程。"""
         text = (block or "").strip()
         with self._lock:
             record = self._records.get(intake_id)
@@ -250,7 +250,7 @@ class IntakeStore:
             return updated
 
     def clear_delivered(self, intake_id: str) -> IntakeRecord | None:
-        """撤销交付标记（片场这轮没接下），让它继续走 ``tool_input``。"""
+        """撤销主流程送达标记，让兼容可见条目接口可以再次提供它。"""
         with self._lock:
             record = self._records.get(intake_id)
             if record is None:

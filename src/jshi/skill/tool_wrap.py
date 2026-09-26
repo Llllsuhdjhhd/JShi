@@ -84,7 +84,7 @@ PROGRESS_PROMPT = """你是匠石的工具反馈包装器。你只负责把「�
 4. 有 feedback_plan.stages 时，仅 stage_name 在列表内才考虑上报。
 5. previous_summary 相同且 previous_stage_name 相同时，visible=false；阶段切换不受限制。
 6. 如果存在 plan_id / step_id，只写当前步骤的进展，不要写成整件事已经完成。
-7. summary 控制 80 字以内；没有值得记录的进展则 visible=false。"""
+7. summary 控制 30 字以内，尽量短，只写对 need 有用的进展；没有值得记录的进展则 visible=false。"""
 
 RESULT_PROMPT = """你是匠石的工具反馈包装器。你只负责把「工具执行的最终结果」写成一句给匠石自己看的事实。
 不是对用户开口，不要称呼对方，不要写成 response_plan。
@@ -114,7 +114,8 @@ RESULT_PROMPT = """你是匠石的工具反馈包装器。你只负责把「工�
    结果是数据或事实时，**把内容本身写出来**（数值、日期、名称、结论）。
    不要写成「已查到 / 已获取 / 可用于回答」这类元陈述——读到这句话的人看不到原始数据，
    只看到这一句；写成元陈述等于没拿到结果。
-4. 有 result_fields 时优先提取那些对回答 need 有用的字段内容。
+4. 通读完整 result_text，排除探索日志等无关内容，提取回答 need 必需的事实；不要只看开头片段。
+   有 result_fields 时优先提取那些对回答 need 有用的字段内容。
 5. metrics 一律不写入 summary（耗时、token、费用都不写）。
 6. 如果 summary 与 previous_summary 完全一致，visible=false。
 7. result_text 为空时按 status 输出统一兜底句（白话）。
@@ -272,19 +273,29 @@ def _system_extra(instruction: str, schema: Mapping[str, Any]) -> str:
 
 
 def _result_text_for_wrap(result: Any) -> str:
-    """包装器用的终态正文：summary 与 result.content 取更完整的一份（有上限）。"""
+    """包装器用的完整终态正文；摘要单独压缩，不能在送入模型前截掉结果尾部。"""
     summary = (getattr(result, "summary", None) or "").strip()
     error = (getattr(result, "error", None) or "").strip()
     content = ""
     raw = getattr(result, "result", None)
     if isinstance(raw, Mapping):
-        content = str(raw.get("content") or "").strip()
-    text = summary or error
-    if content and len(content) > len(text):
-        text = content
-    if len(text) > 2400:
-        return text[:2400].rstrip() + "…"
-    return text
+        raw_content = raw.get("content")
+        if (raw_content is None or raw_content == "") and raw:
+            raw_content = raw
+        if isinstance(raw_content, str):
+            content = raw_content.strip()
+        elif raw_content is not None:
+            content = json.dumps(
+                raw_content, ensure_ascii=False, separators=(",", ":"), default=str
+            ).strip()
+    parts: list[str] = []
+    if summary:
+        parts.append(f"引擎摘要：\n{summary}")
+    if content and content != summary:
+        parts.append(f"完整终态结果：\n{content}")
+    if error and error not in {summary, content}:
+        parts.append(f"错误信息：\n{error}")
+    return "\n\n".join(parts) or summary or error
 
 
 def _result_tokens(result: Any) -> float | None:

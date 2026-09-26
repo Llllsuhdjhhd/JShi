@@ -38,5 +38,15 @@
     "avg_time_ms": 36025.666666666664,
     "avg_cost": 0.00031061146666666665,
     "avg_tokens": 7456.0
+  },
+  "skill:weather-forecast-query": {
+    "command": "skill:weather-forecast-query",
+    "runs": 1,
+    "sum_time_ms": 27668.0,
+    "sum_cost": 0.004397888,
+    "sum_tokens": 8722.0,
+    "avg_time_ms": 27668.0,
+    "avg_cost": 0.004397888,
+    "avg_tokens": 8722.0
   }
 }

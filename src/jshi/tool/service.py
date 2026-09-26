@@ -26,6 +26,8 @@ from .contract import (
 from .hang import (
     HangStore,
     OPEN_LIST_CAP,
+    NOTE_MAX_CHARS,
+    PROGRESS_NOTE_MAX_CHARS,
     is_stage_fact,
     rule_wrap_from_item,
     truncate_note,
@@ -370,6 +372,26 @@ def _result_tokens_for_stage(result: Any) -> float | None:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
     return None
+
+
+def _terminal_fallback_summary(result: ToolResult) -> str:
+    """包装模型不可用时，至少保留引擎给出的终态摘要或结果正文。"""
+    summary = (result.summary or "").strip()
+    if summary:
+        return summary
+    error = (result.error or "").strip()
+    if error:
+        return error
+    payload = result.result
+    if isinstance(payload, Mapping):
+        content = payload.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if content is not None:
+            return json.dumps(content, ensure_ascii=False, default=str)
+        if payload:
+            return json.dumps(dict(payload), ensure_ascii=False, default=str)
+    return result.status.value
 
 
 def _plan_to_dict(plan: ToolPlan) -> dict[str, Any]:
@@ -1137,6 +1159,13 @@ class ToolService:
         hang = self.hang_store.get(task_id)
         if hang is None or hang.status == "cancelled":
             return
+        terminal = any(item.kind is FeedbackKind.RESULT for item in batch)
+        has_progress = any(item.kind is FeedbackKind.PROGRESS for item in batch)
+        summary_limit = (
+            PROGRESS_NOTE_MAX_CHARS
+            if has_progress and not terminal
+            else NOTE_MAX_CHARS
+        )
         skill = self.wrap_skill
         if skill is None:
             return
@@ -1146,7 +1175,7 @@ class ToolService:
             logger.exception("tool wrap skill failed")
             result = None
         if result is None:
-            terminal = next(
+            terminal_result = next(
                 (
                     item.result
                     for item in reversed(batch)
@@ -1154,9 +1183,9 @@ class ToolService:
                 ),
                 None,
             )
-            if terminal is None:
+            if terminal_result is None:
                 return
-            text = (terminal.error or terminal.status.value).strip()
+            text = _terminal_fallback_summary(terminal_result)
             if not text:
                 return
             self.hang_store.set_wrap(
@@ -1165,9 +1194,9 @@ class ToolService:
                 summary=text,
                 wrap_meta={"source": "fallback"},
                 terminal=True,
+                summary_limit=NOTE_MAX_CHARS,
             )
             return
-        terminal = any(item.kind is FeedbackKind.RESULT for item in batch)
         summary = (result.summary or "").strip()
         # 终态包装若空摘要，用引擎 RESULT 正文兜底，避免收口后仍留着「还在查」的中途句。
         if terminal and not summary:
@@ -1180,17 +1209,14 @@ class ToolService:
                 None,
             )
             if engine_result is not None:
-                summary = (
-                    engine_result.summary
-                    or engine_result.error
-                    or engine_result.status.value
-                ).strip()
+                summary = _terminal_fallback_summary(engine_result)
         self.hang_store.set_wrap(
             task_id,
             visible=bool(result.visible) and bool(summary),
             summary=summary,
             wrap_meta={"model_tag": getattr(skill, "model_tag", "")},
             terminal=terminal,
+            summary_limit=summary_limit,
         )
 
     def list_visible(
