@@ -64,7 +64,9 @@ class RecalledFragment:
     summary_level: str | None = None  # L1 等；进程内实现无多级摘要，为 None
     kind: str = "fact"
     object_id: str | None = None
-    interlocutor: str | None = None  # 说话/互动对象；REMS 特性,进程内 None
+    query_object_role: str | None = None  # interlocutor | involved：相对本轮查询对象的角色
+    interlocutor: str | None = None  # 唯一历史对话对象；多对象时为空
+    interlocutor_object_ids: tuple[str, ...] = ()  # 历史来源段记录的全部对话对象
     source_ids: tuple[str, ...] = ()
     score: float = 0.0
     occurred_at: datetime | None = None
@@ -90,6 +92,8 @@ class MemoryPort(Protocol):
         *,
         limit: int | None = None,
         object_id: str | None = None,
+        object_ids: tuple[str, ...] = (),
+        interlocutor_object_id: str | None = None,
         level: int = 1,
         anchor_event_ids: tuple[str, ...] = (),
     ) -> Sequence[RecalledFragment]:
@@ -124,6 +128,8 @@ class InProcessHistoryMemory:
         *,
         limit: int | None = None,
         object_id: str | None = None,
+        object_ids: tuple[str, ...] = (),
+        interlocutor_object_id: str | None = None,
         level: int = 1,
         anchor_event_ids: tuple[str, ...] = (),
     ) -> Sequence[RecalledFragment]:
@@ -136,11 +142,16 @@ class InProcessHistoryMemory:
         recent = self._repository.list_history(
             subject_id, kind=HistoryKind.FACT, limit=max(cap * 3, cap)
         )
-        if object_id:
+        wanted = tuple(dict.fromkeys((
+            *((interlocutor_object_id,) if interlocutor_object_id else ()),
+            *object_ids,
+            *((object_id,) if object_id else ()),
+        )))
+        if wanted:
             recent = [
                 record
                 for record in recent
-                if _fact_mentions_object(record, object_id)
+                if any(_fact_mentions_object(record, oid) for oid in wanted)
             ]
         tokens = query_terms(query)
         scored: list[tuple[float, HistoryRecord]] = []
@@ -153,7 +164,15 @@ class InProcessHistoryMemory:
             # Keep chronological presence even without lexical hit.
             scored.append((score, record))
         scored.sort(
-            key=lambda item: (item[0], item[1].created_at), reverse=True
+            key=lambda item: (
+                item[0],
+                bool(
+                    interlocutor_object_id
+                    and _fact_mentions_object(item[1], interlocutor_object_id)
+                ),
+                item[1].created_at,
+            ),
+            reverse=True,
         )
         chosen = [record for score, record in scored if score > 0][:cap]
         if not chosen:
@@ -172,6 +191,18 @@ class InProcessHistoryMemory:
                 object_id=(
                     str(record.content["object_id"])
                     if record.content.get("object_id") is not None
+                    else next(
+                        (oid for oid in ((interlocutor_object_id,) + wanted)
+                         if oid and _fact_mentions_object(record, oid)),
+                        None,
+                    )
+                ),
+                query_object_role=(
+                    "interlocutor"
+                    if interlocutor_object_id and interlocutor_object_id in wanted
+                    and _fact_mentions_object(record, interlocutor_object_id)
+                    else "involved"
+                    if wanted and any(_fact_mentions_object(record, oid) for oid in wanted)
                     else None
                 ),
                 source_ids=(record.id, *record.source_ids),

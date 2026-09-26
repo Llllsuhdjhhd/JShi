@@ -391,6 +391,18 @@ def test_format_memory_line_includes_time_and_label() -> None:
     plain = format_memory_line("无归属", occurred_at=when)
     assert "]无归属" in plain and plain.startswith("[")
     assert format_memory_line("只有名", label="lux") == "（lux）只有名"
+    assert format_memory_line(
+        "共同经历", label="lux", object_role="interlocutor"
+    ) == "（本轮对话对象：lux）共同经历"
+    assert format_memory_line(
+        "共同经历", label="bao", object_role="involved"
+    ) == "（本轮涉及对象：bao）共同经历"
+    assert format_memory_line(
+        "共同经历",
+        label="lux",
+        object_role="interlocutor",
+        historical_interlocutors=("lux", "bao"),
+    ) == "（历史对话对象：lux、bao；本轮对话对象：lux）共同经历"
     assert format_memory_line("  ") == ""
 
 

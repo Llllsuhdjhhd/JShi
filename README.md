@@ -46,6 +46,8 @@ python -m jshi.app.cli --data-dir .tmp/demo experience stone "你好" \
 python -m jshi.app.cli talk stone --speaker 火星人
 ```
 
+Windows 本机对话与真实 Jshi_memory 测试可直接运行 [`talk.cmd`](talk.cmd)；从任意目录启动、环境配置和记忆验证步骤见[本机启动与 CLI 测试](doc/本机启动与CLI测试.md)。
+
 ### 需要配置什么
 
 不配任何东西也能跑——但只有「没有智能的骨架」。要真的像样，配这些（见 `.env.example`）：

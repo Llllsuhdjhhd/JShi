@@ -187,14 +187,23 @@ class MemorySource:
         seen: set[str] = set()
         fragments: list[AssemblyFragment] = []
         object_id = ctx.speaker.object_id if ctx.speaker else None
-        if object_id:
+        involved_ids = tuple(
+            dict.fromkeys(
+                oid for oid in (
+                    object_id,
+                    *((ctx.speaker.mentioned_object_ids) if ctx.speaker else ()),
+                ) if oid
+            )
+        )
+        if involved_ids:
             self._absorb(
                 fragments,
                 seen,
                 self._memory.recall(
                     ctx.subject_id,
                     ctx.input_text,
-                    object_id=object_id,
+                    object_ids=involved_ids,
+                    interlocutor_object_id=object_id,
                     level=ctx.recall_level,
                     limit=ctx.recall_limit,
                 ),
@@ -228,6 +237,7 @@ class MemorySource:
                     # 用 content（按 summary_level 选的摘要）装配；进程内无摘要则落回原文。
                     content=item.content or item.text,
                     object_id=item.object_id,
+                    query_object_role=item.query_object_role,
                     kind=item.kind or "fact",
                     status="active",
                     importance=0.5,

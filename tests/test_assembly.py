@@ -291,6 +291,34 @@ def test_memory_source_skips_without_object_id(tmp_path):
     assert source.load(ctx).fragments == ()
 
 
+def test_memory_source_searches_speaker_and_mentioned_objects(tmp_path):
+    from jshi.memory import RecalledFragment
+
+    calls = []
+
+    class CaptureMemory:
+        def recall(self, subject_id, query, **kwargs):
+            calls.append((subject_id, query, kwargs))
+            return (RecalledFragment(
+                event_id="evt-1", event_type="memory", text="一起经历的事",
+                object_id="OBJ-USER", query_object_role="interlocutor",
+            ),)
+
+    source = MemorySource(
+        SubjectRepository(tmp_path / "subject.sqlite3"), memory=CaptureMemory()
+    )
+    result = source.load(AssemblyContext(
+        subject_id="stone", input_text="提到了朋友的计划",
+        speaker=AssemblySpeaker(
+            object_id="OBJ-USER", label="用户", mentioned_object_ids=("OBJ-FRIEND",)
+        ),
+    ))
+
+    assert calls[0][2]["object_ids"] == ("OBJ-USER", "OBJ-FRIEND")
+    assert calls[0][2]["interlocutor_object_id"] == "OBJ-USER"
+    assert result.fragments[0].query_object_role == "interlocutor"
+
+
 class BadSource:
     name = "bad"
     status = "implemented"

@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import warnings
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -178,6 +179,7 @@ def from_recalled_fragments(raw: Sequence[Any] | None) -> tuple[RecalledFragment
                 kind=kind,
                 object_id=getattr(item, "object_id", None),
                 interlocutor=getattr(item, "interlocutor", None),
+                interlocutor_object_ids=_as_tuple(getattr(item, "interlocutor_object_ids", ())),
                 source_ids=_as_tuple(getattr(item, "source_ids", ())),
                 score=float(getattr(item, "score", 0.0) or 0.0),
                 occurred_at=occurred_at,
@@ -364,6 +366,8 @@ class Rems3MemoryBackend:
         *,
         limit: int | None = None,
         object_id: str | None = None,
+        object_ids: tuple[str, ...] = (),
+        interlocutor_object_id: str | None = None,
         level: int = 1,
         anchor_event_ids: tuple[str, ...] = (),
     ) -> Sequence[RecalledFragment]:
@@ -371,11 +375,35 @@ class Rems3MemoryBackend:
             subject_id,
             query,
             object_id=object_id,
+            object_ids=tuple(dict.fromkeys((
+                *((interlocutor_object_id,) if interlocutor_object_id else ()),
+                *object_ids,
+                *((object_id,) if object_id else ()),
+            ))),
             level=level,
             limit=limit,
             anchor_event_ids=anchor_event_ids,
         )
-        return from_recalled_fragments(raw)
+        fragments = from_recalled_fragments(raw)
+        if interlocutor_object_id:
+            # 只在相关度接近时把本轮对话人关联结果前移；明显更相关的其他对象不被压过。
+            close = float(getattr(self._pipeline, "_relevance_close", 0.0) or 0.0)
+            if close > 0 and len(fragments) > 1:
+                highest = max(item.score for item in fragments)
+                fragments = tuple(sorted(
+                    fragments,
+                    key=lambda item: (
+                        0 if highest - item.score <= close and item.object_id == interlocutor_object_id else 1,
+                    ),
+                ))
+        return tuple(
+            replace(item, query_object_role=(
+                "interlocutor" if interlocutor_object_id and item.object_id == interlocutor_object_id
+                else "involved" if item.object_id in object_ids or item.object_id == object_id
+                else None
+            ))
+            for item in fragments
+        )
 
     def remember_fact(
         self,

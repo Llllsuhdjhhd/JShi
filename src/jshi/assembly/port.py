@@ -16,6 +16,7 @@ class AssemblySpeaker:
     aliases: tuple[str, ...] = ()
     status: str = "provisional"
     reason: str = ""
+    mentioned_object_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class AssemblyFragment:
     content: str
     kind: str
     object_id: str | None = None
+    query_object_role: str | None = None  # interlocutor | involved
     status: str = "active"
     importance: float = 1.0
     source_ids: tuple[str, ...] = ()

@@ -51,6 +51,7 @@ class RecallCoordinator:
         round_number: int,
         requests: Sequence[RecallRequest],
         known_ids: set[str],
+        interlocutor_object_id: str | None = None,
     ) -> RecallExecution:
         from jshi.subject.domain import HistoryKind, HistoryRecord
 
@@ -66,9 +67,8 @@ class RecallCoordinator:
                     subject_id,
                     request.query,
                     limit=request.budget or 3,
-                    object_id=(
-                        request.object_ids[0] if request.object_ids else None
-                    ),
+                    object_ids=request.object_ids,
+                    interlocutor_object_id=interlocutor_object_id,
                     level=request.level,
                     anchor_event_ids=request.anchor_event_ids,
                 )

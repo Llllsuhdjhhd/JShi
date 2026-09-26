@@ -52,6 +52,33 @@ def test_recall_filters_by_object_id(tmp_path):
     assert recalled[0].object_id == "OBJ-A"
 
 
+def test_recall_filters_for_all_objects_and_marks_interlocutor(tmp_path):
+    repository = SubjectRepository(tmp_path / "subject.sqlite3")
+    memory = InProcessHistoryMemory(repository)
+    repository.add_history(HistoryRecord(
+        subject_id="stone", kind=HistoryKind.FACT, event_type="memory_external",
+        content={"text": "甲和乙一起去看展", "object_ids": ["OBJ-A", "OBJ-B"]},
+    ))
+    repository.add_history(HistoryRecord(
+        subject_id="stone", kind=HistoryKind.FACT, event_type="memory_external",
+        content={"text": "丙的旅行计划", "object_ids": ["OBJ-C"]},
+    ))
+    repository.add_history(HistoryRecord(
+        subject_id="stone", kind=HistoryKind.FACT, event_type="memory_external",
+        content={"text": "乙记下了看展后的想法", "object_ids": ["OBJ-B"]},
+    ))
+
+    recalled = memory.recall(
+        "stone", "看展", object_ids=("OBJ-A", "OBJ-B"),
+        interlocutor_object_id="OBJ-A", limit=3,
+    )
+
+    assert len(recalled) == 2
+    assert recalled[0].object_id == "OBJ-A"
+    assert recalled[0].query_object_role == "interlocutor"
+    assert recalled[1].query_object_role == "involved"
+
+
 def test_recall_uses_chinese_bigrams_over_recency_fallback(tmp_path):
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
     memory = InProcessHistoryMemory(repository)
@@ -94,6 +121,8 @@ def test_subject_process_wires_injected_memory_into_assembly(tmp_path):
             *,
             limit=None,
             object_id=None,
+            object_ids=(),
+            interlocutor_object_id=None,
             level=1,
             anchor_event_ids=(),
         ):
@@ -103,7 +132,8 @@ def test_subject_process_wires_injected_memory_into_assembly(tmp_path):
                     event_type="external_input",
                     text="injected-memory",
                     kind="fact",
-                    object_id=object_id,
+                    object_id=object_id or (object_ids[0] if object_ids else None),
+                    query_object_role=("interlocutor" if interlocutor_object_id else None),
                 ),
             )
 

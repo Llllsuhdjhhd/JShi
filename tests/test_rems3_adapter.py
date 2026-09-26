@@ -121,6 +121,8 @@ def test_from_recalled_fragments_defaults_event_type():
             content="",
             kind=None,
             object_id=None,
+            interlocutor="OBJ-A",
+            interlocutor_object_ids=["OBJ-A", "OBJ-B"],
             source_ids=["s1"],
             score=1,
             summary_level=None,
@@ -134,6 +136,8 @@ def test_from_recalled_fragments_defaults_event_type():
     assert fragments[0].kind == "fact"
     assert fragments[0].source_ids == ("s1",)
     assert fragments[0].text == "原文"
+    assert fragments[0].interlocutor == "OBJ-A"
+    assert fragments[0].interlocutor_object_ids == ("OBJ-A", "OBJ-B")
 
 
 def test_prefer_neighbor_rems_puts_jshi_memory_first():
@@ -223,6 +227,19 @@ def test_adapter_ingest_and_recall_use_engine_shapes():
     assert fragments[0].content == "摘要"
     assert pipeline.queries[0][2]["level"] == 2
     assert pipeline.queries[0][2]["limit"] == 3
+
+
+def test_rems3_recall_passes_all_objects_and_marks_roles():
+    pipeline = FakePipeline()
+    backend = Rems3MemoryBackend(pipeline)
+
+    fragments = backend.recall(
+        "stone", "共同经历", object_ids=("OBJ-B", "OBJ-A"),
+        interlocutor_object_id="OBJ-A", limit=3,
+    )
+
+    assert pipeline.queries[0][2]["object_ids"] == ("OBJ-A", "OBJ-B")
+    assert fragments[0].query_object_role == "interlocutor"
 
 
 def test_remember_fact_synthesizes_single_ingest():

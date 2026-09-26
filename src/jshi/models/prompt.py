@@ -162,6 +162,8 @@ def format_memory_line(
     content: str,
     *,
     label: str = "",
+    object_role: str | None = None,
+    historical_interlocutors: tuple[str, ...] = (),
     occurred_at: object = None,
     now: datetime | None = None,
 ) -> str:
@@ -171,12 +173,22 @@ def format_memory_line(
         return ""
     when = relative_time_label(occurred_at, now=now)
     name = (label or "").strip()
-    if when and name:
-        return f"[{when}]（{name}）{text}"
+    role_label = {
+        "interlocutor": "本轮对话对象",
+        "involved": "本轮涉及对象",
+    }.get(object_role or "")
+    tags: list[str] = []
+    past = tuple(dict.fromkeys(item.strip() for item in historical_interlocutors if item and item.strip()))
+    if past:
+        tags.append(f"历史对话对象：{'、'.join(past)}")
+    if name:
+        tags.append(f"{role_label}：{name}" if role_label else name)
+    if when and tags:
+        return f"[{when}]（{'；'.join(tags)}）{text}"
     if when:
         return f"[{when}]{text}"
-    if name:
-        return f"（{name}）{text}"
+    if tags:
+        return f"（{'；'.join(tags)}）{text}"
     return text
 
 

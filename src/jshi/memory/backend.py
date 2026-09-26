@@ -28,6 +28,8 @@ class MemoryBackendPort(Protocol):
         *,
         limit: int | None = None,
         object_id: str | None = None,
+        object_ids: tuple[str, ...] = (),
+        interlocutor_object_id: str | None = None,
         level: int = 1,
         anchor_event_ids: tuple[str, ...] = (),
     ) -> Sequence[RecalledFragment]: ...
@@ -74,6 +76,8 @@ class InProcessMemoryBackend:
         *,
         limit: int | None = None,
         object_id: str | None = None,
+        object_ids: tuple[str, ...] = (),
+        interlocutor_object_id: str | None = None,
         level: int = 1,
         anchor_event_ids: tuple[str, ...] = (),
     ) -> Sequence[RecalledFragment]:
@@ -82,6 +86,8 @@ class InProcessMemoryBackend:
             query,
             limit=limit,
             object_id=object_id,
+            object_ids=object_ids,
+            interlocutor_object_id=interlocutor_object_id,
             level=level,
             anchor_event_ids=anchor_event_ids,
         )

@@ -1044,9 +1044,17 @@ class SubjectProcess:
             if not content:
                 continue
             label = self._object_display(getattr(fragment, "object_id", None))
+            historical_ids = getattr(fragment, "interlocutor_object_ids", ()) or ()
+            if not historical_ids and getattr(fragment, "interlocutor", None):
+                historical_ids = (fragment.interlocutor,)
+            historical_interlocutors = tuple(
+                self._object_display(object_id) for object_id in historical_ids if object_id
+            )
             line = format_memory_line(
                 content,
                 label=label,
+                object_role=getattr(fragment, "query_object_role", None),
+                historical_interlocutors=historical_interlocutors,
                 occurred_at=getattr(fragment, "occurred_at", None),
                 now=now,
             )
@@ -1742,6 +1750,7 @@ class SubjectProcess:
                 aliases=tuple(aliases),
                 status=status,
                 reason=speaker.reason,
+                mentioned_object_ids=tuple(speaker.mentioned_object_ids),
             )
         if not object_id:
             return None
