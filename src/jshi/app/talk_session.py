@@ -1109,6 +1109,8 @@ class TalkSession:
                 persona_schema=persona_schema,
                 boot=boot,
                 persona_user_text=persona_user_text,
+                tool_input=assembled.tool_input,
+                tool_hot_state=assembled.tool_hot_state,
                 context=self.process._model_context(
                     self.subject_id,
                     assembled.recalled,

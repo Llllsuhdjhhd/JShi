@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -383,6 +384,22 @@ def test_prompt_command_shows_system_and_user(tmp_path):
     assert "【正例】" not in text
     _, user = text.split("\n---\nuser\n", 1)
     assert "OBJ-" not in user
+
+
+def test_prompt_preview_includes_tool_related_text(tmp_path, monkeypatch):
+    session = _make_session(tmp_path)
+    original_preview = session.process.preview_state
+
+    def preview_with_tool(*args, **kwargs):
+        preview = original_preview(*args, **kwargs)
+        return replace(
+            preview,
+            assembled=replace(preview.assembled, tool_input="【工具相关】\n新的信息：已查到数据"),
+        )
+
+    monkeypatch.setattr(session.process, "preview_state", preview_with_tool)
+    text = session.handle("/prompt").events[0].text
+    assert "【工具相关】\n新的信息：已查到数据" in text
 
 
 def test_talk_does_not_pass_objects_but_ledger_is_filled(tmp_path):
