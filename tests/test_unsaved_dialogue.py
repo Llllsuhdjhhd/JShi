@@ -1,13 +1,12 @@
-"""05 上下文带上记忆游标之后、尚未写入 09 的原话。"""
+"""尚未投递的原话留在账本和片场里，不再单独贴进认知提示词。"""
 
 from __future__ import annotations
 
-from jshi.experienceledger import ConsumerKind
 from jshi.identity import IdentityProfile, IdentityRepository
-from jshi.memorycontrol import InProcessMemoryControl
 from jshi.models import ModelRequest, ModelResponse
 from jshi.models.prompt import build_user
 from jshi.recognition import ObjectProfile
+from jshi.style import SMITH
 from jshi.subject import SubjectProcess, SubjectRepository
 
 
@@ -22,7 +21,7 @@ class CaptureModel:
         return ModelResponse(text="好的。", model=self.name, rewritten_context="现场")
 
 
-def _process(tmp_path, model):
+def _process(tmp_path, model) -> SubjectProcess:
     identities = IdentityRepository(tmp_path / "identities.json")
     identities.create(IdentityProfile("stone", "匠石", "测试", "我是匠石。"))
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
@@ -33,11 +32,11 @@ def _process(tmp_path, model):
     return process
 
 
-def _cognition_requests(model):
-    return [r for r in model.requests if r.input_text in {"第一句", "第二句", "第三句"}]
+def _cognition_requests(model: CaptureModel) -> list[ModelRequest]:
+    return [item for item in model.requests if item.purpose == "subject_activity"]
 
 
-def test_unsaved_dialogue_carries_prior_turns_but_not_current(tmp_path):
+def test_unflushed_talk_stays_in_the_ledger_not_a_prompt_block(tmp_path):
     model = CaptureModel()
     process = _process(tmp_path, model)
     process.experience("stone", "第一句", object_ref="user")
@@ -45,33 +44,37 @@ def test_unsaved_dialogue_carries_prior_turns_but_not_current(tmp_path):
 
     second = _cognition_requests(model)[-1]
     assert second.input_text == "第二句"
-    assert "第一句" in second.unsaved_dialogue
-    assert "好的。" in second.unsaved_dialogue
-    assert "第二句" not in second.unsaved_dialogue
     text = build_user(second)
-    assert "【尚未存入记忆的近期原话】" in text
-    assert text.index("【尚未存入记忆的近期原话】") < text.index("【本轮】")
+    assert "尚未存入记忆" not in text
+    assert "第二句" in text
+    raw = [segment.text_raw for segment in process.activity_ledger.list_experiences("stone")]
+    assert "第一句" in raw
+    assert "第二句" in raw
 
 
-def test_unsaved_dialogue_drops_segments_after_memory_cursor_moves(tmp_path):
+def test_persona_prompt_uses_the_scene_not_an_unflushed_dump(tmp_path):
     model = CaptureModel()
     process = _process(tmp_path, model)
-    process.experience("stone", "第一句", object_ref="user")
-    ledger = process.activity_ledger
-    ledger.advance_consumer_cursor(
-        "stone", ConsumerKind.MEMORY, ledger.head_sequence("stone")
-    )
-    process.experience("stone", "第三句", object_ref="user")
-    last = _cognition_requests(model)[-1]
-    assert last.input_text == "第三句"
-    assert last.unsaved_dialogue == ""
-    assert "【尚未存入记忆的近期原话】" not in build_user(last)
+    process.style_packs.set("stone", SMITH)
+    process.zone_store.boot("stone", scene=["user说：“第一句”", "我说：好的。"])
+    process.experience("stone", "第二句", object_ref="user")
+
+    seen = _cognition_requests(model)[-1]
+    text = (seen.persona_user_text or "").strip()
+    assert text
+    assert "尚未存入记忆" not in text
+    assert "【此时的片场】" in text
+    assert "第一句" in text
+    assert "第二句" in text
+    raw = [segment.text_raw for segment in process.activity_ledger.list_experiences("stone")]
+    assert "第二句" in raw
 
 
-def test_default_flush_threshold_is_half_of_unsaved_cap():
-    from jshi.core.params import memory_flush_chars, unsaved_dialogue_chars
-    from jshi.experienceledger import InProcessExperienceLedger
+def test_scene_budget_is_longer_than_the_flush_threshold():
+    from jshi.core.params import memory_flush_chars, suxipo_zone_chars
 
-    control = InProcessMemoryControl(InProcessExperienceLedger(), memory=None)
-    assert control._flush_max_chars == memory_flush_chars() == 3000
-    assert unsaved_dialogue_chars() == 2 * memory_flush_chars()
+    flush = memory_flush_chars()
+    scene = suxipo_zone_chars()
+    assert flush == 3000
+    assert scene == 5000
+    assert 1.5 * flush <= scene <= 2 * flush

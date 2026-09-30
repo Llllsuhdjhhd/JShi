@@ -4,7 +4,7 @@ import logging
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, AbstractSet, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
 from jshi.activezone import (
     ActiveZonePort,
@@ -18,11 +18,9 @@ from jshi.action import (
 from jshi.activityclose import InProcessActivityClose
 from jshi.responsemark import InProcessResponseMark
 from jshi.experienceledger import (
-    ConsumerKind,
     ContextViewState,
     ExperienceLedgerPort,
     InProcessExperienceLedger,
-    OutputKind,
 )
 from jshi.evaluation import EvaluationEvent, InProcessEvaluationSystem, new_id
 from jshi.assembly import (
@@ -75,7 +73,6 @@ from jshi.models import (
     format_speech_with_action,
     format_unsaid_zone_block,
     format_turn_input,
-    format_unsaved_dialogue,
     STIMULUS_IDLE,
     STIMULUS_SPEECH,
 )
@@ -211,8 +208,6 @@ class AssembledCurrentState:
     tool_input: str = ""
     tool_hot_state: str = ""
     stimulus: str = STIMULUS_SPEECH
-    # 记忆游标之后、尚未写入 09 的原话（不含本轮输入）；现场重写不影响这一段。
-    unsaved_dialogue: str = ""
 
 
 @dataclass(frozen=True)
@@ -460,44 +455,7 @@ class SubjectProcess:
             tool_input=tool_related,
             tool_hot_state="",
             stimulus=stimulus if stimulus == STIMULUS_IDLE else STIMULUS_SPEECH,
-            unsaved_dialogue=self._unsaved_dialogue(
-                subject_id, input_text, shown={sid for sid, _ in view.segment_texts}
-            ),
         )
-
-    def _unsaved_dialogue(
-        self, subject_id: str, input_text: str, *, shown: AbstractSet[str] = frozenset()
-    ) -> str:
-        """09 尚未收下的原话，按时间顺序；超出上限时保留最新的。"""
-        from jshi.core.params import unsaved_dialogue_chars
-        from jshi.memorycontrol.inprocess import _experience_text
-        from jshi.models.prompt import relative_time_label
-
-        ledger = self.activity_ledger
-        cursor = ledger.consumer_cursor(subject_id, ConsumerKind.MEMORY)
-        segments = list(ledger.list_experiences(subject_id, after_sequence=cursor))
-        if (
-            segments
-            and segments[-1].output_kind is OutputKind.EXTERNAL_INPUT
-            and (segments[-1].text_raw or "").strip() == (input_text or "").strip()
-        ):
-            segments.pop()
-        subject_name = self._subject_display_name(subject_id)
-        cap = unsaved_dialogue_chars()
-        lines: list[str] = []
-        used = 0
-        for segment in reversed(segments):
-            if segment.segment_id in shown:
-                continue
-            text = _experience_text(segment, subject_name).strip()
-            if not text:
-                continue
-            if lines and used + len(text) > cap:
-                break
-            when = relative_time_label(segment.occurred_at)
-            lines.append(f"[{when}] {text}" if when else text)
-            used += len(text)
-        return "\n".join(reversed(lines))
 
     def preview_state(
         self,
@@ -1141,7 +1099,6 @@ class SubjectProcess:
         *,
         boot: bool,
         include_tool: bool = True,
-        include_unsaved: bool = True,
         now: datetime | None = None,
     ) -> str:
         label = current.speaker.label if current.speaker else "对方"
@@ -1167,9 +1124,6 @@ class SubjectProcess:
                 tool_cap=self._tool_block_cap(),
             ),
         ]
-        unsaved = (current.unsaved_dialogue or "").strip() if include_unsaved else ""
-        if unsaved:
-            parts.append(format_unsaved_dialogue(unsaved))
         parts.append(
             "【此时的输入】\n"
             + format_turn_input(
@@ -1487,7 +1441,6 @@ class SubjectProcess:
             tool_input=current.tool_input,
             tool_hot_state=current.tool_hot_state,
             stimulus=current.stimulus,
-            unsaved_dialogue=current.unsaved_dialogue,
             context=self._model_context(
                 current.subject_state.subject_id,
                 working_recalled,
@@ -1574,7 +1527,7 @@ class SubjectProcess:
             )
             persona_schema = write_schema_for(pack_id, registry=registry)
             persona_user_text = self._persona_user_text(
-                current, boot=False, include_tool=False, include_unsaved=False, now=now
+                current, boot=False, include_tool=False, now=now
             )
         else:
             persona_instruction = ""

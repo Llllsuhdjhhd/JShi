@@ -35,18 +35,15 @@ WORKING_SET_LIMIT_CHARS: int = 1500
 # 普通价值装载占活跃区字符预算的比例。按字截断；binding 边界不占此预算。
 VALUE_LOAD_RATIO: float = 1 / 5
 
-# 苏西坡 / 斯密斯（人格）片场预算：固定约 2500 字，独立于木头活跃区。
-# 2026-09-12 由 2000 提到 2500：块要带时间标注后，同一块数占的字变多。
-SUXIPO_ZONE_CHARS: int = 2500
+# 苏西坡 / 斯密斯（人格）片场预算：约 5000 字，独立于木头活跃区。
+# 取记忆投递阈值（3000 字）的 1.5–2 倍，让尚未投递的原话仍能留在片场里。
+SUXIPO_ZONE_CHARS: int = 5000
 
 # 人格「价值叙述」字数上限：boot 时单独生成、独立于片场预算。
 VALUE_NARRATION_CHARS: int = 300
 
 # 09 记忆按量投递：尚未存入记忆的原话累计到这个字数就投递。
 MEMORY_FLUSH_CHARS: int = 3000
-# 05 里「尚未存入记忆的近期原话」上限：取投递阈值的 2 倍，
-# 投递进行中继续累积的原话仍能完整留在上下文里。
-UNSAVED_DIALOGUE_RATIO: int = 2
 
 
 def _base_window(context_window: int | None = None) -> int:
@@ -71,7 +68,7 @@ def working_set_limit(context_window: int | None = None) -> int:
 
 
 def suxipo_zone_chars(context_window: int | None = None) -> int:
-    """人格片场字符上限：固定约 2500 字，独立于木头活跃区。"""
+    """人格片场字符上限：约 5000 字，约为记忆投递阈值的 1.5–2 倍。"""
     del context_window
     return max(1, int(SUXIPO_ZONE_CHARS))
 
@@ -85,11 +82,6 @@ def value_narration_chars(context_window: int | None = None) -> int:
 def memory_flush_chars() -> int:
     """09 按量投递的字数阈值，默认 3000 字。"""
     return max(1, int(MEMORY_FLUSH_CHARS))
-
-
-def unsaved_dialogue_chars() -> int:
-    """05「尚未存入记忆的近期原话」字数上限：投递阈值 × 2。"""
-    return memory_flush_chars() * max(1, int(UNSAVED_DIALOGUE_RATIO))
 
 
 def value_load_char_budget(active_zone: int | None = None) -> int:
@@ -158,7 +150,6 @@ __all__ = [
     "INTROSPECTION_TIMEOUT_SECONDS",
     "MEMORY_FLUSH_CHARS",
     "SUXIPO_ZONE_CHARS",
-    "UNSAVED_DIALOGUE_RATIO",
     "VALUE_CATALOG_REFRESH_SECONDS",
     "VALUE_LOAD_RATIO",
     "VALUE_NARRATION_CHARS",
@@ -166,7 +157,6 @@ __all__ = [
     "active_zone_chars",
     "memory_flush_chars",
     "suxipo_zone_chars",
-    "unsaved_dialogue_chars",
     "value_narration_chars",
     "value_load_char_budget",
     "working_set_limit",

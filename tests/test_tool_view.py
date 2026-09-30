@@ -45,7 +45,7 @@ def test_format_tool_process_shows_05_intake_hang_and_wrap(tmp_path: Path) -> No
     assert "result" in text
     assert "【送入主流程】" in text
     assert "【05 回写】" in text
-    assert "【可见新反馈】" in text
+    assert "【这一本的最新反馈】" in text
     listing = format_tool_process(
         service,
         subject_id="stone",
@@ -72,6 +72,46 @@ def test_format_tool_process_shows_05_intake_hang_and_wrap(tmp_path: Path) -> No
         item_id="no-such-id",
     )
     assert "找不到" in missing
+
+
+def test_process_view_keeps_other_hangs_out_of_this_feedback(tmp_path: Path) -> None:
+    store = HangStore(tmp_path / "hang.jsonl")
+    runner = ToolRunner(ToolModule(StubEngine()), store)
+    service = ToolService(
+        store,
+        runner,
+        intake_path=tmp_path / "tool.jsonl",
+    )
+    service.intake(
+        subject_id="stone",
+        object_id="OBJ-A",
+        need="旧的新闻四条",
+        verbal="先查新闻",
+    )
+    service.drain_for_tests()
+    service.intake(
+        subject_id="stone",
+        object_id="OBJ-A",
+        need="新的天气两天",
+        verbal="再查天气",
+    )
+    service.drain_for_tests()
+    records = service.intake_store.list_for("stone", "OBJ-A")
+    newer, older = records[0], records[-1]
+    service.hang_store.set_wrap(newer.task_id, visible=True, summary="杭州两天都是小雨")
+    service.hang_store.set_wrap(older.task_id, visible=True, summary="只拿到四条旧新闻")
+    text = format_tool_process(
+        service,
+        subject_id="stone",
+        object_id="OBJ-A",
+    )
+    latest, others = text.split("【其他尚未送入】", 1)
+    assert "【这一本的最新反馈】" in latest
+    assert "杭州两天都是小雨" in latest
+    assert "只拿到四条旧新闻" not in latest
+    assert "这些是别的记挂，不是这一本的结果。" in others
+    assert older.task_id[:8] in others
+    assert "只拿到四条旧新闻" in others
 
 
 def test_format_tool_process_matches_short_id(tmp_path: Path) -> None:

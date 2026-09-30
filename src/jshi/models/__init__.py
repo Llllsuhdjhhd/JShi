@@ -22,7 +22,6 @@ from .prompt import (
     build_user,
     format_memory_line,
     format_turn_input,
-    format_unsaved_dialogue,
     STIMULUS_IDLE,
     STIMULUS_SPEECH,
 )
@@ -48,7 +47,6 @@ __all__ = [
     "build_user",
     "format_memory_line",
     "format_turn_input",
-    "format_unsaved_dialogue",
     "STIMULUS_IDLE",
     "STIMULUS_SPEECH",
     "format_speech_with_action",

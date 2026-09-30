@@ -58,8 +58,8 @@ def test_format_zone_budget_note_over_and_under():
     assert "【片场字数】" in over
     assert "已超限 1329 字" in over
     assert "不得为 []" in over
-    assert "最无关" in over
-    assert "mod 压缩" in over
+    assert "先 del 无关" in over
+    assert "装不下就整块 del" in over
     assert "不要只删最旧的" not in over
     under = format_zone_budget_note(800, 2000)
     assert "未超限，还剩 1200 字" in under
@@ -85,7 +85,7 @@ def test_suxipo_pack_content_and_contract():
     assert '"edit":[]' in instruction or '"edit": []' in instruction
     assert "已超限时不得交空 edit" in instruction
     assert "删哪一块、改哪一块由你判断" in instruction
-    assert "几条都重要" in instruction
+    assert "【压缩片场】" in instruction
     assert "本轮对方的话、你的 reply / unsaid / action 由程序追加" in instruction
     assert '"action":"…"' in instruction or '"action":"微微点头"' in instruction
     assert "不要把动作写进 reply" in instruction
@@ -105,7 +105,7 @@ def test_suxipo_pack_content_and_contract():
     assert schema is not None
     assert schema["properties"]["mode"]["enum"] == ["respond", "think", "ignore", "wait"]
     assert "unsaid" in schema["properties"]
-    assert zone_chars_for(SUXIPO) == 2500
+    assert zone_chars_for(SUXIPO) == 5000
 
 
 def test_zone_store_boot_render_and_edit(tmp_path):
@@ -388,7 +388,7 @@ def test_suxipo_end_to_end_boot_then_respond(tmp_path):
     process.activity_ledger.append_external(
         "stone",
         actor_object_id="OBJ-USER",
-        text_raw="木头素材。" * 250,
+        text_raw="木头素材。" * (suxipo_zone_chars() // 10 + 1),
     )
 
     result = process.experience("stone", "茶凉了，还坐得住吗？", object_ref="user")

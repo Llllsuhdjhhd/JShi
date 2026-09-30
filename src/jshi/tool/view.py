@@ -63,9 +63,10 @@ def _format_feedback(item: ToolFeedback, *, raw: bool) -> str:
             tool = res.result.get("tool")
             if tool:
                 payload = f"  tool={tool}"
+        summary_limit = limit if raw else 1200
         return (
             f"- result  status={res.status.value}  ideal={res.ideal}  "
-            f"summary={_clip(res.summary, limit)}  error={_clip(res.error, limit)}"
+            f"summary={_clip(res.summary, summary_limit)}  error={_clip(res.error, limit)}"
             f"{payload}"
         )
     return f"- {kind}"
@@ -436,6 +437,43 @@ def format_tool_plan_view(
     return "\n".join(lines)
 
 
+def _latest_feedback_lines(
+    hang: HangRecord | None,
+    intake: IntakeRecord | None,
+    visible: tuple[VisibleToolItem, ...],
+) -> list[str]:
+    """这一本只显示自己的最新包装。别的未送达记挂另列，并带短编号。"""
+    lines = ["【这一本的最新反馈】"]
+    current_ids = {
+        item
+        for item in (
+            hang.task_id if hang is not None else "",
+            intake.intake_id if intake is not None else "",
+        )
+        if item
+    }
+    if hang is None:
+        lines.append("（没有这一本记挂）")
+    else:
+        summary = (hang.summary or "").strip()
+        if not summary:
+            lines.append("（还没有包装摘要；上面的引擎反馈是原始输出）")
+        elif hang.visible:
+            lines.append(_clip(summary, 1200))
+        else:
+            lines.append("（已隐藏，不送入主流程）")
+            lines.append(_clip(summary, 1200))
+    others = [item for item in visible if item.id not in current_ids]
+    if others:
+        lines.append("【其他尚未送入】")
+        lines.append("这些是别的记挂，不是这一本的结果。")
+        for item in others:
+            lines.append(
+                f"- {item.id[:8]}  {_at(item)}  {_clip(item.summary, 80)}"
+            )
+    return lines
+
+
 def format_tool_process(
     service: ToolService,
     *,
@@ -548,17 +586,7 @@ def format_tool_process(
             for item in hang.feedback:
                 lines.append(_format_feedback(item, raw=raw))
 
-    lines.append("【可见新反馈】")
-    if not visible:
-        lines.append("（list_visible 为空；已送达结果仍可能按话题重新装入）")
-    else:
-        for item in visible:
-            mark = ""
-            if hang is not None and item.id == hang.task_id:
-                mark = "  ← 上面这本"
-            elif intake is not None and item.id == intake.intake_id:
-                mark = "  ← 上面这条失败句"
-            lines.append(f"- {item.kind} {_clip(item.summary, 80)}{mark}")
+    lines.extend(_latest_feedback_lines(hang, intake, visible))
     return "\n".join(lines)
 
 

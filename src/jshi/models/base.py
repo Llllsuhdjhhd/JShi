@@ -51,8 +51,6 @@ class ModelRequest:
     tool_input: str = ""
     # 工具热状态（进行中 + 近时终态）；空则本路不出现。供 05 判断是否再开工具。
     tool_hot_state: str = ""
-    # 记忆游标之后、尚未写入 09 的原话；空则本路不出现。
-    unsaved_dialogue: str = ""
 
 
 @dataclass(frozen=True)

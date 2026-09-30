@@ -11,11 +11,16 @@
 
 约定：程序不自动从头部裁剪，预算由模型通过 edit 满足；若模型给不出符合预算的场景，
 此处仍接受（预算为模型侧约束，不在此处硬裁）。
+
+例外：`mod` 若把原块的具体事实（标题、数字、名字、引文、链接）大多压掉，或声称已删的
+内容仍在（「都取到了」「链接还在」），按 `del` 处理。片场高于回忆，空话留在片场里，
+下一轮会信它而不再去找原文；整块删掉，下一轮才会回忆或重取。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from dataclasses import replace as _replace
@@ -28,6 +33,54 @@ from jshi.models.prompt import relative_time_label
 _LEADING_BLOCK_ID = re.compile(r"^B\d+\s+")
 _LEADING_BLOCK_TIME = re.compile(r"^\[[^\]]{1,24}\]\s*")
 _LEADING_BLOCK_REF = re.compile(r"^(?:B\d+)?(?:\[[^\]]{1,24}\])?\s*")
+
+logger = logging.getLogger(__name__)
+
+_FACT_PATTERNS = (
+    re.compile(r"https?://\S+"),
+    re.compile(r"[A-Za-z][A-Za-z0-9&.'+-]+"),
+    re.compile(r"\d+(?:[.:：/-]\d+)*%?"),
+    re.compile(r"[《「『]([^》」』]{2,60})[》」』]"),
+)
+_INNER_QUOTE = re.compile(r"“([^“”]{2,60})”")
+_POSSESSION_CLAIM = re.compile(
+    r"都取到|全都取到|已经取到|都拿到|一条不差|一个不差|一字不差|都在|全在|还在|都记着|都记下"
+    r"|详见|见上文|如上|已列出|都列过|齐全|原样保存"
+)
+MOD_FACT_MIN = 3
+MOD_KEEP_RATIO = 0.25
+
+
+def block_facts(text: str) -> set[str]:
+    """块里可核对的具体事实：链接、外文词、数字、书名号与引号里的短引文。"""
+    body = str(text or "")
+    facts: set[str] = set()
+    for pattern in _FACT_PATTERNS:
+        for match in pattern.finditer(body):
+            value = (match.group(1) if match.groups() else match.group(0)).strip()
+            if value:
+                facts.add(value.lower())
+    # 「我说：“……”」这层外引号包的是整段话，不是引文；只取里面较短的引号。
+    for match in _INNER_QUOTE.finditer(body):
+        start = match.start()
+        if start <= 16 and match.end() >= len(body.rstrip()) - 16:
+            continue
+        facts.add(match.group(1).strip().lower())
+    return facts
+
+
+def hollow_mod(old: str, new: str) -> bool:
+    """mod 是否把原块压成了空话：事实大多丢了，或已丢事实却声称仍在。"""
+    facts = block_facts(old)
+    if len(facts) < MOD_FACT_MIN:
+        return False
+    lowered = str(new or "").lower()
+    kept = sum(1 for fact in facts if fact in lowered)
+    ratio = kept / len(facts)
+    if ratio < MOD_KEEP_RATIO:
+        return True
+    claim = _POSSESSION_CLAIM.search(str(new or ""))
+    return bool(claim and ratio < 1 and claim.group(0) not in str(old or ""))
 
 
 def _utc_now() -> datetime:
@@ -96,6 +149,8 @@ class ZoneStore:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path) if path is not None else None
         self._zones: dict[str, tuple[str, tuple[ZoneBlock, ...]]] = {}
+        # 最近一次 apply_edit 里被改判为 del 的 mod：(块号, 原文, 模型给的改写)。
+        self.last_hollow_mods: tuple[tuple[str, str, str], ...] = ()
         if self.path is not None and self.path.is_file():
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
@@ -228,12 +283,14 @@ class ZoneStore:
         ``add`` 只应用 ``text``，忽略 ``id``。
         时间：`mod` **保留原块时间**（内容改了，但「什么时候知道的」不该刷新）；
         `add` 与程序追加的块用当前时间。
+        压成空话的 `mod`（见 ``hollow_mod``）改判为 `del`，记在 ``last_hollow_mods``。
         """
         current = list(self.blocks(subject_id))
         offset = self._block_offset(subject_id)
         del_indices: set[int] = set()
         mods: dict[int, str] = {}
         add_blocks: list[str] = []
+        hollow: list[tuple[str, str, str]] = []
         for edit in edits or ():
             if not isinstance(edit, Mapping):
                 continue
@@ -253,8 +310,16 @@ class ZoneStore:
                 del_indices.add(scene_index)
             elif op == "mod":
                 text = _clean_block_text(edit.get("text"))
-                if text:
-                    mods[scene_index] = text
+                if not text:
+                    continue
+                if hollow_mod(current[scene_index].text, text):
+                    del_indices.add(scene_index)
+                    hollow.append((f"B{index + 1}", current[scene_index].text, text))
+                    continue
+                mods[scene_index] = text
+        self.last_hollow_mods = tuple(hollow)
+        for block_id, _old, new in hollow:
+            logger.warning("片场 %s 的 mod 丢了原块大部分事实，改为整块删除：%s", block_id, new[:80])
         stamp = _utc_now()
         result: list[ZoneBlock] = []
         for i, block in enumerate(current):
