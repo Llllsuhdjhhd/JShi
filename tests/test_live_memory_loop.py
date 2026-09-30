@@ -162,9 +162,9 @@ def test_plan_explicit_turns_and_from_now():
 
 def test_flash_cost_offpeak():
     # 空闲：未命中 1.5、输出 4.5 / 百万
-    assert abs(memory_loop.flash_cost_cny(1_000_000, 0, 0) - 1.5) < 1e-9
-    assert abs(memory_loop.flash_cost_cny(0, 1_000_000, 0) - 4.5) < 1e-9
-    assert abs(memory_loop.flash_cost_cny(1_000_000, 0, 1_000_000) - 0.05) < 1e-9
+    assert abs(memory_loop.flash_cost_cny(1_000_000, 0, 0) - 2.1) < 1e-9
+    assert abs(memory_loop.flash_cost_cny(0, 1_000_000, 0) - 8.4) < 1e-9
+    assert abs(memory_loop.flash_cost_cny(1_000_000, 0, 1_000_000) - 0.042) < 1e-9
 
 
 def test_parse_args_accepts_continue_and_one():

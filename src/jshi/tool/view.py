@@ -299,12 +299,12 @@ def _format_list(
         lines.append("（无）")
     for hang in hangs[:12]:
         flag = "可见" if hang.visible else "隐藏"
-        state = "已交付" if hang.delivered_at is not None else "未交付"
+        state = "曾送入" if hang.delivered_at is not None else "未送入"
         lines.append(
             f"- {hang.task_id[:8]}  {hang.status}/{flag}/{state}  "
             f"tpl={hang.template or '—'}  summary={_clip(hang.summary, 40)}"
         )
-    lines.append("【当前可见（未交付）list_visible】")
+    lines.append("【可见新反馈 list_visible】")
     if not visible:
         lines.append("（无）")
     for item in visible:
@@ -522,13 +522,13 @@ def format_tool_process(
         if hang.status == "open" and hang.visible:
             lines.append("（进度已可见，尚未终态；notified 只在终态包装后）")
 
-        lines.append("【交付片场】")
+        lines.append("【送入主流程】")
         if hang.delivered_at is None:
-            lines.append("（尚未交付：仍走 tool_input）")
+            lines.append("（尚未送入；本轮是否装载由【工具相关】选集决定）")
         else:
             lines.append(f"delivered_at={hang.delivered_at.isoformat()}")
             lines.append(f"块={hang.delivered_block or '（空）'}")
-            lines.append("（已交付：不再走 tool_input；随片场压缩自然过期，账本仍保留）")
+            lines.append("（曾送入主流程；结果仍可按话题从记挂账本重新选入）")
 
         lines.append("【05 回写】")
         if not hang.responses:
@@ -548,9 +548,9 @@ def format_tool_process(
             for item in hang.feedback:
                 lines.append(_format_feedback(item, raw=raw))
 
-    lines.append("【当前可见（未交付）】")
+    lines.append("【可见新反馈】")
     if not visible:
-        lines.append("（list_visible 为空，tool_input 不会出现）")
+        lines.append("（list_visible 为空；已送达结果仍可能按话题重新装入）")
     else:
         for item in visible:
             mark = ""
@@ -592,12 +592,12 @@ def format_turn_view(
         lines.append("（未定位对象；加 --speaker / --object-id 才能看该对象的可见集）")
     else:
         pending = service.pending_for_scene(subject_id, object_id)
-        lines.append(f"未交付（会进 tool_input）：{len(pending)} 条")
+        lines.append(f"可见新反馈（候选）：{len(pending)} 条")
         for item in pending:
             lines.append(f"- {item.kind} {item.id[:8]}  {_clip(item.summary, 80)}")
         hangs = service.hang_store.list_for(subject_id, object_id)
         delivered = [h for h in hangs if h.delivered_at is not None]
-        lines.append(f"已交付进片场：{len(delivered)} 条（不再走 tool_input）")
+        lines.append(f"曾送入主流程：{len(delivered)} 条（相关时仍可重新装入）")
         for record in delivered:
             at = _at(record)
             lines.append(f"- {record.task_id[:8]}  {at}  {_clip(record.delivered_block, 80)}")

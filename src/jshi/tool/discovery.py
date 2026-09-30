@@ -259,6 +259,14 @@ class ToolIndex:
         observed = meta.get("observed")
         return observed if isinstance(observed, Mapping) else {}
 
+    def feedback_plan(self, name: str) -> Mapping[str, Any]:
+        """返回工具声明的进度阶段和结果字段。"""
+        entry = self._by_name.get(name)
+        if entry is None:
+            return {}
+        plan = (entry.meta or {}).get("feedback_plan")
+        return plan if isinstance(plan, Mapping) else {}
+
     @property
     def tier(self) -> str:
         return self._disclosure.tier

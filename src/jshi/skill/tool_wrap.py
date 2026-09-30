@@ -96,6 +96,7 @@ RESULT_PROMPT = """你是匠石的工具反馈包装器。你只负责把「工�
 - command
 - status
 - result_text
+- expected_result
 - ideal / ideal_note
 - feedback_plan
 - metrics
@@ -115,15 +116,17 @@ RESULT_PROMPT = """你是匠石的工具反馈包装器。你只负责把「工�
    不要写成「已查到 / 已获取 / 可用于回答」这类元陈述——读到这句话的人看不到原始数据，
    只看到这一句；写成元陈述等于没拿到结果。
 4. 通读完整 result_text，排除探索日志等无关内容，提取回答 need 必需的事实；不要只看开头片段。
+   对照 expected_result；缺少要求的条目或字段时说明已得到什么、还缺什么。
    有 result_fields 时优先提取那些对回答 need 有用的字段内容。
 5. metrics 一律不写入 summary（耗时、token、费用都不写）。
 6. 如果 summary 与 previous_summary 完全一致，visible=false。
 7. result_text 为空时按 status 输出统一兜底句（白话）。
 8. 有 step_id 时只写这一步的结果，不要替整个计划下结论；is_plan_final=true 也只表示
 这是计划的最后一步（按声明顺序），不表示整件事成功。
-9. ideal=false 表示这一步没有真实产出（占位引擎、只回显需求、或明确没做成）。
-这时**不得**写成「已经查到 / 已经拿到 / 获得了结果」；照 ideal_note 说清实际是什么情况。
-10. summary 控制 80 字以内；没有值得记录的信息则 visible=false。"""
+9. ideal=false 表示未达到理想结果。若 result_text 有可确认的部分数据，如实写出已得到的内容和缺口；
+若只有占位回显或错误，则照 ideal_note 说明。不得把部分数据写成完整成功。
+10. summary 不设固定字数上限。根据 need 完整呈现回答所需的结果；多条数据用清晰列表，
+不要为追求简短省略条目或关键字段。没有值得记录的信息则 visible=false。"""
 
 
 @dataclass(frozen=True)
@@ -208,7 +211,7 @@ class ToolWrapSkill(Skill[WrapResult]):
             "command": hang.command,
             "stage_name": progress.stage or "",
             "text": (progress.partial or "").strip(),
-            "feedback_plan": {},
+            "feedback_plan": _feedback_plan_from_hang(hang),
             "plan_id": hang.plan_id,
             "step_id": hang.step_id,
             "plan_index": hang.plan_index,
@@ -234,7 +237,8 @@ class ToolWrapSkill(Skill[WrapResult]):
             "result_text": _result_text_for_wrap(result),
             "ideal": bool(result.ideal),
             "ideal_note": (result.ideal_note or "").strip(),
-            "feedback_plan": {},
+            "feedback_plan": _feedback_plan_from_hang(hang),
+            "expected_result": str(hang.meta.get("expected_result") or ""),
             "metrics": {
                 "time_ms": result.time_ms,
                 "cost": result.cost,
@@ -270,6 +274,17 @@ def _system_extra(instruction: str, schema: Mapping[str, Any]) -> str:
         "请严格按下面的 JSON Schema 输出：只输出一个 JSON 对象，不要任何解释文字。\n"
         f"JSON Schema：{schema_doc}"
     )
+
+
+def _feedback_plan_from_hang(hang: HangRecord) -> dict[str, Any]:
+    raw = hang.meta.get("feedback_plan")
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        plan = json.loads(raw)
+    except ValueError:
+        return {}
+    return dict(plan) if isinstance(plan, Mapping) else {}
 
 
 def _result_text_for_wrap(result: Any) -> str:

@@ -134,6 +134,7 @@ class CreateToolSpec:
     expected_output: str = ""
     cost_estimate: float | None = None
     feedback_plan: Mapping[str, Any] = field(default_factory=dict)
+    fulfill_after_create: bool = True
 
 
 @dataclass(frozen=True)

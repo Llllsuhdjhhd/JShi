@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import sys
+import threading
 import warnings
 from dataclasses import replace
 from datetime import datetime
@@ -335,6 +337,31 @@ class Rems3MemoryBackend:
                 config_cls,
             )
         disable_local_embedding_if_needed(self._pipeline)
+        self.long_term_experience = None
+        self._portrait_refresh = None
+        if all(
+            hasattr(self._pipeline, name)
+            for name in ("config", "role_repo", "db", "llm")
+        ):
+            from jshi.longtermexperience import RemsLongTermExperience
+
+            self.long_term_experience = RemsLongTermExperience.from_pipeline(
+                self._pipeline
+            )
+            if getattr(self._pipeline, "portrait_service", None) is not None:
+                from rems.services.white_painting_portrait import WhitePaintingPortraitBuilder
+                from rems.storage.repository import PortraitRepository
+
+                self._portrait_refresh = WhitePaintingPortraitBuilder(
+                    self._pipeline.config,
+                    self._pipeline.role_repo,
+                    PortraitRepository(self._pipeline.db),
+                    self._pipeline.llm,
+                )
+        self._experience_refresh_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._experience_refresh_lock = threading.Lock()
+        self._experience_refresh_queued: set[tuple[str, str]] = set()
+        self._experience_refresh_worker: threading.Thread | None = None
 
     def _to_engine_batch(self, payload: Mapping[str, Any]) -> Any:
         experiences_raw = payload["experiences"]
@@ -357,7 +384,55 @@ class Rems3MemoryBackend:
         payload = batch_payload(batch)
         engine_batch = self._to_engine_batch(payload)
         raw = self._pipeline.ingest_batch(engine_batch)
-        return from_ingest_result(raw)
+        result = from_ingest_result(raw)
+        for object_id in result.role_ids:
+            self._schedule_experience_refresh(batch.subject_id, object_id)
+        return result
+
+    def _schedule_experience_refresh(self, subject_id: str, object_id: str) -> None:
+        if (self.long_term_experience is None and self._portrait_refresh is None) or not subject_id or not object_id:
+            return
+        key = (subject_id, object_id)
+        with self._experience_refresh_lock:
+            if key in self._experience_refresh_queued:
+                return
+            self._experience_refresh_queued.add(key)
+            self._experience_refresh_queue.put(key)
+            worker = self._experience_refresh_worker
+            if worker is None or not worker.is_alive():
+                worker = threading.Thread(
+                    target=self._refresh_experience_loop,
+                    name="jshi-person-experience",
+                    # 单次 experience 命令退出前也要完成已接收的白描维护。
+                    # 回复已返回，等待只发生在进程退出阶段。
+                    daemon=False,
+                )
+                self._experience_refresh_worker = worker
+                worker.start()
+
+    def _refresh_experience_loop(self) -> None:
+        while True:
+            with self._experience_refresh_lock:
+                try:
+                    subject_id, object_id = self._experience_refresh_queue.get_nowait()
+                except queue.Empty:
+                    self._experience_refresh_worker = None
+                    return
+                self._experience_refresh_queued.discard((subject_id, object_id))
+            try:
+                if self.long_term_experience is not None:
+                    self.long_term_experience.refresh_person_experience(
+                        subject_id, object_id
+                    )
+            except Exception:
+                logger.exception("人物经验维护失败：%s/%s", subject_id, object_id)
+            try:
+                if self._portrait_refresh is not None:
+                    self._portrait_refresh.refresh(subject_id, object_id)
+            except Exception:
+                logger.exception("人物描述肖像维护失败：%s/%s", subject_id, object_id)
+            finally:
+                self._experience_refresh_queue.task_done()
 
     def recall(
         self,

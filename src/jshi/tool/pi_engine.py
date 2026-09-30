@@ -46,6 +46,8 @@ def _shell_output_is_exploration(text: str) -> bool:
     low = t.lower()
     if "rate=" in low or '"query"' in t or '"results"' in t:
         return False
+    if re.fullmatch(r"[\w.\-]+\.(?:py|ps1|sh)\s+Python\s+\d+(?:\.\d+)*", t, re.I):
+        return True
     if t.lstrip().startswith("---") and re.search(
         r"(?m)^name:\s*\S+", t[:400]
     ):
@@ -73,13 +75,18 @@ def _shell_output_is_exploration(text: str) -> bool:
 
 def _join_shell_result_parts(parts: list[str]) -> str:
     """多段 bash 成功输出合并；丢掉探路噪声，避免截断后只剩目录清单。"""
-    useful = [p.strip() for p in parts if not _shell_output_is_exploration(p)]
+    useful = [_clean_shell_output(p) for p in parts if not _shell_output_is_exploration(p)]
     return "\n".join(useful).strip()
+
+
+def _clean_shell_output(text: str) -> str:
+    """去掉脚本探针附加的退出码；它不是工具数据。"""
+    return re.sub(r"\s*EXIT=\d+\s*$", "", text.strip(), flags=re.I).strip()
 
 
 def _compact_shell_summary(parts: list[str], *, limit: int = 1500) -> str:
     """给 RESULT.summary / 包装器用的短摘要：多段实质输出各留一段，避免只剩第一段检索 JSON。"""
-    useful = [p.strip() for p in parts if p and not _shell_output_is_exploration(p)]
+    useful = [_clean_shell_output(p) for p in parts if p and not _shell_output_is_exploration(p)]
     if not useful:
         return ""
     if len(useful) == 1:
@@ -507,6 +514,9 @@ class PiEngine:
         last_tool_ok = ""
         last_tool_error = ""
         assistant_text = ""
+        last_running_text = ""
+        last_running_step = ""
+        last_running_at = 0.0
         timeout_s = self.timeout_s
         raw_timeout = (
             request.meta.get("timeout_s") if isinstance(request.meta, Mapping) else None
@@ -554,6 +564,24 @@ class PiEngine:
                     usage=usage,
                     elapsed_ms=elapsed_ms,
                 )
+                if converted is not None and converted.progress is not None:
+                    progress = converted.progress
+                    if not (progress.partial or "").strip():
+                        continue
+                    if progress.stage == "running":
+                        if (
+                            progress.step == last_running_step
+                            and progress.partial == last_running_text
+                        ):
+                            continue
+                        if (
+                            progress.step == last_running_step
+                            and time.monotonic() - last_running_at < 0.5
+                        ):
+                            continue
+                        last_running_text = progress.partial
+                        last_running_step = progress.step
+                        last_running_at = time.monotonic()
                 if converted is not None:
                     yield converted
         finally:
@@ -568,10 +596,25 @@ class PiEngine:
             )
             return
         if stop_reason == "timeout":
+            # Pi 可能在脚本已交出完整输出后继续推理，最终才触发墙钟超时。
+            # 保留已完成的实质输出供 05 判断；未收到 agent_settled，不能算成功。
+            completed_output = _join_shell_result_parts(shell_ok_parts)
             yield ToolFeedback(
                 request_id=request.request_id,
                 kind=FeedbackKind.RESULT,
-                result=ToolResult(status=ToolStatus.FAILED, error="工具执行超时"),
+                result=ToolResult(
+                    status=ToolStatus.PARTIAL if completed_output else ToolStatus.FAILED,
+                    result={"content": completed_output} if completed_output else {},
+                    summary=_compact_shell_summary(shell_ok_parts, limit=1500)
+                    if completed_output else "",
+                    ideal=False,
+                    ideal_note="Pi 会话超时；已完成的输出尚未成为最终确认结果"
+                    if completed_output else "",
+                    error="工具执行超时",
+                    cost=_usage_cost(usage),
+                    time_ms=int((time.monotonic() - started) * 1000),
+                    resource=_usage_resource(usage),
+                ),
             )
             return
 
@@ -594,6 +637,22 @@ class PiEngine:
         short = _compact_shell_summary(shell_ok_parts, limit=1500)
         if not short:
             short = full[:1500] if full else ""
+        if request.create is not None:
+            create_error = self._created_skill_error(request.create.tool_name)
+            if create_error:
+                yield ToolFeedback(
+                    request_id=request.request_id,
+                    kind=FeedbackKind.RESULT,
+                    result=ToolResult(
+                        status=ToolStatus.FAILED,
+                        result={"content": full} if full else {},
+                        summary=create_error,
+                        ideal=False,
+                        ideal_note=create_error,
+                        error=create_error,
+                    ),
+                )
+                return
         if full:
             yield ToolFeedback(
                 request_id=request.request_id,
@@ -710,6 +769,9 @@ class PiEngine:
         if not name:
             return ""
         args = str(request.need or "").strip()
+        if request.params:
+            params = json.dumps(dict(request.params), ensure_ascii=False, separators=(",", ":"))
+            args = f"{args}；调用参数(JSON，以此为准)：{params}" if args else f"调用参数(JSON，以此为准)：{params}"
         line = f"/skill:{name}"
         if args:
             line += " " + args
@@ -819,6 +881,23 @@ class PiEngine:
             "只创建这个 skill 和必要脚本，不要做无关探索；完成后说明文件路径。"
         )
 
+    def _created_skill_error(self, tool_name: str) -> str:
+        """创建步骤的输出不能替代技能文件和可读取的规格。"""
+        name = _skill_name(tool_name)
+        folder = self._agent_dir / "skills" / name
+        skill = folder / "SKILL.md"
+        sidecar = folder / "tool.json"
+        if not skill.is_file() or not sidecar.is_file():
+            return "工具创建未完成：缺少技能文件或规格文件"
+        try:
+            metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "工具创建未完成：规格文件无法读取"
+        declared = str(metadata.get("tool_name") or "").strip() if isinstance(metadata, Mapping) else ""
+        if not declared or _skill_name(declared) != name:
+            return "工具创建未完成：规格中的工具名不匹配"
+        return ""
+
     def _convert_event(
         self,
         request: ToolRequest,
@@ -845,13 +924,18 @@ class PiEngine:
         if event_type == "tool_execution_update":
             partial = event.get("partialResult") or {}
             text = self._content_text(partial.get("content"))
+            tool_name = str(event.get("toolName") or "").strip().lower()
+            if not text.strip() or (
+                tool_name in _SHELL_TOOLS and _shell_output_is_exploration(text)
+            ):
+                return None
             return ToolFeedback(
                 request_id=request.request_id,
                 kind=FeedbackKind.PROGRESS,
                 progress=ToolProgress(
                     stage="running",
                     step=str(event.get("toolName") or ""),
-                    partial=text,
+                    partial=text[:400],
                     cost_used=_usage_cost(usage),
                     time_used_ms=elapsed_ms,
                     resource_used=_usage_resource(usage),
@@ -864,6 +948,14 @@ class PiEngine:
             is_error = bool(event.get("isError"))
             content = self._content_text(result.get("content"))
             tool_name = str(event.get("toolName") or "")
+            if not is_error and (
+                not content.strip()
+                or (
+                    tool_name.lower() in _SHELL_TOOLS
+                    and _shell_output_is_exploration(content)
+                )
+            ):
+                return None
             return ToolFeedback(
                 request_id=request.request_id,
                 kind=FeedbackKind.PROGRESS,

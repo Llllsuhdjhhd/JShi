@@ -88,18 +88,28 @@ def is_stage_fact(item: ToolFeedback) -> bool:
 
 
 def rule_wrap_from_item(item: ToolFeedback) -> tuple[bool, str] | None:
-    """无包装 skill 时的占位：非拒绝的 RESULT → 可见短句。
+    """无包装 skill 时的占位：非拒绝的 RESULT → 完整可见结果。
 
-    只留功能性内容，不附加耗时 / token 等技术参数。
+    只留功能性内容，不附加耗时 / token 等技术参数。终态结果不能截断，
+    否则它会成为下游唯一看得见的内容。
     """
     if item.kind is not FeedbackKind.RESULT or item.result is None:
         return None
     if item.result.status is ToolStatus.REJECTED:
         return None
-    text = (item.result.summary or item.result.error or "").strip()
+    raw = item.result.result
+    content = raw.get("content") if isinstance(raw, Mapping) else None
+    if isinstance(content, str):
+        text = content.strip()
+    elif content is not None:
+        text = json.dumps(content, ensure_ascii=False, default=str)
+    elif raw:
+        text = json.dumps(dict(raw), ensure_ascii=False, default=str)
+    else:
+        text = (item.result.summary or item.result.error or "").strip()
     if not text:
         text = item.result.status.value
-    return True, truncate_note(text)
+    return True, text
 
 
 def _feedback_to_dict(item: ToolFeedback) -> dict[str, Any]:
@@ -456,9 +466,13 @@ class HangStore:
         summary: str,
         wrap_meta: Mapping[str, str] | None = None,
         terminal: bool = False,
-        summary_limit: int = NOTE_MAX_CHARS,
+        summary_limit: int | None = None,
     ) -> HangRecord | None:
-        summary = truncate_note(summary, limit=summary_limit)
+        summary = (
+            truncate_note(summary, limit=summary_limit)
+            if summary_limit is not None
+            else (summary or "").strip()
+        )
         with self._lock:
             record = self._records.get(task_id)
             if record is None:
@@ -476,12 +490,14 @@ class HangStore:
                 # 否则 wrap 判不可见时记挂一直 open，像「挂空」，205 也当成还在办。
                 if terminal:
                     status = "notified"
-                # 新的可见摘要到来：清掉「已送入主流程」，让「新的信息」再出现一轮。
+                # 新进度或终态都是新的材料；此前只送过进度不能吞掉最终结果。
                 clear_seen = bool(
-                    visible
-                    and (summary or "").strip()
-                    and (summary or "").strip() != (record.summary or "").strip()
-                    and not terminal
+                    terminal
+                    or (
+                        visible
+                        and (summary or "").strip()
+                        and (summary or "").strip() != (record.summary or "").strip()
+                    )
                 )
                 # 终态即使 visible=false，也写入 summary，供【工具相关】近期完成使用。
                 next_summary = record.summary
@@ -584,17 +600,30 @@ class HangStore:
         object_id: str,
         command: str,
         *,
+        kind: str = "",
+        need: str = "",
+        params: Mapping[str, Any] | None = None,
         exclude_plan_id: str = "",
     ) -> HangRecord | None:
         key = (command or "").strip()
         if not key:
             return None
         exclude = (exclude_plan_id or "").strip()
+        need_key = " ".join((need or "").split()).casefold()
+        wanted_params = dict(params or {})
         for item in self.list_open(subject_id, object_id):
             if exclude and (item.plan_id or "").strip() == exclude:
                 continue
-            if (item.command or "").strip() == key:
-                return item
+            if (item.command or "").strip() != key:
+                continue
+            if kind and item.kind != kind:
+                continue
+            if kind and kind != "create" and (
+                " ".join((item.need or "").split()).casefold() != need_key
+                or dict(item.params) != wanted_params
+            ):
+                continue
+            return item
         return None
 
     def list_for_subject(self, subject_id: str) -> tuple[HangRecord, ...]:

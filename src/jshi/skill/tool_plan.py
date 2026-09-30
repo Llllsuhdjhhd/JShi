@@ -93,6 +93,7 @@ TOOL_PLAN_SCHEMA: Mapping[str, Any] = {
                 "params_schema": {"type": "object"},
                 "expected_output": {"type": "string"},
                 "cost_estimate": {"type": ["number", "null"]},
+                "fulfill_after_create": {"type": "boolean"},
                 "feedback_plan": {
                     "type": "object",
                     "properties": {
@@ -139,6 +140,7 @@ TOOL_PLAN_SCHEMA: Mapping[str, Any] = {
                                     "cost_estimate": {
                                         "type": ["number", "null"]
                                     },
+                                    "fulfill_after_create": {"type": "boolean"},
                                     "feedback_plan": {"type": "object"},
                                 },
                             },
@@ -224,7 +226,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
 - params：只填工具声明支持的键。
 - expected_result：一句说清成功后的产出；写不出就空。
 - estimate：先看所选命令的 meta.observed。有 runs 和 avg_time_ms / avg_cost / avg_tokens 时，把 avg_time_ms 填进 time_est_ms，把 avg_cost 填进 cost_est；没有 observed 才用目录说明或模板槽位；仍没有依据时时间、费用填 null，benefit/downside 空，need_confirm false。
-- create_tool：tool_name 建议名、tool_intent 能力意图、params_schema 参数 JSON Schema、expected_output 预期产出、cost_estimate 预估开销、feedback_plan 反馈方案（stages 阶段名、result_fields 结果字段）；非 create_tool 时为空对象。
+- create_tool：tool_name 建议名、tool_intent 能力意图、params_schema 参数 JSON Schema、expected_output 预期产出、cost_estimate 预估开销、feedback_plan 反馈方案（stages 阶段名、result_fields 结果字段）。fulfill_after_create：原需求是查找/执行任务时为 true，造好后后台接着用；原需求只要求造工具时为 false。非 create_tool 时为空对象。
 - error：ok=false 时才有，像匠石自己的认知，有主语；不要写字段名、变量名、JSON 键名，也不要照抄工具清单原文，字符串内不换行。例：「我手上现在没有能查天气的工具」。
 - 外部已经向用户说过需求的，定义要和那句一致，不另起需求。"""
 
@@ -307,6 +309,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             feedback_plan=dict(feedback_raw)
             if isinstance(feedback_raw, Mapping)
             else {},
+            fulfill_after_create=raw.get("fulfill_after_create") is not False,
         )
 
     @classmethod
@@ -450,7 +453,14 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             expected_result=planned.expected_result,
             ask=planned.ask,
             budget=MAX_BUDGET,
-            meta={"estimate": dict(estimate or {})},
+            meta={
+                "estimate": dict(estimate or {}),
+                "feedback_plan": dict(
+                    create_spec.feedback_plan
+                    if create_spec is not None
+                    else index.feedback_plan(command)
+                ),
+            },
         )
 
     def _finalize_plan(
@@ -515,7 +525,14 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
                 need=intake.need,
                 template=DEFAULT_TEMPLATE,
                 budget=MAX_BUDGET,
-                meta={"estimate": estimate},
+                meta={
+                    "estimate": estimate,
+                    "feedback_plan": dict(
+                        create_spec.feedback_plan
+                        if create_spec is not None
+                        else index.feedback_plan(request.command)
+                    ),
+                },
             )
             final_steps.append(
                 ToolStep(

@@ -86,6 +86,7 @@ def test_process_assembly_builds_fragments_and_report(tmp_path):
         "object",
         "activity",
         "personal",
+        "person_portrait",
         "memory",
         "tool",
     }
@@ -372,6 +373,7 @@ def test_current_state_assembled_records_sources(tmp_path):
         "object",
         "activity",
         "personal",
+        "person_portrait",
         "memory",
         "tool",
     }
@@ -384,7 +386,7 @@ def test_preview_state_reports_sources_and_stays_read_only(tmp_path):
 
     preview = process.preview_state("stone", "你好", object_ref="user")
 
-    assert len(preview.assembled.source_report) == 6
+    assert len(preview.assembled.source_report) == 7
     assert repository.list_history("stone") == ()
 
 

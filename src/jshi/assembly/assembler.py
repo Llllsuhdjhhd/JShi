@@ -79,8 +79,8 @@ class CurrentStateAssembler:
 
         # 分档（三档）：
         #  - protected：永不裁、不占预算 —— 身份 / 对象 / 既往视图正文 / 08 常驻(always)。
-        #  - memory：单独一档，"受预算但仍可被裁" —— 占用同一上限，但在普通条目之前先分配，
-        #    背景不会把它挤掉；memory 自身超限时仍会被裁。
+        #  - person_experience / person_portrait / memory：共享回忆预算，先分配人物认识，再分配事件；
+        #    两者都可能被预算裁掉，不变成常驻人物事实。
         #  - ordinary：普通条目（个人世界普通价值等）—— 最低档，预算不足时先裁。
         #  - tool：不进工作集分片，原样并成 tool_input（03 不改写 200 的正文）。
         #
@@ -92,7 +92,7 @@ class CurrentStateAssembler:
         for fragment in fragments:
             if fragment.always or fragment.source in _PROTECTED_SOURCES:
                 protected_frags.append(fragment)
-            elif fragment.source == "memory":
+            elif fragment.source in {"person_experience", "person_portrait", "memory"}:
                 memory_frags.append(fragment)
             elif fragment.source == "tool":
                 tool_frags.append(fragment)

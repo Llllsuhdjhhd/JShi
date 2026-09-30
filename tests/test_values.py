@@ -244,7 +244,7 @@ def test_ordinary_values_hold_snapshot_until_catalog_or_timer(tmp_path):
 def test_example_json_imports(tmp_path):
     repository = SubjectRepository(tmp_path / "subject.sqlite3")
     world = InProcessValues(repository)
-    path = Path(__file__).resolve().parents[1] / "doc" / "examples" / "values-import.example.json"
+    path = Path(__file__).resolve().parents[1] / "doc" / "历史文档" / "examples" / "values-import.example.json"
     document = json.loads(path.read_text(encoding="utf-8"))
     report = world.import_entries("stone", document["entries"])
     assert len(report.imported_ids) == 26

@@ -11,6 +11,7 @@ from jshi.effectiveness import InProcessEffectiveness, JsonlRatingStore
 from jshi.experienceledger import SqliteExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.memory import MemoryShell, RecallStrategyStore, build_memory_backend
+from jshi.memory.factory import BACKEND_REMS3, memory_backend_name
 from jshi.memory.traces import JsonlRecallTraceStore
 from jshi.core.skillconfig import SkillConfigStore, SkillProfile, build_model_port
 from jshi.models import ModelPort
@@ -207,6 +208,7 @@ def _runtime(
         identities,
         cognition,
         memory=MemoryShell(backend),
+        long_term_experience=getattr(backend, "long_term_experience", None),
         activity_ledger=SqliteExperienceLedger(data_dir / "subject.sqlite3"),
         prompt_rules=prompt_rules,
         recall_strategy=recall_strategy,
@@ -258,6 +260,13 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         help="对象映射表条目，格式 名字:object_id，可重复（如 宝玉:OBJ-BAO）",
     )
+
+    refresh_experience = commands.add_parser(
+        "person-experience-refresh",
+        help="用 REMS 已存白描显式维护一个人物的长期相处经验",
+    )
+    refresh_experience.add_argument("subject_id")
+    refresh_experience.add_argument("object_id")
 
     talk = commands.add_parser(
         "talk",
@@ -542,6 +551,18 @@ def main() -> None:
         return
     if args.command == "tool-log":
         _run_tool_log(args)
+        return
+    if args.command == "person-experience-refresh":
+        if memory_backend_name() != BACKEND_REMS3:
+            raise SystemExit("人物经验刷新需要 JSHI_MEMORY_BACKEND=rems3")
+        backend = build_memory_backend(
+            SubjectRepository(args.data_dir / "subject.sqlite3"), args.data_dir
+        )
+        port = getattr(backend, "long_term_experience", None)
+        if port is None:
+            raise SystemExit("当前 REMS 后端未提供人物经验模块")
+        result = port.refresh_person_experience(args.subject_id, args.object_id)
+        print(json.dumps(vars(result), ensure_ascii=False))
         return
     process, identities, subjects = _runtime(args.data_dir)
     super_permissions = SuperPermissionStore(args.data_dir / "super_permissions.json")

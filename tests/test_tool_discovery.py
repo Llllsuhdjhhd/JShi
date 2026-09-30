@@ -259,6 +259,24 @@ def test_plan_create_tool_preserves_feedback_plan() -> None:
     assert planned.create is not None
     assert planned.create.feedback_plan["stages"] == ["search", "rank", "book"]
     assert planned.create.feedback_plan["result_fields"] == ["flight_no", "price"]
+    assert planned.meta["feedback_plan"]["result_fields"] == ["flight_no", "price"]
+
+
+def test_existing_tool_feedback_plan_reaches_use_request() -> None:
+    port = _JsonPort({"ok": True, "command": "skill:weather", "params": {}})
+    planner = SkillPlanner(
+        ToolPlanSkill(port),
+        engine_tools=(
+            {
+                "name": "skill:weather",
+                "description": "查天气",
+                "meta": {"feedback_plan": {"result_fields": ["city", "temperature"]}},
+            },
+        ),
+    )
+    planned = planner.plan(_intake())
+    assert isinstance(planned, ToolRequest)
+    assert planned.meta["feedback_plan"]["result_fields"] == ["city", "temperature"]
 
 
 def test_plan_skill_outputs_multi_step_plan() -> None:

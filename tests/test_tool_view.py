@@ -43,9 +43,9 @@ def test_format_tool_process_shows_05_intake_hang_and_wrap(tmp_path: Path) -> No
     assert "estimate" in text
     assert "progress" in text
     assert "result" in text
-    assert "【交付片场】" in text
+    assert "【送入主流程】" in text
     assert "【05 回写】" in text
-    assert "【当前可见（未交付）】" in text
+    assert "【可见新反馈】" in text
     listing = format_tool_process(
         service,
         subject_id="stone",

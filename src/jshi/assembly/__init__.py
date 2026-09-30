@@ -12,6 +12,8 @@ from .sources import (
     IdentitySource,
     MemorySource,
     ObjectSource,
+    PersonExperienceSource,
+    PersonPortraitSource,
     PersonalWorldSource,
     ToolSource,
 )
@@ -28,6 +30,8 @@ __all__ = [
     "LoadResult",
     "MemorySource",
     "ObjectSource",
+    "PersonExperienceSource",
+    "PersonPortraitSource",
     "PersonalWorldSource",
     "SourceLoadReport",
     "ToolSource",

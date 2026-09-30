@@ -1,11 +1,9 @@
 """循环实测：设目标、跑轮次、每轮读库分析。不在循环里改主程序。
 
-用法（仓库根；必须用 conda 环境 py3125，不要用 PATH 里的 python）：
+用法（仓库根；使用已安装项目依赖的 Python）：
 
-  conda run -n py3125 python tests/live/memory_loop.py --goal "提升回忆质量" --seed 3 --recall 3 --speaker 火星人
-  conda run -n py3125 python tests/live/memory_loop.py --scenario tests/live/scenarios/mars-quality.json
-  conda run -n py3125 python tests/live/memory_loop.py --scenario tests/live/scenarios/mars-ingest.json --one
-  conda run -n py3125 python tests/live/memory_loop.py --continue .tmp/live-loop/<run-id> --one
+  python tests/live/memory_loop.py --scenario .jshi/person-portrait-study-20260930/scenario.json
+  python tests/live/memory_loop.py --continue .jshi/person-portrait-study-20260930/isolated-run --one
 
 --one：只跑下一轮然后退出，便于改完代码再继续。
 --pause：同进程内每轮结束后等回车；改代码须停掉再 --continue。
@@ -24,6 +22,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parents[2]
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 
 def _forbid_test_store(data_dir: Path) -> None:
@@ -74,7 +74,7 @@ def _now_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
 
-def wait_memory(process, subject_id: str, timeout: float = 900.0):
+def wait_memory(process, subject_id: str, timeout: float = 120.0):
     control = process.memory_control
     deadline = time.time() + timeout
     last_report = 0.0
@@ -243,6 +243,8 @@ def analyze_seed(
                 ),
             )
         )
+    if not markers:
+        return checks
     if unrelated_events:
         checks.append(
             _check(
@@ -359,10 +361,11 @@ def analyze_recall(
     return checks
 
 
-# DeepSeek V4 Flash，2026-08-17 起官方价；周末全天空闲。单位：元 / 百万 tokens。
-FLASH_OFFPEAK_HIT = 0.05
-FLASH_OFFPEAK_MISS = 1.5
-FLASH_OFFPEAK_OUT = 4.5
+# DeepSeek V4.1 Flash 的峰时价按 7 元/USD 折算；失败或超时请求可能缺 usage。
+# 美元/百万 tokens：缓存命中 0.006、未命中 0.3、输出 1.2。
+FLASH_BUDGET_HIT = 0.042
+FLASH_BUDGET_MISS = 2.1
+FLASH_BUDGET_OUT = 8.4
 
 
 def flash_cost_cny(
@@ -374,7 +377,7 @@ def flash_cost_cny(
     completion = int(completion_tokens or 0)
     cached = int(cached_tokens or 0)
     miss = max(prompt - cached, 0)
-    return (miss * FLASH_OFFPEAK_MISS + cached * FLASH_OFFPEAK_HIT + completion * FLASH_OFFPEAK_OUT) / 1_000_000
+    return (miss * FLASH_BUDGET_MISS + cached * FLASH_BUDGET_HIT + completion * FLASH_BUDGET_OUT) / 1_000_000
 
 
 def _as_int(value: Any) -> int | None:
@@ -451,6 +454,11 @@ def _print_round(row: dict[str, Any]) -> None:
         print("装上的回忆：", flush=True)
         for item in row["memories"]:
             print(f"  - {item.get('content', '')[:200]}", flush=True)
+    for label, key in (("人物肖像", "portraits"), ("相处经验", "experiences")):
+        if row.get(key):
+            print(f"装上的{label}：", flush=True)
+            for item in row[key]:
+                print(f"  - {item.get('content', '')[:500]}", flush=True)
     print("检查：", flush=True)
     for check in row.get("checks") or []:
         mark = "通过" if check["ok"] else "未过"
@@ -582,7 +590,7 @@ def _save(plan: dict[str, Any], out_dir: Path) -> None:
         lines.append(f"> {note}")
         lines.append("")
     cost = plan.get("cost") or {}
-    lines.append(f"累计约 ¥{cost.get('total_cny', 0)}（Flash 空闲价：命中 0.05 / 未命中 1.5 / 输出 4.5，单位元/百万 tokens；周末按空闲。）")
+    lines.append(f"已记录调用估算约 ¥{cost.get('total_cny', 0)}（Flash 峰时价按 7 元/USD 折算：命中 0.042 / 未命中 2.1 / 输出 8.4，单位元/百万 tokens；超时而未返回 usage 的调用只计人工预留。）")
     lines.append("")
     for row in plan.get("rounds") or []:
         lines.append(f"## {row['phase']} {row['index']}")
@@ -591,6 +599,9 @@ def _save(plan: dict[str, Any], out_dir: Path) -> None:
         lines.append(f"- mode：{row.get('mode')}")
         delivery = row.get("delivery") or {}
         lines.append(f"- 投递：{delivery.get('status')} {delivery.get('reason')}")
+        for label, key in (("人物肖像", "portraits"), ("相处经验", "experiences")):
+            for item in row.get(key) or []:
+                lines.append(f"- 装载{label}：{item.get('content', '')}")
         for check in row.get("checks") or []:
             mark = "通过" if check["ok"] else "未过"
             lines.append(f"- [{mark}] {check['name']}：{check['detail']}")
@@ -620,7 +631,16 @@ def run_turn(process, plan: dict[str, Any], spec: dict[str, Any], db: Path) -> d
     speaker = plan["speaker"]
     before = snapshot_db(db)
     result = process.experience(subject_id, spec["text"], object_ref=speaker)
-    memory_result = wait_memory(process, subject_id)
+    try:
+        memory_result = wait_memory(process, subject_id)
+    except TimeoutError as exc:
+        from types import SimpleNamespace
+
+        memory_result = SimpleNamespace(
+            status="timeout",
+            decision=SimpleNamespace(reason="wait_memory_timeout"),
+            error=str(exc),
+        )
     after = snapshot_db(db)
     new_ids = after["event_ids"] - before["event_ids"]
     new_events = [item for item in after["events"] if item["event_id"] in new_ids]
@@ -649,6 +669,16 @@ def run_turn(process, plan: dict[str, Any], spec: dict[str, Any], db: Path) -> d
         for frag in result.current_state.fragments
         if getattr(frag, "source", None) == "memory"
     ]
+    portraits = [
+        {"id": frag.id, "content": frag.content, "object_id": frag.object_id}
+        for frag in result.current_state.fragments
+        if getattr(frag, "source", None) == "person_portrait"
+    ]
+    experiences = [
+        {"id": frag.id, "content": frag.content, "object_id": frag.object_id}
+        for frag in result.current_state.fragments
+        if getattr(frag, "source", None) == "person_experience"
+    ]
     recalled_event_ids = [
         getattr(item, "event_id", "")
         for item in result.current_state.recalled
@@ -664,11 +694,17 @@ def run_turn(process, plan: dict[str, Any], spec: dict[str, Any], db: Path) -> d
         "reason": getattr(getattr(memory_result, "decision", None), "reason", None),
         "error": getattr(memory_result, "error", None),
     }
+    if delivery["status"] == "timeout":
+        checks = [
+            _check("09 投递", False, "对话已完成，记忆投递等待超时；已保存本轮以避免重复灌入")
+        ]
+    else:
+        checks = []
     reply_kind = outgoing.output_kind.value if outgoing else None
     reply_text = result.action_text or ""
     markers = list(spec.get("markers") or [])
     if spec["phase"] == "recall":
-        checks = analyze_recall(
+        checks += analyze_recall(
             markers=markers,
             recalled_event_ids=recalled_event_ids,
             memories=memories,
@@ -682,7 +718,7 @@ def run_turn(process, plan: dict[str, Any], spec: dict[str, Any], db: Path) -> d
             identity_name = process.identities.get(subject_id).name or "匠石"
         except KeyError:
             pass
-        checks = analyze_seed(
+        checks += analyze_seed(
             speaker=speaker,
             subject_name=identity_name,
             markers=markers,
@@ -712,6 +748,8 @@ def run_turn(process, plan: dict[str, Any], spec: dict[str, Any], db: Path) -> d
         "unclosed": after.get("unclosed") or [],
         "unclosed_count": after["unclosed_count"],
         "memories": memories,
+        "portraits": portraits,
+        "experiences": experiences,
         "recalled_event_ids": recalled_event_ids,
         "source_errors": source_errors,
         "checks": checks,
@@ -768,7 +806,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--budget-cny",
         type=float,
-        help="经济阈值（元，DeepSeek Flash 空闲价估算）",
+        help="经济阈值（元，DeepSeek Flash 峰时价保守估算）",
     )
     parser.add_argument("--pause", action="store_true", help="每轮结束后等回车")
     parser.add_argument(
@@ -861,17 +899,28 @@ def main(argv: list[str] | None = None) -> int:
         for offset, spec in enumerate(remaining):
             spec = dict(spec)
             spec["index"] = plan["cursor"] + 1
+            previous_write_response = process.last_write_response
             row = run_turn(process, plan, spec, db)
             cognition = usage_from_metadata(
                 getattr(getattr(process, "last_model_response", None), "metadata", None)
             )
+            write_zone = usage_from_metadata(
+                getattr(
+                    process.last_write_response
+                    if process.last_write_response is not previous_write_response
+                    else None,
+                    "metadata",
+                    None,
+                )
+            )
             rems_now = snapshot_rems_llm(process)
             rems_delta = rems_now[rems_seen:]
             rems_seen = len(rems_now)
-            turn_cost = float(cognition.get("cost_cny") or 0) + sum(
+            turn_cost = float(cognition.get("cost_cny") or 0) + float(write_zone.get("cost_cny") or 0) + sum(
                 float(item.get("cost_cny") or 0) for item in rems_delta
             )
             plan["cost"]["cognition"].append(cognition)
+            plan["cost"].setdefault("write_zone", []).append(write_zone)
             plan["cost"]["rems"].extend(rems_delta)
             plan["cost"]["total_cny"] = round(
                 float(plan["cost"].get("total_cny") or 0) + turn_cost, 6
@@ -879,6 +928,7 @@ def main(argv: list[str] | None = None) -> int:
             row["usage"] = {
                 **cognition,
                 "rems": rems_delta,
+                "write_zone": write_zone,
                 "cost_cny": round(turn_cost, 6),
                 "total_cost_cny": plan["cost"]["total_cny"],
                 "budget_cny": budget,
@@ -886,8 +936,11 @@ def main(argv: list[str] | None = None) -> int:
             plan["rounds"].append(row)
             plan["cursor"] += 1
             ran += 1
-            _print_round(row)
             _save(plan, out_dir)
+            _print_round(row)
+            if row.get("delivery", {}).get("status") == "timeout":
+                print("09 投递超时，已保存对话与游标；本趟停止。", flush=True)
+                break
             if budget is not None and plan["cost"]["total_cny"] >= float(budget):
                 print(
                     f"已达经济阈值 ¥{budget}（累计约 ¥{plan['cost']['total_cny']}），停止。",

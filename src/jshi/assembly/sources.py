@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from .port import AssemblyContext, AssemblyFragment, AssemblySpeaker, LoadResult
 
 if TYPE_CHECKING:
+    from jshi.longtermexperience import LongTermExperiencePort
     from jshi.memory import MemoryPort
     from jshi.identity import IdentityRepository
     from jshi.personalworld import PersonalWorldPort
@@ -268,8 +270,121 @@ class MemorySource:
         return memory_display_text(text, label=label, aliases=aliases)
 
 
+class PersonExperienceSource:
+    """按本轮已确认的对话对象读取可修订的长期相处经验。"""
+
+    name = "person_experience"
+    status = "implemented"
+
+    def __init__(
+        self, experience: LongTermExperiencePort, *, budget_chars: int = 500
+    ) -> None:
+        self._experience = experience
+        self._budget_chars = max(0, budget_chars)
+
+    def load(self, ctx: AssemblyContext) -> LoadResult:
+        speaker = ctx.speaker
+        if (
+            speaker is None
+            or not speaker.object_id
+            or speaker.status != "confirmed"
+            or self._budget_chars == 0
+        ):
+            return LoadResult()
+        hits = self._experience.recall_experience(
+            ctx.subject_id,
+            ctx.input_text,
+            object_ids=(speaker.object_id,),
+            budget_chars=self._budget_chars,
+        )
+        fragments = tuple(
+            AssemblyFragment(
+                source=self.name,
+                id=f"person-experience:{item.object_id}",
+                content=item.content,
+                kind=item.type,
+                object_id=item.object_id,
+                query_object_role="interlocutor",
+                status="active",
+                importance=0.7,
+                source_ids=item.source_event_ids,
+                always=False,
+                occurred_at=item.updated_at,
+                variant=item.variant,
+            )
+            for item in hits
+            if item.object_id == speaker.object_id and item.content.strip()
+        )
+        return LoadResult(fragments=fragments)
+
+
+class PersonPortraitSource:
+    """仅为已确认的当前说话人装载描述性肖像。"""
+
+    name = "person_portrait"
+    status = "implemented"
+
+    def __init__(self, memory: object, *, budget_chars: int = 350) -> None:
+        self._memory = memory
+        self._budget_chars = max(0, budget_chars)
+
+    def load(self, ctx: AssemblyContext) -> LoadResult:
+        speaker = ctx.speaker
+        if (
+            speaker is None
+            or not speaker.object_id
+            or speaker.status != "confirmed"
+            or self._budget_chars == 0
+        ):
+            return LoadResult()
+        read = getattr(self._memory, "portrait", None)
+        if not callable(read):
+            return LoadResult()
+        portrait = read(ctx.subject_id, speaker.object_id)
+        if not isinstance(portrait, dict):
+            return LoadResult()
+        if (
+            portrait.get("subject_id") != ctx.subject_id
+            or portrait.get("object_id") != speaker.object_id
+        ):
+            return LoadResult()
+        levels = portrait.get("levels") or {}
+        texts: list[str] = []
+        if isinstance(levels, dict):
+            texts = [
+                value.strip()
+                for value in levels.values()
+                if isinstance(value, str) and value.strip()
+            ]
+        if not texts:
+            text = str(portrait.get("visible_summary") or "").strip()
+        else:
+            fitting = [item for item in texts if len(item) <= self._budget_chars]
+            text = max(fitting, key=len) if fitting else min(texts, key=len)
+        if not text:
+            return LoadResult()
+        if len(text) > self._budget_chars:
+            text = text[: self._budget_chars - 1].rstrip() + "…"
+        updated_at = portrait.get("updated_at")
+        return LoadResult(
+            fragments=(
+                AssemblyFragment(
+                    source=self.name,
+                    id=f"person-portrait:{speaker.object_id}",
+                    content=text,
+                    kind="portrait",
+                    object_id=speaker.object_id,
+                    query_object_role="interlocutor",
+                    status="active",
+                    importance=0.65,
+                    occurred_at=updated_at if isinstance(updated_at, datetime) else None,
+                ),
+            )
+        )
+
+
 class ToolSource:
-    """200 可见反馈源：只读 list_visible，正文原样交给组装器的 tool_input。"""
+    """200 工具源：按本轮话题装载账本条目，供组装报告追溯。"""
 
     name = "tool"
     status = "implemented"
@@ -281,20 +396,21 @@ class ToolSource:
         speaker = ctx.speaker
         if speaker is None or not speaker.object_id:
             return LoadResult()
-        items = self._service.list_visible(ctx.subject_id, speaker.object_id)
+        items = self._service.list_tool_related_entries(
+            ctx.subject_id, speaker.object_id, query=ctx.input_text
+        )
         fragments = tuple(
             AssemblyFragment(
                 source="tool",
-                id=f"tool:{item.id}",
-                content=item.summary,
-                kind=item.kind,
-                object_id=item.object_id,
+                id=f"tool:{item['id']}",
+                content=str(item.get("new_info") or item.get("final_result") or item.get("status") or ""),
+                kind=str(item.get("section") or ""),
+                object_id=speaker.object_id,
                 status="active",
                 importance=0.6,
-                source_ids=(item.id,),
+                source_ids=(str(item["id"]),),
                 always=False,
             )
             for item in items
-            if (item.summary or "").strip()
         )
         return LoadResult(fragments=fragments)

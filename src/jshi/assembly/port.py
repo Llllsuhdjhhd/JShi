@@ -48,6 +48,7 @@ class AssemblyFragment:
     source_ids: tuple[str, ...] = ()
     always: bool = False
     occurred_at: datetime | None = None
+    variant: str = ""
 
 
 @dataclass(frozen=True)

@@ -264,6 +264,20 @@ def build_user(request: ModelRequest) -> str:
                 for mid, mlabel, text, time_label in memories
             )
         )
+    portraits = _person_portraits(request.context)
+    if portraits:
+        parts.append(
+            "【人物肖像·可修订】\n这是过往白描形成的描述，需以本轮信息为准。\n"
+            + "\n".join(portraits)
+        )
+    experiences = _person_experiences(request.context)
+    if experiences:
+        parts.append(
+            "【人物相处经验·可修订】\n"
+            "这是基于过往事件形成的相处认识，不是具体往事或此人的绝对事实。"
+            "以本轮明确请求为先，只在相关情境使用，不要自动套用旧偏好。\n"
+            + "\n".join(experiences)
+        )
     extra = (getattr(request, "tool_input", "") or "").strip()
     if extra:
         parts.append(extra)
@@ -362,5 +376,27 @@ def _memories(
         seen_ids.add(memory_id)
         rows.append((memory_id, memory_label, text, time_label))
     return rows
+
+
+def _person_experiences(context: Sequence[Mapping[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for item in context:
+        if item.get("source") != "person_experience":
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            lines.append(f"{item.get('label') or item.get('object_id') or '对话对象'}：{content}")
+    return lines
+
+
+def _person_portraits(context: Sequence[Mapping[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for item in context:
+        if item.get("source") != "person_portrait":
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            lines.append(f"{item.get('label') or item.get('object_id') or '对话对象'}：{content}")
+    return lines
 
 

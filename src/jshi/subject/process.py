@@ -32,6 +32,8 @@ from jshi.assembly import (
     IdentitySource,
     MemorySource,
     ObjectSource,
+    PersonExperienceSource,
+    PersonPortraitSource,
     PersonalWorldSource,
     SourceLoadReport,
     ToolSource,
@@ -58,6 +60,7 @@ from jshi.memory import (
     RuleBasedRecallEvaluator,
 )
 from jshi.memorycontrol import InProcessMemoryControl
+from jshi.longtermexperience import LongTermExperiencePort
 from jshi.objects import InProcessObjectSystem, ObjectSystemPort
 from jshi.models import (
     ModelPort,
@@ -295,6 +298,7 @@ class SubjectProcess:
         tool_runner: ToolRunner | None = None,
         tool_service: ToolService | None = None,
         introspection_model: ModelPort | None = None,
+        long_term_experience: LongTermExperiencePort | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
@@ -324,6 +328,7 @@ class SubjectProcess:
         self._segment_short_map: dict[str, str] = {}
         self._memory_short_map: dict[str, str] = {}
         self.memory = memory or MemoryShell(InProcessMemoryBackend(repository))
+        self.long_term_experience = long_term_experience
         self.recall_coordinator = RecallCoordinator(repository, self.memory)
         self.recall_evaluator = recall_evaluator or RuleBasedRecallEvaluator()
         self.activity_ledger = activity_ledger or InProcessExperienceLedger()
@@ -363,6 +368,12 @@ class SubjectProcess:
                 ObjectSource(),
                 ActivityWindowSource(),
                 PersonalWorldSource(self.personal_world),
+                *(
+                    (PersonExperienceSource(self.long_term_experience),)
+                    if self.long_term_experience is not None
+                    else ()
+                ),
+                PersonPortraitSource(self.memory),
                 MemorySource(
                     repository, memory=self.memory, profiles=self.profiles
                 ),
@@ -416,23 +427,21 @@ class SubjectProcess:
         working_set = self.assembler.assemble(ctx)
         if gap:
             self.effectiveness.consume_gap(subject_id)
-        # 本轮真正装上的记挂 id：工具片段进 tool_input、不进 fragments，
-        # 所以从组装报告里取，而不是从 working_set.fragments 里找。
-        self._turn_tool_ids = tuple(
-            str(fid)[len("tool:") :]
-            for report in working_set.report
-            if getattr(report, "source", None) == "tool"
-            for fid in (report.loaded_ids or ())
-            if str(fid).startswith("tool:")
-        )
+        # 本轮真正送进 05 的条目以【工具相关】最终选集为准；03 的可见报告
+        # 可能包含因上下文预算、话题筛选而未选中的记挂。
+        self._turn_tool_ids = ()
         tool_related = ""
         speaker_oid = (
             assembly_speaker.object_id if assembly_speaker is not None else ""
         )
         if speaker_oid:
-            tool_related = self.tool_service.format_tool_related_block(
-                subject_id, speaker_oid
+            from jshi.tool.service import format_tool_related
+
+            tool_entries = self.tool_service.list_tool_related_entries(
+                subject_id, speaker_oid, query=input_text
             )
+            self._turn_tool_ids = tuple(str(item["id"]) for item in tool_entries)
+            tool_related = format_tool_related(tool_entries)
         return AssembledCurrentState(
             input_text=input_text,
             speaker=working_set.speaker,
@@ -841,6 +850,7 @@ class SubjectProcess:
         self._tool_mark_main_seen(
             subject_id,
             speaker.object_id if speaker is not None else "",
+            turn_tool_ids,
         )
         self._intake_tool_if_requested(subject_id, activity, speaker, response)
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
@@ -1062,6 +1072,24 @@ class SubjectProcess:
                 lines.append(line)
         return lines
 
+    def _person_experience_lines(
+        self, fragments: Sequence[AssemblyFragment]
+    ) -> list[str]:
+        return [
+            f"{fragment.id}（{self._object_display(fragment.object_id)}）：{fragment.content}"
+            for fragment in fragments
+            if fragment.source == "person_experience" and fragment.content.strip()
+        ]
+
+    def _person_portrait_lines(
+        self, fragments: Sequence[AssemblyFragment]
+    ) -> list[str]:
+        return [
+            f"{self._object_display(fragment.object_id)}：{fragment.content}"
+            for fragment in fragments
+            if fragment.source == "person_portrait" and fragment.content.strip()
+        ]
+
     def _persona_user_text(
         self,
         current: AssembledCurrentState,
@@ -1073,8 +1101,11 @@ class SubjectProcess:
         label = current.speaker.label if current.speaker else "对方"
         stamp = now or datetime.now().astimezone()
         memories = self._memory_lines(current.fragments, now=stamp)
+        experiences = self._person_experience_lines(current.fragments)
+        portraits = self._person_portrait_lines(current.fragments)
         if boot:
-            return self._boot_user_text(current, label, memories, now=stamp)
+            return self._boot_user_text(current, label, memories, experiences=experiences,
+                                        portraits=portraits, now=stamp)
         subject_id = current.subject_state.subject_id
         scene = self.zone_store.render(subject_id, now=stamp)
         pack_id = self.style_packs.get(subject_id)
@@ -1098,6 +1129,18 @@ class SubjectProcess:
         )
         if memories:
             parts.append("【你此时的回忆】\n" + "\n".join(memories))
+        if portraits:
+            parts.append(
+                "【人物肖像·可修订】\n这是过往白描形成的描述，需以本轮信息为准。\n"
+                + "\n".join(portraits)
+            )
+        if experiences:
+            parts.append(
+                "【人物相处经验·可修订】\n"
+                "这是基于过往事件形成的相处认识，不能当作此人的绝对事实或某次具体往事。"
+                "以本轮明确请求为先，只在相关情境使用，不要自动套用旧偏好。\n"
+                + "\n".join(experiences)
+            )
         extra = (current.tool_input or "").strip() if include_tool else ""
         if extra:
             parts.append(extra)
@@ -1112,6 +1155,8 @@ class SubjectProcess:
         label: str,
         memories: Sequence[str],
         *,
+        experiences: Sequence[str] = (),
+        portraits: Sequence[str] = (),
         now: datetime | None = None,
     ) -> str:
         subject_id = current.subject_state.subject_id
@@ -1138,6 +1183,10 @@ class SubjectProcess:
             parts.append("【素材·活跃区】\n" + "\n".join(active))
         if memories:
             parts.append("【素材·回忆】\n" + "\n".join(memories))
+        if portraits:
+            parts.append("【素材·人物肖像（可修订）】\n" + "\n".join(portraits))
+        if experiences:
+            parts.append("【素材·人物相处经验（可修订）】\n" + "\n".join(experiences))
         values = [
             str(item).strip()
             for item in current.subject_state.salient_values
@@ -1242,14 +1291,16 @@ class SubjectProcess:
                 ),
             )
 
-    def _tool_mark_main_seen(self, subject_id: str, object_id: str) -> None:
+    def _tool_mark_main_seen(
+        self, subject_id: str, object_id: str, item_ids: tuple[str, ...] = ()
+    ) -> None:
         """本轮认知已看到【工具相关】：标记可见句已送入主流程，不写片场。"""
         if not object_id:
             return
         service = getattr(self, "tool_service", None)
         if service is None:
             return
-        service.mark_main_seen(subject_id, object_id)
+        service.mark_main_seen(subject_id, object_id, item_ids=item_ids)
 
     def _tool_scene_blocks(
         self, subject_id: str, object_id: str
@@ -1845,6 +1896,36 @@ class SubjectProcess:
                         "source": "memory",
                         "label": self._object_display(fragment.object_id),
                         "occurred_at": _iso(fragment.occurred_at),
+                    }
+                )
+                continue
+            if fragment.source == "person_experience":
+                items.append(
+                    {
+                        "id": fragment.id,
+                        "kind": "person_experience",
+                        "content": fragment.content,
+                        "status": fragment.status,
+                        "source": fragment.source,
+                        "object_id": fragment.object_id,
+                        "label": self._object_display(fragment.object_id),
+                        "source_event_ids": fragment.source_ids,
+                        "variant": fragment.variant,
+                        "updated_at": _iso(fragment.occurred_at),
+                    }
+                )
+                continue
+            if fragment.source == "person_portrait":
+                items.append(
+                    {
+                        "id": fragment.id,
+                        "kind": "portrait",
+                        "content": fragment.content,
+                        "status": fragment.status,
+                        "source": fragment.source,
+                        "object_id": fragment.object_id,
+                        "label": self._object_display(fragment.object_id),
+                        "updated_at": _iso(fragment.occurred_at),
                     }
                 )
                 continue

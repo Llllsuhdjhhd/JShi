@@ -36,7 +36,7 @@ from jshi.tool import (
     engine_tools,
     load_catalog,
 )
-from jshi.tool.hang import HangRecord, NOTE_MAX_CHARS
+from jshi.tool.hang import HangRecord
 from jshi.tool.plan import ToolPlan, ToolStep
 
 
@@ -958,7 +958,7 @@ def test_service_writes_exactly_one_estimate(tmp_path: Path) -> None:
     assert kinds[0] is FeedbackKind.ESTIMATE
 
 
-def test_wrap_truncates_long_summary(tmp_path: Path) -> None:
+def test_terminal_wrap_keeps_full_summary(tmp_path: Path) -> None:
     wrap = ToolWrapSkill(_JsonPort({"visible": True, "summary": "啊" * 200}))
     process, _repository, store, service = _runtime(
         tmp_path,
@@ -968,10 +968,10 @@ def test_wrap_truncates_long_summary(tmp_path: Path) -> None:
     result = process.experience("stone", "明天天气怎样", object_ref="user")
     service.drain_for_tests()
     done = store.list_for("stone", result.speaker.object_id)[0]
-    assert len(done.summary) == NOTE_MAX_CHARS
+    assert len(done.summary) == 200
     visible = service.list_visible("stone", result.speaker.object_id)
     assert visible
-    assert len(visible[0].summary) == NOTE_MAX_CHARS
+    assert len(visible[0].summary) == 200
 
 
 def test_progress_wrap_keeps_status_open(tmp_path: Path) -> None:
@@ -1277,6 +1277,124 @@ def test_created_tool_enters_the_catalog_for_the_next_planning(tmp_path: Path) -
     assert len(store.list_for("stone", second.speaker.object_id)) == 2
 
 
+def test_created_tool_continues_original_need_in_background(tmp_path: Path) -> None:
+    from jshi.tool.contract import CreateToolSpec
+
+    class _CreatingEngine:
+        def __init__(self) -> None:
+            self.created = False
+            self.used: list[ToolRequest] = []
+
+        def list_commands(self):
+            return ({"name": "skill:weather", "description": "查天气"},) if self.created else ()
+
+        def iter_execute(self, request: ToolRequest, cancel=None):
+            del cancel
+            if request.create is not None:
+                self.created = True
+                content = "已创建天气技能"
+            else:
+                self.used.append(request)
+                content = "杭州明天晴"
+            yield ToolFeedback(
+                request_id=request.request_id,
+                kind=FeedbackKind.RESULT,
+                result=ToolResult(
+                    status=ToolStatus.OK,
+                    result={"content": content},
+                    summary=content,
+                    ideal=True,
+                ),
+            )
+
+    engine = _CreatingEngine()
+    store = HangStore(tmp_path / "hang.jsonl")
+    service = ToolService(
+        store,
+        ToolRunner(ToolModule(engine), store),
+        intake_path=tmp_path / "tool.jsonl",
+    )
+    intake = service.intake_store.create(
+        subject_id="stone", object_id="OBJ-A", need="查杭州明天天气"
+    )
+    service._launch(
+        intake,
+        ToolRequest(
+            need=intake.need,
+            ask=AskMode.CREATE_TOOL,
+            create=CreateToolSpec(tool_name="weather", tool_intent="查天气"),
+        ),
+    )
+    service.drain_for_tests()
+    assert [item.kind for item in store.list_for("stone", "OBJ-A")] == ["use", "create"]
+    assert len(engine.used) == 1
+    assert engine.used[0].command == "skill:weather"
+    assert engine.used[0].need == intake.need
+
+
+def test_same_command_only_dedupes_same_need_and_params(tmp_path: Path) -> None:
+    store = HangStore(tmp_path / "hang.jsonl")
+    service = ToolService(
+        store,
+        ToolRunner(ToolModule(StubEngine()), store),
+        intake_path=tmp_path / "tool.jsonl",
+    )
+    current = store.create(
+        subject_id="stone",
+        object_id="OBJ-A",
+        need="查杭州天气",
+        command="weather",
+        kind="use",
+        params={"city": "杭州"},
+    )
+    same = service.intake_store.create(
+        subject_id="stone", object_id="OBJ-A", need="查杭州天气"
+    )
+    same_id = service._launch(
+        same,
+        ToolRequest(need=same.need, command="weather", params={"city": "杭州"}),
+    )
+    assert same_id == current.task_id
+    different = service.intake_store.create(
+        subject_id="stone", object_id="OBJ-A", need="查上海天气"
+    )
+    other_id = service._launch(
+        different,
+        ToolRequest(need=different.need, command="weather", params={"city": "上海"}),
+    )
+    assert other_id != current.task_id
+    service.drain_for_tests()
+
+
+def test_terminal_wrapper_receives_declared_result_fields(tmp_path: Path) -> None:
+    store = HangStore(tmp_path / "hang.jsonl")
+    hang = store.create(
+        subject_id="stone",
+        object_id="OBJ-A",
+        need="查天气",
+        command="skill:weather",
+        kind="use",
+        meta={
+            "feedback_plan": json.dumps({"result_fields": ["city", "temperature"]}),
+            "expected_result": "城市和温度",
+        },
+    )
+    feedback = ToolFeedback(
+        request_id=hang.request_id,
+        kind=FeedbackKind.RESULT,
+        result=ToolResult(
+            status=ToolStatus.OK,
+            result={"content": "杭州 25°C"},
+            ideal=True,
+        ),
+    )
+    payload = ToolWrapSkill(_JsonPort({"visible": True, "summary": "杭州 25°C"}))._result_payload(
+        hang, feedback
+    )
+    assert payload["feedback_plan"]["result_fields"] == ["city", "temperature"]
+    assert payload["expected_result"] == "城市和温度"
+
+
 def test_pi_engine_streams_recorded_events() -> None:
     from jshi.tool.pi_engine import PiEngine
 
@@ -1407,6 +1525,30 @@ def test_pi_engine_timeout_writes_failed_result() -> None:
     assert items[-1].result is not None
     assert items[-1].result.status is ToolStatus.FAILED
     assert "超时" in items[-1].result.error
+
+
+def test_pi_engine_timeout_preserves_completed_shell_output() -> None:
+    from jshi.tool.pi_engine import PiEngine
+
+    engine = PiEngine()
+    engine._spawn = lambda: _FakePopen("")
+
+    def timed_out_events(*args, **kwargs):
+        yield {
+            "type": "tool_execution_end",
+            "toolName": "bash",
+            "isError": False,
+            "result": {"content": [{"type": "text", "text": '{"count":10,"articles":[1,2]}' }]},
+        }
+        engine._last_stop = "timeout"
+
+    engine._iter_events = timed_out_events
+    items = list(engine.iter_execute(ToolRequest(need="查新闻", command="skill:news")))
+    result = items[-1].result
+    assert result is not None
+    assert result.status is ToolStatus.PARTIAL
+    assert result.result["content"] == '{"count":10,"articles":[1,2]}'
+    assert "超时" in result.error
 
 
 def test_resolve_timeout_s_tiers() -> None:
@@ -1689,7 +1831,7 @@ def test_service_wrap_contract_without_tmp_path() -> None:
     service.drain_for_tests()
     done = store.get(mid.task_id)
     assert done is not None
-    assert len(done.summary) == NOTE_MAX_CHARS
+    assert len(done.summary) == 200
     assert done.status == "notified"
 
 
@@ -2478,7 +2620,8 @@ def test_pi_prompt_uses_official_skill_command_form() -> None:
             expected_result="杭州明天的天气",
         )
     )
-    assert prompt == "/skill:get-weather 查明天杭州天气"
+    assert prompt.startswith("/skill:get-weather 查明天杭州天气")
+    assert '"city":"杭州"' in prompt
 
 
 def test_pi_prompt_keeps_plain_form_for_non_skill_commands() -> None:
@@ -2778,6 +2921,42 @@ def test_reap_closes_open_hang_that_already_has_result(tmp_path: Path) -> None:
     assert "仍在查询中" not in done.summary
 
 
+def test_reap_keeps_full_terminal_content(tmp_path: Path) -> None:
+    hang = HangStore(tmp_path / "hang.jsonl")
+    service = ToolService(
+        hang,
+        ToolRunner(ToolModule(StubEngine()), hang),
+        intake_path=tmp_path / "tool.jsonl",
+    )
+    rec = hang.create(
+        subject_id="stone",
+        object_id="OBJ-A",
+        need="取完整结果",
+        command="skill:report",
+        kind="use",
+    )
+    content = "完整条目\n" * 400
+    hang.append_feedback(
+        rec.task_id,
+        (
+            ToolFeedback(
+                request_id=rec.request_id,
+                kind=FeedbackKind.RESULT,
+                result=ToolResult(
+                    status=ToolStatus.OK,
+                    result={"content": content},
+                    summary="短摘要",
+                    ideal=True,
+                ),
+            ),
+        ),
+    )
+    service.reap_stale("stone", "OBJ-A")
+    done = hang.get(rec.task_id)
+    assert done is not None
+    assert done.summary == content.strip()
+
+
 def test_dedupe_plan_failure_not_labeled_as_cannot_plan(tmp_path: Path) -> None:
     hang = HangStore(tmp_path / "hang.jsonl")
     service = ToolService(
@@ -2799,10 +2978,10 @@ def test_dedupe_plan_failure_not_labeled_as_cannot_plan(tmp_path: Path) -> None:
     assert "不再另开" in text
 
 
-def test_recent_tool_related_keeps_last_ok_and_last_fail_per_tool(
+def test_recent_tool_related_keeps_distinct_needs_for_same_tool(
     tmp_path: Path,
 ) -> None:
-    """同一工具在「近期完成」里最多各留一条成功、一条失败。"""
+    """同名工具的不同查询不能互相吞掉；同一需求才归并。"""
     from datetime import timedelta
 
     from jshi.tool.contract import utc_now
@@ -2822,13 +3001,22 @@ def test_recent_tool_related_keeps_last_ok_and_last_fail_per_tool(
             "final_result": "0.2066",
         },
         {
-            "id": "usd-junk",
+            "id": "usd-ok",
             "section": "recent",
             "status": "已完成",
             "tool_name": "skill:exchange-rate",
             "need": "兑美元",
             "used_at": older,
-            "final_result": "---\nname: web-search",
+            "final_result": "0.15美元",
+        },
+        {
+            "id": "cad-old",
+            "section": "recent",
+            "status": "已完成",
+            "tool_name": "exchange_rate",
+            "need": "兑加元",
+            "used_at": older,
+            "final_result": "旧加元结果",
         },
         {
             "id": "search-fail",
@@ -2879,14 +3067,15 @@ def test_recent_tool_related_keeps_last_ok_and_last_fail_per_tool(
     recent = [e for e in kept if e["section"] == "recent"]
     in_use = [e for e in kept if e["section"] == "in_use"]
     assert len(in_use) == 1
+    assert "cad-old" not in {e["id"] for e in recent}
     assert {e["id"] for e in recent} == {
         "cad-ok",
+        "usd-ok",
         "search-fail",
         "search-ok",
         "plan-new",
+        "plan-old",
     }
-    assert "usd-junk" not in {e["id"] for e in recent}
-    assert "plan-old" not in {e["id"] for e in recent}
 
     # 经 ToolService 组装也生效
     hang = HangStore(tmp_path / "hang.jsonl")
@@ -2897,7 +3086,7 @@ def test_recent_tool_related_keeps_last_ok_and_last_fail_per_tool(
     )
     for need, cmd, summary, when in (
         ("兑加元", "skill:exchange-rate", "0.2066加元", newer),
-        ("兑美元坏摘要", "skill:exchange-rate", "---\nname: web-search", older),
+        ("兑美元", "skill:exchange-rate", "0.15美元", older),
         ("果蝇通称", "skill:web-search", "8条通称", older),
     ):
         rec = hang.create(
@@ -2931,9 +3120,116 @@ def test_recent_tool_related_keeps_last_ok_and_last_fail_per_tool(
     assert "0.2066加元" in text
     assert "8条通称" in text
     assert "换词超时" in text
-    assert text.count("工具名称：skill:exchange-rate") == 1
-    assert "兑美元坏摘要" not in text
-    assert "---" not in text or "name: web-search" not in text
+    assert text.count("工具名称：skill:exchange-rate") == 2
+    assert "0.15美元" in text
+
+
+def test_tool_result_survives_hot_window_until_shown_and_returns_for_related_query(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from jshi.tool.contract import utc_now
+
+    hang = HangStore(tmp_path / "hang.jsonl")
+    service = ToolService(
+        hang,
+        ToolRunner(ToolModule(StubEngine()), hang),
+        intake_path=tmp_path / "tool.jsonl",
+    )
+    record = hang.create(
+        subject_id="stone", object_id="OBJ-A", need="查杭州天气", command="weather"
+    )
+    hang.set_wrap(record.task_id, visible=True, summary="杭州明天有雨", terminal=True)
+    stamp = utc_now()
+    hang._records[record.task_id] = replace(
+        hang.get(record.task_id), updated_at=stamp - timedelta(hours=3)
+    )
+
+    before = service.list_tool_related_entries("stone", "OBJ-A", now=stamp)
+    assert [item["id"] for item in before] == [record.task_id]
+    service.mark_main_seen("stone", "OBJ-A", item_ids=(record.task_id,))
+    later = stamp + timedelta(hours=2)
+    assert service.list_tool_related_entries("stone", "OBJ-A", query="聊别的", now=later) == ()
+    again = service.list_tool_related_entries(
+        "stone", "OBJ-A", query="杭州天气怎样", now=later
+    )
+    assert [item["id"] for item in again] == [record.task_id]
+
+
+def test_terminal_result_is_new_after_progress_was_seen(tmp_path: Path) -> None:
+    hang = HangStore(tmp_path / "hang.jsonl")
+    service = ToolService(
+        hang,
+        ToolRunner(ToolModule(StubEngine()), hang),
+        intake_path=tmp_path / "tool.jsonl",
+    )
+    record = hang.create(
+        subject_id="stone", object_id="OBJ-A", need="查天气", command="weather"
+    )
+    hang.set_wrap(record.task_id, visible=True, summary="正在查询", terminal=False)
+    service.mark_main_seen("stone", "OBJ-A", item_ids=(record.task_id,))
+    assert hang.get(record.task_id).delivered_at is not None
+
+    hang.set_wrap(record.task_id, visible=True, summary="明天有雨", terminal=True)
+    assert hang.get(record.task_id).delivered_at is None
+    selected = service.list_tool_related_entries("stone", "OBJ-A")
+    assert selected[0]["final_result"] == "明天有雨"
+
+
+def test_tool_context_rotates_overflow_and_marks_only_selected_ids(tmp_path: Path) -> None:
+    hang = HangStore(tmp_path / "hang.jsonl")
+    service = ToolService(
+        hang,
+        ToolRunner(ToolModule(StubEngine()), hang),
+        intake_path=tmp_path / "tool.jsonl",
+    )
+    records = []
+    for index in range(14):
+        record = hang.create(
+            subject_id="stone",
+            object_id="OBJ-A",
+            need=f"查询第{index}项",
+            command="search",
+        )
+        hang.set_wrap(record.task_id, visible=True, summary=f"第{index}项结果", terminal=True)
+        records.append(record)
+
+    first = service.list_tool_related_entries("stone", "OBJ-A")
+    assert len(first) == 12
+    shown_ids = tuple(str(item["id"]) for item in first)
+    service.mark_main_seen("stone", "OBJ-A", item_ids=shown_ids)
+    assert all(hang.get(item_id).delivered_at is not None for item_id in shown_ids)
+    assert any(hang.get(item.task_id).delivered_at is None for item in records)
+
+    second = service.list_tool_related_entries("stone", "OBJ-A")
+    assert {item.task_id for item in records if item.task_id not in shown_ids}.issubset(
+        {str(item["id"]) for item in second}
+    )
+
+
+def test_oversized_single_result_is_not_cut_to_fit_context_budget(tmp_path: Path) -> None:
+    hang = HangStore(tmp_path / "hang.jsonl")
+    service = ToolService(
+        hang,
+        ToolRunner(ToolModule(StubEngine()), hang),
+        intake_path=tmp_path / "tool.jsonl",
+    )
+    record = hang.create(
+        subject_id="stone", object_id="OBJ-A", need="取完整报告", command="report"
+    )
+    full = "完整报告内容" * 1500
+    hang.set_wrap(record.task_id, visible=True, summary=full, terminal=True)
+    other = hang.create(
+        subject_id="stone", object_id="OBJ-A", need="另查一项", command="search"
+    )
+    hang.set_wrap(other.task_id, visible=True, summary="另一项结果", terminal=True)
+
+    selected = service.list_tool_related_entries("stone", "OBJ-A")
+    assert len(selected) == 1
+    assert selected[0]["final_result"] == full
+    assert len(hang.get(record.task_id).summary) == len(full)
 
 
 def test_plan_retries_false_in_flight_when_empty(tmp_path: Path) -> None:

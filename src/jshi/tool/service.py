@@ -26,7 +26,6 @@ from .contract import (
 from .hang import (
     HangStore,
     OPEN_LIST_CAP,
-    NOTE_MAX_CHARS,
     PROGRESS_NOTE_MAX_CHARS,
     is_stage_fact,
     rule_wrap_from_item,
@@ -80,6 +79,7 @@ HOT_STATE_TTL_S = 3600
 # 策划中（intake received、尚无记挂）：超过此时长视为卡死，自动标失败。
 PLANNING_TTL_S = 300
 HOT_STATE_CAP = 12
+TOOL_RELATED_CHARS = 8000
 _HOT_FAILED_STATUSES = frozenset(
     {
         ToolStatus.FAILED,
@@ -133,7 +133,7 @@ def _entry_used_at(item: Mapping[str, Any]) -> datetime:
 def dedupe_recent_tool_entries(
     entries: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """近期完成：同一工具只留最后一次成功与最后一次失败；使用中原样保留。"""
+    """近期完成：只归并同一工具、同一需求和参数的重复执行。"""
     in_use: list[dict[str, Any]] = []
     recent: list[dict[str, Any]] = []
     for raw in entries:
@@ -144,10 +144,15 @@ def dedupe_recent_tool_entries(
         elif section == "recent":
             recent.append(item)
     recent.sort(key=_entry_used_at, reverse=True)
-    best_ok: dict[str, dict[str, Any]] = {}
-    best_fail: dict[str, dict[str, Any]] = {}
+    best_ok: dict[tuple[str, str, str], dict[str, Any]] = {}
+    best_fail: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in recent:
-        key = _normalize_tool_related_key(str(item.get("tool_name") or ""))
+        params = item.get("params")
+        key = (
+            _normalize_tool_related_key(str(item.get("tool_name") or "")),
+            " ".join(str(item.get("need") or "").lower().split()),
+            json.dumps(params if isinstance(params, Mapping) else {}, sort_keys=True, default=str),
+        )
         status = str(item.get("status") or "").strip()
         if status == "已完成":
             if key not in best_ok:
@@ -158,6 +163,72 @@ def dedupe_recent_tool_entries(
     kept = list(best_ok.values()) + list(best_fail.values())
     kept.sort(key=_entry_used_at, reverse=True)
     return in_use + kept
+
+
+def select_tool_related_entries(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    query: str,
+    now: datetime,
+    ttl_s: float,
+) -> tuple[dict[str, Any], ...]:
+    """从原记挂账本挑本轮上下文：未展示优先，旧结果按话题召回。
+
+    全文保留在账本；这里按条数和合计长度选择整条，不截断单条结果。
+    """
+    from .discovery import tokenize
+
+    terms = set(tokenize(query))
+    unseen: list[dict[str, Any]] = []
+    relevant: list[tuple[int, dict[str, Any]]] = []
+    active: list[dict[str, Any]] = []
+    recent: list[dict[str, Any]] = []
+    for raw in entries:
+        item = dict(raw)
+        if item.get("section") == "in_use":
+            active.append(item)
+            continue
+        if item.get("section") != "recent":
+            continue
+        if item.get("delivered_at") is None:
+            unseen.append(item)
+            continue
+        basis = " ".join(
+            str(item.get(key) or "")
+            for key in ("need", "tool_name", "tool_description")
+        ) + " " + str(item.get("final_result") or "")[:500]
+        overlap = len(terms.intersection(tokenize(basis))) if terms else 0
+        if overlap:
+            relevant.append((overlap, item))
+        elif (now - (item.get("delivered_at") or item.get("updated_at") or _entry_used_at(item))).total_seconds() <= ttl_s:
+            recent.append(item)
+
+    unseen.sort(key=_entry_used_at)  # 老的未展示结果先送，避免一直被新结果挤掉。
+    active.sort(key=_entry_used_at, reverse=True)
+    relevant.sort(key=lambda pair: (pair[0], _entry_used_at(pair[1])), reverse=True)
+    recent.sort(key=_entry_used_at, reverse=True)
+    ordered = (
+        unseen[:4]
+        + active[:3]
+        + [item for _score, item in relevant]
+        + recent
+        + unseen[4:]
+        + active[3:]
+    )
+    selected: list[dict[str, Any]] = []
+    used_chars = 0
+    for item in ordered:
+        if len(selected) >= HOT_STATE_CAP:
+            break
+        size = sum(
+            len(str(item.get(key) or ""))
+            for key in ("need", "tool_name", "tool_description", "new_info", "final_result")
+        )
+        if selected and used_chars + size > TOOL_RELATED_CHARS:
+            continue
+        selected.append(item)
+        used_chars += size
+    return tuple(selected)
 
 
 @dataclass(frozen=True)
@@ -253,6 +324,8 @@ def format_tool_related(
         if isinstance(used_at, datetime):
             when = relative_time_label(used_at, now=now) or ""
         lines.append(f"- 需求：{need}")
+        if item.get("id"):
+            lines.append(f"  任务ID：{item['id']}")
         lines.append(f"  工具名称：{name}")
         if when:
             lines.append(f"  使用时间：{when}")
@@ -274,6 +347,7 @@ def format_tool_related(
     if recent:
         lines.append("")
         lines.append("# 近期使用完成的工具")
+        lines.append("其中也可能有按当前话题从旧记挂重新选入的结果；注意使用时间与时效。")
         for item in recent:
             _emit(item)
     return "\n".join(lines)
@@ -341,7 +415,18 @@ def _hang_launch_meta(plan_tag: str, request: ToolRequest) -> dict[str, str]:
     if plan_tag:
         meta["plan_model_tag"] = plan_tag
     create = request.create
+    feedback_plan = (
+        create.feedback_plan
+        if create is not None
+        else request.meta.get("feedback_plan")
+    )
+    if isinstance(feedback_plan, Mapping) and feedback_plan:
+        meta["feedback_plan"] = json.dumps(dict(feedback_plan), ensure_ascii=False)
+    expected_result = (request.expected_result or "").strip()
+    if expected_result:
+        meta["expected_result"] = expected_result
     if create is not None:
+        meta["fulfill_after_create"] = "1" if create.fulfill_after_create else "0"
         intent = (create.tool_intent or "").strip()
         if intent:
             meta["tool_intent"] = intent
@@ -375,13 +460,7 @@ def _result_tokens_for_stage(result: Any) -> float | None:
 
 
 def _terminal_fallback_summary(result: ToolResult) -> str:
-    """包装模型不可用时，至少保留引擎给出的终态摘要或结果正文。"""
-    summary = (result.summary or "").strip()
-    if summary:
-        return summary
-    error = (result.error or "").strip()
-    if error:
-        return error
+    """包装模型不可用时，优先保留完整终态结果。"""
     payload = result.result
     if isinstance(payload, Mapping):
         content = payload.get("content")
@@ -391,6 +470,12 @@ def _terminal_fallback_summary(result: ToolResult) -> str:
             return json.dumps(content, ensure_ascii=False, default=str)
         if payload:
             return json.dumps(dict(payload), ensure_ascii=False, default=str)
+    summary = (result.summary or "").strip()
+    if summary:
+        return summary
+    error = (result.error or "").strip()
+    if error:
+        return error
     return result.status.value
 
 
@@ -598,7 +683,7 @@ class ToolService:
         return str(getattr(skill, "model_tag", "") or "")
 
     def _finish_create(self, task_id: str, item: ToolFeedback) -> None:
-        """造工具的记挂收到终态：造成功了就让 205 下次重读引擎目录。
+        """造工具完成后刷新目录；查询型原需求在后台接着使用新工具。
 
         不重读的话，同一会话里新造出来的工具检索不到，于是会重复造。
         """
@@ -611,6 +696,77 @@ class ToolService:
         invalidate = getattr(self.planner, "invalidate_tools", None)
         if callable(invalidate):
             invalidate()
+        hang = self.hang_store.get(task_id)
+        if (
+            not result.ideal
+            or hang is None
+            or hang.plan_id
+            or hang.meta.get("fulfill_after_create") != "1"
+        ):
+            return
+        thread = threading.Thread(
+            target=self._continue_after_create,
+            args=(task_id,),
+            name=f"tool-created-use-{task_id[:8]}",
+            daemon=True,
+        )
+        with self._lock:
+            self._planner_threads.append(thread)
+        thread.start()
+
+    def _continue_after_create(self, task_id: str) -> None:
+        hang = self.hang_store.get(task_id)
+        original = self.intake_store.get_by_task_id(task_id)
+        if hang is None or original is None or hang.status == "cancelled":
+            return
+        from .catalog import engine_tools
+
+        name = (hang.command or "").strip()
+        candidates = {name, f"skill:{name}"}
+        catalog = engine_tools(self.runner.module.engine)
+        tool = next(
+            (entry for entry in catalog if str(entry.get("name") or "").strip() in candidates),
+            None,
+        )
+        followup = self.intake_store.create(
+            subject_id=original.subject_id,
+            object_id=original.object_id,
+            activity_id=original.activity_id,
+            need=original.need,
+            verbal=original.verbal,
+            field_ref=original.field_ref,
+            origin=original.origin,
+        )
+        followup = self.intake_store.update(
+            followup.intake_id, meta={"created_from": task_id}
+        ) or followup
+        if tool is None:
+            self._fail_intake(
+                followup.intake_id,
+                "工具文件已创建，但新工具尚未出现在引擎目录，原需求未执行",
+            )
+            return
+        try:
+            origin = ToolOrigin(original.origin)
+        except ValueError:
+            origin = ToolOrigin.EXTERNAL_05
+        tool_meta = tool.get("meta")
+        tool_meta = tool_meta if isinstance(tool_meta, Mapping) else {}
+        feedback_plan = tool_meta.get("feedback_plan")
+        if not isinstance(feedback_plan, Mapping):
+            feedback_plan = {}
+        request = ToolRequest(
+            subject_id=original.subject_id,
+            activity_id=original.activity_id,
+            origin=origin,
+            need=original.need,
+            template="generic",
+            command=str(tool["name"]),
+            field_ref=original.field_ref,
+            expected_result=str(hang.meta.get("expected_output") or ""),
+            meta={"feedback_plan": dict(feedback_plan)},
+        )
+        self._launch(followup, request)
 
     def _launch(
         self,
@@ -641,6 +797,9 @@ class ToolService:
                     intake.subject_id,
                     intake.object_id,
                     command,
+                    kind=kind,
+                    need=request.need or intake.need,
+                    params=request.params,
                     exclude_plan_id=plan_id,
                 )
                 if existing is not None:
@@ -1164,7 +1323,7 @@ class ToolService:
         summary_limit = (
             PROGRESS_NOTE_MAX_CHARS
             if has_progress and not terminal
-            else NOTE_MAX_CHARS
+            else None
         )
         skill = self.wrap_skill
         if skill is None:
@@ -1194,7 +1353,6 @@ class ToolService:
                 summary=text,
                 wrap_meta={"source": "fallback"},
                 terminal=True,
-                summary_limit=NOTE_MAX_CHARS,
             )
             return
         summary = (result.summary or "").strip()
@@ -1451,32 +1609,21 @@ class ToolService:
                 None,
             )
             if last_result is not None:
-                # 优先从进度事实里拼实质输出（汇率行 / 检索 JSON），
-                # 不要用探路目录清单，也不要一直留着「还在查询中」的中途句。
-                from jshi.tool.pi_engine import (
-                    _compact_shell_summary,
-                    _shell_output_is_exploration,
-                )
+                # 有终态正文时保留完整内容；旧记录只有短摘要时，才从有效进度恢复。
+                text = _terminal_fallback_summary(last_result)
+                if not last_result.result:
+                    from jshi.tool.pi_engine import _shell_output_is_exploration
 
-                parts: list[str] = []
-                for item in hang.feedback:
-                    if item.kind is not FeedbackKind.PROGRESS or item.progress is None:
-                        continue
-                    partial = (item.progress.partial or "").strip()
-                    if not partial or _shell_output_is_exploration(partial):
-                        continue
-                    if partial not in parts:
-                        parts.append(partial)
-                text = _compact_shell_summary(parts, limit=1500) if parts else ""
-                if not text:
-                    text = (hang.summary or "").strip()
-                if not text or _shell_output_is_exploration(text):
-                    text = (
-                        last_result.summary
-                        or last_result.error
-                        or "工具已跑完"
-                    ).strip()
-                    if _shell_output_is_exploration(text):
+                    parts: list[str] = []
+                    for item in hang.feedback:
+                        if item.kind is not FeedbackKind.PROGRESS or item.progress is None:
+                            continue
+                        partial = (item.progress.partial or "").strip()
+                        if partial and not _shell_output_is_exploration(partial) and partial not in parts:
+                            parts.append(partial)
+                    if parts:
+                        text = "\n".join(parts)
+                    elif _shell_output_is_exploration(text):
                         text = "工具已跑完，终态摘要不完整"
                 self.hang_store.set_wrap(
                     hang.task_id,
@@ -1501,6 +1648,7 @@ class ToolService:
         subject_id: str,
         object_id: str,
         *,
+        query: str = "",
         now: datetime | None = None,
         ttl_s: float = HOT_STATE_TTL_S,
     ) -> tuple[dict[str, Any], ...]:
@@ -1508,7 +1656,8 @@ class ToolService:
 
         含：策划中（intake received、205 在跑）、使用中记挂、近时终态、
         近时取消、策划失败。已被 ``invalidate`` 的不出现。
-        近期完成按工具名归并：同一工具只保留最后一次成功与最后一次失败。
+        相同需求和参数的重复执行归并；未展示结果保留到实际送入 05。
+        旧结果只在当前问题再次相关时装入，账本本身不丢。
         组装前先 ``reap_stale``，清掉超时策划与僵尸 open。
         """
         stamp = now or utc_now()
@@ -1539,7 +1688,7 @@ class ToolService:
             if record.status != "failed":
                 continue
             age = (stamp - record.updated_at).total_seconds()
-            if age > ttl_s:
+            if age > ttl_s and record.delivered_at is not None:
                 continue
             error = (record.plan_error or "策划失败").strip()
             if self._is_dedupe_plan_error(error):
@@ -1560,6 +1709,8 @@ class ToolService:
                     "tool_name": name,
                     "tool_description": desc,
                     "used_at": record.updated_at,
+                    "updated_at": record.updated_at,
+                    "delivered_at": record.delivered_at,
                     "final_result": error,
                 }
             )
@@ -1586,7 +1737,7 @@ class ToolService:
 
             if hang.status == "cancelled":
                 age = (stamp - hang.updated_at).total_seconds()
-                if age > ttl_s:
+                if age > ttl_s and hang.delivered_at is not None:
                     continue
                 final = "已取消，不再执行"
                 if "超时" in str((hang.meta or {}).get("cancel_reason") or ""):
@@ -1601,6 +1752,8 @@ class ToolService:
                         "tool_name": name or hang.command or "工具",
                         "tool_description": desc,
                         "used_at": used_at,
+                        "updated_at": hang.updated_at,
+                        "delivered_at": hang.delivered_at,
                         "final_result": final,
                     }
                 )
@@ -1627,8 +1780,6 @@ class ToolService:
             if hang.status != "notified":
                 continue
             age = (stamp - hang.updated_at).total_seconds()
-            if age > ttl_s:
-                continue
             phase = hang_hot_phase(hang)
             entries.append(
                 {
@@ -1639,16 +1790,17 @@ class ToolService:
                     "tool_name": name or hang.command or "工具",
                     "tool_description": desc,
                     "used_at": used_at,
+                    "updated_at": hang.updated_at,
+                    "delivered_at": hang.delivered_at,
+                    "params": hang.params,
                     "final_result": (hang.summary or "").strip(),
                 }
             )
 
         entries = dedupe_recent_tool_entries(entries)
-        entries.sort(
-            key=lambda item: item.get("used_at") or stamp,
-            reverse=True,
+        return select_tool_related_entries(
+            entries, query=query, now=stamp, ttl_s=ttl_s
         )
-        return tuple(entries[:HOT_STATE_CAP])
 
     def invalidate(
         self, item_id: str, *, reason: str = ""
@@ -1682,13 +1834,14 @@ class ToolService:
         subject_id: str,
         object_id: str,
         *,
+        query: str = "",
         now: datetime | None = None,
         ttl_s: float = HOT_STATE_TTL_S,
     ) -> str:
         """该对象【工具相关】全文；空则 ``\"\"``。"""
         return format_tool_related(
             self.list_tool_related_entries(
-                subject_id, object_id, now=now, ttl_s=ttl_s
+                subject_id, object_id, query=query, now=now, ttl_s=ttl_s
             ),
             now=now,
         )
@@ -1702,18 +1855,36 @@ class ToolService:
         return tuple(pending)
 
     def mark_main_seen(
-        self, subject_id: str, object_id: str
+        self, subject_id: str, object_id: str, *, item_ids: Sequence[str] | None = None
     ) -> tuple[str, ...]:
         """本轮【工具相关】已交给 05：标记可见句已送入主流程，不写片场。"""
         delivered: list[str] = []
-        for item in self.pending_for_scene(subject_id, object_id)[:SCENE_BLOCK_CAP]:
-            if item.kind == "plan_failed":
-                marked = self.intake_store.set_delivered(item.id, block="")
+        if item_ids is None:
+            ids = tuple(item.id for item in self.pending_for_scene(subject_id, object_id)[:SCENE_BLOCK_CAP])
+        else:
+            ids = tuple(dict.fromkeys(item_ids))
+        for item_id in ids:
+            intake = self.intake_store.get(item_id)
+            hang = self.hang_store.get(item_id)
+            if intake is not None and intake.status == "failed":
+                if intake.subject_id != subject_id or intake.object_id != object_id:
+                    continue
+                if intake.delivered_at is not None:
+                    continue
+                marked = self.intake_store.set_delivered(item_id, block="")
+            elif hang is not None:
+                if hang.subject_id != subject_id or hang.object_id != object_id:
+                    continue
+                if hang.delivered_at is not None:
+                    continue
+                if not (hang.summary or "").strip():
+                    continue
+                marked = self.hang_store.set_delivered(item_id, block="")
             else:
-                marked = self.hang_store.set_delivered(item.id, block="")
+                continue
             if marked is None:
                 continue
-            delivered.append(item.id)
+            delivered.append(item_id)
         return tuple(delivered)
 
     def deliver_to_scene(

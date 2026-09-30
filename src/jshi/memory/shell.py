@@ -54,3 +54,7 @@ class MemoryShell:
 
     def ingest_batch(self, batch: MemoryBatch) -> BackendIngestResult:
         return self._backend.ingest_batch(batch)
+
+    def portrait(self, subject_id: str, object_id: str) -> dict | None:
+        """读取后端已形成的人物描述肖像。"""
+        return self._backend.portrait(subject_id, object_id)
