@@ -396,9 +396,11 @@ class ToolSource:
         speaker = ctx.speaker
         if speaker is None or not speaker.object_id:
             return LoadResult()
-        items = self._service.list_tool_related_entries(
-            ctx.subject_id, speaker.object_id, query=ctx.input_text
-        )
+        items = ctx.tool_entries
+        if items is None:
+            items = self._service.list_tool_related_entries(
+                ctx.subject_id, speaker.object_id, query=ctx.input_text
+            )
         fragments = tuple(
             AssemblyFragment(
                 source="tool",

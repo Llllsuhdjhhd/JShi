@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -43,16 +44,28 @@ from jshi.tool.plan import ToolPlan, ToolStep
 class _PlanModel:
     name = "plan-model"
 
-    def __init__(self, plan: ResponsePlan, tool_intent: ToolUseIntent | None = None) -> None:
+    def __init__(
+        self,
+        plan: ResponsePlan,
+        tool_intent: ToolUseIntent | None = None,
+        *,
+        consume: bool = True,
+    ) -> None:
         self._plan = plan
         self._tool_intent = tool_intent
+        self._consume = consume
 
     def generate(self, request: ModelRequest) -> ModelResponse:
-        del request
+        # 模拟 05：把本轮【工具相关】里看到的任务ID都标为已消化。
+        consumed: tuple[str, ...] = ()
+        if self._consume:
+            text = (request.tool_input or "") + (request.persona_user_text or "")
+            consumed = tuple(re.findall(r"任务ID：(\S+)", text))
         return ModelResponse(
             model=self.name,
             response_plan=self._plan,
             tool_intent=self._tool_intent,
+            tool_consumed=consumed,
         )
 
 
@@ -2039,6 +2052,26 @@ def test_cli_turn_view_reads_main_flow_tool_intent(tmp_path: Path) -> None:
     assert "use_tool=true" in out
 
 
+def test_unconsumed_tool_item_stays_new_and_gets_no_write_back(tmp_path: Path) -> None:
+    process, _repository, store, service, record = _persona_runtime(tmp_path)
+    process.cognition = _PlanModel(
+        ResponsePlan(
+            mode="respond",
+            reason="先谈别的",
+            items=(ResponseItem(channel="verbal", text="我们先说别的。"),),
+        ),
+        consume=False,
+    )
+    process.experience("stone", "聊点别的", object_ref="user")
+    service.drain_for_tests()
+    done = store.get(record.task_id)
+    assert done is not None
+    assert done.delivered_at is None
+    assert done.responses == ()
+    again = service.list_tool_related_entries("stone", "OBJ-USER", query="还是别的")
+    assert record.task_id in {item["id"] for item in again}
+
+
 def test_persona_write_back_keeps_turn_when_silent(tmp_path: Path) -> None:
     """没开口（think）也留一条轮次。"""
     process, _repository, store, service, record = _persona_runtime(tmp_path)
@@ -2096,9 +2129,8 @@ def test_persona_round_marks_plan_failure_seen(tmp_path: Path) -> None:
     zone = process.zone_store.get("stone")
     assert not any(text.startswith("（我知道）") for text in zone)
     assert service.list_visible("stone", "OBJ-USER") == ()
-    related = service.format_tool_related_block("stone", "OBJ-USER")
-    assert "【工具相关】" in related
-    assert "失败" in related
+    # 05 已标明消化：之后不再按时间自动重现，只在话题相关时召回。
+    assert service.format_tool_related_block("stone", "OBJ-USER") == ""
 
 
 def test_plan_instruction_forbids_internal_names_in_failure_line() -> None:
@@ -2853,7 +2885,9 @@ def test_reap_stale_planning_and_open_unblocks_retry(tmp_path: Path) -> None:
         updated_at=utc_now() - timedelta(hours=2),
     )
 
-    text = service.format_tool_related_block("stone", "OBJ-A")
+    assert "僵尸在办" in service.format_tool_related_block("stone", "OBJ-A")
+    assert hang.get(zombie.task_id).status == "open"  # 读取不清理
+    text = service.format_tool_related_block("stone", "OBJ-A", reap=True)
     assert hang.get(zombie.task_id).status == "cancelled"
     done_plan = service.intake_store.get(stale_plan.intake_id)
     assert done_plan is not None and done_plan.status == "failed"
@@ -3102,7 +3136,7 @@ def test_recent_tool_related_keeps_distinct_needs_for_same_tool(
         hang._records[rec.task_id] = replace(
             hang.get(rec.task_id),
             updated_at=when,
-            delivered_at=when,
+            delivered_at=None,
         )
     fail = hang.create(
         subject_id="stone",
@@ -3209,7 +3243,7 @@ def test_tool_context_rotates_overflow_and_marks_only_selected_ids(tmp_path: Pat
     )
 
 
-def test_oversized_single_result_is_not_cut_to_fit_context_budget(tmp_path: Path) -> None:
+def test_unconsumed_results_are_sent_whole_without_char_budget(tmp_path: Path) -> None:
     hang = HangStore(tmp_path / "hang.jsonl")
     service = ToolService(
         hang,
@@ -3227,7 +3261,7 @@ def test_oversized_single_result_is_not_cut_to_fit_context_budget(tmp_path: Path
     hang.set_wrap(other.task_id, visible=True, summary="另一项结果", terminal=True)
 
     selected = service.list_tool_related_entries("stone", "OBJ-A")
-    assert len(selected) == 1
+    assert [item["id"] for item in selected] == [record.task_id, other.task_id]
     assert selected[0]["final_result"] == full
     assert len(hang.get(record.task_id).summary) == len(full)
 

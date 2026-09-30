@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import threading
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -25,7 +27,13 @@ from .contract import (
 )
 from .stage import ToolStageEvent
 
+logger = logging.getLogger(__name__)
+
 OPEN_LIST_CAP = 8
+# 账本文件上限；超过一半就压缩成每本一行，压缩后仍超上限则丢最旧的已结束记挂。
+HANG_FILE_MAX_BYTES = 300 * 1024 * 1024
+# 每本记挂保留的 05 回应条数（只留最近的）。
+HANG_MAX_RESPONSES = 20
 NOTE_MAX_CHARS = 80
 PROGRESS_NOTE_MAX_CHARS = 30
 NEED_MIN_CHARS = 2
@@ -68,7 +76,9 @@ class HangRecord:
     delivered_block: str = ""
     # 05 对这一次工具反馈的回应（回写，只增）：{"turn", "mode", "reply", "action", "text"}。
     responses: tuple[Mapping[str, Any], ...] = ()
+    # 最近一次工具侧变化（反馈、阶段、包装、注销）；回写与送达标记不改它。
     updated_at: datetime = field(default_factory=utc_now)
+    created_at: datetime = field(default_factory=utc_now)
 
 
 def truncate_note(need: str, limit: int = NOTE_MAX_CHARS) -> str:
@@ -266,6 +276,7 @@ def _record_to_dict(record: HangRecord) -> dict[str, Any]:
         "delivered_block": record.delivered_block,
         "responses": [dict(item) for item in record.responses],
         "updated_at": record.updated_at.isoformat(),
+        "created_at": record.created_at.isoformat(),
     }
 
 
@@ -331,17 +342,44 @@ def _record_from_dict(data: Mapping[str, Any]) -> HangRecord:
             if isinstance(item, Mapping)
         ),
         updated_at=_dt(data.get("updated_at")),
+        created_at=_created_at(data),
     )
+
+
+def _created_at(data: Mapping[str, Any]) -> datetime:
+    """旧行没有 created_at：取最早的阶段/反馈时间，再退到 updated_at。"""
+    if str(data.get("created_at") or "").strip():
+        return _dt(data["created_at"])
+    stamps = [
+        _dt(item.get(field_name))
+        for key, field_name in (("stages", "created_at"), ("feedback", "at"))
+        for item in (data.get(key) or ())
+        if isinstance(item, Mapping) and str(item.get(field_name) or "").strip()
+    ]
+    return min(stamps) if stamps else _dt(data.get("updated_at"))
 
 
 class HangStore:
     """jsonl 记挂账本。崩溃可丢进行中的子进程，账本行仍在。"""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        max_bytes: int = HANG_FILE_MAX_BYTES,
+        max_responses: int = HANG_MAX_RESPONSES,
+    ) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
         self._records: dict[str, HangRecord] = {}
+        self._max_bytes = max(1, int(max_bytes))
+        self._max_responses = max(1, int(max_responses))
+        self._lines = 0
+        self._bytes = 0
         self._load()
+        if self._needs_compaction():
+            with self._lock:
+                self._compact()
 
     def _load(self) -> None:
         if not self.path.is_file():
@@ -351,6 +389,7 @@ class HangStore:
             raw = line.strip()
             if not raw:
                 continue
+            self._lines += 1
             try:
                 data = json.loads(raw)
             except ValueError:
@@ -359,12 +398,62 @@ class HangStore:
                 continue
             record = _record_from_dict(data)
             self._records[record.task_id] = record
+        self._bytes = self.path.stat().st_size
 
     def _append(self, record: HangRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(_record_to_dict(record), ensure_ascii=False) + "\n"
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line)
+        self._lines += 1
+        self._bytes += len(line.encode("utf-8"))
+        if self._needs_compaction():
+            self._compact()
+
+    def _needs_compaction(self) -> bool:
+        """旧版本行远多于现存记录，或文件超过上限。"""
+        stale = self._lines - len(self._records)
+        return stale > max(64, 2 * len(self._records)) or self._bytes > self._max_bytes
+
+    def _compact(self) -> None:
+        """只留每本记挂的最新一行，原子替换。
+
+        文件超过上限时，再丢最旧的已结束记挂，压到上限的一半以下，
+        免得每次追加都重新压缩。调用方持锁。
+        """
+        lines = {
+            task_id: json.dumps(_record_to_dict(record), ensure_ascii=False) + "\n"
+            for task_id, record in self._records.items()
+        }
+        sizes = {task_id: len(text.encode("utf-8")) for task_id, text in lines.items()}
+        total = sum(sizes.values())
+        if self._bytes > self._max_bytes or total > self._max_bytes:
+            target = self._max_bytes // 2
+            ended = sorted(
+                (r for r in self._records.values() if r.status != "open"),
+                key=lambda r: r.updated_at,
+            )
+            for record in ended:
+                if total <= target:
+                    break
+                total -= sizes.pop(record.task_id)
+                lines.pop(record.task_id)
+        ordered = sorted(lines, key=lambda task_id: self._records[task_id].updated_at)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.path.with_name(self.path.name + ".compact")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                for task_id in ordered:
+                    handle.write(lines[task_id])
+            os.replace(temp, self.path)
+        except OSError:
+            logger.warning("记挂账本压缩失败，继续追加：%s", self.path, exc_info=True)
+            temp.unlink(missing_ok=True)
+            return
+        for task_id in set(self._records) - set(lines):
+            self._records.pop(task_id, None)
+        self._lines = len(ordered)
+        self._bytes = total
 
     def get(self, task_id: str) -> HangRecord | None:
         with self._lock:
@@ -417,8 +506,8 @@ class HangStore:
             summary="",
             wrap_meta={},
             meta=dict(meta or {}),
-            updated_at=utc_now(),
         )
+        record = replace(record, created_at=record.updated_at)
         with self._lock:
             self._records[record.task_id] = record
             self._append(record)
@@ -530,7 +619,6 @@ class HangStore:
                 record,
                 delivered_at=utc_now(),
                 delivered_block=text or record.delivered_block,
-                updated_at=utc_now(),
             )
             self._records[task_id] = updated
             self._append(updated)
@@ -542,11 +630,9 @@ class HangStore:
             record = self._records.get(task_id)
             if record is None:
                 return None
-            updated = replace(
-                record,
-                delivered_at=None,
-                updated_at=utc_now(),
-            )
+            if record.delivered_at is None:
+                return record
+            updated = replace(record, delivered_at=None)
             self._records[task_id] = updated
             self._append(updated)
             return updated
@@ -559,8 +645,8 @@ class HangStore:
             record = self._records.get(task_id)
             if record is None:
                 return None
-            merged = record.responses + (dict(response),)
-            updated = replace(record, responses=merged, updated_at=utc_now())
+            merged = (record.responses + (dict(response),))[-self._max_responses :]
+            updated = replace(record, responses=merged)
             self._records[task_id] = updated
             self._append(updated)
             return updated

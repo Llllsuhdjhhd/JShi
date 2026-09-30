@@ -51,6 +51,8 @@ class ModelRequest:
     tool_input: str = ""
     # 工具热状态（进行中 + 近时终态）；空则本路不出现。供 05 判断是否再开工具。
     tool_hot_state: str = ""
+    # 记忆游标之后、尚未写入 09 的原话；空则本路不出现。
+    unsaved_dialogue: str = ""
 
 
 @dataclass(frozen=True)
@@ -214,6 +216,8 @@ class ModelResponse:
     raw_text: str = ""
     # 可选：本轮要用工具的指示。空 = 不用。
     tool_intent: ToolUseIntent | None = None
+    # 本轮【工具相关】里已用上或判定不必再提的任务ID；只有这些标记为已送达并回写回应。
+    tool_consumed: tuple[str, ...] = ()
 
     @property
     def text(self) -> str:
@@ -247,6 +251,7 @@ class ModelResponse:
         value_narration: str = "",
         raw_text: str = "",
         tool_intent: ToolUseIntent | None = None,
+        tool_consumed: tuple[str, ...] = (),
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
     ) -> None:
@@ -283,6 +288,11 @@ class ModelResponse:
         object.__setattr__(self, "value_narration", value_narration or "")
         object.__setattr__(self, "raw_text", raw_text or "")
         object.__setattr__(self, "tool_intent", tool_intent)
+        object.__setattr__(
+            self,
+            "tool_consumed",
+            tuple(dict.fromkeys(str(i).strip() for i in tool_consumed if str(i).strip())),
+        )
 
     def with_raw(self, raw_text: str) -> ModelResponse:
         """把解析前的原文挂到这份响应上（同一对象，不另造一份）。"""

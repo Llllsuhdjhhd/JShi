@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import queue
@@ -25,6 +26,13 @@ from .port import RecalledFragment
 logger = logging.getLogger("jshi.memory")
 
 _DEFAULT_EVENT_TYPE = "memory"
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
 
 
 class RemsUnavailableError(RuntimeError):
@@ -362,6 +370,9 @@ class Rems3MemoryBackend:
         self._experience_refresh_lock = threading.Lock()
         self._experience_refresh_queued: set[tuple[str, str]] = set()
         self._experience_refresh_worker: threading.Thread | None = None
+        self._experience_refresh_stopping = False
+        self._experience_exit_hook = False
+        self._experience_exit_wait_s = _env_float("JSHI_EXPERIENCE_EXIT_WAIT_S", 30.0)
 
     def _to_engine_batch(self, payload: Mapping[str, Any]) -> Any:
         experiences_raw = payload["experiences"]
@@ -400,19 +411,37 @@ class Rems3MemoryBackend:
             self._experience_refresh_queue.put(key)
             worker = self._experience_refresh_worker
             if worker is None or not worker.is_alive():
+                # 守护线程不拖住退出；退出时限时等待当前这一项做完。
+                # 没做完的对象不会丢：待整理白描仍在库里，下次该人入库时一并吸收。
                 worker = threading.Thread(
                     target=self._refresh_experience_loop,
                     name="jshi-person-experience",
-                    # 单次 experience 命令退出前也要完成已接收的白描维护。
-                    # 回复已返回，等待只发生在进程退出阶段。
-                    daemon=False,
+                    daemon=True,
                 )
                 self._experience_refresh_worker = worker
+                if not self._experience_exit_hook:
+                    atexit.register(self._wait_experience_refresh_on_exit)
+                    self._experience_exit_hook = True
                 worker.start()
+
+    def _wait_experience_refresh_on_exit(self) -> None:
+        self._experience_refresh_stopping = True
+        worker = self._experience_refresh_worker
+        if worker is None or not worker.is_alive():
+            return
+        worker.join(self._experience_exit_wait_s)
+        if worker.is_alive():
+            logger.warning(
+                "退出时人物经验维护未在 %.0f 秒内完成，剩余部分留待下次入库",
+                self._experience_exit_wait_s,
+            )
 
     def _refresh_experience_loop(self) -> None:
         while True:
             with self._experience_refresh_lock:
+                if self._experience_refresh_stopping:
+                    self._experience_refresh_worker = None
+                    return
                 try:
                     subject_id, object_id = self._experience_refresh_queue.get_nowait()
                 except queue.Empty:

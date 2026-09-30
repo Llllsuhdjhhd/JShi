@@ -139,6 +139,7 @@ COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
         },
         "use_tool": {"type": "boolean"},
         "need": {"type": "string"},
+        "tool_consumed": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -231,6 +232,15 @@ def _parse_tool_intent(data: Mapping[str, Any]) -> ToolUseIntent | None:
     return None
 
 
+def _parse_tool_consumed(data: Mapping[str, Any]) -> tuple[str, ...]:
+    raw = data.get("tool_consumed")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(str(item).strip() for item in raw if str(item or "").strip())
+
+
 def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
     """把模型 JSON 映射为 ``ModelResponse``（各用途段）；非法枚举与通道丢弃或降级。"""
     plan_raw = data.get("response_plan") if isinstance(data.get("response_plan"), dict) else {}
@@ -312,6 +322,7 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         importance_ranking=importance_ranking,
         memory_ratings=_parse_memory_ratings(data),
         tool_intent=_parse_tool_intent(data),
+        tool_consumed=_parse_tool_consumed(data),
     )
 
 
@@ -343,6 +354,7 @@ def _bind_speaker_fields(response: ModelResponse, request: ModelRequest) -> Mode
         memory_ratings=response.memory_ratings,
         rewritten_context=response.rewritten_context,
         tool_intent=response.tool_intent,
+        tool_consumed=response.tool_consumed,
     )
 
 
@@ -422,6 +434,14 @@ def salvage_persona_json(text: str) -> dict[str, Any] | None:
         return None
     if mode not in _RESPONSE_MODES:
         mode = "respond" if reply else "think"
+    consumed: list[Any] = []
+    found = re.search(r'"tool_consumed"\s*:\s*(\[[^\]]*\])', raw, re.IGNORECASE)
+    if found:
+        try:
+            parsed = json.loads(found.group(1))
+        except (ValueError, json.JSONDecodeError):
+            parsed = []
+        consumed = parsed if isinstance(parsed, list) else []
     return {
         "mode": mode,
         "action": action,
@@ -429,6 +449,7 @@ def salvage_persona_json(text: str) -> dict[str, Any] | None:
         "unsaid": unsaid,
         "reason": reason or "persona_partial_json",
         "edit": edit,
+        "tool_consumed": consumed,
     }
 
 
@@ -462,6 +483,7 @@ def _persona_to_model_response(
             mode=mode, reason=reason, items=tuple(items), unsaid=unsaid
         ),
         tool_intent=_parse_tool_intent(data),
+        tool_consumed=_parse_tool_consumed(data),
     )
 
 

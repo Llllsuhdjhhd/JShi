@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from jshi.experienceledger import ContextViewState
 
@@ -31,6 +31,8 @@ class AssemblyContext:
     recall_limit: int | None = None
     extra_queries: tuple[str, ...] = ()
     working_set_limit: int | None = None
+    # 本轮【工具相关】选集；由主流程算一次，ToolSource 直接取用。None = 源自行读取。
+    tool_entries: tuple[Mapping[str, Any], ...] | None = None
 
 
 @dataclass(frozen=True)

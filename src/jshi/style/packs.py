@@ -132,7 +132,9 @@ need 不是工具名、不是参数、不是模板名。不要填 template / par
 例子1：询问天气，对象几分钟前询问过，你也回答他答案，他再次询问，你可以直接使用回忆，这不会影响天气的准确性。
 例子2：本轮天气查询失败，但对象又询问机票，不得因为天气查询失败而退出不能询问机票。
 例子3：关注工具请求的时间——昨天的请求结果（失败、或某些信息是否已过时）是否还适用于今天。昨天天气工具请求失败了，不代表过了这段时间还是不行。要根据时间合理推算时效性。
-不需要工具则不要这两个键。"""
+不需要工具则不要这两个键。
+
+消化标记：【工具相关】每条都有「任务ID」。本轮已在 reply 里用上、已写进 unsaid 暂留、或判断已不必再告诉对方的条目，把它的任务ID列进 "tool_consumed"（字符串数组）。没有列入的条目，下一轮会再次作为未消化的材料出现。本轮没有【工具相关】或一条也没处理，写 [] 或不写这个键。"""
 
 PERSONA_TOOL_NOTE = TOOL_TASK_NOTE
 
@@ -244,6 +246,7 @@ SUXIPO_SCHEMA: Mapping = {
         "reason": {"type": "string"},
         "use_tool": {"type": "boolean"},
         "need": {"type": "string"},
+        "tool_consumed": {"type": "array", "items": {"type": "string"}},
         "edit": {
             "type": "array",
             "items": {
@@ -358,7 +361,8 @@ def _persona_reply_instruction(style_note: str, *, task1: str) -> str:
         + "\n\n【文风】\n"
         + style_note
         + "\n\n【你的输出】\n"
-        "只输出一个 JSON 对象：任务1 的各项；任务2 成立时，把 use_tool / need 两个键并进同一对象。\n"
+        "只输出一个 JSON 对象：任务1 的各项；任务2 成立时，把 use_tool / need 两个键并进同一对象；"
+        "本轮处理了【工具相关】里的条目时，加 tool_consumed。\n"
         "不用工具：{\"mode\":\"…\",\"reply\":\"…\",\"action\":\"…\",\"unsaid\":\"…\",\"reason\":\"…\"}\n"
         "要用工具：{\"mode\":\"respond\",\"reply\":\"…\",\"action\":\"…\",\"unsaid\":\"…\",\"reason\":\"…\",\"use_tool\":true,\"need\":\"…\"}\n"
         "- action：只写给执行层的短意图；没有动作必须写「无动作」。不要把动作写进 reply。\n"

@@ -11,6 +11,7 @@ __pycache__/
 .jshi/rems/rems.db-wal
 .jshi/rems/rems.db-shm
 .jshi/rems/qdrant/.lock
+.jshi/locomo-plus/
 .jshi-*/
 .jshi-try/
 .env

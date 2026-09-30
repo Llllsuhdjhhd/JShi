@@ -42,6 +42,12 @@ SUXIPO_ZONE_CHARS: int = 2500
 # 人格「价值叙述」字数上限：boot 时单独生成、独立于片场预算。
 VALUE_NARRATION_CHARS: int = 300
 
+# 09 记忆按量投递：尚未存入记忆的原话累计到这个字数就投递。
+MEMORY_FLUSH_CHARS: int = 3000
+# 05 里「尚未存入记忆的近期原话」上限：取投递阈值的 2 倍，
+# 投递进行中继续累积的原话仍能完整留在上下文里。
+UNSAVED_DIALOGUE_RATIO: int = 2
+
 
 def _base_window(context_window: int | None = None) -> int:
     return (
@@ -74,6 +80,16 @@ def value_narration_chars(context_window: int | None = None) -> int:
     """人格「价值叙述」字数上限：boot 时单独生成，独立于片场预算。"""
     del context_window
     return max(1, int(VALUE_NARRATION_CHARS))
+
+
+def memory_flush_chars() -> int:
+    """09 按量投递的字数阈值，默认 3000 字。"""
+    return max(1, int(MEMORY_FLUSH_CHARS))
+
+
+def unsaved_dialogue_chars() -> int:
+    """05「尚未存入记忆的近期原话」字数上限：投递阈值 × 2。"""
+    return memory_flush_chars() * max(1, int(UNSAVED_DIALOGUE_RATIO))
 
 
 def value_load_char_budget(active_zone: int | None = None) -> int:
@@ -140,13 +156,17 @@ __all__ = [
     "INTROSPECTION_SCENE_MAX_SEGMENTS",
     "INTROSPECTION_SCENE_WINDOW_SECONDS",
     "INTROSPECTION_TIMEOUT_SECONDS",
+    "MEMORY_FLUSH_CHARS",
     "SUXIPO_ZONE_CHARS",
+    "UNSAVED_DIALOGUE_RATIO",
     "VALUE_CATALOG_REFRESH_SECONDS",
     "VALUE_LOAD_RATIO",
     "VALUE_NARRATION_CHARS",
     "WORKING_SET_LIMIT_CHARS",
     "active_zone_chars",
+    "memory_flush_chars",
     "suxipo_zone_chars",
+    "unsaved_dialogue_chars",
     "value_narration_chars",
     "value_load_char_budget",
     "working_set_limit",

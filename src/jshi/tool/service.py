@@ -78,8 +78,55 @@ SCENE_BLOCK_PREFIX = "（我知道）"
 HOT_STATE_TTL_S = 3600
 # 策划中（intake received、尚无记挂）：超过此时长视为卡死，自动标失败。
 PLANNING_TTL_S = 300
+# 使用中记挂：引擎多久没有进度就当作中断；另有从建档算起的总时长上限。
+OPEN_IDLE_TTL_S = HOT_STATE_TTL_S
+OPEN_MAX_LIFETIME_S = 24 * 3600
 HOT_STATE_CAP = 12
+# 未消化结果：05 没有标明已消化时每轮再送；超过这个时长后只按话题召回。
+UNCONSUMED_TTL_S = 24 * 3600
+# 按话题从已消化旧结果里召回：至少命中几个不同的实词、最多几条、合计多少字。
+# 字数只约束这些可有可无的旧结果；未消化的新结果与使用中的条目整条送入，不按字数截。
+RELEVANT_MIN_TERMS = 2
+RELEVANT_CAP = 3
 TOOL_RELATED_CHARS = 8000
+# 话题词里不算实词的字：代词、虚词、泛用动词。含这些字的双字组不参与匹配。
+_TOPIC_STOP_CHARS = frozenset(
+    "的了吗呢吧啊呀嘛哦哈么着过得地和与及或而且就都也还再又才只很太更最"
+    "我你您他她它们咱这那哪谁啥什怎样么些个位种件次回下上里中外前后来去"
+    "是在有没不无别把被给让叫对向从到于为以所之其可能会要想该应请帮说讲"
+    "看查找问告诉知道一二两几多少点儿吧好行嗯呃喂"
+)
+_TOPIC_STOP_WORDS = frozenset(
+    {"the", "a", "an", "is", "are", "to", "of", "and", "or", "in", "on", "for",
+     "it", "me", "my", "you", "your", "what", "how", "can", "please", "again"}
+)
+
+
+def topic_terms(text: str) -> frozenset[str]:
+    """话题匹配用的实词：去掉单字与含虚词/代词的双字组。"""
+    from .discovery import tokenize
+
+    terms: set[str] = set()
+    for term in tokenize(text):
+        if term.isascii():
+            if len(term) >= 3 and term not in _TOPIC_STOP_WORDS:
+                terms.add(term)
+            continue
+        if len(term) < 2 or any(char in _TOPIC_STOP_CHARS for char in term):
+            continue
+        terms.add(term)
+    return frozenset(terms)
+
+
+def _topic_match(hits: frozenset[str], need_hits: int) -> bool:
+    """命中词数够，且汉字双字组要覆盖至少 3 个不同的字（「天天」「天气」只算一个词）。"""
+    if len(hits) < need_hits or not hits:
+        return False
+    if need_hits < RELEVANT_MIN_TERMS:
+        return True
+    ascii_hits = sum(1 for term in hits if term.isascii())
+    chars = {char for term in hits if not term.isascii() for char in term}
+    return ascii_hits >= RELEVANT_MIN_TERMS or len(chars) + 2 * ascii_hits >= 3
 _HOT_FAILED_STATUSES = frozenset(
     {
         ToolStatus.FAILED,
@@ -172,17 +219,19 @@ def select_tool_related_entries(
     now: datetime,
     ttl_s: float,
 ) -> tuple[dict[str, Any], ...]:
-    """从原记挂账本挑本轮上下文：未展示优先，旧结果按话题召回。
+    """从原记挂账本挑本轮上下文。
 
-    全文保留在账本；这里按条数和合计长度选择整条，不截断单条结果。
+    - 使用中的条目与 05 尚未标明已消化的结果：整条送入，不按字数截。
+    - 已消化的旧结果：只在当前话题命中至少 ``RELEVANT_MIN_TERMS`` 个实词时召回，
+      最多 ``RELEVANT_CAP`` 条、合计不超过 ``TOOL_RELATED_CHARS`` 字。
+    ``ttl_s`` 保留作兼容参数；已消化结果不再按时间自动重现。
     """
-    from .discovery import tokenize
-
-    terms = set(tokenize(query))
+    del ttl_s
+    terms = topic_terms(query)
+    need_hits = min(RELEVANT_MIN_TERMS, len(terms))
     unseen: list[dict[str, Any]] = []
     relevant: list[tuple[int, dict[str, Any]]] = []
     active: list[dict[str, Any]] = []
-    recent: list[dict[str, Any]] = []
     for raw in entries:
         item = dict(raw)
         if item.get("section") == "in_use":
@@ -190,41 +239,37 @@ def select_tool_related_entries(
             continue
         if item.get("section") != "recent":
             continue
-        if item.get("delivered_at") is None:
+        result_at = item.get("updated_at") or _entry_used_at(item)
+        fresh = (now - result_at).total_seconds() <= UNCONSUMED_TTL_S
+        if item.get("delivered_at") is None and fresh:
             unseen.append(item)
             continue
+        if not need_hits:
+            continue
         basis = " ".join(
-            str(item.get(key) or "")
-            for key in ("need", "tool_name", "tool_description")
-        ) + " " + str(item.get("final_result") or "")[:500]
-        overlap = len(terms.intersection(tokenize(basis))) if terms else 0
-        if overlap:
-            relevant.append((overlap, item))
-        elif (now - (item.get("delivered_at") or item.get("updated_at") or _entry_used_at(item))).total_seconds() <= ttl_s:
-            recent.append(item)
+            str(item.get(key) or "") for key in ("need", "tool_name", "tool_description")
+        )
+        hits = terms & topic_terms(basis)
+        if _topic_match(hits, need_hits):
+            relevant.append((len(hits), item))
 
-    unseen.sort(key=_entry_used_at)  # 老的未展示结果先送，避免一直被新结果挤掉。
+    unseen.sort(key=_entry_used_at)  # 老的未消化结果先送，避免一直被新结果挤掉。
     active.sort(key=_entry_used_at, reverse=True)
     relevant.sort(key=lambda pair: (pair[0], _entry_used_at(pair[1])), reverse=True)
-    recent.sort(key=_entry_used_at, reverse=True)
-    ordered = (
-        unseen[:4]
-        + active[:3]
-        + [item for _score, item in relevant]
-        + recent
-        + unseen[4:]
-        + active[3:]
-    )
     selected: list[dict[str, Any]] = []
+    for item in unseen[:4] + active[:3] + unseen[4:] + active[3:]:
+        if len(selected) >= HOT_STATE_CAP:
+            return tuple(selected)
+        selected.append(item)
     used_chars = 0
-    for item in ordered:
+    for _score, item in relevant[:RELEVANT_CAP]:
         if len(selected) >= HOT_STATE_CAP:
             break
         size = sum(
             len(str(item.get(key) or ""))
-            for key in ("need", "tool_name", "tool_description", "new_info", "final_result")
+            for key in ("need", "tool_name", "tool_description", "final_result")
         )
-        if selected and used_chars + size > TOOL_RELATED_CHARS:
+        if used_chars + size > TOOL_RELATED_CHARS:
             continue
         selected.append(item)
         used_chars += size
@@ -1575,10 +1620,13 @@ class ToolService:
         *,
         now: datetime | None = None,
         planning_ttl_s: float = PLANNING_TTL_S,
-        open_ttl_s: float = HOT_STATE_TTL_S,
+        open_ttl_s: float = OPEN_IDLE_TTL_S,
+        open_max_lifetime_s: float = OPEN_MAX_LIFETIME_S,
     ) -> tuple[int, int]:
-        """清理卡死账本：超时仍 received 的策划、过久无更新的 open 记挂。
+        """清理卡死账本：超时仍 received 的策划、过久无进度或总时长超限的 open 记挂。
 
+        open 的「无进度」按 ``updated_at`` 算；回写回应与送达标记不更新它，
+        只有引擎反馈、阶段、包装会更新。总时长从建档算起。
         返回 ``(策划超时条数, 注销的 open 条数)``。供组装与 intake 前调用，
         避免「半天前还在策划 / 还在使用中」挡住重试。
         """
@@ -1636,8 +1684,9 @@ class ToolService:
                     terminal=True,
                 )
                 continue
-            age = (stamp - hang.updated_at).total_seconds()
-            if age <= open_ttl_s:
+            idle = (stamp - hang.updated_at).total_seconds()
+            lifetime = (stamp - hang.created_at).total_seconds()
+            if idle <= open_ttl_s and lifetime <= open_max_lifetime_s:
                 continue
             if self.cancel(hang.task_id):
                 cancelled_open += 1
@@ -1651,17 +1700,19 @@ class ToolService:
         query: str = "",
         now: datetime | None = None,
         ttl_s: float = HOT_STATE_TTL_S,
+        reap: bool = False,
     ) -> tuple[dict[str, Any], ...]:
         """组装【工具相关】条目（程序侧结构，再交给 format_tool_related）。
 
         含：策划中（intake received、205 在跑）、使用中记挂、近时终态、
         近时取消、策划失败。已被 ``invalidate`` 的不出现。
-        相同需求和参数的重复执行归并；未展示结果保留到实际送入 05。
+        相同需求和参数的重复执行归并；未消化结果保留到 05 标明已消化。
         旧结果只在当前问题再次相关时装入，账本本身不丢。
-        组装前先 ``reap_stale``，清掉超时策划与僵尸 open。
+        默认只读；``reap=True`` 时先 ``reap_stale``（主流程在组装前单独调用）。
         """
         stamp = now or utc_now()
-        self.reap_stale(subject_id, object_id, now=stamp)
+        if reap:
+            self.reap_stale(subject_id, object_id, now=stamp)
         entries: list[dict[str, Any]] = []
 
         for record in self.intake_store.list_for(subject_id, object_id):
@@ -1837,11 +1888,12 @@ class ToolService:
         query: str = "",
         now: datetime | None = None,
         ttl_s: float = HOT_STATE_TTL_S,
+        reap: bool = False,
     ) -> str:
         """该对象【工具相关】全文；空则 ``\"\"``。"""
         return format_tool_related(
             self.list_tool_related_entries(
-                subject_id, object_id, query=query, now=now, ttl_s=ttl_s
+                subject_id, object_id, query=query, now=now, ttl_s=ttl_s, reap=reap
             ),
             now=now,
         )

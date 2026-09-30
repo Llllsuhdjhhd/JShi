@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Mapping
 
-from jshi.core.params import active_zone_chars
+from jshi.core.params import memory_flush_chars
 from jshi.experienceledger import ConsumerKind, ExperienceLedgerPort, OutputKind
 from jshi.memory.contracts import (
     MemoryBatch,
@@ -150,7 +150,7 @@ class InProcessMemoryControl(MemoryControlPort):
         self._subject_name = subject_name
         self._max_retry = max_retry
         self._flush_max_chars = (
-            flush_max_chars if flush_max_chars is not None else active_zone_chars()
+            flush_max_chars if flush_max_chars is not None else memory_flush_chars()
         )
         self._flush_max_segments = flush_max_segments
         self._flush_max_idle_seconds = flush_max_idle_seconds

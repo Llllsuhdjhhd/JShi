@@ -4,7 +4,7 @@ import logging
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, AbstractSet, Callable, Mapping, Sequence
 
 from jshi.activezone import (
     ActiveZonePort,
@@ -18,9 +18,11 @@ from jshi.action import (
 from jshi.activityclose import InProcessActivityClose
 from jshi.responsemark import InProcessResponseMark
 from jshi.experienceledger import (
+    ConsumerKind,
     ContextViewState,
     ExperienceLedgerPort,
     InProcessExperienceLedger,
+    OutputKind,
 )
 from jshi.evaluation import EvaluationEvent, InProcessEvaluationSystem, new_id
 from jshi.assembly import (
@@ -73,6 +75,7 @@ from jshi.models import (
     format_speech_with_action,
     format_unsaid_zone_block,
     format_turn_input,
+    format_unsaved_dialogue,
     STIMULUS_IDLE,
     STIMULUS_SPEECH,
 )
@@ -208,6 +211,8 @@ class AssembledCurrentState:
     tool_input: str = ""
     tool_hot_state: str = ""
     stimulus: str = STIMULUS_SPEECH
+    # 记忆游标之后、尚未写入 09 的原话（不含本轮输入）；现场重写不影响这一段。
+    unsaved_dialogue: str = ""
 
 
 @dataclass(frozen=True)
@@ -415,6 +420,15 @@ class SubjectProcess:
         assembly_speaker = self._assembly_speaker(speaker, object_id)
         strategy = self.recall_strategy.get(subject_id)
         gap = (self.effectiveness.pending_gap_query(subject_id) or "").strip()
+        # 【工具相关】每次组装只选一次：ToolSource 的报告与送进 05 的是同一份。
+        speaker_oid = (
+            assembly_speaker.object_id if assembly_speaker is not None else ""
+        )
+        tool_entries: tuple[Mapping[str, object], ...] = ()
+        if speaker_oid:
+            tool_entries = self.tool_service.list_tool_related_entries(
+                subject_id, speaker_oid, query=input_text
+            )
         ctx = AssemblyContext(
             subject_id=subject_id,
             input_text=input_text,
@@ -423,25 +437,15 @@ class SubjectProcess:
             recall_level=strategy.default_level,
             recall_limit=strategy.limit,
             extra_queries=(gap,) if gap else (),
+            tool_entries=tool_entries,
         )
         working_set = self.assembler.assemble(ctx)
         if gap:
             self.effectiveness.consume_gap(subject_id)
-        # 本轮真正送进 05 的条目以【工具相关】最终选集为准；03 的可见报告
-        # 可能包含因上下文预算、话题筛选而未选中的记挂。
-        self._turn_tool_ids = ()
-        tool_related = ""
-        speaker_oid = (
-            assembly_speaker.object_id if assembly_speaker is not None else ""
-        )
-        if speaker_oid:
-            from jshi.tool.service import format_tool_related
+        from jshi.tool.service import format_tool_related
 
-            tool_entries = self.tool_service.list_tool_related_entries(
-                subject_id, speaker_oid, query=input_text
-            )
-            self._turn_tool_ids = tuple(str(item["id"]) for item in tool_entries)
-            tool_related = format_tool_related(tool_entries)
+        self._turn_tool_ids = tuple(str(item["id"]) for item in tool_entries)
+        tool_related = format_tool_related(tool_entries)
         return AssembledCurrentState(
             input_text=input_text,
             speaker=working_set.speaker,
@@ -456,7 +460,44 @@ class SubjectProcess:
             tool_input=tool_related,
             tool_hot_state="",
             stimulus=stimulus if stimulus == STIMULUS_IDLE else STIMULUS_SPEECH,
+            unsaved_dialogue=self._unsaved_dialogue(
+                subject_id, input_text, shown={sid for sid, _ in view.segment_texts}
+            ),
         )
+
+    def _unsaved_dialogue(
+        self, subject_id: str, input_text: str, *, shown: AbstractSet[str] = frozenset()
+    ) -> str:
+        """09 尚未收下的原话，按时间顺序；超出上限时保留最新的。"""
+        from jshi.core.params import unsaved_dialogue_chars
+        from jshi.memorycontrol.inprocess import _experience_text
+        from jshi.models.prompt import relative_time_label
+
+        ledger = self.activity_ledger
+        cursor = ledger.consumer_cursor(subject_id, ConsumerKind.MEMORY)
+        segments = list(ledger.list_experiences(subject_id, after_sequence=cursor))
+        if (
+            segments
+            and segments[-1].output_kind is OutputKind.EXTERNAL_INPUT
+            and (segments[-1].text_raw or "").strip() == (input_text or "").strip()
+        ):
+            segments.pop()
+        subject_name = self._subject_display_name(subject_id)
+        cap = unsaved_dialogue_chars()
+        lines: list[str] = []
+        used = 0
+        for segment in reversed(segments):
+            if segment.segment_id in shown:
+                continue
+            text = _experience_text(segment, subject_name).strip()
+            if not text:
+                continue
+            if lines and used + len(text) > cap:
+                break
+            when = relative_time_label(segment.occurred_at)
+            lines.append(f"[{when}] {text}" if when else text)
+            used += len(text)
+        return "\n".join(reversed(lines))
 
     def preview_state(
         self,
@@ -607,6 +648,8 @@ class SubjectProcess:
         )
 
         clock.mark("②活跃区")
+        # 组装只读；清理超时策划与僵尸记挂放在组装之前，由主流程显式做。
+        self._tool_reap_stale(subject_id, speaker.object_id)
         # 阶段③ 当前状态组装（单一路径，只读已有记录）
         current = self.assemble_current_state(
             subject_id, text, view, speaker=speaker, stimulus=stimulus
@@ -844,13 +887,15 @@ class SubjectProcess:
         clock.mark("16编排")
         # 落库 05 的工具指示：CLI 里 `jshi tool-log --turn` 靠它回看主流程这一拍交给 200 的是什么。
         self._record_tool_intent(activity, response)
-        # 回写：本轮回应进入这一拍装上的每一本记挂（人格与木头两条路都记）。
-        self._tool_write_back(turn_tool_ids, response.response_plan)
-        # 【工具相关】里的「新的信息」本轮已交给 05 → 标记已送入主流程（不写片场）。
+        # 只有 05 标明已消化的条目才算送达并回写；其余下一轮仍作为未消化材料出现。
+        consumed = tuple(
+            item for item in response.tool_consumed if item in set(turn_tool_ids)
+        )
+        self._tool_write_back(consumed, response.response_plan)
         self._tool_mark_main_seen(
             subject_id,
             speaker.object_id if speaker is not None else "",
-            turn_tool_ids,
+            consumed,
         )
         self._intake_tool_if_requested(subject_id, activity, speaker, response)
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
@@ -1096,6 +1141,7 @@ class SubjectProcess:
         *,
         boot: bool,
         include_tool: bool = True,
+        include_unsaved: bool = True,
         now: datetime | None = None,
     ) -> str:
         label = current.speaker.label if current.speaker else "对方"
@@ -1121,6 +1167,9 @@ class SubjectProcess:
                 tool_cap=self._tool_block_cap(),
             ),
         ]
+        unsaved = (current.unsaved_dialogue or "").strip() if include_unsaved else ""
+        if unsaved:
+            parts.append(format_unsaved_dialogue(unsaved))
         parts.append(
             "【此时的输入】\n"
             + format_turn_input(
@@ -1291,6 +1340,15 @@ class SubjectProcess:
                 ),
             )
 
+    def _tool_reap_stale(self, subject_id: str, object_id: str | None) -> None:
+        service = getattr(self, "tool_service", None)
+        if service is None or not object_id:
+            return
+        try:
+            service.reap_stale(subject_id, object_id)
+        except Exception:
+            logger.exception("tool reap failed")
+
     def _tool_mark_main_seen(
         self, subject_id: str, object_id: str, item_ids: tuple[str, ...] = ()
     ) -> None:
@@ -1429,6 +1487,7 @@ class SubjectProcess:
             tool_input=current.tool_input,
             tool_hot_state=current.tool_hot_state,
             stimulus=current.stimulus,
+            unsaved_dialogue=current.unsaved_dialogue,
             context=self._model_context(
                 current.subject_state.subject_id,
                 working_recalled,
@@ -1515,7 +1574,7 @@ class SubjectProcess:
             )
             persona_schema = write_schema_for(pack_id, registry=registry)
             persona_user_text = self._persona_user_text(
-                current, boot=False, include_tool=False, now=now
+                current, boot=False, include_tool=False, include_unsaved=False, now=now
             )
         else:
             persona_instruction = ""

@@ -196,6 +196,14 @@ STIMULUS_SPEECH = "speech"
 STIMULUS_IDLE = "idle"
 
 
+def format_unsaved_dialogue(text: str) -> str:
+    return (
+        "【尚未存入记忆的近期原话】\n"
+        "这些对话还没有写进长期记忆。上面的场景若已概括或略去其中内容，以这里的原话为准。\n"
+        + text.strip()
+    )
+
+
 def format_turn_input(label: str, text: str, *, stimulus: str = STIMULUS_SPEECH) -> str:
     """【本轮】/【此时的输入】正文。闲时直写时间流过，不写成「名字：原话」。"""
     name = (label or "").strip() or "对方"
@@ -251,6 +259,9 @@ def build_user(request: ModelRequest) -> str:
                 for sid, slabel, text, time_label in segments
             )
         )
+    unsaved = (getattr(request, "unsaved_dialogue", "") or "").strip()
+    if unsaved:
+        parts.append(format_unsaved_dialogue(unsaved))
     memories = _memories(
         request.context,
         {text for _sid, _slabel, text, _time in segments},

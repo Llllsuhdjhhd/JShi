@@ -203,3 +203,49 @@ def test_rems_ingest_schedules_refresh_after_return(tmp_path) -> None:
     backend._experience_refresh_queue.join()
     assert refresh.items == [("stone", "OBJ-USER")]
     assert portrait.items == [("stone", "OBJ-USER")]
+
+
+def test_refresh_worker_is_daemon_and_exit_wait_is_bounded(tmp_path) -> None:
+    import time
+
+    from jshi.memory import MemoryBatch, MemoryExperience, Rems3MemoryBackend
+
+    class _Pipeline:
+        def ingest_batch(self, batch):
+            return SimpleNamespace(
+                subject_id=batch.subject_id, stored_marks={}, sealed_event_ids=(),
+                role_ids=("OBJ-A", "OBJ-B"), unclosed_count=0, errors=(),
+            )
+
+    release = threading.Event()
+    started = threading.Event()
+
+    class _SlowRefresh:
+        def __init__(self) -> None:
+            self.items = []
+
+        def refresh_person_experience(self, subject_id, object_id):
+            self.items.append(object_id)
+            started.set()
+            release.wait(5)
+
+    backend = Rems3MemoryBackend(_Pipeline())
+    refresh = _SlowRefresh()
+    backend.long_term_experience = refresh
+    backend._experience_exit_wait_s = 0.2
+    backend.ingest_batch(
+        MemoryBatch(
+            batch_id="batch-1", subject_id="stone",
+            experiences=(MemoryExperience(subject_id="stone", text="你好"),),
+            from_sequence=1, to_sequence=1,
+        )
+    )
+    assert started.wait(2)
+    worker = backend._experience_refresh_worker
+    assert worker is not None and worker.daemon
+    began = time.monotonic()
+    backend._wait_experience_refresh_on_exit()
+    assert time.monotonic() - began < 2
+    release.set()
+    worker.join(2)
+    assert refresh.items == ["OBJ-A"]
