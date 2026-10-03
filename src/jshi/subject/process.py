@@ -853,13 +853,32 @@ class SubjectProcess:
         consumed = tuple(
             item for item in response.tool_consumed if item in set(turn_tool_ids)
         )
-        self._tool_write_back(consumed, response.response_plan)
+        handling = response.tool_handling
+        if not handling and consumed:
+            # Legacy responses retain their old contract, but unsaid must stay
+            # attached to an open work item rather than vanish from context.
+            handling = tuple({"task_id": task_id,
+                              "disposition": "deferred" if response.response_plan.unsaid_text() else "answered",
+                              "evidence": response.response_plan.verbal_text(),
+                              "work_complete": True} for task_id in consumed)
+        if handling:
+            consumed = self.tool_service.handle_results(
+                subject_id, speaker.object_id if speaker else "", handling,
+                selected_ids=turn_tool_ids, reply=response.response_plan.verbal_text(),
+                unsaid=response.response_plan.unsaid_text(),
+                new_need=response.tool_intent.need if response.tool_intent else "",
+            )
+        handled_ids = tuple(dict.fromkeys(
+            (*consumed, *(str(item.get("task_id")) for item in handling
+                          if item.get("task_id") in set(turn_tool_ids)))
+        ))
+        self._tool_write_back(handled_ids, response.response_plan)
         self._tool_mark_main_seen(
             subject_id,
             speaker.object_id if speaker is not None else "",
-            consumed,
+            handled_ids,
         )
-        self._intake_tool_if_requested(subject_id, activity, speaker, response)
+        self._intake_tool_if_requested(subject_id, activity, speaker, response, current.input_text)
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
         close_result = self.activity_close.close(
             subject_id,
@@ -1685,6 +1704,7 @@ class SubjectProcess:
         activity: Activity,
         speaker: SpeakerCandidate | None,
         response: ModelResponse,
+        input_text: str = "",
     ) -> None:
         """有工具指示则交接给 200；不等策划、不等执行。"""
         intent = getattr(response, "tool_intent", None)
@@ -1715,6 +1735,11 @@ class SubjectProcess:
                 "zone_rev": str(zone_rev),
             },
             origin="external_05",
+            refresh_reason=intent.refresh_reason or (
+                input_text if any(word in input_text for word in ("重新查", "重查", "刷新", "更新数据")) else ""
+            ),
+            work_id=intent.work_id,
+            step_id=intent.step_id,
         )
 
     def _cognize(

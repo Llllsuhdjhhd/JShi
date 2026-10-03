@@ -34,6 +34,18 @@ from .contract import (
 
 logger = logging.getLogger(__name__)
 
+
+def _result_payload(text: str) -> dict[str, Any]:
+    """Preserve a tool's explicit coverage contract alongside its original output."""
+    payload: dict[str, Any] = {"content": text} if text else {}
+    try:
+        raw = json.loads(text)
+    except (ValueError, TypeError):
+        return payload
+    if isinstance(raw, Mapping) and isinstance(raw.get("coverage"), Mapping):
+        payload["coverage"] = dict(raw["coverage"])
+    return payload
+
 # 脚本类工具的成功输出优先作为整轮 RESULT（读文件 / ls 不当终态）。
 _SHELL_TOOLS = frozenset({"bash", "powershell", "shell", "cmd", "pwsh"})
 
@@ -604,7 +616,7 @@ class PiEngine:
                 kind=FeedbackKind.RESULT,
                 result=ToolResult(
                     status=ToolStatus.PARTIAL if completed_output else ToolStatus.FAILED,
-                    result={"content": completed_output} if completed_output else {},
+                    result=_result_payload(completed_output),
                     summary=_compact_shell_summary(shell_ok_parts, limit=1500)
                     if completed_output else "",
                     ideal=False,
@@ -645,7 +657,7 @@ class PiEngine:
                     kind=FeedbackKind.RESULT,
                     result=ToolResult(
                         status=ToolStatus.FAILED,
-                        result={"content": full} if full else {},
+                        result=_result_payload(full),
                         summary=create_error,
                         ideal=False,
                         ideal_note=create_error,
@@ -659,7 +671,7 @@ class PiEngine:
                 kind=FeedbackKind.RESULT,
                 result=ToolResult(
                     status=ToolStatus.OK,
-                    result={"content": full},
+                    result=_result_payload(full),
                     summary=short,
                     ideal=True,
                     cost=_usage_cost(usage),
@@ -811,6 +823,8 @@ class PiEngine:
                 "3. 步骤之间没有依赖时，可以并行执行。",
                 "4. 每一步都输出关键进展；最终给出总结果。",
                 "5. 不要做与本目标无关的工作。",
+                "查询任务不要阅读项目 README、源码、测试、Git 历史或扫描主体账本。只读取执行所需的工具说明和脚本，随后查询外部数据。",
+                "优先使用现有工具。确需创建查询脚本时，仅围绕本次目标，取得所需材料后及时汇总并结束会话。",
                 "6. 临时下载和中间文件只放在当前工作目录，不要写到仓库根目录。",
             ]
         )

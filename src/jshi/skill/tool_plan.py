@@ -179,6 +179,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
 
 【输入】
 - 本轮任务 JSON：need、verbal、object_id、field_ref、scene、catalog、engine_tools 或 discovery、budget，以及 in_flight。
+- tool_materials（若有）：已取得的工具结果与事项关系。先看已有材料，只策划缺少或明确要求更新的部分；失败、过期、不完整的结果不能当成已经满足需求。
 - 只看本轮 need、现场和目录/命中；片场里旧的失败、不相干负面，不要拿来判定这次。
 - in_flight：该说话对象当前全部未终态记挂（按对象，不按本轮活动）。每项含 task_id / phase / tool_name / purpose / need / progress。phase 为 use（正在执行一次查询或动作）、create（正在造工具）或 propose（提案未执行）。tool_name 是命令名或正在造的工具名。purpose 是该工具的能力说明，只用来识别「在造哪一种工具」，不用来判断「本轮查询是否属于该能力域」。progress 是人类可读状态备注，不参与判定。
 - **优先检查 in_flight**。空列表不得以「已经在办」放弃；已终态不计入。按 phase 分别判定是否重复开工，不要用 purpose 覆盖本轮 need：
@@ -356,6 +357,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
         engine_tools: Sequence[Mapping[str, Any]] = (),
         scene: str = "",
         in_flight: Sequence[Mapping[str, Any]] = (),
+        materials: str = "",
     ) -> PlanResult:
         index = ToolIndex.from_maps(engine_tools)
         engine_names = index.names
@@ -364,7 +366,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
         forced_note = ""
         for round_i in range(LOOKUP_MAX_ROUNDS + 1):
             payload = self._task_payload(
-                intake, catalog, index, scene, lookups, in_flight=in_flight
+                intake, catalog, index, scene, lookups, in_flight=in_flight, materials=materials
             )
             if forced_note:
                 payload = {**payload, "note": forced_note}
@@ -557,6 +559,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
         scene: str,
         lookups: Sequence[Mapping[str, Any]],
         in_flight: Sequence[Mapping[str, Any]] = (),
+        materials: str = "",
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "need": intake.need,
@@ -568,6 +571,8 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             "budget": budget_to_dict(MAX_BUDGET),
             "in_flight": [dict(item) for item in in_flight],
         }
+        if materials:
+            payload["tool_materials"] = materials
         if index.is_eager:
             payload["engine_tools"] = index.eager_tools()
         else:
@@ -587,6 +592,7 @@ class SkillPlanner:
         engine: Any = None,
         scene_loader: Callable[[IntakeRecord], str] | None = None,
         hang_store: Any = None,
+        material_loader: Callable[[IntakeRecord], str] | None = None,
     ) -> None:
         self.skill = skill
         self.catalog = tuple(catalog or ())
@@ -597,6 +603,7 @@ class SkillPlanner:
         self._tools_read = self._tools_fixed
         self.scene_loader = scene_loader
         self.hang_store = hang_store
+        self.material_loader = material_loader
 
     def invalidate_tools(self) -> None:
         """造出新工具之后调用：下一次策划重新读引擎目录。
@@ -691,10 +698,14 @@ class SkillPlanner:
         engine_error = self._engine_error()
         if engine_error:
             return PlanFailure("我这边现在连不上工具引擎，暂时没法判断或执行。")
-        return self.skill.plan_intake(
-            intake,
-            self.catalog,
-            tools,
-            scene=self._load_scene(intake),
-            in_flight=self._in_flight(intake),
-        )
+        scene = self._load_scene(intake)
+        materials = ""
+        if self.material_loader is not None:
+            try:
+                materials = self.material_loader(intake)
+            except Exception:
+                logger.exception("205 已有工具材料加载失败")
+        kwargs = {"scene": scene, "in_flight": self._in_flight(intake)}
+        if materials:
+            kwargs["materials"] = materials
+        return self.skill.plan_intake(intake, self.catalog, tools, **kwargs)

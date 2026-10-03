@@ -2894,7 +2894,7 @@ def test_reap_stale_planning_and_open_unblocks_retry(tmp_path: Path) -> None:
     assert "超时" in (done_plan.plan_error or "")
     # 不应再以「策划中 / 使用中」出现
     assert "工具名称：策划中" not in text
-    in_use = text.split("# 近期使用完成的工具")[0]
+    in_use = text.split("# 近期已结束的工具")[0]
     assert "僵尸在办" not in in_use
     assert "已取消" in text
 

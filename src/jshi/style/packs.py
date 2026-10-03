@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from jshi.core.tool_handling import TOOL_HANDLING_SCHEMA
+
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,10 +128,12 @@ TOOL_TASK_NOTE = """【任务2 · 工具】
 - "use_tool": true
 - "need": "一句话：为什么用、要什么"
 need 不是工具名、不是参数、不是模板名。不要填 template / params。
+用户明确要求更新，或已有结果不足、过时而需重查时，同时写 refresh_reason 说明原因；已有结果足够则直接复用，不要调用。
 若本轮有【工具相关】，先按它判断值不值得再开，再决定 use_tool：
 - 「使用中的工具」已有同一事项：不要再开一本；可据「新的信息」回答，或等结果。
-- 「近期使用完成的工具」结果仍够用：直接用，不必再开；要重查须说得出理由（过时、要更新、上次不完整）。
-- 「近期使用完成的工具」为失败：不得因此断定这次也不行；换需求、隔了时间、或失败原因已过，仍可再开。
+- 「近期已结束的工具」结果仍够用：直接用，不必再开；要重查须说得出理由（过时、要更新、上次不完整）。
+- 「近期已结束的工具」为部分完成：先使用已取得的材料，只补缺失或需核实部分；不要把部分完成当成完全失败。
+- 「近期已结束的工具」为失败：不得因此断定这次也不行；换需求、隔了时间、或失败原因已过，仍可再开。
 - 本轮没有【工具相关】：表示近期没有相关工具动静，按平常判断。
 其他仍须按实际情况分析：
 - 不得因为前一次失败就断定这次也不行；换个需求、隔了时间，都可能不一样。
@@ -139,7 +143,15 @@ need 不是工具名、不是参数、不是模板名。不要填 template / par
 例子3：关注工具请求的时间——昨天的请求结果（失败、或某些信息是否已过时）是否还适用于今天。昨天天气工具请求失败了，不代表过了这段时间还是不行。要根据时间合理推算时效性。
 不需要工具则不要这两个键。
 
-消化标记：【工具相关】每条都有「任务ID」。本轮已在 reply 里用上、已写进 unsaid 暂留、或判断已不必再告诉对方的条目，把它的任务ID列进 "tool_consumed"（字符串数组）。没有列入的条目，下一轮会再次作为未消化的材料出现。本轮没有【工具相关】或一条也没处理，写 [] 或不写这个键。"""
+结果处理：对本轮处理的【工具相关】条目输出 "tool_handling" 数组，每项包含 task_id、disposition、evidence、reason，可含 work_complete。
+- answered：已经在 reply 中交付这条结果；evidence 必须摘录 reply 中实际交付的原文，不能只写“查到了”。
+- deferred：暂留待用，或只报了进度但完整事项尚未交付；reason 写明还要办什么。说“稍后给方案”“都查到了”也属于暂留。
+- dismissed：已无须处理；reason 写明原因，evidence 摘录本轮 reply 中的说明。
+- work_complete=true：整个事项已经交付，所有步骤结果均已处理，且没有未开口暂留或后续补查，才可写。某一步已回答不等于整个事项完成。
+补查已有事项时，工具请求同时写 work_id（材料中的事项ID）；若补的是列出的缺失步骤，再写 step_id。只引用已有编号，不编造。
+程序会保存事项与任务关系；事项未关闭时，已有结果还会出现。不要为了让材料消失而标完成。
+旧 tool_consumed 仅作兼容；优先使用 tool_handling。结果成功、失败以工具材料为准，不由你重报。
+"""
 
 PERSONA_TOOL_NOTE = TOOL_TASK_NOTE
 
@@ -253,6 +265,10 @@ SUXIPO_SCHEMA: Mapping = {
         "use_tool": {"type": "boolean"},
         "need": {"type": "string"},
         "tool_consumed": {"type": "array", "items": {"type": "string"}},
+        "tool_handling": TOOL_HANDLING_SCHEMA,
+        "refresh_reason": {"type": "string"},
+        "work_id": {"type": "string"},
+        "step_id": {"type": "string"},
         "edit": {
             "type": "array",
             "items": {
@@ -368,7 +384,7 @@ def _persona_reply_instruction(style_note: str, *, task1: str) -> str:
         + style_note
         + "\n\n【你的输出】\n"
         "只输出一个 JSON 对象：任务1 的各项；任务2 成立时，把 use_tool / need 两个键并进同一对象；"
-        "本轮处理了【工具相关】里的条目时，加 tool_consumed。\n"
+        "本轮处理了【工具相关】里的条目时，加 tool_handling。\n"
         "不用工具：{\"mode\":\"…\",\"reply\":\"…\",\"action\":\"…\",\"unsaid\":\"…\",\"reason\":\"…\"}\n"
         "要用工具：{\"mode\":\"respond\",\"reply\":\"…\",\"action\":\"…\",\"unsaid\":\"…\",\"reason\":\"…\",\"use_tool\":true,\"need\":\"…\"}\n"
         "- action：只写给执行层的短意图；没有动作必须写「无动作」。不要把动作写进 reply。\n"

@@ -102,7 +102,7 @@ def _pick_intake(
         hang = None
         if intake is not None:
             hang = _hang_for(intake, hangs)
-        if hang is None and hangs:
+        if intake is None and hangs:
             hang = hangs[0]
         return intake, hang, ""
 
@@ -538,7 +538,9 @@ def format_tool_process(
 
     lines.append("【记挂 210】")
     if hang is None:
-        lines.append("（无记挂：尚未发出请求，或策划失败）")
+        lines.append("（本次正在策划，尚无执行结果）" if intake is not None and intake.status == "received"
+                     else "（本次尚无关联的执行记挂）" if intake is not None
+                     else "（无记挂：尚未发出请求，或策划失败）")
     else:
         lines.append(f"task_id={hang.task_id}  request_id={hang.request_id}")
         lines.append(

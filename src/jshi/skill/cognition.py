@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from jshi.core.tool_handling import TOOL_HANDLING_SCHEMA, parse_tool_handling
+
 import json
 import re
 from dataclasses import replace
@@ -140,6 +142,10 @@ COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
         "use_tool": {"type": "boolean"},
         "need": {"type": "string"},
         "tool_consumed": {"type": "array", "items": {"type": "string"}},
+        "tool_handling": TOOL_HANDLING_SCHEMA,
+        "refresh_reason": {"type": "string"},
+        "work_id": {"type": "string"},
+        "step_id": {"type": "string"},
     },
 }
 
@@ -226,9 +232,13 @@ def _parse_tool_intent(data: Mapping[str, Any]) -> ToolUseIntent | None:
     if use_tool is False:
         return None
     if use_tool is True:
-        return ToolUseIntent(need=need)
+        return ToolUseIntent(need=need, refresh_reason=str(data.get("refresh_reason") or "").strip(),
+                             work_id=str(data.get("work_id") or "").strip(),
+                             step_id=str(data.get("step_id") or "").strip())
     if need:
-        return ToolUseIntent(need=need)
+        return ToolUseIntent(need=need, refresh_reason=str(data.get("refresh_reason") or "").strip(),
+                             work_id=str(data.get("work_id") or "").strip(),
+                             step_id=str(data.get("step_id") or "").strip())
     return None
 
 
@@ -323,6 +333,7 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         memory_ratings=_parse_memory_ratings(data),
         tool_intent=_parse_tool_intent(data),
         tool_consumed=_parse_tool_consumed(data),
+        tool_handling=parse_tool_handling(data.get("tool_handling")),
     )
 
 
@@ -355,6 +366,7 @@ def _bind_speaker_fields(response: ModelResponse, request: ModelRequest) -> Mode
         rewritten_context=response.rewritten_context,
         tool_intent=response.tool_intent,
         tool_consumed=response.tool_consumed,
+        tool_handling=response.tool_handling,
     )
 
 
@@ -484,6 +496,7 @@ def _persona_to_model_response(
         ),
         tool_intent=_parse_tool_intent(data),
         tool_consumed=_parse_tool_consumed(data),
+        tool_handling=parse_tool_handling(data.get("tool_handling")),
     )
 
 
