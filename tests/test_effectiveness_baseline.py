@@ -186,12 +186,13 @@ def test_inprocess_uses_baseline_when_available(tmp_path):
         eff.record_ratings("stone", f"act-{index}", ratings)
 
     eff.run_due("stone")
-    assert strategy.get("stone").default_level > 1
-    assert strategy.get("stone").source_report_id
+    assert strategy.get("stone").default_level == 1
     assert any(
         report.strategy.get("basis", "").startswith("baseline:")
         for report in eff.reports("stone")
     )
+    assert eff.suggestions.rows[-1]["proposed"]["name"] == "recall.default_level"
+    assert eff.suggestions.rows[-1]["applied"] is False
 
 
 def memory_ratings_missing_8():
@@ -201,11 +202,11 @@ def memory_ratings_missing_8():
 
 def test_no_baseline_falls_back_to_heuristic(tmp_path):
     from jshi.effectiveness import InProcessEffectiveness
-    from jshi.effectiveness.memory_analyzer import heuristic_strategy
 
     strategy = RecallStrategyStore(tmp_path / "recall_strategy.json")
     strategy.apply("stone", default_level=2)
-    eff = InProcessEffectiveness(strategy=strategy)
+    suggestions = tmp_path / "tuning_suggestions.jsonl"
+    eff = InProcessEffectiveness(strategy=strategy, suggestions_path=suggestions)
     ratings = MemoryRatings(
         items=(MemoryRating(ref="memory:x", relevance="unrelated"),),
         coverage="sufficient",
@@ -213,8 +214,9 @@ def test_no_baseline_falls_back_to_heuristic(tmp_path):
     for index in range(8):
         eff.record_ratings("stone", f"act-{index}", ratings)
     eff.run_due("stone")
-    assert strategy.get("stone").default_level == 1
-    assert strategy.get("stone").source_report_id
+    assert strategy.get("stone").default_level == 2
+    assert eff.suggestions.rows[-1]["status"] == "suggestion"
+    assert eff.suggestions.rows[-1]["applied"] is False
 
 
 def test_inprocess_collects_unlabeled_candidates(tmp_path):

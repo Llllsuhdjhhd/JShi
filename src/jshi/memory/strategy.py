@@ -36,6 +36,9 @@ class RecallStrategyStore:
     def get(self, subject_id: str) -> RecallStrategy:
         return self._entries.get(subject_id, RecallStrategy())
 
+    def known_ids(self) -> tuple[str, ...]:
+        return tuple(self._entries)
+
     def apply(
         self,
         subject_id: str,

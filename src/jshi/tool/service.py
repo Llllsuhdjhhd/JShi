@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from urllib.error import URLError
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -680,8 +681,11 @@ class ToolService:
         tag = self._planner_tag()
         try:
             planned = self.planner.plan(record)
-        except Exception:
-            logger.exception("tool planner failed")
+        except Exception as exc:
+            if isinstance(exc, URLError):
+                logger.error("tool planner failed: %s", exc)
+            else:
+                logger.exception("tool planner failed")
             self.intake_store.update(
                 intake_id,
                 status="failed",

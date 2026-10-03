@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
+import ssl
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -349,6 +352,56 @@ def test_openai_compatible_thinking_rejects_unknown(monkeypatch) -> None:
             "sk-test",
             "deepseek-v4-flash",
         ).generate(_request())
+
+
+def test_openai_compatible_retries_transient_ssl_eof(monkeypatch) -> None:
+    monkeypatch.delenv("JSHI_MODEL_THINKING", raising=False)
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN201
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise URLError(ssl.SSLError(1, "EOF occurred in violation of protocol"))
+        return _FakeChatResponse(
+            json.dumps(
+                {"choices": [{"message": {"content": '{"mode":"respond"}'}}]}
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("jshi.models.base.urlopen", fake_urlopen)
+    monkeypatch.setattr("jshi.models.base.time.sleep", lambda _seconds: None)
+    response = OpenAICompatibleModel(
+        "https://api.deepseek.com/v1/chat/completions",
+        "sk-test",
+        "deepseek-v4-flash",
+    ).generate(_request())
+    assert calls["n"] == 2
+    assert response.text == '{"mode":"respond"}'
+
+
+def test_openai_compatible_does_not_retry_client_error(monkeypatch) -> None:
+    monkeypatch.delenv("JSHI_MODEL_THINKING", raising=False)
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN201
+        calls["n"] += 1
+        raise HTTPError(
+            "https://api.deepseek.com/v1/chat/completions",
+            400,
+            "bad request",
+            hdrs=None,
+            fp=io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr("jshi.models.base.urlopen", fake_urlopen)
+    model = OpenAICompatibleModel(
+        "https://api.deepseek.com/v1/chat/completions",
+        "sk-test",
+        "deepseek-v4-flash",
+    )
+    with pytest.raises(HTTPError):
+        model.generate(_request())
+    assert calls["n"] == 1
 
 
 def test_openai_compatible_stream_also_disables_thinking(monkeypatch) -> None:

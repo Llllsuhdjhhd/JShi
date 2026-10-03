@@ -20,9 +20,9 @@ import json
 from datetime import datetime, timedelta
 
 from jshi.core.params import (
-    INTROSPECTION_RECALL_LIMIT,
-    INTROSPECTION_SCENE_MAX_SEGMENTS,
-    INTROSPECTION_SCENE_WINDOW_SECONDS,
+    introspection_recall_limit,
+    introspection_scene_max_segments,
+    introspection_scene_window_seconds,
 )
 from jshi.experienceledger.port import SegmentStatus
 
@@ -50,11 +50,17 @@ def build_scene(
     *,
     ledger: object,
     memory: object,
-    window_seconds: int = INTROSPECTION_SCENE_WINDOW_SECONDS,
-    max_segments: int = INTROSPECTION_SCENE_MAX_SEGMENTS,
-    recall_limit: int = INTROSPECTION_RECALL_LIMIT,
+    window_seconds: int | None = None,
+    max_segments: int | None = None,
+    recall_limit: int | None = None,
 ) -> IntrospectionScene | None:
     """按时间窗取段 + 召回一次，拼成现场；没材料返回 ``None``。"""
+    if window_seconds is None:
+        window_seconds = introspection_scene_window_seconds()
+    if max_segments is None:
+        max_segments = introspection_scene_max_segments()
+    if recall_limit is None:
+        recall_limit = introspection_recall_limit()
     centers = request.centers
     delta = timedelta(seconds=max(1, int(window_seconds)))
     try:

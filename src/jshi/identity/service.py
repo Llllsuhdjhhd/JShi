@@ -57,3 +57,6 @@ class IdentityRepository:
 
     def get(self, subject_id: str) -> IdentityProfile:
         return self._profiles[subject_id]
+
+    def subject_ids(self) -> tuple[str, ...]:
+        return tuple(self._profiles)

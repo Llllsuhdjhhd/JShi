@@ -674,14 +674,25 @@ def boot_schema_for(
     return pack.boot_schema
 
 
+_SNAPSHOT_ZONE_PACKS = frozenset({SUXIPO, SMITH, AQIU})
+
+
 def zone_chars_for(
     pack_id: str | None,
     registry: StylePackRegistry | None = None,
 ) -> int:
+    """内置人格的片场上限用到时再读。不返回导入时写进风格包的数字。
+
+    事后登记的风格包若自带 ``zone_chars``，仍用那一次登记的值。
+    """
     from jshi.core.params import active_zone_chars
 
     pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
-    return pack.zone_chars or active_zone_chars()
+    if pack.pack_id in _SNAPSHOT_ZONE_PACKS:
+        return suxipo_zone_chars()
+    if pack.zone_chars:
+        return pack.zone_chars
+    return active_zone_chars()
 
 
 def value_narration_chars_for(
@@ -689,7 +700,9 @@ def value_narration_chars_for(
     registry: StylePackRegistry | None = None,
 ) -> int:
     pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
-    return pack.value_narration_chars or value_narration_chars()
+    if pack.pack_id in _SNAPSHOT_ZONE_PACKS or not pack.value_narration_chars:
+        return value_narration_chars()
+    return pack.value_narration_chars
 
 
 def is_persona(

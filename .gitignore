@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 # .jshi/ 可入库作会话样例；超大/易变文件仍忽略
 .jshi/hang.jsonl
+step_inputs.jsonl
 .jshi/rems/rems.db-wal
 .jshi/rems/rems.db-shm
 .jshi/rems/qdrant/.lock

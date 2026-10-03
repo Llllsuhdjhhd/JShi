@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from jshi.core.params import ACTIVE_ZONE_CHARS
+from jshi.core.params import active_zone_chars
 from jshi.experienceledger.inprocess import InProcessExperienceLedger, _SubjectLedgerState
 from jshi.experienceledger.port import (
     ActorKind,
@@ -171,9 +171,15 @@ class SqliteExperienceLedger(InProcessExperienceLedger):
         self,
         path: str | Path,
         *,
-        active_window_chars: int = ACTIVE_ZONE_CHARS,
+        active_window_chars: int | None = None,
     ) -> None:
-        super().__init__(active_window_chars=active_window_chars)
+        super().__init__(
+            active_window_chars=(
+                active_zone_chars()
+                if active_window_chars is None
+                else active_window_chars
+            )
+        )
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._hydrated: set[str] = set()

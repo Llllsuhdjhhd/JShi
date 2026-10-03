@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 # ---------------------------------------------------------------------------- #
 # 上下文与工作集（基线按 100 万 token 窗口）
 # ---------------------------------------------------------------------------- #
@@ -46,17 +48,23 @@ VALUE_NARRATION_CHARS: int = 300
 MEMORY_FLUSH_CHARS: int = 3000
 
 
+def _current(name: str, default: int | float | bool) -> int | float | bool:
+    """读进程里的当前快照。未安装时用登记的默认值。"""
+    from jshi.core.param_overlay import current_value
+
+    return current_value(name, default)
+
+
 def _base_window(context_window: int | None = None) -> int:
-    return (
-        context_window
-        if context_window is not None
-        else DEFAULT_MODEL_CONTEXT_WINDOW
-    )
+    if context_window is not None:
+        return int(context_window)
+    return int(_current("DEFAULT_MODEL_CONTEXT_WINDOW", DEFAULT_MODEL_CONTEXT_WINDOW))
 
 
 def active_zone_chars(context_window: int | None = None) -> int:
-    """16 活跃区字符硬上限：窗口 × 1/30，至少 1。"""
-    return max(1, round(_base_window(context_window) * ACTIVE_ZONE_RATIO))
+    """16 活跃区字符硬上限：窗口 × 活跃区比例，至少 1。"""
+    ratio = float(_current("ACTIVE_ZONE_RATIO", ACTIVE_ZONE_RATIO))
+    return max(1, round(_base_window(context_window) * ratio))
 
 
 def working_set_limit(context_window: int | None = None) -> int:
@@ -64,34 +72,79 @@ def working_set_limit(context_window: int | None = None) -> int:
 
     不随模型窗口放大。``context_window`` 保留签名，当前忽略。
     """
-    return max(1, int(WORKING_SET_LIMIT_CHARS))
+    del context_window
+    return max(1, int(_current("WORKING_SET_LIMIT_CHARS", WORKING_SET_LIMIT_CHARS)))
 
 
 def suxipo_zone_chars(context_window: int | None = None) -> int:
     """人格片场字符上限：约 5000 字，约为记忆投递阈值的 1.5–2 倍。"""
     del context_window
-    return max(1, int(SUXIPO_ZONE_CHARS))
+    return max(1, int(_current("SUXIPO_ZONE_CHARS", SUXIPO_ZONE_CHARS)))
 
 
 def value_narration_chars(context_window: int | None = None) -> int:
     """人格「价值叙述」字数上限：boot 时单独生成，独立于片场预算。"""
     del context_window
-    return max(1, int(VALUE_NARRATION_CHARS))
+    return max(1, int(_current("VALUE_NARRATION_CHARS", VALUE_NARRATION_CHARS)))
 
 
 def memory_flush_chars() -> int:
     """09 按量投递的字数阈值，默认 3000 字。"""
-    return max(1, int(MEMORY_FLUSH_CHARS))
+    return max(1, int(_current("MEMORY_FLUSH_CHARS", MEMORY_FLUSH_CHARS)))
+
+
+def value_catalog_refresh_seconds() -> float:
+    return float(
+        _current("VALUE_CATALOG_REFRESH_SECONDS", VALUE_CATALOG_REFRESH_SECONDS)
+    )
 
 
 def value_load_char_budget(active_zone: int | None = None) -> int:
-    """普通价值装载的字符预算：活跃区上限 × 1/5，至少 1。"""
+    """普通价值装载的字符预算：活跃区上限 × 比例，至少 1。"""
     cap = active_zone_chars() if active_zone is None else int(active_zone)
-    return max(1, round(cap * VALUE_LOAD_RATIO))
+    ratio = float(_current("VALUE_LOAD_RATIO", VALUE_LOAD_RATIO))
+    return max(1, round(cap * ratio))
 
 
-# 与 experienceledger.active_window_chars 对齐的默认值（随窗口与比例计算）。
-ACTIVE_ZONE_CHARS: int = active_zone_chars()
+def introspection_enabled() -> bool:
+    return bool(_current("INTROSPECTION_ENABLED", INTROSPECTION_ENABLED))
+
+
+def introspection_scene_window_seconds() -> int:
+    return int(
+        _current(
+            "INTROSPECTION_SCENE_WINDOW_SECONDS",
+            INTROSPECTION_SCENE_WINDOW_SECONDS,
+        )
+    )
+
+
+def introspection_scene_max_segments() -> int:
+    return int(
+        _current("INTROSPECTION_SCENE_MAX_SEGMENTS", INTROSPECTION_SCENE_MAX_SEGMENTS)
+    )
+
+
+def introspection_recall_limit() -> int:
+    return int(_current("INTROSPECTION_RECALL_LIMIT", INTROSPECTION_RECALL_LIMIT))
+
+
+def introspection_cooldown_seconds() -> int:
+    return int(
+        _current("INTROSPECTION_COOLDOWN_SECONDS", INTROSPECTION_COOLDOWN_SECONDS)
+    )
+
+
+def introspection_max_queue() -> int:
+    return int(_current("INTROSPECTION_MAX_QUEUE", INTROSPECTION_MAX_QUEUE))
+
+
+def introspection_idle_window() -> int:
+    return int(_current("INTROSPECTION_IDLE_WINDOW", INTROSPECTION_IDLE_WINDOW))
+
+
+def step_inputs_max_bytes() -> int:
+    return int(_current("STEP_INPUTS_MAX_BYTES", STEP_INPUTS_MAX_BYTES))
 
 
 # ---------------------------------------------------------------------------- #
@@ -133,8 +186,248 @@ INTROSPECTION_MODEL_CALLS_HIGH: int = 3
 # 闲时回顾只在"最近 K 段"里挑，避免从最老开始翻旧账
 INTROSPECTION_IDLE_WINDOW: int = 40
 
+# 重放输入文件的字节上限。超出后删最旧的调用。本阶段 locked，不参与调参。
+STEP_INPUTS_MAX_BYTES: int = 2_097_152
+
+# 片场上限不低于投递阈值的这个倍数。来源见 ParamConstraint 说明。
+ZONE_FLUSH_RATIO: float = 1.5
+
+
+@dataclass(frozen=True)
+class ParamSpec:
+    """一项参数的登记。默认值仍是上面的模块常量。"""
+
+    name: str
+    default: int | float | bool | None
+    low: int | float | None
+    high: int | float | None
+    level: str  # auto | review | locked
+    metrics: tuple[str, ...] = ()
+    store: str = "overlay"  # overlay | recall_strategy
+    kind: str = "int"  # int | float | bool
+
+
+@dataclass(frozen=True)
+class ParamConstraint:
+    """片场上限应不小于投递阈值的 1.5 倍。
+
+    1.5 取自片场预算注释里的下限：尚未投递的原话还要留在片场里。
+    人格生效还要求素材达到片场预算的一半（``subject/process.py``）。
+    不取注释里的上限 2。默认 5000 只比 3000 的 1.5 倍（4500）多 500。
+    """
+
+    name: str
+    left: str
+    right: str
+    ratio: float
+
+
+REGISTRY: dict[str, ParamSpec] = {
+    spec.name: spec
+    for spec in (
+        ParamSpec(
+            "DEFAULT_MODEL_CONTEXT_WINDOW",
+            DEFAULT_MODEL_CONTEXT_WINDOW,
+            100_000,
+            2_000_000,
+            "locked",
+            kind="int",
+        ),
+        ParamSpec(
+            "ACTIVE_ZONE_RATIO",
+            ACTIVE_ZONE_RATIO,
+            1 / 60,
+            1 / 5,
+            "review",
+            ("反应时间",),
+            kind="float",
+        ),
+        ParamSpec(
+            "WORKING_SET_LIMIT_CHARS",
+            WORKING_SET_LIMIT_CHARS,
+            200,
+            8_000,
+            "review",
+            ("回忆质量", "费用"),
+            kind="int",
+        ),
+        ParamSpec(
+            "VALUE_LOAD_RATIO",
+            VALUE_LOAD_RATIO,
+            0.05,
+            0.5,
+            "review",
+            kind="float",
+        ),
+        ParamSpec(
+            "SUXIPO_ZONE_CHARS",
+            SUXIPO_ZONE_CHARS,
+            1_500,
+            20_000,
+            "review",
+            ("费用", "记忆质量", "反应时间"),
+            kind="int",
+        ),
+        ParamSpec(
+            "VALUE_NARRATION_CHARS",
+            VALUE_NARRATION_CHARS,
+            50,
+            2_000,
+            "locked",
+            kind="int",
+        ),
+        ParamSpec(
+            "MEMORY_FLUSH_CHARS",
+            MEMORY_FLUSH_CHARS,
+            1_000,
+            8_000,
+            "review",
+            ("费用", "记忆质量", "反应时间"),
+            kind="int",
+        ),
+        ParamSpec(
+            "VALUE_CATALOG_REFRESH_SECONDS",
+            VALUE_CATALOG_REFRESH_SECONDS,
+            0,
+            604_800,
+            "review",
+            kind="float",
+        ),
+        ParamSpec(
+            "INTROSPECTION_ENABLED",
+            INTROSPECTION_ENABLED,
+            None,
+            None,
+            "locked",
+            kind="bool",
+        ),
+        ParamSpec(
+            "INTROSPECTION_SCENE_WINDOW_SECONDS",
+            INTROSPECTION_SCENE_WINDOW_SECONDS,
+            60,
+            3_600,
+            "review",
+            kind="int",
+        ),
+        ParamSpec(
+            "INTROSPECTION_SCENE_MAX_SEGMENTS",
+            INTROSPECTION_SCENE_MAX_SEGMENTS,
+            1,
+            200,
+            "review",
+            kind="int",
+        ),
+        ParamSpec(
+            "INTROSPECTION_RECALL_LIMIT",
+            INTROSPECTION_RECALL_LIMIT,
+            0,
+            30,
+            "review",
+            kind="int",
+        ),
+        ParamSpec(
+            "INTROSPECTION_COOLDOWN_SECONDS",
+            INTROSPECTION_COOLDOWN_SECONDS,
+            0,
+            86_400,
+            "review",
+            kind="int",
+        ),
+        ParamSpec(
+            "INTROSPECTION_MAX_QUEUE",
+            INTROSPECTION_MAX_QUEUE,
+            1,
+            32,
+            "review",
+            kind="int",
+        ),
+        ParamSpec(
+            "INTROSPECTION_TIMEOUT_SECONDS",
+            INTROSPECTION_TIMEOUT_SECONDS,
+            1,
+            600,
+            "review",
+            kind="int",
+        ),
+        ParamSpec(
+            "INTROSPECTION_MODEL_CALLS_LOW",
+            INTROSPECTION_MODEL_CALLS_LOW,
+            0,
+            5,
+            "review",
+            kind="int",
+        ),
+        ParamSpec(
+            "INTROSPECTION_MODEL_CALLS_MEDIUM",
+            INTROSPECTION_MODEL_CALLS_MEDIUM,
+            0,
+            5,
+            "review",
+            kind="int",
+        ),
+        ParamSpec(
+            "INTROSPECTION_MODEL_CALLS_HIGH",
+            INTROSPECTION_MODEL_CALLS_HIGH,
+            0,
+            10,
+            "review",
+            kind="int",
+        ),
+        ParamSpec(
+            "INTROSPECTION_IDLE_WINDOW",
+            INTROSPECTION_IDLE_WINDOW,
+            1,
+            500,
+            "review",
+            kind="int",
+        ),
+        ParamSpec(
+            "STEP_INPUTS_MAX_BYTES",
+            STEP_INPUTS_MAX_BYTES,
+            1_024,
+            50_000_000,
+            "locked",
+            kind="int",
+        ),
+        ParamSpec(
+            "recall.default_level",
+            1,
+            1,
+            9,
+            "auto",
+            ("回忆质量",),
+            store="recall_strategy",
+            kind="int",
+        ),
+        ParamSpec(
+            "recall.limit",
+            None,
+            0,
+            64,
+            "auto",
+            ("回忆质量", "费用"),
+            store="recall_strategy",
+            kind="int",
+        ),
+    )
+}
+
+ZONE_FLUSH_CONSTRAINT = ParamConstraint(
+    name="zone_at_least_1_5_flush",
+    left="SUXIPO_ZONE_CHARS",
+    right="MEMORY_FLUSH_CHARS",
+    ratio=ZONE_FLUSH_RATIO,
+)
+
+
+def lookup(name: str) -> ParamSpec:
+    try:
+        return REGISTRY[name]
+    except KeyError as exc:
+        raise KeyError(name) from exc
+
+
 __all__ = [
-    "ACTIVE_ZONE_CHARS",
     "ACTIVE_ZONE_RATIO",
     "DEFAULT_MODEL_CONTEXT_WINDOW",
     "INTROSPECTION_COOLDOWN_SECONDS",
@@ -149,15 +442,31 @@ __all__ = [
     "INTROSPECTION_SCENE_WINDOW_SECONDS",
     "INTROSPECTION_TIMEOUT_SECONDS",
     "MEMORY_FLUSH_CHARS",
+    "ParamConstraint",
+    "ParamSpec",
+    "REGISTRY",
+    "STEP_INPUTS_MAX_BYTES",
     "SUXIPO_ZONE_CHARS",
     "VALUE_CATALOG_REFRESH_SECONDS",
     "VALUE_LOAD_RATIO",
     "VALUE_NARRATION_CHARS",
     "WORKING_SET_LIMIT_CHARS",
+    "ZONE_FLUSH_CONSTRAINT",
+    "ZONE_FLUSH_RATIO",
     "active_zone_chars",
+    "introspection_cooldown_seconds",
+    "introspection_enabled",
+    "introspection_idle_window",
+    "introspection_max_queue",
+    "introspection_recall_limit",
+    "introspection_scene_max_segments",
+    "introspection_scene_window_seconds",
+    "lookup",
     "memory_flush_chars",
+    "step_inputs_max_bytes",
     "suxipo_zone_chars",
-    "value_narration_chars",
+    "value_catalog_refresh_seconds",
     "value_load_char_budget",
+    "value_narration_chars",
     "working_set_limit",
 ]

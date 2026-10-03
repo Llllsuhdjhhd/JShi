@@ -18,12 +18,7 @@ from datetime import datetime
 from typing import Any, Callable, Sequence
 
 from jshi.core.contracts import Provenance, SubjectState
-from jshi.core.params import (
-    INTROSPECTION_ENABLED,
-    INTROSPECTION_RECALL_LIMIT,
-    INTROSPECTION_SCENE_MAX_SEGMENTS,
-    INTROSPECTION_SCENE_WINDOW_SECONDS,
-)
+from jshi.core.params import introspection_enabled
 from jshi.models import ModelPort, ModelRequest
 
 from .port import (
@@ -76,7 +71,7 @@ class InProcessReflection(IntrospectionPort):
         self.memory = getattr(process, "memory", None)
         self.hang_store = getattr(process, "hang_store", None)
         self._activity_close = process.activity_close
-        self._enabled = INTROSPECTION_ENABLED if enabled is None else bool(enabled)
+        self._enabled = introspection_enabled() if enabled is None else bool(enabled)
         self._now = now
         self._model = model if model is not None else getattr(process, "cognition", None)
         self._skill = skill
@@ -208,9 +203,6 @@ class InProcessReflection(IntrospectionPort):
             request,
             ledger=self.ledger,
             memory=self.memory,
-            window_seconds=INTROSPECTION_SCENE_WINDOW_SECONDS,
-            max_segments=INTROSPECTION_SCENE_MAX_SEGMENTS,
-            recall_limit=INTROSPECTION_RECALL_LIMIT,
         )
         if scene is None and not _allows_empty_material(request):
             self.queue.finish(request)

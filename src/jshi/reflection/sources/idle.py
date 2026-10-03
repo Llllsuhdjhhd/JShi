@@ -31,13 +31,10 @@ class IdleSource:
         segments = list(context.ledger.list_experiences(context.subject_id))
         if not segments:
             return ()
-        from jshi.core.params import INTROSPECTION_IDLE_WINDOW
+        from jshi.core.params import introspection_idle_window
 
-        window = (
-            segments[-INTROSPECTION_IDLE_WINDOW:]
-            if INTROSPECTION_IDLE_WINDOW > 0
-            else segments
-        )
+        idle_window = introspection_idle_window()
+        window = segments[-idle_window:] if idle_window > 0 else segments
         seen = _introspected_refs(context)
         for segment in window:  # 账本按 sequence 升序 → 最早优先
             entry_ref = f"segment:{segment.segment_id}"

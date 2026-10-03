@@ -1,11 +1,55 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import ssl
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
+
+# 握手被掐断、超时、网关短暂 5xx 时重试。4xx（除 408/429）不重试。
+_CHAT_ATTEMPTS = 3
+_CHAT_BACKOFF_S = (0.4, 1.2)
+_RETRY_HTTP = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _transient_chat_error(exc: BaseException) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code in _RETRY_HTTP
+    if isinstance(exc, URLError):
+        reason = exc.reason
+        if isinstance(reason, BaseException):
+            return _transient_chat_error(reason)
+        return True
+    return isinstance(exc, (TimeoutError, ConnectionError, ssl.SSLError))
+
+
+def _urlopen_chat(http_request: Request, timeout: float = 60):
+    """打开对话请求。连接被中途掐断时隔一会儿再试，避免一次抖动就整轮失败。"""
+    for attempt in range(_CHAT_ATTEMPTS):
+        try:
+            return urlopen(http_request, timeout=timeout)
+        except Exception as exc:
+            if isinstance(exc, HTTPError):
+                exc.close()
+            if not _transient_chat_error(exc) or attempt + 1 >= _CHAT_ATTEMPTS:
+                raise
+            delay = _CHAT_BACKOFF_S[min(attempt, len(_CHAT_BACKOFF_S) - 1)]
+            logger.warning(
+                "模型连接中断（%s），%.1f 秒后重试（%s/%s）",
+                exc,
+                delay,
+                attempt + 2,
+                _CHAT_ATTEMPTS,
+            )
+            time.sleep(delay)
+    raise RuntimeError("unreachable")
 
 from jshi.core import SubjectState
 from jshi.experienceledger.port import ContextAssessment
@@ -557,7 +601,7 @@ class OpenAICompatibleModel:
             },
             method="POST",
         )
-        with urlopen(http_request, timeout=60) as response:
+        with _urlopen_chat(http_request, timeout=60) as response:
             result = json.loads(response.read().decode("utf-8"))
         return ModelResponse(
             text=result["choices"][0]["message"]["content"],
@@ -589,7 +633,7 @@ class OpenAICompatibleModel:
             },
             method="POST",
         )
-        with urlopen(http_request, timeout=60) as response:
+        with _urlopen_chat(http_request, timeout=60) as response:
             for line in response:
                 raw = line.decode("utf-8") if isinstance(line, bytes) else str(line)
                 text = raw.strip()

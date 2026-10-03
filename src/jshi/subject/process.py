@@ -49,6 +49,8 @@ from jshi.governance import (
 from jshi.identity import IdentityRepository
 from jshi.intent import IntentPort, PlaceholderIntent
 from jshi.effectiveness import EffectivenessPort, InProcessEffectiveness
+from jshi.effectiveness.step_inputs import StepInputStore
+from jshi.effectiveness.timings import append_timing
 from jshi.memory import (
     InProcessMemoryBackend,
     MemoryPort,
@@ -306,6 +308,8 @@ class SubjectProcess:
         # 写场（②）独立端口：注入时走两调用；未注入退回单调用（保旧契约可跑）。
         self.write_zone = write_zone
         data_dir = repository.path.parent
+        self.step_inputs = StepInputStore(data_dir / "step_inputs.jsonl")
+        self._timings_path = data_dir / "activity_timings.jsonl"
         if tool_service is not None:
             self.tool_service = tool_service
         else:
@@ -703,7 +707,7 @@ class SubjectProcess:
         # 不能依赖 self._turn_tool_ids（会被后来的组装覆盖）。
         turn_tool_ids = tuple(getattr(self, "_turn_tool_ids", ()) or ())
         # 阶段④.5：非木头人格首次（无片场）→ boot 写场景
-        self._maybe_boot(subject_id, current)
+        self._maybe_boot(subject_id, current, activity.id)
         # 阶段⑤ 认知活动（一次调用；不执行同轮补召回）
         # 流式中途不早开口：等整份 response_plan 齐了，再在写场前把语言+动作合成一条交付，
         # 避免口头先出、动作拖到写场后另起一行。
@@ -914,6 +918,17 @@ class SubjectProcess:
             )
         timing = clock.finish(completed.id)
         self.last_activity_timing = timing
+        try:
+            append_timing(
+                self._timings_path,
+                subject_id=subject_id,
+                activity_id=timing.activity_id,
+                started_at=timing.started_at,
+                total_ms=timing.total_ms,
+                steps=timing.steps,
+            )
+        except Exception:
+            logger.exception("activity timing persist failed")
         # 300：事件结果钩子——只入队，不等待；执行由宿主在两拍之间 drain
         self._maybe_introspect_after_activity(
             subject_id, completed, plan, action_id, speaker
@@ -1201,7 +1216,9 @@ class SubjectProcess:
             parts.append(f"【素材·活跃区】\n{label}：{current.input_text}")
         return "\n\n".join(parts)
 
-    def _maybe_boot(self, subject_id: str, current: AssembledCurrentState) -> None:
+    def _maybe_boot(
+        self, subject_id: str, current: AssembledCurrentState, activity_id: str
+    ) -> None:
         """非木头人格且无片场：跑一次性 boot（写场景）并存入块级片场。
 
         已有片场不得再 boot：``_persona_ready`` 在已有现场时为真（本轮走
@@ -1243,6 +1260,9 @@ class SubjectProcess:
             persona_user_text=self._persona_user_text(current, boot=True),
         )
         try:
+            self._record_step_input(
+                request, self.cognition, subject_id=subject_id, activity_id=activity_id
+            )
             response = self.cognition.generate(request)
             scene = getattr(response, "scene", ())
             self.last_boot = "是"
@@ -1390,11 +1410,40 @@ class SubjectProcess:
         except Exception:
             logger.exception("tool response write-back failed")
 
+    def _record_step_input(
+        self,
+        request: ModelRequest,
+        model: object,
+        *,
+        subject_id: str,
+        activity_id: str,
+    ) -> None:
+        """存渲染后的系统提示词和用户提示词。失败不挡说话。"""
+        try:
+            rendered = request
+            skill = getattr(model, "_skill", None)
+            apply_to = getattr(model, "_apply_to", ())
+            if skill is not None and request.purpose in apply_to:
+                rendered = replace(request, system_extra=skill.system_extra(request))
+            from jshi.models.prompt import build_system, build_user
+
+            self.step_inputs.append_call(
+                subject_id=subject_id,
+                activity_id=activity_id,
+                purpose=request.purpose,
+                model=str(getattr(model, "name", "") or ""),
+                system_text=build_system(rendered),
+                user_text=build_user(rendered),
+            )
+        except Exception:
+            logger.exception("step input persist failed")
+
     def _cognize_once(
         self,
         current: AssembledCurrentState,
         working_recalled: Sequence[RecalledFragment],
         *,
+        activity_id: str,
         on_reply: Callable[[str], None] | None = None,
     ) -> object:
         """05 认知层：一次模型调用，只产出回应与上下文方案，不执行记忆。
@@ -1448,6 +1497,12 @@ class SubjectProcess:
                 current.context_view,
             ),
         )
+        self._record_step_input(
+            request,
+            self.cognition,
+            subject_id=current.subject_state.subject_id,
+            activity_id=activity_id,
+        )
         if on_reply is not None and hasattr(self.cognition, "generate_stream"):
             # 木头 & 人格都走流式提前开口：人格由 CognitionSkill.run_stream 按 reply 触发。
             return self.cognition.generate_stream(request, on_reply=on_reply)
@@ -1495,7 +1550,6 @@ class SubjectProcess:
         与回复调用独立：本轮回复已由调用①交出（``response_plan``），这里只整理现场/片场。
         失败重试一次；仍失败 → 空写场结果（木头沿用上一份 / 人格片场不动），不吞回复。
         """
-        del activity
         pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
         persona = is_persona(pack_id, registry=registry)
@@ -1566,6 +1620,12 @@ class SubjectProcess:
             context=context,
         )
         try:
+            self._record_step_input(
+                request,
+                self.write_zone,
+                subject_id=subject_id,
+                activity_id=activity.id,
+            )
             return self.write_zone.generate(request)
         except Exception:
             logger.exception("write_zone attempt 1 failed, retrying")
@@ -1670,7 +1730,7 @@ class SubjectProcess:
         """主流程认知编排：05 一次产出方案。同轮不执行 recall_requests。"""
         working_recalled: list[RecalledFragment] = list(current.recalled)
         response = self._cognize_once(
-            current, working_recalled, on_reply=on_reply
+            current, working_recalled, activity_id=activity.id, on_reply=on_reply
         )
         if clock is not None:
             clock.mark("⑤认知")

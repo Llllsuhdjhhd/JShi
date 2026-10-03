@@ -14,8 +14,8 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from jshi.core.params import (
-    INTROSPECTION_COOLDOWN_SECONDS,
-    INTROSPECTION_MAX_QUEUE,
+    introspection_cooldown_seconds,
+    introspection_max_queue,
 )
 
 from .port import (
@@ -40,10 +40,14 @@ class IntrospectionQueue:
     def __init__(
         self,
         *,
-        max_size: int = INTROSPECTION_MAX_QUEUE,
-        cooldown_seconds: int = INTROSPECTION_COOLDOWN_SECONDS,
+        max_size: int | None = None,
+        cooldown_seconds: int | None = None,
         now: Callable[[], datetime] = utc_now,
     ) -> None:
+        if max_size is None:
+            max_size = introspection_max_queue()
+        if cooldown_seconds is None:
+            cooldown_seconds = introspection_cooldown_seconds()
         self._max_size = max(1, int(max_size))
         self._cooldown_seconds = max(0, int(cooldown_seconds))
         self._now = now

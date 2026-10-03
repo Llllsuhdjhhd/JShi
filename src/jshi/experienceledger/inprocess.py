@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Mapping, Sequence
 
-from jshi.core.params import ACTIVE_ZONE_CHARS
+from jshi.core.params import active_zone_chars
 
 from .port import (
     ContextAssessment,
@@ -36,8 +36,10 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
     def __init__(
         self,
         *,
-        active_window_chars: int = ACTIVE_ZONE_CHARS,
+        active_window_chars: int | None = None,
     ) -> None:
+        if active_window_chars is None:
+            active_window_chars = active_zone_chars()
         self.active_window_chars = active_window_chars
         self._states: dict[str, _SubjectLedgerState] = {}
 

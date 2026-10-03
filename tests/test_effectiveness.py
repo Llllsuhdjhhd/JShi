@@ -81,7 +81,10 @@ def test_ratings_are_written_to_jsonl(tmp_path):
 def test_analyzer_lowers_level_on_unrelated(tmp_path):
     strategy = RecallStrategyStore(tmp_path / "recall_strategy.json")
     strategy.apply("stone", default_level=2)
-    effectiveness = InProcessEffectiveness(strategy=strategy)
+    suggestions = tmp_path / "tuning_suggestions.jsonl"
+    effectiveness = InProcessEffectiveness(
+        strategy=strategy, suggestions_path=suggestions
+    )
     ratings = MemoryRatings(
         items=(MemoryRating(ref="memory:x", relevance="unrelated"),),
         coverage="sufficient",
@@ -91,12 +94,38 @@ def test_analyzer_lowers_level_on_unrelated(tmp_path):
 
     effectiveness.run_due("stone")
 
-    assert strategy.get("stone").default_level == 1
-    assert strategy.get("stone").source_report_id
+    assert strategy.get("stone").default_level == 2
+    assert strategy.get("stone").limit is None
     reports = effectiveness.reports("stone")
     assert len(reports) == 1
     assert reports[0].analyzer == "memory_quality"
     assert reports[0].model_tag == ""
+    row = effectiveness.suggestions.rows[-1]
+    assert row["status"] == "suggestion"
+    assert row["applied"] is False
+    assert row["counter_id"] == "ratings.unrelated_ratio"
+    assert row["sample_activity_ids"]
+    assert "参数：recall.default_level" in row["cause"]
+    assert row["proposed"]["new"] == 1
+    assert row["proposed"]["name"] == "recall.default_level"
+    assert "limit" not in row["proposed"]["name"]
+    moments = [
+        item.created_at for item in effectiveness.ratings.list("stone")
+    ]
+    assert row["window"]["start"] == min(moments).isoformat()
+    assert row["window"]["end"] == max(moments).isoformat()
+
+
+def test_timing_and_step_input_failure_does_not_block_speech(tmp_path, monkeypatch):
+    process, _repository = runtime(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("jshi.subject.process.append_timing", boom)
+    process.step_inputs.append_call = boom
+    result = process.experience("stone", "你好", object_ref="user")
+    assert result.action_text == "回应"
 
 
 def test_run_due_failure_does_not_block_speech(tmp_path):

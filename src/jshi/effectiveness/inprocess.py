@@ -11,6 +11,9 @@ from jshi.memory.strategy import RecallStrategyStore
 from jshi.models import MemoryRatings
 
 from .baseline import BaselineStats, MemoryQualityEvaluator, calibrate
+from .counters import CountWindow, run_counter
+from .precheck import Change, Proposal, precheck
+from .suggestions import CODE_REF, Suggestion, SuggestionStore
 from .examples import (
     candidate_from_ratings,
     features_from_rows,
@@ -40,18 +43,26 @@ class InProcessEffectiveness:
         baseline: BaselineStats | None = None,
         examples_path: Path | str | None = None,
         candidate_path: Path | str | None = None,
+        suggestions_path: Path | str | None = None,
+        evaluator: MemoryQualityEvaluator | None = None,
     ) -> None:
         self.ratings = ratings or JsonlRatingStore()
         self.strategy = strategy or RecallStrategyStore()
         self._reports_path = Path(reports_path) if reports_path is not None else None
         self._candidate_path = Path(candidate_path) if candidate_path is not None else None
+        self.suggestions = SuggestionStore(suggestions_path)
         self._reports: list[EffectivenessReport] = []
         self._last_report_at: dict[str, datetime] = {}
         # 有基准则用它出策略；无基准回退启发式（见 memory_analyzer.heuristic_strategy）。
         if baseline is None and examples_path is not None:
             baseline = calibrate(read_examples(examples_path))
         self._baseline = baseline
-        self._evaluator = MemoryQualityEvaluator(baseline) if baseline is not None else None
+        if evaluator is not None:
+            self._evaluator = evaluator
+        elif baseline is not None:
+            self._evaluator = MemoryQualityEvaluator(baseline)
+        else:
+            self._evaluator = None
 
     def record_ratings(
         self,
@@ -135,15 +146,64 @@ class InProcessEffectiveness:
         )
         self._reports.append(report)
         self._last_report_at[subject_id] = now
-        # 落地可执行参数到 09 薄壳；策略全量留在报告（含 summary_level / recall_mode / basis）。
-        self.strategy.apply(
-            subject_id,
-            default_level=strategy.default_level,
-            limit=strategy.limit,
-            source_report_id=report.report_id,
-        )
-        self.ratings.mark_analyzed(unanalyzed)
         self._append_report(report)
+        # 过渡期不写 recall_strategy.json。只留下问题和原因，applied 保持 false。
+        self._suggest(subject_id, unanalyzed, current_level, strategy)
+        self.ratings.mark_analyzed(unanalyzed)
+
+    def _suggest(self, subject_id: str, unanalyzed: list, current_level: int, strategy) -> None:
+        level_changed = strategy.default_level != current_level
+        # 档位和条数同时变化时，本条只留档位，条数留给以后另一批评分。
+        if not level_changed:
+            return
+        counter_id = (
+            "ratings.unrelated_ratio"
+            if strategy.default_level < current_level
+            else "ratings.missing_coverage"
+        )
+        start = min(row.created_at for row in unanalyzed)
+        end = max(row.created_at for row in unanalyzed)
+        window = CountWindow(start=start, end=end)
+        counted = run_counter(counter_id, self.ratings.list(subject_id), window)
+        if not counted.activity_ids:
+            return
+        proposed = Change(
+            name="recall.default_level",
+            old=current_level,
+            new=strategy.default_level,
+            store="recall_strategy",
+        )
+        reason = (strategy.reason or "").strip()
+        cause = f"{reason} 参数：recall.default_level" if reason else ""
+        proposal = Proposal(
+            counter_id=counter_id,
+            sample_activity_ids=counted.activity_ids,
+            cause=cause,
+            window_start=start.isoformat(),
+            window_end=end.isoformat(),
+            proposed=proposed,
+        )
+        result = precheck(proposal)
+        suggestion = Suggestion(
+            status="suggestion" if result.ok else "rejected",
+            subject_id=subject_id,
+            counter_id=counter_id,
+            window_start=proposal.window_start,
+            window_end=proposal.window_end,
+            count=counted.count,
+            sample_activity_ids=counted.activity_ids,
+            cause=cause,
+            code_ref=CODE_REF,
+            proposed={
+                "name": proposed.name,
+                "old": proposed.old,
+                "new": proposed.new,
+                "store": proposed.store,
+            },
+            applied=False,
+            reject_reason="" if result.ok else result.reason,
+        )
+        self.suggestions.append(suggestion)
 
     def _append_report(self, report: EffectivenessReport) -> None:
         if self._reports_path is None:

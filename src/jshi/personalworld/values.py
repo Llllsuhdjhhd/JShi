@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping, Protocol, Sequence
 
-from jshi.core.params import VALUE_CATALOG_REFRESH_SECONDS
+from jshi.core.params import value_catalog_refresh_seconds
 from jshi.subject.domain import (
     HistoryKind,
     HistoryRecord,
@@ -199,7 +199,7 @@ class InProcessValues:
         self._repository = repository
         self._store = store or SqliteValueStore(repository.path)
         self._refresh_seconds = (
-            VALUE_CATALOG_REFRESH_SECONDS
+            value_catalog_refresh_seconds()
             if refresh_seconds is None
             else float(refresh_seconds)
         )

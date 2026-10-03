@@ -7,7 +7,10 @@ import os
 import sys
 from pathlib import Path
 
+from jshi.core.param_overlay import OverlayError, ensure_installed, load, rollback
+from jshi.core.params import active_zone_chars
 from jshi.effectiveness import InProcessEffectiveness, JsonlRatingStore
+from jshi.effectiveness.suggestions import write_baseline_if_absent
 from jshi.experienceledger import SqliteExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.memory import MemoryShell, RecallStrategyStore, build_memory_backend
@@ -188,6 +191,10 @@ def _tool_service(data_dir: Path, store: SkillConfigStore) -> ToolService:
 def _runtime(
     data_dir: Path,
 ) -> tuple[SubjectProcess, IdentityRepository, SubjectRepository]:
+    try:
+        ensure_installed(data_dir / "param_overlay.json")
+    except OverlayError as exc:
+        raise SystemExit(str(exc)) from exc
     identities = IdentityRepository(data_dir / "identities.json")
     subjects = SubjectRepository(data_dir / "subject.sqlite3")
     backend = build_memory_backend(subjects, data_dir)
@@ -197,6 +204,12 @@ def _runtime(
         ratings=JsonlRatingStore(data_dir / "memory_ratings.jsonl"),
         strategy=recall_strategy,
         reports_path=data_dir / "effectiveness_reports.jsonl",
+        suggestions_path=data_dir / "tuning_suggestions.jsonl",
+    )
+    write_baseline_if_absent(
+        data_dir / "tuning_suggestions.jsonl",
+        recall_strategy,
+        identities.subject_ids(),
     )
     if type(backend).__name__ != "InProcessMemoryBackend":
         print(f"[jshi] memory backend: {type(backend).__name__}", file=sys.stderr)
@@ -209,7 +222,10 @@ def _runtime(
         cognition,
         memory=MemoryShell(backend),
         long_term_experience=getattr(backend, "long_term_experience", None),
-        activity_ledger=SqliteExperienceLedger(data_dir / "subject.sqlite3"),
+        activity_ledger=SqliteExperienceLedger(
+            data_dir / "subject.sqlite3",
+            active_window_chars=active_zone_chars(),
+        ),
         prompt_rules=prompt_rules,
         recall_strategy=recall_strategy,
         effectiveness=effectiveness,
@@ -539,7 +555,30 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="看「主流程这一拍给了 200 什么」：05 指示（落库）+ 200 当前可见/已交付/已回写",
     )
+    overlay = commands.add_parser("overlay", help="查看或回滚参数覆盖层")
+    overlay.add_argument(
+        "--rollback",
+        action="store_true",
+        help="退回上一版整份覆盖，版本号加一",
+    )
     return parser
+
+
+def _run_overlay(args: argparse.Namespace) -> None:
+    path = args.data_dir / "param_overlay.json"
+    if not path.exists():
+        raise SystemExit(f"{path}：参数 ：文件不存在")
+    try:
+        if args.rollback:
+            snapshot = rollback(path)
+            print(snapshot.version)
+            return
+        snapshot = load(path)
+    except OverlayError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(path)
+    print(snapshot.version)
+    print(json.dumps(snapshot.values, ensure_ascii=False))
 
 
 def main() -> None:
@@ -548,6 +587,9 @@ def main() -> None:
     # tool 是独立演示：不依赖主体运行时，避免为它构建记忆后端 / 模型端口。
     if args.command == "tool":
         _run_tool(args)
+        return
+    if args.command == "overlay":
+        _run_overlay(args)
         return
     if args.command == "tool-log":
         _run_tool_log(args)
