@@ -1,6 +1,10 @@
 """Pi 整轮 RESULT：探路 bash 不得占满摘要。"""
 
 import json
+import tempfile
+from pathlib import Path
+
+import pytest
 
 from jshi.tool.contract import ToolRequest
 from jshi.tool.pi_engine import (
@@ -9,6 +13,23 @@ from jshi.tool.pi_engine import (
     _join_shell_result_parts,
     _shell_output_is_exploration,
 )
+
+
+def test_pi_spawn_cwd_is_scratch(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_popen(cmd, **kwargs):  # noqa: ANN001, ANN003
+        seen["cwd"] = kwargs.get("cwd")
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr("jshi.tool.pi_engine.subprocess.Popen", fake_popen)
+    with tempfile.TemporaryDirectory() as raw:
+        home = Path(raw)
+        engine = PiEngine(home_dir=home, executable="pi")
+        with pytest.raises(RuntimeError, match="stop"):
+            engine._spawn()
+        assert seen["cwd"] == home / "scratch"
+        assert (home / "scratch").is_dir()
 
 
 def test_skill_dir_listing_is_exploration() -> None:

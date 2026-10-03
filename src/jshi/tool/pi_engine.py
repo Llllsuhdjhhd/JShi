@@ -198,6 +198,7 @@ class PiEngine:
         )
         self._agent_dir.mkdir(parents=True, exist_ok=True)
         self._session_dir.mkdir(parents=True, exist_ok=True)
+        self._scratch_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def _agent_dir(self) -> Path:
@@ -206,6 +207,11 @@ class PiEngine:
     @property
     def _session_dir(self) -> Path:
         return self.home_dir / "sessions"
+
+    @property
+    def _scratch_dir(self) -> Path:
+        """工具进程的工作目录。相对路径的下载和中间文件落在这里，不进仓库根目录。"""
+        return self.home_dir / "scratch"
 
     def _base_args(self) -> list[str]:
         args = [self.executable, "--mode", "rpc", "--no-session"]
@@ -235,21 +241,13 @@ class PiEngine:
         args = self._base_args()
         # Windows 上 npm 只生成 pi.cmd。CreateProcess 不能直接执行 .cmd，
         # 因此 .cmd/.bat 走 cmd shell 启动，避免 PermissionError。
+        # cwd 固定在 scratch：工具里 `curl -o bing.html` 这类相对路径不再写进仓库根目录。
         suffix = Path(self.executable).suffix.lower()
-        if os.name == "nt" and suffix in {".cmd", ".bat"}:
-            return subprocess.Popen(
-                subprocess.list2cmdline(args),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                bufsize=1,
-                env=self._child_env(),
-                shell=True,
-            )
+        shell = os.name == "nt" and suffix in {".cmd", ".bat"}
+        command: str | list[str] = subprocess.list2cmdline(args) if shell else args
+        self._scratch_dir.mkdir(parents=True, exist_ok=True)
         return subprocess.Popen(
-            args,
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -257,6 +255,8 @@ class PiEngine:
             encoding="utf-8",
             bufsize=1,
             env=self._child_env(),
+            cwd=self._scratch_dir,
+            shell=shell,
         )
 
     @staticmethod
@@ -744,6 +744,7 @@ class PiEngine:
                 "【约束】",
                 "只做这次工具使用，不要扩展到无关任务。",
                 "按反馈要求输出关键阶段；没有要求就只输出必要结果。",
+                "临时下载和中间文件只放在当前工作目录，不要写到仓库根目录。",
             ]
         )
 
@@ -810,6 +811,7 @@ class PiEngine:
                 "3. 步骤之间没有依赖时，可以并行执行。",
                 "4. 每一步都输出关键进展；最终给出总结果。",
                 "5. 不要做与本目标无关的工作。",
+                "6. 临时下载和中间文件只放在当前工作目录，不要写到仓库根目录。",
             ]
         )
 
@@ -878,7 +880,8 @@ class PiEngine:
             f"description: {intent}\n"
             "正文如下（可补充，但 frontmatter 的 name 不能改）：\n\n"
             f"{body}\n\n"
-            "只创建这个 skill 和必要脚本，不要做无关探索；完成后说明文件路径。"
+            "只创建这个 skill 和必要脚本，不要做无关探索；完成后说明文件路径。\n"
+            "临时下载和中间文件只放在当前工作目录，不要写到仓库根目录。"
         )
 
     def _created_skill_error(self, tool_name: str) -> str:
