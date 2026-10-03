@@ -318,6 +318,21 @@ def _parser() -> argparse.ArgumentParser:
         help="原来的一行输入（默认；与 --tui 同时出现时以本项为准）",
     )
 
+    setup = commands.add_parser("voice-setup", help="下载本地中文流式识别和声纹模型（约 48 MB）")
+    setup.add_argument("--tts", action="store_true", help="同时下载中文合成音色（另约 159 MB）")
+    setup.add_argument("--refine", action="store_true", help="增加 SenseVoice 整句识别复核（另约 158 MB）")
+    setup.add_argument("--diarize", action="store_true", help="增加说话人分段与时间线（包括整句识别）")
+    setup.add_argument('--speaker-model', choices=['cam++', 'eres2netv2'], default='cam++', help='选择下载的声纹模型')
+    voice = commands.add_parser("voice", help="浏览器语音对话：麦克风输入、电脑扬声器输出")
+    voice.add_argument("subject_id", nargs="?", default=None)
+    voice.add_argument("--port", type=int, default=8765)
+    voice.add_argument("--asr", choices=["online", "local"], default=None)
+    voice.add_argument("--tts", choices=["online", "local"], default=None)
+
+    enroll = commands.add_parser("voice-enroll", help="将已注册对象与在线声纹关联")
+    enroll.add_argument("object_id")
+    enroll.add_argument("--audio-url", required=True, help="5～30 秒单人音频的 HTTPS 地址")
+
     reflect = commands.add_parser(
         "reflect", aliases=["inner"], help="进行一次内部反思"
     )
@@ -584,6 +599,10 @@ def _run_overlay(args: argparse.Namespace) -> None:
 def main() -> None:
     _load_local_env()
     args = _parser().parse_args()
+    if args.command == "voice-setup":
+        from jshi.voice.local import setup_models
+        setup_models(args.data_dir, tts=args.tts, refine=args.refine, diarize=args.diarize, speaker_model=args.speaker_model)
+        return
     # tool 是独立演示：不依赖主体运行时，避免为它构建记忆后端 / 模型端口。
     if args.command == "tool":
         _run_tool(args)
@@ -649,6 +668,18 @@ def main() -> None:
         _drain_introspection(process, args.subject_id)
     elif args.command in {"talk", "chat"}:
         _run_talk(process, identities, args, super_permissions)
+    elif args.command == "voice":
+        from jshi.app.voice import run_voice
+        try:
+            run_voice(process, identities, args)
+        except (ValueError, ImportError) as exc:
+            raise SystemExit(str(exc)) from exc
+    elif args.command == "voice-enroll":
+        from jshi.app.voice import enroll_voice
+        try:
+            enroll_voice(process, args)
+        except (ValueError, ImportError) as exc:
+            raise SystemExit(str(exc)) from exc
     elif args.command in {"reflect", "inner"}:
         result = process.reflect(args.subject_id, args.prompt)
         print(result.content)

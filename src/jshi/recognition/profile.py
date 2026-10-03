@@ -157,6 +157,24 @@ class ObjectProfileRepository:
             )
         return updated
 
+    def add_carrier(self, object_id: str, carrier: CarrierEntry) -> ObjectProfile:
+        # One transaction prevents associating a voice reference with two people.
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute("SELECT * FROM object_profiles").fetchall()
+            profiles = tuple(_profile(row) for row in rows)
+            current = next((p for p in profiles if p.object_id == object_id), None)
+            if current is None:
+                raise KeyError(object_id)
+            for p in profiles:
+                if p.object_id != object_id and any(c.kind == carrier.kind and c.value == carrier.value for c in p.carriers):
+                    raise ValueError("carrier already belongs to another object")
+            carriers = tuple(c for c in current.carriers if not (c.kind == carrier.kind and c.value == carrier.value)) + (carrier,)
+            updated = replace(current, carriers=carriers, updated_at=utc_now())
+            connection.execute("UPDATE object_profiles SET carriers = ?, updated_at = ? WHERE object_id = ?",
+                               (_dump_carriers(carriers), updated.updated_at.isoformat(), object_id))
+        return updated
+
     def list(self) -> Sequence[ObjectProfile]:
         with self._connect() as connection:
             rows = connection.execute(

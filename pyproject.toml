@@ -14,6 +14,8 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 talk = ["textual>=0.86,<9"]
+voice = ["aiohttp>=3.10,<4"]
+voice-local = ["aiohttp>=3.10,<4", "sherpa-onnx>=1.13.8,<2", "numpy>=1.24,<3"]
 # 标记用：真正的引擎是邻仓 `rems`，请另执行 pip install -e <Jshi_memory>
 memory-rems = []
 

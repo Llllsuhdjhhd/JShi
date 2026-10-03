@@ -230,6 +230,12 @@ def build_system(request: ModelRequest) -> str:
 
 
 def build_user(request: ModelRequest) -> str:
+    body = _build_user_body(request)
+    note = getattr(request, "transport_context", "")
+    return f"{note}\n\n{body}" if note else body
+
+
+def _build_user_body(request: ModelRequest) -> str:
     if not _is_cognition(request):
         return request.input_text
     persona = (getattr(request, "persona_user_text", "") or "").strip()
@@ -238,7 +244,11 @@ def build_user(request: ModelRequest) -> str:
     speaker = request.speaker
     label = speaker.label.strip() if speaker and speaker.label.strip() else "对方"
     parts: list[str] = [f"【说话人】{label}"]
-    if speaker is not None and is_name_ambiguous(speaker.reason):
+    if speaker is not None and speaker.reason == "voice_scene":
+        parts.append("这是现场观察，没有唯一说话人；按语音现场各段证据理解，不要求先确定一个对象，不把现场拟人。")
+    elif speaker is not None and speaker.reason == "voice_unknown":
+        parts.append("声音身份尚未明确，可以自然询问怎么称呼；临时对象不是已认识的人。")
+    elif speaker is not None and is_name_ambiguous(speaker.reason):
         parts.append(_ambiguous_speaker_note(speaker))
     elif speaker is not None and speaker.status != "confirmed":
         parts.append(f"档案暂定，无冲突按此人说话，不要问你是{label}吗。")

@@ -93,6 +93,8 @@ class ModelRequest:
     stimulus: str = "speech"
     # 200 交出的人话，03 原样装入；空则本路不出现。
     tool_input: str = ""
+    # Transport/actual playback facts, separate from the person's words.
+    transport_context: str = ""
     # 工具热状态（进行中 + 近时终态）；空则本路不出现。供 05 判断是否再开工具。
     tool_hot_state: str = ""
 
@@ -112,6 +114,7 @@ class RecallRequest:
 class ResponseItem:
     channel: str  # verbal | embodied
     text: str = ""
+    target_ids: tuple[str, ...] = ()
 
 
 # 片场里未说出口念头的固定前缀（程序追加；提示词同文）。
@@ -154,10 +157,7 @@ class ResponsePlan:
     def verbal_text(self) -> str:
         if self.mode in {"think", "ignore", "wait"}:
             return ""
-        for item in self.items:
-            if item.channel == "verbal" and item.text.strip():
-                return item.text
-        return ""
+        return "\n".join(item.text for item in self.items if item.channel == "verbal" and item.text.strip())
 
     def has_embodied(self) -> bool:
         return any(item.channel == "embodied" for item in self.items)
@@ -462,12 +462,13 @@ def _verbal_text(plan: Mapping[str, Any]) -> str:
     mode = (plan.get("mode") or "").strip()
     if mode not in {"respond"}:
         return ""
+    texts = []
     for item in plan.get("items") or ():
         if isinstance(item, Mapping) and item.get("channel") == "verbal":
             text = (item.get("text") or "").strip()
             if text:
-                return text
-    return ""
+                texts.append(text)
+    return "\n".join(texts)
 
 
 def _provider_usage_metadata(result: Mapping[str, Any]) -> dict[str, Any]:

@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Mapping, Sequence
+from jshi.core.envelope import InputEnvelope
 
 from jshi.activezone import (
     ActiveZonePort,
@@ -210,6 +211,8 @@ class AssembledCurrentState:
     tool_input: str = ""
     tool_hot_state: str = ""
     stimulus: str = STIMULUS_SPEECH
+    transport_context: str = ""
+    audio_delivery: bool = False
 
 
 @dataclass(frozen=True)
@@ -262,6 +265,7 @@ class SubjectActivityResult:
         default_factory=lambda: SpeakerCandidate(subject_id="", actor_object_id="")
     )
     timing: ActivityTiming | None = None
+    selected_tool_ids: tuple[str, ...] = ()
 
 
 class SubjectProcess:
@@ -496,7 +500,13 @@ class SubjectProcess:
         objects: Mapping[str, str] | None = None,
         on_reply: Callable[[str], None] | None = None,
         stimulus: str = STIMULUS_SPEECH,
+        envelope: InputEnvelope | None = None,
+        resolved_speaker: SpeakerCandidate | None = None,
+        on_verbal: Callable[[str], None] | None = None,
+        on_voice_plan: Callable[[ResponsePlan], None] | None = None,
     ) -> SubjectActivityResult:
+        if envelope is not None and (not envelope.final or envelope.text != text.strip()):
+            raise ValueError("only final envelopes with matching text enter cognition")
         clock = StepClock()
         self.last_boot = "否"
         self.last_memory_control = None
@@ -505,8 +515,13 @@ class SubjectProcess:
         if idle:
             text = ""
         # 阶段① 对象必填校验 → 对象解析 → 置信度门禁 → 落位
-        self._require_object_source(object_ref, channel, carriers)
-        speaker = self.recognition.resolve(
+        if resolved_speaker is not None:
+            if (envelope is None or resolved_speaker.subject_id != subject_id
+                    or resolved_speaker.object_id != envelope.speaker.object_id):
+                raise ValueError("resolved speaker requires an envelope for this subject")
+        else:
+            self._require_object_source(object_ref, channel, carriers)
+        speaker = resolved_speaker or self.recognition.resolve(
             subject_id, text, object_ref, channel, carriers
         )
         if not speaker.object_id:
@@ -539,12 +554,17 @@ class SubjectProcess:
                 extra_aliases = profile.aliases
         objects = _speaker_object_mapping(speaker, objects, extra_aliases)
         mentioned_object_ids = _mentioned_with_speaker(speaker)
+        if envelope is not None:
+            mentioned_object_ids = tuple(dict.fromkeys((*mentioned_object_ids,
+                *(u.speaker.object_id for u in envelope.utterances
+                  if u.speaker.status in {"introduced", "recognized"}))))
         fact = HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.FACT,
             event_type="idle_stimulus" if idle else "external_input",
             content={
                 "text": text,
+                **({"envelope": envelope.to_dict()} if envelope else {}),
                 "stimulus": STIMULUS_IDLE if idle else STIMULUS_SPEECH,
                 "objects": dict(objects),
                 "source": "idle" if idle else speaker.label,
@@ -616,6 +636,8 @@ class SubjectProcess:
         current = self.assemble_current_state(
             subject_id, text, view, speaker=speaker, stimulus=stimulus
         )
+        if envelope is not None:
+            current = replace(current, transport_context=envelope.context_note(), audio_delivery=True)
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -711,9 +733,21 @@ class SubjectProcess:
         # 阶段⑤ 认知活动（一次调用；不执行同轮补召回）
         # 流式中途不早开口：等整份 response_plan 齐了，再在写场前把语言+动作合成一条交付，
         # 避免口头先出、动作拖到写场后另起一行。
+        verbal_delivered = False
+
+        def deliver_verbal(value: str) -> None:
+            nonlocal verbal_delivered
+            if on_verbal is not None and not verbal_delivered and value.strip():
+                verbal_delivered = True
+                on_verbal(value)
+
         response, working_recalled = self._cognize(
-            subject_id, activity, current, perception, clock=clock, on_reply=None
+            subject_id, activity, current, perception, clock=clock,
+            on_reply=deliver_verbal if on_verbal is not None else None,
         )
+        deliver_verbal(verbal_text(response.response_plan))
+        if on_voice_plan is not None:
+            on_voice_plan(response.response_plan)
         self.last_model_response = response
         if on_reply is not None:
             early = format_speech_with_action(
@@ -736,7 +770,7 @@ class SubjectProcess:
                 source_ids=(activity.id,),
             )
         )
-        if response.object_assessment is not None:
+        if response.object_assessment is not None and envelope is None:
             speaker = self._apply_object_assessment(
                 subject_id, speaker, fact, activity.id, response.object_assessment
             )
@@ -792,9 +826,11 @@ class SubjectProcess:
         }
         if spoke:
             reply_text = spoken_text
+            if current.audio_delivery:
+                reply_text = f"（准备通过语音说，实际交付待播放器反馈）{reply_text}"
             embodied_text = plan.embodied_text().strip()
             if embodied_text:
-                reply_text = f"{spoken_text}（动作：{embodied_text}）"
+                reply_text = f"{reply_text}（动作：{embodied_text}）"
             self.activity_ledger.append_subject_reply(
                 subject_id,
                 text_raw=reply_text,
@@ -824,6 +860,11 @@ class SubjectProcess:
         pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
         # 写场：两调用时由独立 write_zone 产出；未注入则读回复响应的写场字段（单调用兼容）。
+        if current.audio_delivery:
+            current = replace(current, transport_context=current.transport_context +
+                "\n【语音交付】本轮回复是待播放的计划，写场不等待播放。"
+                "没有播放完成反馈，不得写成对方已经听完；记录为准备说。"
+                "实际播放与打断反馈会在下一轮信封提供。")
         write_result = (
             self._write_zone(
                 subject_id, activity, current, response, speaker, working_recalled
@@ -861,6 +902,12 @@ class SubjectProcess:
                               "disposition": "deferred" if response.response_plan.unsaid_text() else "answered",
                               "evidence": response.response_plan.verbal_text(),
                               "work_complete": True} for task_id in consumed)
+        if current.audio_delivery:
+            # Generated text is not yet delivered speech. The voice host can
+            # confirm answered items once the player finishes the full reply.
+            handling = tuple({**item, "disposition": "deferred", "work_complete": False,
+                              "reason": "awaiting_voice_delivery"}
+                             if item.get("disposition") == "answered" else item for item in handling)
         if handling:
             consumed = self.tool_service.handle_results(
                 subject_id, speaker.object_id if speaker else "", handling,
@@ -960,6 +1007,7 @@ class SubjectProcess:
             current,
             speaker=speaker,
             timing=timing,
+            selected_tool_ids=turn_tool_ids,
         )
 
     def _governing_rules(self, subject_id: str) -> tuple[str, ...]:
@@ -1315,7 +1363,8 @@ class SubjectProcess:
         unsaid_block = format_unsaid_zone_block(plan.unsaid_text())
         parts: list[str] = []
         if reply_text:
-            parts.append(f"我说：“{reply_text}”")
+            prefix = "我准备说" if current.audio_delivery else "我说"
+            parts.append(f"{prefix}：“{reply_text}”")
         if action_text and action_text != "无动作":
             parts.append(action_text)
         reply_block = " ".join(parts).strip()
@@ -1507,6 +1556,7 @@ class SubjectProcess:
             persona_schema=persona_schema,
             persona_user_text=persona_user_text,
             tool_input=current.tool_input,
+            transport_context=current.transport_context,
             tool_hot_state=current.tool_hot_state,
             stimulus=current.stimulus,
             context=self._model_context(
@@ -1546,7 +1596,8 @@ class SubjectProcess:
             parts.append(f"【上一份现场】\n{prev}")
         parts.append(f"【本轮原话】{label}：{current.input_text}")
         if reply_text:
-            parts.append(f"【你的回应】我说：{reply_text}")
+            prefix = "我准备说" if current.audio_delivery else "我说"
+            parts.append(f"【你的回应】{prefix}：{reply_text}")
         unsaid_block = format_unsaid_zone_block(unsaid_text)
         if unsaid_block:
             parts.append(f"【未说出口】{unsaid_block}")
@@ -1625,6 +1676,7 @@ class SubjectProcess:
             )
         request = ModelRequest(
             purpose="write_zone",
+            transport_context=current.transport_context,
             input_text=current.input_text,
             subject_state=current.subject_state,
             speaker=model_speaker,

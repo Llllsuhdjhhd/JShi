@@ -70,6 +70,7 @@ COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
                         "properties": {
                             "channel": {"enum": ["verbal", "embodied"]},
                             "text": {"type": "string"},
+                            "target_ids": {"type": "array", "items": {"type": "string"}},
                         },
                     },
                 },
@@ -255,7 +256,9 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
     """把模型 JSON 映射为 ``ModelResponse``（各用途段）；非法枚举与通道丢弃或降级。"""
     plan_raw = data.get("response_plan") if isinstance(data.get("response_plan"), dict) else {}
     items = tuple(
-        ResponseItem(channel=str(it.get("channel")), text=str(it.get("text", "")))
+        ResponseItem(channel=str(it.get("channel")), text=str(it.get("text", "")),
+                     target_ids=tuple(v for v in it.get("target_ids", []) if isinstance(v, str))
+                     if isinstance(it.get("target_ids", []), list) else ())
         for it in (plan_raw.get("items") or [])
         if isinstance(it, dict) and it.get("channel") in _CHANNELS
     )
