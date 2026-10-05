@@ -97,6 +97,7 @@ class ModelRequest:
     transport_context: str = ""
     # 工具热状态（进行中 + 近时终态）；空则本路不出现。供 05 判断是否再开工具。
     tool_hot_state: str = ""
+    input_review_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -266,6 +267,8 @@ class ModelResponse:
     # 本轮【工具相关】里已用上或判定不必再提的任务ID；只有这些标记为已送达并回写回应。
     tool_consumed: tuple[str, ...] = ()
     tool_handling: tuple[Mapping[str, Any], ...] = ()
+    speaker_judgments: tuple[Mapping[str, Any], ...] = ()
+    next_jev_note: str = ""
 
     @property
     def text(self) -> str:
@@ -301,6 +304,8 @@ class ModelResponse:
         tool_intent: ToolUseIntent | None = None,
         tool_consumed: tuple[str, ...] = (),
         tool_handling: tuple[Mapping[str, Any], ...] = (),
+        speaker_judgments: tuple[Mapping[str, Any], ...] = (),
+        next_jev_note: str = "",
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
     ) -> None:
@@ -336,6 +341,8 @@ class ModelResponse:
         object.__setattr__(self, "scene", tuple(scene))
         object.__setattr__(self, "value_narration", value_narration or "")
         object.__setattr__(self, "raw_text", raw_text or "")
+        object.__setattr__(self, "speaker_judgments", tuple(speaker_judgments))
+        object.__setattr__(self, "next_jev_note", str(next_jev_note or "")[:120])
         object.__setattr__(self, "tool_intent", tool_intent)
         from jshi.core.tool_handling import parse_tool_handling
         object.__setattr__(self, "tool_handling", parse_tool_handling(tool_handling))

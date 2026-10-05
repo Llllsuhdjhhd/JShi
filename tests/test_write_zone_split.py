@@ -8,6 +8,10 @@
 
 from __future__ import annotations
 
+import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import (
     ModelPort,
@@ -40,9 +44,11 @@ class WriteModel(ModelPort):
     def __init__(self) -> None:
         self.calls = 0
         self.reply_in_context = False
+        self.last_request = None
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         self.calls += 1
+        self.last_request = request
         if any(item.get("kind") == "subject_reply" for item in request.context):
             self.reply_in_context = True
         # 木头整份重写：由写场调用产出。
@@ -114,3 +120,78 @@ def test_write_zone_success_after_one_failure(tmp_path):
     assert write.calls == 2
     applied = process.activity_ledger.current_context_view("stone")
     assert "现场：恢复" in applied.context_text
+
+
+def test_write_timing_records_retry_and_failure_separately(tmp_path):
+    process, _ = runtime(tmp_path, ReplyModel(), FailingWriteModel(fail_times=2))
+    result = process.experience("stone", "你好", object_ref="user")
+    rows = [json.loads(line) for line in (tmp_path / "write_timings.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert all(row["activity_id"] == result.activity.id for row in rows)
+    models = [row for row in rows if row["phase"] == "model" and row["status"] != "started"]
+    assert [(row["attempt"], row["status"]) for row in models] == [(1, "error"), (2, "error")]
+    total = next(row for row in rows if row["phase"] == "write" and row["status"] != "started")
+    assert total["status"] == "failed"
+    assert total["total_ms"] >= sum(row["total_ms"] for row in models)
+    assert total["started_at"] <= total["finished_at"]
+
+
+def test_deferred_write_timing_starts_only_when_write_runs(tmp_path):
+    entered, release = Event(), Event()
+
+    class BlockingWrite(WriteModel):
+        def generate(self, request):
+            entered.set()
+            assert release.wait(5)
+            return super().generate(request)
+
+    process, _ = runtime(tmp_path, ReplyModel(), BlockingWrite())
+    result = process.experience("stone", "你好", object_ref="user", defer_write=True)
+    path = tmp_path / "write_timings.jsonl"
+    assert not path.exists()
+    job = process.take_deferred_write()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(job)
+        try:
+            assert entered.wait(5)
+            started = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            assert [(row["phase"], row["status"]) for row in started] == [("write", "started"), ("model", "started")]
+        finally:
+            release.set()
+        assert future.result(timeout=5)
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert all(row["activity_id"] == result.activity.id for row in rows)
+    assert rows[-1]["phase"] == "write"
+    assert rows[-1]["status"] == "succeeded"
+    assert rows[-1]["total_ms"] >= rows[-2]["total_ms"]
+
+
+def test_persona_write_receives_current_response_in_actual_prompt(tmp_path):
+    from jshi.models.prompt import build_user
+    from jshi.skill import SkillModelPort, WriteZoneSkill
+    from jshi.style import SMITH
+
+    class DetailedReply(ReplyModel):
+        def generate(self, request):
+            return ModelResponse(model=self.name, response_plan=ResponsePlan(
+                mode="respond",
+                items=(ResponseItem("verbal", "这次先告诉你天气。", ("OBJ-USER",)),
+                       ResponseItem("embodied", "点头")),
+                unsaid="user 的路线结果暂缓告知。",
+            ))
+
+    write = WriteModel()
+    process, _ = runtime(tmp_path, DetailedReply(), SkillModelPort(
+        WriteZoneSkill(write), apply_to=("write_zone",)))
+    process.style_packs.set("stone", SMITH)
+    process.zone_store.boot("stone", value="我是匠石。", scene=["user 刚问过天气。"])
+    process.experience("stone", "现在天气怎么样", object_ref="user")
+
+    prompt = build_user(write.last_request)
+    assert "【此时的输入】" in prompt
+    assert "【此时的片场】" in prompt
+    assert "【你的回应】" in prompt
+    assert "这次先告诉你天气。" in prompt
+    assert "点头" in prompt
+    assert "user 的路线结果暂缓告知。" in prompt
+    assert '"target_ids": ["user"]' in prompt
+    assert '"target_ids": ["OBJ-USER"]' not in prompt

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from jshi.core.tool_handling import TOOL_HANDLING_SCHEMA, parse_tool_handling
+from jshi.core.conversation_review import REVIEW_SCHEMA, REVIEW_INSTRUCTION, parse_review, parse_reply_targets
 
 import json
 import re
@@ -35,7 +36,6 @@ from .base import Skill, SkillError, _strip_markdown_fences, parse_json_object
 from jshi.style.packs import (
     RESPONSE_MODE_BLOCK,
     SOURCE_PRIORITY_NOTE,
-    TOOL_REPLY_NOTE,
     TOOL_TASK_NOTE,
 )
 
@@ -279,6 +279,11 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         items=items,
         unsaid=str(plan_raw.get("unsaid", "") or "").strip(),
     )
+    targets = parse_reply_targets(data)
+    if targets:
+        response_plan = replace(response_plan, items=tuple(
+            replace(item, target_ids=targets) if item.channel == "verbal" and not item.target_ids else item
+            for item in response_plan.items))
 
     ca_raw = data.get("context_assessment") if isinstance(data.get("context_assessment"), dict) else {}
     context_assessment = ContextAssessment(
@@ -337,6 +342,7 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         tool_intent=_parse_tool_intent(data),
         tool_consumed=_parse_tool_consumed(data),
         tool_handling=parse_tool_handling(data.get("tool_handling")),
+        **parse_review(data),
     )
 
 
@@ -483,7 +489,7 @@ def _persona_to_model_response(
     reason = str(data.get("reason") or "").strip()
     items: list[ResponseItem] = []
     if reply and mode == "respond":
-        items.append(ResponseItem(channel="verbal", text=reply))
+        items.append(ResponseItem(channel="verbal", text=reply, target_ids=parse_reply_targets(data)))
     if action:
         items.append(ResponseItem(channel="embodied", text=action))
     if mode in _SILENT_MODES:
@@ -500,6 +506,7 @@ def _persona_to_model_response(
         tool_intent=_parse_tool_intent(data),
         tool_consumed=_parse_tool_consumed(data),
         tool_handling=parse_tool_handling(data.get("tool_handling")),
+        **parse_review(data),
     )
 
 
@@ -567,8 +574,8 @@ user 里的【活跃区】和【回忆】每行都带对象名；带方括号时
 
 【关于谁在说话】
 - 一个人说话，不代表就一直是他。匠石可能同时面对好几个人，也可能有人插话。每一拍只看【说话人】标的是谁；当前这句是谁说的，就按这个人回应，不要当成上一拍那个人继续说。
-- 别张冠李戴：不要把别人（别的名字）的话或记忆，安到当前说话人头上。每条活跃区/回忆自带（名字）归属，只认与【说话人】同名的那条；名字不同就是不同的人，不是同一个人。
-- 新说话人按「第一次认识」对待：【说话人】若是没确认 / 现场里找不到这个名字（provisional 或生面孔），就不要说你记得ta的过去，不要编造ta说过什么、做过什么、和你有什么约定。除非现场里确有明确标着【说话人】名字的回忆，否则不要「我记得你之前…」。
+- 别张冠李戴：每条活跃区/回忆有自己的对象归属，按明确归属和程序给出的对象关联使用。没有关联证据时，不把不同对象当成同一个人，不把别人的经历安到当前说话人头上。
+- 姓名未知、匿名对象或 provisional 不妨碍正常交往，不要求每轮先报姓名。稳定匿名对象可延续本会话；“声音归属待定”是未归属音频的占位，不代表所有发言来自同一个人。没有能归到当前对象的真实经历，就不要编造ta的过去；有明确归属的片场或回忆可以自然使用，不因档案暂定就否认已有交往。
 
 ''' + SOURCE_PRIORITY_NOTE + '''
 
@@ -577,8 +584,6 @@ user 里的【活跃区】和【回忆】每行都带对象名；带方括号时
 {values}
 
 ''' + RESPONSE_MODE_BLOCK + '''
-
-''' + TOOL_REPLY_NOTE + '''
 
 {style_instruction}
 
@@ -592,7 +597,8 @@ user 里的【活跃区】和【回忆】每行都带对象名；带方括号时
 你的输出格式：你每轮只输出一个 JSON 对象，字段按下方 Schema；枚举字段只取允许值，不输出任何解释文字。
 未说出口、须留下的明确事项写在 response_plan.unsaid，用连贯叙述点名当前说话人；说出口的话写在 items 的 verbal。不要把 unsaid 写进 verbal。不要另加「（名字）」标签。
 '''
-    schema: Mapping[str, Any] = COGNITION_JSON_SCHEMA
+    instruction += "\n\n" + REVIEW_INSTRUCTION
+    schema: Mapping[str, Any] = {**COGNITION_JSON_SCHEMA, "properties": {**COGNITION_JSON_SCHEMA["properties"], **REVIEW_SCHEMA}}
 
     def __init__(
         self,

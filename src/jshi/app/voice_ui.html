@@ -4,61 +4,96 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>和匠石说话</title>
 <style>
-  *{box-sizing:border-box} body{margin:0;background:#f6f4ef;color:#272b29;font:16px/1.7 system-ui,sans-serif}
-  main{max-width:960px;margin:20px auto;padding:20px} h1{font-size:30px;margin:0} .sub{color:#66716c;margin:8px 0}
-  .panel{background:white;border:1px solid #dddcd5;border-radius:16px;padding:22px;margin:22px 0}
-  label{display:block;margin:10px 0} select{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font:inherit}
-  button{padding:10px 20px;border:0;border-radius:8px;background:#315c4e;color:white;font:inherit;cursor:pointer;margin-right:8px}
-  button.secondary{background:#e9edea;color:#315c4e} button:disabled{opacity:.45;cursor:default}
-  meter{width:100%;height:14px} #live{min-height:32px;color:#66716c} #log p{padding:12px 16px;border-radius:10px;background:#edf2ee;margin:12px 0;white-space:pre-wrap}
-  #log p.notice{background:#f5efe3;color:#7a603c} #log p.reply{background:white;border:1px solid #dddcd5}
-  small{color:#66716c} input[type=range]{vertical-align:middle}
-  .toolbar{position:sticky;top:0;z-index:2;background:#fff;padding:12px;border-bottom:1px solid #dddcd5;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  .toolbar button{margin:0} #status{margin:0;flex:1;min-width:180px} #speaker{color:#315c4e} #judge{font-size:13px;color:#66716c}
-  details.panel{margin:14px 0;padding:14px 18px} summary{cursor:pointer} #log{display:flex;flex-direction:column;gap:10px} #log p{margin:0}
-  #log time{display:block;font-size:12px;color:#66716c} audio{width:100%;margin-top:10px} .tip{font-size:14px;color:#66716c}
-  .debug pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:55vh;overflow:auto;font:13px/1.6 monospace;background:#f6f4ef;padding:12px}
-  body{background:#f9f9f9;color:#242424;font:15px/1.65 system-ui,sans-serif}
-  main{max-width:1500px;margin:0 auto;padding:24px 32px} h1{font-size:23px;font-weight:600}
-  .sub{font-size:13px;margin:4px 0 20px}.workspace{display:grid;grid-template-columns:minmax(0,1fr) 350px;gap:30px;align-items:start}
-  .conversation{min-width:0;min-height:70vh}.inspector{position:sticky;top:16px;border-left:1px solid #e5e5e5;padding-left:22px;max-height:95vh;overflow:auto}
-  .toolbar{position:sticky;top:0;border:1px solid #e5e5e5;border-radius:12px;padding:12px;box-shadow:0 2px 12px #00000005;margin-bottom:16px}
-  button{background:#222;color:#fff;font-size:13px;padding:8px 12px}button.secondary{background:#ededed;color:#333}
-  details.panel{border:1px solid #e5e5e5;border-radius:10px;background:white;padding:12px;margin:0 0 14px}summary{font-weight:600;font-size:14px}
-  #speaker{font-size:13px;margin:4px 0}#judge{margin-bottom:14px}#live{padding:8px 12px;color:#777;font-style:italic}
-  #log{gap:16px}#log p{padding:16px 20px;border-radius:12px;line-height:1.8;background:transparent;border:1px solid #e8e8e8}
-  #log p.input{background:#f0f0f0;margin-left:8%;border:0}#log p.reply{margin-right:6%;background:#fff;border:1px solid #dedede}
-  #log p.notice{padding:8px 14px;font-size:12px;color:#777;background:#f5f5f5;border:0}#log time{font-size:11px;letter-spacing:.02em;margin-bottom:6px}
-  #log p.selected{outline:2px solid #4c7568;background:#eaf2ee}.select-input{display:block;float:right;margin:0 0 6px 8px;background:white;color:#555;border:1px solid #ccc}
-  input[type=text]{width:100%;padding:9px;border:1px solid #ddd;border-radius:7px;font:inherit}select{font-size:13px;padding:8px}
-  .debug pre{max-height:44vh;background:#f5f5f5;font-size:12px}.debug-controls{display:flex;gap:4px;flex-wrap:wrap;margin-top:10px}.debug-controls button{margin:0}
-  .tip{font-size:12px}#enroll-status{font-size:12px;color:#666}#debug-title{font-size:12px;overflow-wrap:anywhere}.empty{color:#999;padding:50px 20px;text-align:center}
-  @media(max-width:900px){main{padding:16px}.workspace{grid-template-columns:1fr}.inspector{position:static;max-height:none;border-left:0;padding:0}.conversation{min-height:40vh}.sub{margin-bottom:12px}}
+  :root{color-scheme:light;--ink:#25272b;--muted:#737780;--line:#e8e9ed;--accent:#3478f6;--surface:#f7f8fa;--input:#edf4ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:#fff;color:var(--ink);font:15px/1.65 "Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  main{max-width:1500px;margin:0 auto;padding:24px 32px}h1{font-size:22px;letter-spacing:-.03em;font-weight:600;margin:0;display:flex;align-items:center;gap:10px}
+  .brand-mark{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:#c83b32;color:#fff;font-size:14px;font-weight:500;letter-spacing:0;flex:none}
+  .page-header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.view-controls{display:flex;gap:4px;flex:none}
+  .header-actions{display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}.header-actions button{margin:0}
+  .help-popup{position:relative}.help-popup>summary{list-style:none;display:grid;place-items:center;width:30px;height:30px;border-radius:8px;color:#747b88;font-size:15px;font-weight:500}
+  .help-popup>summary::marker{content:""}.help-popup>summary::-webkit-details-marker{display:none}.help-popup>summary:hover,.help-popup[open]>summary{background:#edf4ff;color:var(--accent)}
+  .help-bubble{position:absolute;right:0;top:calc(100% + 9px);z-index:5;width:min(320px,calc(100vw - 40px));background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:0 8px 32px #20283814;color:#626975;font-size:12px;line-height:1.7}
+  .help-bubble p{margin:0 0 8px}.help-bubble p:last-child{margin:0}
+  .state-row{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;padding:12px 0 14px;margin-bottom:10px;border-bottom:1px solid #f0f1f3}
+  .judge-popup>summary{width:auto;height:auto;padding:3px 7px;font-size:11px}.judge-popup .help-bubble{right:auto;left:0}
+  .view-toggle{display:grid;place-items:center;padding:7px;margin:0;background:transparent;color:#747b88;border-radius:8px}
+  .view-toggle:hover:not(:disabled){background:#f0f2f6;color:#374151}.view-toggle[aria-pressed=true]{background:#edf4ff;color:var(--accent)}
+  .view-toggle svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  [hidden]{display:none!important}.workspace.single-pane{grid-template-columns:minmax(0,1fr)}.workspace.single-pane .inspector{border-left:0;padding-left:0}
+  .layout-empty{color:var(--muted);text-align:center;padding:32px;font-size:13px}
+  .workspace{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:30px;align-items:start}
+  .conversation{min-width:0;min-height:70vh}.inspector{position:sticky;top:16px;border-left:1px solid var(--line);padding-left:22px;max-height:95vh;overflow:auto}
+  button{border:0;border-radius:9px;background:#292b30;color:#fff;font:inherit;font-size:13px;padding:8px 13px;cursor:pointer;margin-right:8px;transition:background .15s ease}
+  button:hover:not(:disabled){background:#41444b}button.secondary{background:#f2f3f5;color:#555a64}button.secondary:hover:not(:disabled){background:#e9ebef}
+  button:disabled{opacity:.4;cursor:default}.toolbar button{margin:0}#start{background:var(--accent)}#start:hover:not(:disabled){background:#2563de}
+  :is(button,input,select,summary):focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  #status{margin:0;font-size:13px;font-weight:500;color:#414956}
+  #speaker{color:#737780;font-size:12px;margin:0}#judge{font-size:12px;color:var(--muted)}
+  #live{min-height:24px;padding:4px 0;color:#536eaa;font-size:13px}#live:empty{min-height:12px;padding:0}
+  details.panel{border:1px solid var(--line);border-radius:12px;background:#fff;padding:14px;margin:0 0 12px}
+  summary{cursor:pointer;font-weight:600;font-size:13px;color:#3f434c}summary::marker{color:#959ba6}
+  .inspector>.panel>summary{display:flex;align-items:center;gap:9px;list-style:none}
+  .inspector>.panel>summary::marker{content:""}.inspector>.panel>summary::-webkit-details-marker{display:none}
+  .panel-icon{width:26px;height:26px;padding:5px;border-radius:7px;background:#f2f3f5;color:#737b89;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+  .inspector>.panel[open]>summary .panel-icon{background:#edf4ff;color:var(--accent)}
+  .inspector>.panel>summary:hover .panel-icon{color:var(--accent)}
+  #log{display:flex;flex-direction:column;gap:9px}#log p{margin:0;padding:9px 12px;border-radius:10px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line)}
+  #log p.input{background:var(--input);margin-left:8%;border:1px solid transparent}#log p.reply{margin-right:6%;background:#fff;border:1px solid transparent;padding-left:0}
+  #log p.notice{padding:8px 12px;font-size:12px;color:#6e737e;background:var(--surface);border:0;border-left:2px solid #edbc69;border-radius:0 8px 8px 0}
+  #log time{display:inline-block;color:var(--muted);font-size:11px;margin:0 8px 3px 0}#log .message-meta{font-size:11px;color:var(--muted)}#log .message-body{display:block;clear:both}
+  #log details{margin-top:4px}#log details>summary{font-size:11px;font-weight:400;color:var(--muted)}
+  #log p.selected{outline:2px solid var(--accent);background:#e7f0ff}.select-input{display:block;float:right;margin:0 0 3px 8px;padding:3px 8px;background:#ffffffb3;color:#5c677e;border:1px solid #dce4f2;font-size:11px}
+  .select-input:hover:not(:disabled){background:#fff;color:#2468da;border-color:#b6ccf5}
+  label{display:block;margin:10px 0;font-size:13px}input[type=text],select{width:100%;border:1px solid #e0e3e8;border-radius:9px;background:#fff;color:var(--ink);font:inherit}
+  input[type=text]{padding:9px}select{font-size:13px;padding:8px}input[type=range]{vertical-align:middle;accent-color:var(--accent)}
+  meter{width:100%;height:14px;accent-color:var(--accent)}audio{width:100%;margin-top:10px}
+  small,.tip{color:var(--muted)}.tip{font-size:12px}#enroll-status{font-size:12px;color:var(--muted)}#match-value{color:var(--accent);font-weight:600}
+  .debug pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:44vh;overflow:auto;font:12px/1.6 monospace;background:var(--surface);color:#4e5666;border-radius:8px;padding:12px}
+  .debug-controls{display:flex;gap:4px;flex-wrap:wrap;margin-top:10px}.debug-controls button{margin:0}#debug-title{font-size:12px;overflow-wrap:anywhere}
+  .empty{color:#8b909a;padding:40px 20px;text-align:center;font-size:13px}
+  #composer{display:flex;gap:8px;margin-top:12px}#composer input{flex:1;margin:0}#composer button{margin:0;background:var(--accent)}
+  #rename-ask{margin:8px 0 0;padding:10px 12px;border-radius:10px;background:#f5f8ff;border:1px solid #d5e4ff}
+  @media(max-width:900px){main{padding:20px}.workspace{grid-template-columns:1fr;gap:24px}.inspector{position:static;max-height:none;border-left:0;padding:0}.conversation{min-height:28vh}#log p.input{margin-left:5%}#log p.reply{margin-right:3%}}
 </style>
 <main>
-  <h1>和匠石说话</h1>
-  <p class="sub">选择 LARK A2 麦克风，说话即可。声音通过电脑默认扬声器播放。</p>
-  <div class="workspace"><section class="conversation" aria-label="对话">
-  <div class="toolbar">
-    <button id="start">开始对话</button><button id="end" class="secondary" disabled>结束</button><button id="stop" class="secondary" disabled>停止播放</button>
-    <p id="status">尚未连接</p>
+  <header class="page-header"><h1><span class="brand-mark" aria-hidden="true">匠</span>和匠石说话</h1>
+    <div class="header-actions">
+      <button id="start">开始对话</button><button id="end" class="secondary" disabled>结束</button><button id="stop" class="secondary" disabled>停止播放</button><button id="retry-write" class="secondary" hidden>重试写场</button>
+      <details class="help-popup"><summary aria-label="使用提示" title="使用提示">?</summary><div class="help-bubble">
+        <p>选择 LARK A2 麦克风，说话即可。声音通过电脑默认扬声器播放。</p>
+        <p>说“我是 lux”可关联姓名，也可以选中发言手动登记声纹。</p>
+        <p>检测到声音不会自动停播；由 JEV 结合内容与现场判断是否接话。</p>
+        <p>最新消息在上方；录音时间和身份依据可展开“输入详情”查看。</p>
+      </div></details>
+    <nav class="view-controls" aria-label="面板显示">
+      <button id="toggle-conversation" class="view-toggle" aria-label="隐藏对话区" aria-controls="conversation" aria-expanded="true" aria-pressed="false" title="隐藏对话区"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path d="M5 7h2v10H5z" fill="currentColor" stroke="none"/></svg></button>
+      <button id="toggle-inspector" class="view-toggle" aria-label="隐藏右侧检查区" aria-controls="inspector" aria-expanded="true" aria-pressed="false" title="隐藏右侧检查区"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/><path d="M17 7h2v10h-2z" fill="currentColor" stroke="none"/></svg></button>
+    </nav></div></header>
+  <div class="state-row" aria-label="当前状态">
+    <span id="status" role="status" aria-live="polite">尚未连接</span>
+    <span id="speaker">说话人待确认</span>
+    <details class="help-popup judge-popup"><summary title="查看本次接话判断">接话判断</summary><div class="help-bubble" id="judge">尚无接话判断。</div></details>
   </div>
-  <p id="speaker">说话人待确认 · 可以先说“我是 lux”</p>
-  <div id="judge">打断由 JEV 判断；检测到声音不会自动停播。</div>
-  <div id="live"></div><section id="log" aria-live="polite"><div class="empty" id="empty">开始对话后，发言和回应显示在这里。<br>最新消息在上方；点击输入上的“选择声音”可以登记姓名。</div></section>
-  </section><aside class="inspector" aria-label="声音登记与检查">
-  <details class="panel" open><summary>声音与姓名</summary>
-    <p class="tip">每段至少 1.5 秒；单段至少 3 秒，多段合计至少 4 秒。选同一人的清晰发言，不同人的声音请分别登记。</p>
+  <p id="layout-empty" class="layout-empty" hidden>对话与检查面板已隐藏，点击右上角图标恢复。</p>
+  <div class="workspace" id="workspace"><section class="conversation" id="conversation" aria-label="对话">
+  <div id="live"></div><section id="log" aria-live="polite"><div class="empty" id="empty">等待第一句对话。</div></section>
+  <form id="composer"><input id="typed" type="text" maxlength="200" placeholder="打字发送，以当前说话人的身份。更正姓名可写：我其实是小敏，不是小明" disabled><button id="send-text" disabled>发送</button></form>
+  <p id="rename-ask" hidden></p>
+  </section><aside class="inspector" id="inspector" aria-label="声音登记与检查">
+  <details class="panel" open><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20v-2a7 7 0 0 1 14 0v2"/></svg>声音与姓名</summary>
+    <p><a href="/voice-enroll" target="_blank" rel="noopener"><strong>登记声纹、试一试能否认出、改名 →</strong></a></p>
+    <p class="tip">也可以在这里直接登记：在左侧点几句同一个人说的话的“选择声音”，填写姓名后点登记。</p>
     <label>姓名 <input id="enroll-name" type="text" maxlength="40" list="known-names" placeholder="例如 lux"><datalist id="known-names"></datalist></label>
     <p id="enroll-count">尚未选择声音</p>
     <button id="enroll" disabled>登记声纹</button><button id="enroll-clear" class="secondary">清空选择</button>
     <p id="enroll-status" role="status">声音片段仅在当前会话内暂存，登记后保存声纹特征。</p>
-    <label for="match-threshold">声纹匹配门槛 <output id="match-value">—</output></label>
+    <details><summary>匹配门槛 <output id="match-value">—</output></summary>
     <input id="match-threshold" type="range" min="0.30" max="0.95" step="0.01" value="0.60" disabled style="width:100%">
-    <p class="tip">低：更容易认出，也容易混认。高：更严格，也容易漏认。只调整匹配，不改变登记检查。</p>
-    <small id="match-status">连接后可调节；每种本地模型分别保存。</small>
+    <p class="tip">相似度达到门槛才认作此人。低了容易认错人，高了容易认不出。建议在登记页“试一试”后采用推荐值。</p>
+    <small id="match-status">连接后可调节；每种本地模型分别保存。</small></details>
   </details>
-  <details class="panel"><summary>声纹方案对比</summary>
+  <details class="panel"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4m4-8v12m4-15v18m4-15v12m4-8v4"/></svg>声纹方案对比（高级）</summary>
     <p class="tip">先选同一人的 5–30 秒发言并填写姓名，加入登记样本。再选另一次发言加入测试样本；旁人可用其他姓名作为未登记者测试。所选 WAV 仅保存在本机，结果不会改动正式声纹库。</p>
     <label>对话使用的声纹模型 <select id="speaker-model"><option value="">服务默认（保留当前方案）</option><option value="cam++">CAM++</option><option value="eres2netv2">ERes2NetV2</option></select></label>
     <small>换模型须结束后重新开始；声纹库相互独立，新模型需要重新登记。</small>
@@ -68,18 +103,18 @@
     <p id="compare-status">连接后可收集样本。云端保留入口，尚未配置录音上传服务。</p>
     <pre id="compare-report" style="white-space:pre-wrap;font-size:12px;overflow-wrap:anywhere"></pre>
   </details>
-  <details class="panel debug"><summary>轮次信息 · PROMPT / TIMING / tool</summary>
+  <details class="panel debug"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 8h8m-8 4h5m-5 4h8"/></svg>轮次信息 · PROMPT / TIMING / tool</summary>
     <label>轮次 <select id="debug-turn"><option value="">最近已完成轮次</option></select></label>
-    <label>模型调用 <select id="debug-purpose"><option value="all">全部调用</option><option value="subject_activity">认知 / 回应</option><option value="write_zone">写场</option></select></label>
+    <label>模型调用 <select id="debug-purpose"><option value="all">全部调用</option><option value="voice_jev">JEV 初判</option><option value="subject_activity">认知 / 回应</option><option value="write_zone">写场</option></select></label>
     <label>提示词区块 <select id="debug-part"><option value="all">完整提示词</option><option value="system">system</option><option value="user">user</option><option value="schema">JSON Schema</option></select></label>
-    <p class="tip">PROMPT 为实际发送记录；选择 system、user、Schema 或具体区块查看。</p>
+    <p class="tip">PROMPT 为实际发送记录；可选择 JEV 初判、认知或写场，查看 system、user 或具体区块。本轮涉及多次 JEV 时逐次列出。</p>
     <div class="debug-controls">
     <button class="secondary" id="debug-prompt">/PROMPT</button><button class="secondary" id="debug-timing">/TIMING</button><button class="secondary" id="debug-tool">/tool</button>
     <button class="secondary" id="debug-copy">复制内容</button></div>
     <label>更多信息 <select id="debug-extra"><option value="">选择查看</option><option value="input">输入信封</option><option value="scene">现场上下文</option><option value="identity">身份依据</option><option value="delivery">播放交付</option><option value="jev">接话判断</option><option value="response">模型结构化输出</option></select></label>
     <p id="debug-title">尚未读取</p><pre id="debug-content"></pre>
   </details>
-  <details class="panel"><summary>麦克风与声音检查</summary>
+  <details class="panel"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1m-7 8v3m-4 0h8"/></svg>麦克风与声音检查</summary>
     <label>语音识别 <select id="asr"><option value="">服务默认</option><option value="online">火山在线 · 多人时间线</option><option value="local">本地识别</option></select></label>
     <p class="tip">在线识别会上传音频；声纹登记与匹配在本地进行。</p>
     <label for="device">麦克风</label><select id="device"><option value="">系统默认麦克风</option></select>
@@ -94,6 +129,18 @@
 </main>
 <script>
 const $ = id => document.getElementById(id);
+const panelVisibility={conversation:true,inspector:true};
+try{const saved=JSON.parse(localStorage.getItem('jshi.voice.panels') || '{}');for(const id of Object.keys(panelVisibility))if(typeof saved[id]==='boolean')panelVisibility[id]=saved[id];}catch{}
+function refreshPanels(){
+  for(const [id,visible] of Object.entries(panelVisibility)){
+    $(id).hidden=!visible;const button=$('toggle-'+id),name=id==='conversation' ? '对话区' : '右侧检查区';
+    button.ariaExpanded=String(visible);button.ariaPressed=String(!visible);button.ariaLabel=(visible ? '隐藏' : '显示')+name;button.title=button.ariaLabel;
+  }
+  if(!panelVisibility.conversation || !panelVisibility.inspector)$('workspace').classList.add('single-pane');else $('workspace').classList.remove('single-pane');
+  $('layout-empty').hidden=panelVisibility.conversation || panelVisibility.inspector;
+}
+for(const id of Object.keys(panelVisibility))$('toggle-'+id).onclick=()=>{panelVisibility[id]=!panelVisibility[id];refreshPanels();try{localStorage.setItem('jshi.voice.panels',JSON.stringify(panelVisibility));}catch{}};
+refreshPanels();
 let ws, mic, captureContext, outputContext, capture, ready = false;
 let replyId = '', paused = false, queue = [], playing = null, source = null;
 let audioDone = true, mainBusy = false;
@@ -104,6 +151,7 @@ const invalidReplies = new Set();
 const selectedInputs = new Map(), inputRows = new Map();
 let debugSection='prompt';
 let voiceprintAvailable=true;
+function personLabel(label){return /^未命名访客 \d+$/.test(label || '') ? label+' · 内部名，还不知道姓名' : (label || '待确认');}
 function selectionChanged(){ $('enroll-count').textContent=selectedInputs.size ? '已选 '+selectedInputs.size+' 段声音' : '尚未选择声音'; $('enroll').disabled=!selectedInputs.size || !voiceprintAvailable || !ws || ws.readyState!==WebSocket.OPEN; }
 function send(message) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); }
 function log(text, kind='notice', atMs=null) {
@@ -195,6 +243,12 @@ function message(m) {
       lines.push('实际登记通过 '+r.enrollment_accepted+'/'+r.enrollment_people+' 人');
       for(const [label,reason] of Object.entries(r.enrollment_failures || {}))lines.push(label+' 未登记：'+reason);
       lines.push('声纹提取中位 '+r.embedding_p50_ms+'ms，最大 '+r.embedding_max_ms+'ms；加载 '+r.load_ms+'ms');
+      const c=r.calibration;
+      if(c && c.status==='ok'){
+        lines.push('同人相似度 '+c.genuine.min+'–'+c.genuine.max+'（中位 '+c.genuine.median+'，'+c.genuine_pairs+' 组）；异人 '+c.impostor.min+'–'+c.impostor.max+'（中位 '+c.impostor.median+'，'+c.impostor_pairs+' 组）');
+        lines.push('等错误率 '+(c.eer*100).toFixed(1)+'%，对应门槛 '+c.eer_threshold+'；不误认门槛 '+c.strict_threshold+'，此时漏认 '+(c.strict_miss_rate*100).toFixed(1)+'%；当前门槛 '+r.threshold);
+        lines.push((c.separable?'同人与异人分数可以完全分开。':'同人与异人分数有重叠。')+(c.reliable?'':'样本较少（同人、异人各不足 20 组），结论仅供参考。'));
+      } else if(c) lines.push('门槛校准：'+c.reason);
       for(const x of r.results)lines.push(x.expected+' → '+(x.predicted || '未命中')+' · 相似度 '+x.score);
     }
     lines.push('\n云端：'+report.cloud.reason);$('compare-report').textContent=lines.join('\n');$('compare-status').textContent='报告已保存：'+m.path;$('compare-run').disabled=false;return;
@@ -217,19 +271,31 @@ function message(m) {
   }
   if(m.type==='enrollment'){
     speakerLabels.set(m.object_id,m.label);
-    for(const id of m.input_ids){const row=inputRows.get(id);if(row){row.p.style.outline='';row.meta.textContent=row.time+' · '+m.label+' · 手动关联';row.p.classList.remove('selected');row.button.textContent='选择声音';}}
-    selectedInputs.clear();selectionChanged();$('enroll-status').textContent='已关联 '+m.label+'：'+m.clips+' 段，'+m.seconds+' 秒。'+(m.min_similarity!=null ? '最低一致性 '+m.min_similarity+'（要求 '+m.enrollment_threshold+'）。' : '单段登记，尚无跨片段一致性证据。')+'声纹已保存，后续声音会重新匹配。';return;
+    for(const id of m.input_ids){const row=inputRows.get(id);if(row){row.p.style.outline='';row.meta.textContent=m.label+' · 手动关联';row.p.classList.remove('selected');row.button.textContent='选择声音';}}
+    selectedInputs.clear();selectionChanged();$('enroll-status').textContent='已关联 '+m.label+'：'+m.clips+' 段，声纹已保存 '+m.seconds+' 秒。新的声音在最前面，一条声纹最长 10 秒。'+(m.min_similarity!=null ? '样本最低相似度 '+m.min_similarity+'（仅供参考）。' : '')+(m.warning || '');return;
   }
   if (m.type==='ready') { ready=true; $('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '');
     $('match-threshold').disabled=m.match_threshold==null;
-    if(m.match_threshold!=null){$('match-threshold').value=m.match_threshold;$('match-value').textContent=Number(m.match_threshold).toFixed(2);$('match-status').textContent='与第二候选须相差 '+m.match_margin+'；调整后即时生效并保存。';}
+    if(m.match_threshold!=null){$('match-threshold').value=m.match_threshold;$('match-value').textContent=Number(m.match_threshold).toFixed(2);$('match-status').textContent='单句确认至少 '+Math.max(.65,m.match_threshold).toFixed(2)+'，与第二候选须相差 '+m.match_margin+'；较弱声音先收集多段核对，待定声音不参与姓名竞争。';}
     voiceprintAvailable=m.voiceprint_available!==false;selectionChanged();
     if(!voiceprintAvailable)$('enroll-status').textContent='本地声纹模型尚未加载，暂时无法登记声音。';
     else $('enroll-status').textContent='已加载 '+(m.voiceprint_count || 0)+' 份登记声纹；未命中不代表登记丢失。';
     $('compare-status').textContent=m.comparison_available ? '对照样本保存在本机；请选择姓名和录音。' : '当前服务尚未加载对照功能，重启语音服务后可用。';
     $('known-names').replaceChildren();for(const name of m.names || [])$('known-names').appendChild(new Option(name,name));
+    $('typed').disabled=false;$('send-text').disabled=false;
   }
+  else if(m.type==='rename_prompt'){
+    const ask=$('rename-ask'),words=document.createElement('span');words.textContent=m.text+' ';
+    ask.hidden=false;ask.replaceChildren(words);
+    const yes=document.createElement('button'),no=document.createElement('button');
+    yes.textContent='确认改名';no.textContent='取消';no.className='secondary';
+    yes.onclick=()=>{send({type:'rename_confirm',object_id:m.object_id,name:m.name,accept:true});ask.hidden=true;};
+    no.onclick=()=>{send({type:'rename_confirm',object_id:m.object_id,name:m.name,accept:false});ask.hidden=true;};
+    ask.appendChild(yes);ask.appendChild(no);return;
+  }
+  else if(m.type==='renamed'){speakerLabels.set(m.object_id,m.label);$('rename-ask').hidden=true;}
   else if(m.type==='notice') log(m.text);
+  else if(m.type==='write_failed') $('retry-write').hidden=false;
   else if(m.type==='transcript') {
     $('live').textContent=m.final ? '' : m.text;
     // Final utterances appear once, with speaker and timestamps, in timeline.
@@ -238,8 +304,8 @@ function message(m) {
   else if(m.type==='turn_complete') {mainBusy=false;refreshStatus();}
   else if(m.type==='input_pending') $('judge').textContent='主流程忙碌，新发言正在合并为下一批输入。';
   else if(m.type==='speaker') {
-    const basis={self_introduction:'本次自我介绍关联',voiceprint_match:'已登记声纹匹配',unidentified:'身份未知',unassigned_audio:'本句暂不能归属，未新增访客',anonymous_voice_cluster:'匿名声纹轨迹，姓名未确认',voice_scene:'多人现场',manual_annotation:'手动关联'};
-    $('speaker').textContent='当前说话人：'+(m.label || '待确认')+' · '+(basis[m.method] || m.method);
+    const basis={self_introduction:'本次自我介绍关联',voiceprint_match:'已登记声纹匹配',unidentified:'身份未知',unassigned_audio:'本句暂不能归属，未新增访客',anonymous_voice_cluster:'匿名声纹轨迹，姓名未确认',voice_continuity:'沿用会话对象 · 本句姓名未确认',voice_scene:'多人现场',manual_annotation:'手动关联',context_attribution:'上下文推测，声纹未确认'};
+    $('speaker').textContent='当前说话人：'+personLabel(m.label)+' · '+(basis[m.method] || m.method);
   }
   else if(m.type==='identity') log('身份关联：'+m.label+'\n'+m.detail,'notice');
   else if(m.type==='timeline') {
@@ -247,19 +313,30 @@ function message(m) {
     const time=ms=>Math.floor(ms/60000)+':'+((ms%60000)/1000).toFixed(1).padStart(4,'0');
     const wall=ms=>new Date(ms).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
     const stamp='会话 +'+time(m.start_ms)+'–'+time(m.end_ms)+(m.recorded_start_at_ms!=null ? ' · 录音约 '+wall(m.recorded_start_at_ms)+'–'+wall(m.recorded_end_at_ms) : ''), p=log('','input',m.received_at_ms),meta=document.createElement('span'),body=document.createElement('span');
-    meta.textContent=stamp+' · '+m.speaker.label+' · 轨迹 '+m.speaker.track_id+(m.overlap ? ' · 声音重叠' : '');meta.style.cssText='display:block;font-size:12px;color:#777';
-    body.textContent=m.text;p.appendChild(meta);p.appendChild(body);
-    if(m.identity_note){
+    meta.textContent=personLabel(m.speaker.label)+' · 轨迹 '+m.speaker.track_id+(m.overlap ? ' · 声音重叠' : '');meta.className='message-meta';meta.title=stamp;
+    body.textContent=m.text;body.className='message-body';p.appendChild(meta);p.appendChild(body);
+    const ranking=document.createElement('small');ranking.className='voice-ranking';
+    try{
+      const d=JSON.parse(m.identity_note || '{}');
+      const hits=(Array.isArray(d.candidates) ? d.candidates : []).filter(x=>Number.isFinite(x.score)).sort((a,b)=>b.score-a.score).slice(0,2);
+      ranking.textContent=hits.length ? hits.map((x,i)=>(i===0 ? '第一名：' : '第二名：')+(x.label || speakerLabels.get(x.object_id) || '名称未提供')+' '+Number(x.score).toFixed(3)).join(' · ')+'（相似度，未必已确认身份）' : '本句没有有效声纹排名';
+    }catch{ranking.textContent='本句没有有效声纹排名';}
+    p.appendChild(ranking);
+    {
       const details=document.createElement('details'),summary=document.createElement('summary'),note=document.createElement('small');
-      summary.textContent='身份比对';let text=m.identity_note;
-      try{const d=JSON.parse(text);text=d.reason+(d.anonymous_reason ? ' · '+d.anonymous_reason : '')+(d.seconds!=null ? ' · 样本 '+d.seconds+' 秒' : '')+(d.best_score!=null ? ' · 姓名最高相似度 '+d.best_score+'，要求 '+d.threshold+'；次高 '+d.runner_up+'，领先要求 '+d.margin : '')+(d.anonymous_best_score!=null ? ' · 匿名最高相似度 '+d.anonymous_best_score+'，要求 '+d.anonymous_threshold+'；次高 '+d.anonymous_runner_up : '');}catch{}
-      note.textContent=text;details.appendChild(summary);details.appendChild(note);p.appendChild(details);
+      summary.textContent='输入详情 · 身份比对';let text=m.identity_note || '本句没有额外身份比对记录';
+      try{const d=JSON.parse(text);text=d.reason+(d.anonymous_reason ? ' · '+d.anonymous_reason : '')+(d.seconds!=null ? ' · 样本 '+d.seconds+' 秒' : '')+(d.best_score!=null ? ' · 姓名最高相似度 '+d.best_score+'；单句确认要求 '+(d.single_confirmation_threshold ?? d.threshold)+'；次高 '+d.runner_up+'，领先要求 '+d.margin : '')+(d.collection ? ' · 有效发言 '+d.collection.count+'/'+d.collection.required_count+'，累计 '+d.collection.seconds+' 秒，'+(d.collection.stable ? '声音组一致，姓名另行判断' : '继续存疑收集') : '');}catch{}
+      note.textContent=stamp+'\n'+text;details.appendChild(summary);details.appendChild(note);p.appendChild(details);
     }
     if(m.input_id){const button=document.createElement('button');button.className='select-input';button.textContent=m.overlap ? '重叠，无法登记' : '选择声音';button.disabled=!!m.overlap;
       button.onclick=()=>{if(selectedInputs.has(m.input_id)){selectedInputs.delete(m.input_id);p.classList.remove('selected');button.textContent='选择声音';}
         else if(selectedInputs.size<32){selectedInputs.set(m.input_id,true);p.classList.add('selected');button.textContent='已选择 ✓';}selectionChanged();};
       p.prepend(button);p.inputId=m.input_id;inputRows.set(m.input_id,{p,meta,button,time:stamp});
     }
+  }
+  else if(m.type==='input_route' && m.kept===false) {
+    const row=inputRows.get(m.input_id);
+    if(row && !row.meta.textContent.includes('未交主流程')) row.meta.textContent+=' · 未交主流程';
   }
   else if(m.type==='jev') {const labels={ignore:'只记录现场',resume:'继续当前状态',stop:'停止',respond:'接话',clarify:'澄清'}; $('judge').textContent='JEV：'+(labels[m.action] || m.action)+' · '+m.reason;}
   else if(m.type==='reply') {
@@ -309,6 +386,7 @@ for(const section of ['prompt','timing','tool']) $('debug-'+section).onclick=()=
 for(const id of ['debug-turn','debug-part','debug-purpose']) $(id).onchange=()=>requestDebug();
 $('debug-extra').onchange=()=>{if($('debug-extra').value)requestDebug($('debug-extra').value);};
 $('debug-copy').onclick=()=>navigator.clipboard.writeText($('debug-content').textContent).catch(e=>{$('debug-title').textContent='复制失败：'+e.message;});
+$('composer').onsubmit=event=>{event.preventDefault();const text=$('typed').value.trim();if(!text||!ready)return;send({type:'text',text});$('typed').value='';};
 $('enroll-clear').onclick=()=>{for(const id of selectedInputs.keys()){const row=inputRows.get(id);if(row){row.p.classList.remove('selected');row.button.textContent='选择声音';}}selectedInputs.clear();selectionChanged();};
 $('enroll').onclick=()=>{
   if(!ws || ws.readyState!==WebSocket.OPEN){$('enroll-status').textContent='请在当前会话连接中登记声音。';return;}
@@ -325,12 +403,13 @@ $('compare-run').onclick=()=>{if(!ready){$('compare-status').textContent='请先
 $('compare-new').onclick=()=>{if(!ready){$('compare-status').textContent='请先连接对话。';return;}send({type:'compare_new'});};
 $('end').onclick=end;
 $('stop').onclick=()=>{ pause(); send({type:'stop'}); };
+$('retry-write').onclick=()=>{ send({type:'retry_write'}); $('retry-write').hidden=true; };
 $('test').onclick=async()=>{
   let stream, recorder, testContext;
   $('test').disabled=true; $('start').disabled=true;
   try {
     stream=await navigator.mediaDevices.getUserMedia({audio:{deviceId:$('device').value ? {exact:$('device').value} : undefined,
-      echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:{ideal:2}}});
+      echoCancellation:true,noiseSuppression:false,autoGainControl:true,channelCount:{ideal:2}}});
     testContext=new AudioContext(); await testContext.resume();
     const input=testContext.createMediaStreamSource(stream), destination=testContext.createMediaStreamDestination();
     const count=stream.getAudioTracks()[0].getSettings().channelCount || 1;
@@ -364,7 +443,8 @@ $('start').onclick=async()=>{
     outputContext = new AudioContext(); await outputContext.resume();
     mic=await navigator.mediaDevices.getUserMedia({audio:{
       deviceId:$('device').value ? {exact:$('device').value} : undefined,
-      echoCancellation:true, noiseSuppression:true, autoGainControl:true, channelCount:{ideal:2}
+      // Voiceprint enrollment uses the same constraints; browser noise suppression reshapes the spectrum.
+      echoCancellation:true, noiseSuppression:false, autoGainControl:true, channelCount:{ideal:2}
     }});
     captureContext=new AudioContext(); await captureContext.audioWorklet.addModule('/voice_capture.js');
     capture=new AudioWorkletNode(captureContext,'voice-capture');

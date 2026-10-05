@@ -6,6 +6,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 
 from jshi.core.params import step_inputs_max_bytes
 
@@ -24,6 +25,7 @@ class StepInputStore:
     def __init__(self, path: Path | str, *, max_bytes: int | None = None) -> None:
         self.path = Path(path)
         self._max_bytes = max_bytes
+        self._lock = RLock()
 
     def _limit(self) -> int:
         if self._max_bytes is not None:
@@ -31,6 +33,14 @@ class StepInputStore:
         return step_inputs_max_bytes()
 
     def append_call(
+        self,
+        **kwargs,
+    ) -> None:
+        # JEV, cognition and background writing may record concurrently.
+        with self._lock:
+            self._append_call(**kwargs)
+
+    def _append_call(
         self,
         *,
         subject_id: str,
@@ -40,7 +50,7 @@ class StepInputStore:
         system_text: str,
         user_text: str,
     ) -> None:
-        if purpose not in {"subject_activity", "write_zone"}:
+        if purpose not in {"subject_activity", "write_zone", "voice_jev"}:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         digest = _hash(system_text)
@@ -71,6 +81,10 @@ class StepInputStore:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _read(self) -> list[dict]:
+        with self._lock:
+            return self._read_unlocked()
+
+    def _read_unlocked(self) -> list[dict]:
         if not self.path.exists():
             return []
         rows: list[dict] = []

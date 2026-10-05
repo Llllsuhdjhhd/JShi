@@ -1,6 +1,7 @@
 """CPU streaming recognition and speaker embeddings; no cloud audio upload."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -9,6 +10,7 @@ import re
 from pathlib import Path
 from uuid import uuid4
 from threading import RLock
+from time import monotonic, time
 
 from .volc import Transcript
 
@@ -18,6 +20,9 @@ SPEAKER_NAME = "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
 SPEAKER_MODELS = {'cam++': SPEAKER_NAME, 'eres2netv2': '3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx'}
 REFINER_NAME = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09"
 SEGMENTATION_NAME = "sherpa-onnx-pyannote-segmentation-3-0"
+# CAM++ trains on 3-second crops and concatenates short clips to at least 6 seconds.
+# One enrollment embedding is stable around 10 seconds; longer household audio starts to dilute it.
+VOICEPRINT_SECONDS = 10
 
 
 def cosine(a, b) -> float:
@@ -25,6 +30,29 @@ def cosine(a, b) -> float:
         return -1.0
     denom = math.sqrt(sum(x*x for x in a) * sum(x*x for x in b))
     return sum(x*y for x, y in zip(a, b)) / denom if denom else -1.0
+
+
+def voiceprint_score(vector, entry) -> float:
+    """One person has one embedding. Extra stored slices must not raise another person's score."""
+    return cosine(vector, entry['embedding'])
+
+
+def fit_voice_pcm(new_pcm: bytes, old_pcm: bytes, *, seconds: float = VOICEPRINT_SECONDS) -> bytes:
+    """Newest audio is placed first. Short audio keeps its real length; the oldest tail is dropped past the limit."""
+    limit = int(16000 * seconds) * 2
+    combined = (new_pcm or b'') + (old_pcm or b'')
+    if len(combined) % 2:
+        combined = combined[:-1]
+    return combined[:limit]
+
+
+def _unit(vector):
+    import numpy as np
+    values = np.asarray(vector, dtype='float64')
+    norm = np.linalg.norm(values)
+    if norm <= 0 or not np.isfinite(norm):
+        return None
+    return (values / norm).tolist()
 
 
 class EnrollmentError(ValueError):
@@ -35,9 +63,12 @@ class EnrollmentError(ValueError):
 
 class LocalSpeakers:
     def __init__(self, extractor, model_id: str, path: Path, profiles,
-                 *, threshold: float = 0.65, margin: float = 0.08, enrollment_threshold: float = 0.8) -> None:
+                 *, threshold: float = 0.65, margin: float = 0.08, enrollment_threshold: float = 0.8,
+                 anonymous_ttl_s: float = 7 * 86400, clock=time) -> None:
         self.extractor, self.model_id, self.path, self.profiles = extractor, model_id, path, profiles
         self.threshold, self.margin = threshold, margin
+        # Unnamed voices are remembered briefly, like a stranger met in passing.
+        self.anonymous_ttl_s, self.clock = anonymous_ttl_s, clock
         self.enrollment_threshold = enrollment_threshold
         if not -1 <= threshold <= 1 or margin < 0:
             raise ValueError("invalid voice similarity thresholds")
@@ -49,12 +80,17 @@ class LocalSpeakers:
             data = json.loads(path.read_text(encoding="utf-8"))
             if data.get("model_id") == model_id:
                 self.known = data.get("entries", {})
+                self._remove_withdrawn()
+                self._collapse_entries()
         self.tracks: dict[str, list[float]] = {}
         self.track_samples: dict[str, list[list[float]]] = {}
-        self.pending_tracks: list[list[float]] = []
+        self.pending_tracks: list[dict] = []
         self.last_embedding: dict[str, list[float]] = {}
         self.binding: dict[str, str] = {}
         self.last_match = {}
+        self.recent_tracks = {}
+        self.named_tracks = {}
+        self.observation = 0
         settings = self.path.with_suffix('.settings.json')
         if settings.is_file():
             saved = json.loads(settings.read_text(encoding='utf-8'))
@@ -89,80 +125,339 @@ class LocalSpeakers:
             return None
         return values
 
+    def rank_known(self, samples, limit: int = 3) -> list[dict]:
+        """得分最高的已知声纹。未达门槛也返回，供上下文复判；提不出特征时返回空列表。"""
+        with self.lock:
+            self._expire()
+            vector = self.embedding(samples)
+            if vector is None:
+                return []
+            ranked = []
+            for item in self.known.values():
+                profile = self.profiles.get(item.get("object_id"))
+                if profile is None or profile.status == "rejected" or not item.get("embedding"):
+                    continue
+                if item.get('expires_at') is not None or (profile.source == 'voice_anonymous' and profile.label.startswith('未命名访客')):
+                    continue
+                from .identity import canonical_voice_profile
+                profile = canonical_voice_profile(self.profiles, profile)
+                ranked.append((voiceprint_score(vector, item), profile.object_id, profile.label))
+            ranked.sort(reverse=True)
+            seen = set()
+            result = []
+            for score, object_id, label in ranked:
+                if object_id in seen:
+                    continue
+                seen.add(object_id)
+                result.append({"object_id": object_id, "label": label, "score": round(score, 3)})
+                if len(result) >= limit:
+                    break
+            return result
+
     def identify(self, samples) -> tuple[str, str, float | None]:
         with self.lock:
             return self._identify(samples)
 
-    def _identify(self, samples) -> tuple[str, str, float | None]:
+    def identify_timed(self, samples, *, source_track='', start_ms=None, end_ms=None):
+        with self.lock:
+            return self._identify(samples, source_track=source_track, start_ms=start_ms, end_ms=end_ms)
+
+    def _save_bank(self):
+        self._remove_withdrawn()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.path.with_suffix(".tmp")
+        temp.write_text(json.dumps({"model_id": self.model_id, "entries": self.known}), encoding="utf-8")
+        temp.replace(self.path)
+
+    def _remove_withdrawn(self):
+        """Explicitly deleted samples stay deleted even after a stale bank save."""
+        path = self.path.with_suffix('.withdrawn.json')
+        if not path.exists():
+            return
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if data.get('model_id') == self.model_id:
+            for key in data.get('keys', ()):
+                self.known.pop(key, None)
+
+    def _collapse_entries(self):
+        """Older banks kept many embeddings per person. Matching now uses one averaged voiceprint."""
+        grouped = {}
+        for key, entry in self.known.items():
+            grouped.setdefault(entry.get('object_id'), []).append((key, entry))
+        if not grouped or all(len(items) == 1 and not items[0][1].get('templates') for items in grouped.values()):
+            return
+        merged = {}
+        for object_id, items in grouped.items():
+            if len(items) == 1:
+                entry = {k: v for k, v in items[0][1].items() if k != 'templates'}
+                merged[items[0][0]] = entry
+                continue
+            centers = [_unit(entry['embedding']) for _, entry in items if entry.get('embedding')]
+            centers = [v for v in centers if v]
+            vector = _unit([sum(col) / len(centers) for col in zip(*centers)]) if centers else None
+            if vector is None:
+                continue
+            entry = {'object_id': object_id, 'embedding': vector, 'basis': 'merged'}
+            if all('expires_at' in old for _, old in items):
+                entry['expires_at'] = max(old['expires_at'] for _, old in items)
+            merged[items[-1][0]] = entry
+        self.known = merged
+        self._save_bank()
+
+    def _pcm_of(self, object_id) -> bytes:
+        for entry in self.known.values():
+            if entry.get('object_id') == object_id and entry.get('pcm'):
+                return base64.b64decode(entry['pcm'])
+        return b''
+
+    def _store_voice(self, object_id, embedding, pcm, *, basis, expires_at=None) -> bool:
+        vector = _unit(embedding)
+        if vector is None or self.profiles.get(object_id) is None:
+            return False
+        keys = [k for k, e in self.known.items() if e.get('object_id') == object_id]
+        key = keys[0] if keys else uuid4().hex
+        previous = self.known[keys[0]] if keys else {}
+        for extra in keys[1:]:
+            del self.known[extra]
+        entry = {'object_id': object_id, 'embedding': vector, 'basis': basis}
+        if pcm:
+            entry['pcm'] = base64.b64encode(pcm).decode('ascii')
+            entry['seconds'] = round(len(pcm) / 32000, 2)
+        elif previous.get('pcm'):
+            entry['pcm'] = previous['pcm']
+            entry['seconds'] = previous.get('seconds')
+        if expires_at is not None:
+            entry['expires_at'] = expires_at
+        self.known[key] = entry
+        if not keys:
+            from jshi.recognition import CarrierEntry
+            self.profiles.add_carrier(object_id, CarrierEntry('voiceprint', f'local:{self.model_id}:{key}', basis))
+        self._save_bank()
+        return True
+
+    def _expire(self):
+        self._remove_withdrawn()
+        now = self.clock()
+        expired = [k for k, e in self.known.items() if e.get('expires_at') is not None and e['expires_at'] <= now]
+        for key in expired:
+            del self.known[key]
+        if expired:
+            self._save_bank()
+
+    def remember_anonymous(self, track: str, object_id: str) -> bool:
+        """Keep an unnamed visitor's voice for a limited time."""
+        with self.lock:
+            if self.binding.get(track) == object_id:
+                return True
+            samples = self.track_samples.get(track)
+            if samples:
+                import numpy as np
+                rows = [np.asarray(v, dtype='float64') for v in samples]
+                rows = [v / np.linalg.norm(v) for v in rows if np.linalg.norm(v) > 0]
+                if rows:
+                    center = np.mean(rows, axis=0)
+                    norm = np.linalg.norm(center)
+                    if norm > 0:
+                        self.last_embedding[track] = (center / norm).tolist()
+            return self._bind(track, object_id, basis='anonymous_voice', expires_at=self.clock() + self.anonymous_ttl_s)
+
+    def confirm(self, object_id: str) -> None:
+        """A known name turns a short-term voice into a lasting one."""
+        with self.lock:
+            changed = False
+            for entry in self.known.values():
+                if entry['object_id'] == object_id and 'expires_at' in entry:
+                    del entry['expires_at']
+                    changed = True
+            if changed:
+                self._save_bank()
+
+    def forget(self, object_id: str) -> None:
+        with self.lock:
+            keys = [k for k, e in self.known.items() if e['object_id'] == object_id]
+            for key in keys:
+                del self.known[key]
+            old_tracks = {t for t, o in self.binding.items() if o == object_id}
+            old_tracks.update(t for oid, t in self.named_tracks.items() if oid == object_id)
+            self.named_tracks.pop(object_id, None)
+            for track in old_tracks:
+                for table in (self.binding, self.tracks, self.track_samples, self.last_embedding, self.recent_tracks):
+                    table.pop(track, None)
+            if keys:
+                self._save_bank()
+
+    def rank_vector(self, vector):
+        """Score against registered people without touching session tracks or learning."""
+        from .identity import canonical_voice_profile
+        with self.lock:
+            self._expire()
+            best = {}
+            for item in self.known.values():
+                profile = self.profiles.get(item['object_id'])
+                if profile is None or profile.status == 'rejected':
+                    continue
+                if item.get('expires_at') is not None or (profile.source == 'voice_anonymous' and profile.label.startswith('未命名访客')):
+                    continue
+                object_id = canonical_voice_profile(self.profiles, profile).object_id
+                best[object_id] = max(best.get(object_id, -2.0), float(voiceprint_score(vector, item)))
+            return sorted(((score, object_id) for object_id, score in best.items()), reverse=True)
+
+    def reset_session(self):
+        with self.lock:
+            for items in (self.tracks, self.track_samples, self.pending_tracks,
+                          self.last_embedding, self.binding, self.recent_tracks, self.named_tracks):
+                items.clear()
+            self.observation = 0
+            self.last_match = {}
+
+    def _identify(self, samples, *, source_track='', start_ms=None, end_ms=None) -> tuple[str, str, float | None]:
+        self.observation += 1
+        now = end_ms / 1000 if end_ms is not None else monotonic()
         vector = self.embedding(samples)
         if vector is None:
             self.last_match = {'reason': '样本不足或无法提取声纹', 'seconds': round(len(samples)/16000, 2)}
             return f"unidentified-{uuid4().hex}", "", None
+        self._expire()
         by_person = {}
         for key, item in self.known.items():
             profile = self.profiles.get(item["object_id"])
             if profile is None or profile.status == "rejected":
                 continue
+            if profile.source == 'voice_anonymous' and profile.label.startswith('未命名访客'):
+                continue
+            if item.get('expires_at') is not None:
+                continue
             from .identity import canonical_voice_profile
             profile = canonical_voice_profile(self.profiles, profile)
-            hit = (cosine(vector, item["embedding"]), key)
+            hit = (voiceprint_score(vector, item), key)
             if hit > by_person.get(profile.object_id, (-2, "")):
                 by_person[profile.object_id] = hit
         known = sorted(by_person.values(), reverse=True)
-        self.last_match = {'reason': '没有可用登记' if not known else '未达到匹配阈值' if known[0][0] < self.threshold else '与另一对象过于接近',
+        # Temporary observations never compete with registered names.
+        self.last_match = {'reason': '没有可用登记' if not known else '本句尚未确认姓名',
             'best_score': round(known[0][0], 3) if known else None,
-            'runner_up': round(known[1][0], 3) if len(known)>1 else None,
-            'threshold': self.threshold, 'margin': self.margin}
-        if known and known[0][0] >= self.threshold and (len(known) < 2 or known[0][0]-known[1][0] >= self.margin):
-            self.last_match['reason'] = '已匹配登记声纹'
-            score, key = known[0]
-            track = "known-" + key
-            self.last_embedding[track] = vector
-            self.binding[track] = self.known[key]["object_id"]
-            return track, f"local:{self.model_id}:{key}", score
-        candidates = sorted(((max(cosine(vector, sample) for sample in self.track_samples.get(track, [item])), track)
-                             for track, item in self.tracks.items()), reverse=True)
-        # Naming can be strict without fragmenting anonymous session objects.
-        anonymous_threshold = min(.60, self.threshold)
-        self.last_match.update(anonymous_threshold=anonymous_threshold,
-            anonymous_best_score=round(candidates[0][0], 3) if candidates else None,
-            anonymous_runner_up=round(candidates[1][0], 3) if len(candidates)>1 else None)
-        if candidates and candidates[0][0] >= anonymous_threshold and (len(candidates)<2 or candidates[0][0]-candidates[1][0] >= self.margin):
-            score, track = candidates[0]
-            if len(samples) >= 48000 and score >= anonymous_threshold+self.margin:
-                examples = self.track_samples.setdefault(track, [self.tracks[track]])
-                examples.append(vector)
-                # Keep the original anchor and a few recent clear matches.
-                self.track_samples[track] = [examples[0], *examples[1:][-4:]]
-            self.last_match['anonymous_reason'] = '沿用已有匿名声纹'
-        else:
-            # A failed identity match is not evidence of a new person. Leave
-            # short/ambiguous/borderline observations unassigned.
-            if len(samples) < 48000 or (candidates and candidates[0][0] >= max(.3, anonymous_threshold-.1)):
-                self.last_match['anonymous_reason'] = '短句或匿名候选不明确，暂不新增访客'
-                return f'unidentified-{uuid4().hex}', '', None
-            if candidates:
-                pending = next((i for i, item in enumerate(self.pending_tracks)
-                                if cosine(vector, item) >= anonymous_threshold+self.margin), None)
-                if pending is None:
-                    self.pending_tracks = [*self.pending_tracks[-7:], vector]
-                    self.last_match['anonymous_reason'] = '疑似不同声音，先占位；等待另一段较长发言支持，不新增访客'
-                    return f'unidentified-{uuid4().hex}', '', None
-                self.pending_tracks.pop(pending)
-            score, track = None, "speaker-" + uuid4().hex[:10]
-            self.tracks[track] = vector
-            self.track_samples[track] = [vector]
-            self.last_match['anonymous_reason'] = '足够长且未接近已有匿名声纹，建立临时访客'
+            'runner_up': round(known[1][0], 3) if len(known) > 1 else None,
+            'threshold': self.threshold, 'margin': self.margin,
+            'single_confirmation_threshold': max(self.threshold, .65),
+            'candidates': [{'object_id': oid, 'label': self.profiles.get(oid).label, 'score': round(score, 3), 'source': 'voiceprint'}
+                for oid, (score, _) in sorted(by_person.items(), key=lambda pair: pair[1], reverse=True)[:3]]}
+        group = self._collect_pending(vector, len(samples)/16000, now, start_ms, end_ms)
+        if known and known[0][0] >= max(self.threshold, .65) and (len(known) < 2 or known[0][0]-known[1][0] >= self.margin):
+            return self._matched_voice(vector, known[0][1], known[0][0], now, source_track)
+        if group is None:
+            self.last_match.update(tentative=True, anonymous_reason='接近多个待定声音，无法分组；不另建人物')
+            return f'unidentified-{uuid4().hex}', '', None
+        track = group['track']
         self.last_embedding[track] = vector
-        # Session clustering alone does not claim an established identity.
-        return track, "", score
+        examples = group['samples']
+        center = _unit([sum(col)/len(examples) for col in zip(*examples)])
+        from statistics import median
+        cohesion = sorted(cosine(center, v) for v in examples)
+        pairwise = [cosine(a, b) for i, a in enumerate(examples) for b in examples[i+1:]]
+        pair_median = median(pairwise) if pairwise else 1.
+        stable = len(examples) >= 10 and group['seconds'] >= 15 and median(cohesion) >= .75 and cohesion[len(cohesion)//4] >= .65 and pair_median >= .65
+        self.last_match.update(tentative=not stable,
+            collection={'count': len(examples), 'required_count': 10, 'seconds': round(group['seconds'], 2),
+                'median_cohesion': round(median(cohesion), 3), 'lower_quartile_cohesion': round(cohesion[len(cohesion)//4], 3),
+                'median_pair_similarity': round(pair_median, 3),
+                'stable': stable},
+            anonymous_reason='已收集多段一致声音，仅确认声音组，未确认姓名' if stable else '收集待定声音；至少十段有效、不重叠发言后核对分布，不参与姓名竞争')
+        if stable:
+            # Recompute the distribution against the current bank; never train a
+            # registered voice from uncertain observations.
+            ranked = []
+            for oid, (_, key) in by_person.items():
+                scores = [voiceprint_score(v, self.known[key]) for v in examples]
+                ranked.append((median(scores), oid, key, scores))
+            ranked.sort(reverse=True)
+            if ranked:
+                score, oid, key, scores = ranked[0]
+                support = sum(value >= max(self.threshold, .58) for value in scores)/len(scores)
+                gap = score-ranked[1][0] if len(ranked) > 1 else None
+                if score >= max(self.threshold, .58) and support >= .8 and (gap is None or gap >= self.margin):
+                    self.last_match['collection'].update(pick=oid, median_match=round(score, 3), support_fraction=round(support, 3))
+                    return self._matched_voice(vector, key, score, now, source_track)
+            # Compare stable unnamed groups in a separate pool, after the named
+            # decision. They never affect the named ranking or its margin.
+            anonymous = []
+            for key, entry in self.known.items():
+                profile = self.profiles.get(entry['object_id'])
+                if profile and profile.status != 'rejected' and profile.source == 'voice_anonymous' and profile.label.startswith('未命名访客'):
+                    scores = sorted(voiceprint_score(v, entry) for v in examples)
+                    if median(scores) >= .70 and scores[len(scores)//4] >= .58:
+                        anonymous.append((median(scores), key))
+            anonymous.sort(reverse=True)
+            if anonymous and (len(anonymous) < 2 or anonymous[0][0]-anonymous[1][0] >= .08):
+                score, key = anonymous[0]
+                self.last_embedding[track] = vector
+                self.last_match['anonymous_reason'] = '多段分布支持已保存的临时声音组，仍未确认姓名'
+                return track, f'local:{self.model_id}:{key}', score
+            self.tracks[track] = center
+            self.track_samples[track] = list(examples)
+            self.recent_tracks[track] = (now, source_track)
+        return track, '', None
+
+    def _matched_voice(self, vector, key, score, now, source_track):
+        from .identity import canonical_voice_profile
+        object_id = canonical_voice_profile(self.profiles, self.profiles.get(self.known[key]['object_id'])).object_id
+        track = self.named_tracks.setdefault(object_id, 'known-' + object_id)
+        self.last_match.update(reason='多段分布支持已有姓名' if self.last_match.get('collection', {}).get('median_match') is not None else '已匹配登记声纹', tentative=False)
+        self.last_embedding[track] = vector
+        self.binding[track] = object_id
+        self.tracks.setdefault(track, vector)
+        self.track_samples.setdefault(track, [vector])
+        self.recent_tracks[track] = (now, source_track)
+        return track, f'local:{self.model_id}:{key}', score
+
+    def _collect_pending(self, vector, seconds, now, start_ms, end_ms):
+        # Keep a bounded observation pool for up to fifteen minutes. Diarization
+        # track numbers are not identity evidence, and cannot merge groups.
+        self.pending_tracks = [g for g in self.pending_tracks if now-g['time'] <= 900]
+        matches = []
+        for group in self.pending_tracks:
+            center = _unit([sum(col)/len(group['samples']) for col in zip(*group['samples'])])
+            matches.append((cosine(vector, center), group['track'], group))
+        matches.sort(key=lambda row: row[:2], reverse=True)
+        if matches and matches[0][0] >= .50:
+            if len(matches) > 1 and matches[0][0]-matches[1][0] < .04:
+                return None
+            group = matches[0][2]
+        else:
+            group = {'track': 'pending-' + uuid4().hex[:10], 'samples': [], 'durations': [],
+                'intervals': [], 'seconds': 0., 'time': now, 'count': 0}
+            if len(self.pending_tracks) >= 32:
+                self.pending_tracks.pop(0)
+            self.pending_tracks.append(group)
+        overlap = start_ms is not None and end_ms is not None and any(
+            start_ms < end and end_ms > start for start, end in group['intervals'])
+        if seconds >= 1.5 and not overlap:
+            group['samples'].append(vector)
+            group['durations'].append(seconds)
+            if start_ms is not None and end_ms is not None:
+                group['intervals'].append((start_ms, end_ms))
+            group['samples'] = group['samples'][-20:]
+            group['durations'] = group['durations'][-20:]
+            group['intervals'] = group['intervals'][-64:]
+            group.update(seconds=sum(group['durations']), count=len(group['samples']), time=max(now, group['time']))
+        if not group['samples']:
+            self.pending_tracks.remove(group)
+            return None
+        return group
+
+    def discard_pending(self, track):
+        """Explicit labeling retires only this observation group."""
+        with self.lock:
+            self.pending_tracks = [g for g in self.pending_tracks if g['track'] != track]
 
     def bind(self, track: str, object_id: str) -> bool:
         with self.lock:
-            return self._bind(track, object_id)
+            bound = self._bind(track, object_id)
+            if bound:
+                self.discard_pending(track)
+            return bound
 
-    def enroll_samples(self, clips, object_id: str) -> dict:
-        """Extract one normalized centroid from manually selected clean clips."""
+    def enroll_samples(self, clips, object_id: str, *, user_labeled: bool = False) -> dict:
+        """Trust explicit human labels; reserve consistency gates for unconfirmed samples."""
         import numpy as np
         vectors = []
         owners = []
@@ -203,41 +498,41 @@ class LocalSpeakers:
             pairs = [(float(np.dot(a, b)), i, j) for i, a in enumerate(normalized) for j, b in enumerate(normalized) if j > i]
             weakest = min(pairs, default=None)
             minimum = weakest[0] if weakest else None
-            if minimum is not None and minimum < self.enrollment_threshold:
+            if not user_labeled and minimum is not None and minimum < self.enrollment_threshold:
                 first, second = owners[weakest[1]], owners[weakest[2]]
                 raise EnrollmentError(f'片段一致性不足：第 {first[0]+1} 段（{first[1]:.1f} 秒处）与第 {second[0]+1} 段（{second[1]:.1f} 秒处）相似度 {minimum:.3f}，登记要求 {self.enrollment_threshold:.3f}。短句、收声变化或混选人物都可能造成，不能据此判定有杂音；请检查这两段。', sorted({first[0], second[0]}))
-            centroid = np.mean(normalized, axis=0)
-            norm = np.linalg.norm(centroid)
-            if norm <= 0:
-                raise ValueError('无法合成声纹')
-            track = 'manual-' + uuid4().hex
-            self.last_embedding[track] = (centroid / norm).tolist()
-            try:
-                if not self._bind(track, object_id, basis='manual_selection'):
-                    raise ValueError('声纹登记失败')
-            finally:
-                self.last_embedding.pop(track, None)
-                self.binding.pop(track, None)
-            return {'clips': len(clips), 'embeddings': len(vectors), 'seconds': round(seconds, 1),
-                    'min_similarity': round(minimum, 3) if minimum is not None else None, 'enrollment_threshold': self.enrollment_threshold}
+            # Callers pass older audio first. The newest clip is placed at the front.
+            pcm = fit_voice_pcm(b''.join(reversed(clips)), self._pcm_of(object_id))
+            samples = np.frombuffer(pcm, dtype='<i2').astype('float32') / 32768
+            vector = self.embedding(samples)
+            if vector is None or not self._store_voice(object_id, vector, pcm, basis='manual_selection'):
+                raise ValueError('声纹登记失败')
+            stats = {'clips': len(clips), 'embeddings': 1, 'seconds': round(len(pcm) / 32000, 1),
+                    'min_similarity': round(minimum, 3) if minimum is not None else None,
+                    'enrollment_threshold': self.enrollment_threshold, 'voiceprint_seconds': VOICEPRINT_SECONDS}
+            if user_labeled:
+                stats.update(user_labeled=True,
+                    warning='这几段声音差异较大，已按你的标注收成一条声纹；该分数不能证明混入了别人。' if minimum is not None and minimum < self.enrollment_threshold else '')
+            return stats
 
-    def _bind(self, track: str, object_id: str, *, basis: str = 'local_self_introduction') -> bool:
+    def _bind(self, track: str, object_id: str, *, basis: str = 'local_self_introduction', templates=None, expires_at=None) -> bool:
+        del templates
         if self.binding.get(track) == object_id:
+            if expires_at is None:
+                self.confirm(object_id)
             return True
         vector = self.last_embedding.get(track)
         if vector is None or self.profiles.get(object_id) is None:
             return False
-        key = uuid4().hex
-        reference = f"local:{self.model_id}:{key}"
-        from jshi.recognition import CarrierEntry
-        self.profiles.add_carrier(object_id, CarrierEntry("voiceprint", reference, basis))
-        entry = {"object_id": object_id, "embedding": vector}
-        self.known[key] = entry
+        # A later introduction must not add a second voiceprint beside an enrollment.
+        if any(e.get('object_id') == object_id for e in self.known.values()):
+            if expires_at is None:
+                self.confirm(object_id)
+            self.binding[track] = object_id
+            return True
+        if not self._store_voice(object_id, vector, b'', basis=basis, expires_at=expires_at):
+            return False
         self.binding[track] = object_id
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.path.with_suffix(".tmp")
-        temp.write_text(json.dumps({"model_id": self.model_id, "entries": self.known}), encoding="utf-8")
-        temp.replace(self.path)
         return True
 
 
@@ -265,6 +560,7 @@ class LocalASR:
             self.speakers.pending_tracks.clear()
             self.speakers.last_embedding.clear()
             self.speakers.binding.clear()
+            self.speakers.reset_session()
 
     def feed(self, pcm: bytes, *, final: bool = False) -> tuple[Transcript, ...]:
         import numpy as np
@@ -296,8 +592,8 @@ class LocalASR:
                 text = refined.result.text.strip()
             text = re.sub(r"<\|.*?\|>|<unk>", "", text).strip()
             if text:
-                track, vpid, confidence = self.speakers.identify(audio) if self.speakers else (f"unidentified-{start}", "", None)
-                output.append(Transcript(text, track, start, end, True, voiceprint_id=vpid, confidence=confidence))
+                track, vpid, confidence = self.speakers.identify_timed(audio, start_ms=start, end_ms=end) if self.speakers else (f"unidentified-{start}", "", None)
+                output.append(Transcript(text, track, start, end, True, voiceprint_id=vpid, confidence=confidence, speaker_cluster_id=track if self.speakers and not track.startswith('unidentified-') else '', identity_tentative=bool(self.speakers and not vpid and not track.startswith('unidentified-') and getattr(self.speakers, 'last_match', {}).get('tentative', True))))
         elif text and text != self.last_text:
             if self.speakers and self.diarizer is None and self.segment_samples >= 24000 and self.early_speaker is None:
                 self.early_speaker = self.speakers.identify(np.concatenate(self.samples))
@@ -335,7 +631,8 @@ def build_speakers(data_dir: Path, profiles, *, model=None):
     bank = 'voiceprints.json' if model == 'cam++' else 'voiceprints-eres2netv2.json'
     return LocalSpeakers(extractor, model_id, data_dir / bank, profiles,
         threshold=float(os.getenv("JSHI_VOICE_MATCH_THRESHOLD", "0.65")),
-        enrollment_threshold=float(os.getenv('JSHI_VOICE_ENROLL_THRESHOLD', '.8')))
+        enrollment_threshold=float(os.getenv('JSHI_VOICE_ENROLL_THRESHOLD', '.8')),
+        anonymous_ttl_s=float(os.getenv('JSHI_VOICE_ANONYMOUS_DAYS', '7')) * 86400)
 
 
 def build_local(data_dir: Path, profiles) -> LocalASR:
@@ -355,7 +652,6 @@ def build_local(data_dir: Path, profiles) -> LocalASR:
         enable_endpoint_detection=True, rule1_min_trailing_silence=1.5,
         rule2_min_trailing_silence=1.2, rule3_min_utterance_length=25,
     )
-    speaker_model = root / SPEAKER_NAME
     speakers = build_speakers(data_dir, profiles)
     refiner = None
     refine_mode = os.getenv("JSHI_VOICE_REFINE", "auto")
@@ -375,16 +671,23 @@ def build_local(data_dir: Path, profiles) -> LocalASR:
     segment_model = root / SEGMENTATION_NAME / "model.onnx"
     if segment_model.is_file() and refiner is not None and speakers is not None:
         from .diarization import LocalDiarizer
-        cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
-            segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
-                pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=str(segment_model)),
-                num_threads=threads, provider="cpu"),
-            embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(speaker_model), num_threads=threads, provider="cpu"),
-            clustering=sherpa_onnx.FastClusteringConfig(threshold=.5),
-        )
-        if not cfg.validate():
-            raise ValueError("说话人分段模型配置无效")
-        diarizer = LocalDiarizer(sherpa_onnx.OfflineSpeakerDiarization(cfg), speakers, refiner)
+
+        def segmenter(model):
+            speaker_model = root / SPEAKER_MODELS[model]
+            if not speaker_model.is_file():
+                raise ValueError(f"声纹模型 {model} 尚未准备")
+            cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+                segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+                    pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=str(segment_model)),
+                    num_threads=threads, provider="cpu"),
+                embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(speaker_model), num_threads=threads, provider="cpu"),
+                clustering=sherpa_onnx.FastClusteringConfig(threshold=.5),
+            )
+            if not cfg.validate():
+                raise ValueError("说话人分段模型配置无效")
+            return sherpa_onnx.OfflineSpeakerDiarization(cfg)
+        model = os.getenv('JSHI_VOICE_SPEAKER_MODEL', 'cam++')
+        diarizer = LocalDiarizer(segmenter(model), speakers, refiner, build_engine=segmenter, model=model)
         print("说话人时间线：本地分段，最长 6 秒一个处理窗（不是音源分离）")
     return LocalASR(recognizer, speakers, refiner, diarizer)
 

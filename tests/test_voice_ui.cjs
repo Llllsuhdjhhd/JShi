@@ -27,10 +27,18 @@ assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))),{type:'enroll_inputs',i
 vm.runInContext(`message({type:'enrollment',input_ids:['one','two'],object_id:'lux-id',label:'lux',clips:2,seconds:3.9});`,ctx);
 assert.match(node('enroll-status').textContent,/声纹已保存/);
 assert.equal(node('enroll-count').textContent,'尚未选择声音');
+vm.runInContext(`message({type:'enrollment',input_ids:[],object_id:'lux-id',label:'lux',clips:2,seconds:6,user_labeled:true,min_similarity:.428,warning:'已按标注保存'});`,ctx);
+assert.match(node('enroll-status').textContent,/保存 6 秒/);
+assert.match(node('enroll-status').textContent,/一条声纹最长 10 秒/);
+assert.match(node('enroll-status').textContent,/仅供参考/);
+assert.doesNotMatch(node('enroll-status').textContent,/要求 0.8/);
 vm.runInContext(`message({type:'debug',section:'prompt',activity_id:'activity',text:'真实提示词',sections:['当前时间','关于输入']});`,ctx);
 assert.ok(node('debug-part').options.some(x=>x.value==='关于输入'));
 node('debug-part').value='关于输入';node('debug-purpose').value='write_zone';node('debug-turn').value='activity';node('debug-prompt').onclick();
 assert.equal(sent.at(-1).part,'关于输入');assert.equal(sent.at(-1).purpose,'write_zone');assert.equal(sent.at(-1).activity_id,'activity');
+assert.match(html, /value="voice_jev">JEV 初判/);
+node('debug-part').value='user';node('debug-purpose').value='voice_jev';node('debug-prompt').onclick();
+assert.equal(sent.at(-1).purpose,'voice_jev');assert.equal(sent.at(-1).part,'user');
 vm.runInContext(`message({type:'timeline',input_id:'mixed',start_ms:5000,end_ms:8000,text:'混合声音',overlap:true,speaker:{object_id:'U',label:'未知',track_id:'9'}});`,ctx);
 assert.equal(vm.runInContext(`inputRows.get('mixed').button.disabled`,ctx),true);
 vm.runInContext(`ready=true; inputRows.get('one').button.onclick(); $('enroll-name').value='lux'; $('compare-test').onclick();`,ctx);
@@ -42,4 +50,26 @@ assert.equal(node('match-value').textContent,'0.55');node('match-threshold').onc
 assert.equal(sent.at(-1).type,'voice_settings');assert.equal(sent.at(-1).match_threshold,.55);
 vm.runInContext(`message({type:'voice_settings',match_threshold:.55,match_margin:.08});`,ctx);
 assert.match(node('match-status').textContent,/已生效并保存/);
+vm.runInContext(`message({type:'timeline',input_id:'anon',start_ms:1,end_ms:2,text:'你好',speaker:{object_id:'v',label:'未命名访客 3',track_id:'a'}});`,ctx);
+assert.match(vm.runInContext(`inputRows.get('anon').meta.textContent`,ctx),/内部名/);
+vm.runInContext(`message({type:'rename_prompt',object_id:'v',previous:'未命名访客 3',name:'小明',text:'要把「未命名访客 3」改成「小明」吗？'});`,ctx);
+vm.runInContext(`$('rename-ask').children.find(x=>x.textContent==='确认改名').onclick()`,ctx);
+assert.equal(sent.at(-1).accept,true);
+vm.runInContext(`message({type:'timeline',input_id:'aside',start_ms:1,end_ms:2,text:'旁人交谈',speaker:{object_id:'x',label:'未知',track_id:'b'}});
+message({type:'input_route',input_id:'aside',kept:false});
+message({type:'speaker',label:'未知',method:'context_attribution'});`,ctx);
+assert.match(vm.runInContext(`inputRows.get('aside').meta.textContent`,ctx),/未交主流程/);
+assert.match(node('speaker').textContent,/上下文推测，声纹未确认/);
+vm.runInContext(`message({type:'write_failed'});`,ctx);
+assert.equal(node('retry-write').hidden,false);
+node('retry-write').onclick();
+assert.equal(sent.at(-1).type,'retry_write');
+assert.equal(node('retry-write').hidden,true);
 console.log('Voice UI: multi-select, enrollment confirmation, prompt sections and call selection passed');
+vm.runInContext(`message({type:'timeline',input_id:'ranked',start_ms:0,end_ms:3000,text:'比较这句话',
+  identity_note:JSON.stringify({candidates:[{object_id:'qf-id',label:'qf',score:.55},{object_id:'lux-id',label:'lux',score:.81},{object_id:'lg-id',label:'luguang',score:.7}]}),
+  speaker:{object_id:'pending-id',label:'待定声音 1',track_id:'A'}});`,ctx);
+const ranking=vm.runInContext(`inputRows.get('ranked').p.children.find(x=>x.className==='voice-ranking').textContent`,ctx);
+assert.match(ranking,/第一名：lux 0\.810 · 第二名：luguang 0\.700/);
+assert.doesNotMatch(ranking,/qf-id|lux-id|lg-id/);
+assert.match(vm.runInContext(`inputRows.get('mixed').p.children.find(x=>x.className==='voice-ranking').textContent`,ctx),/没有有效声纹排名/);

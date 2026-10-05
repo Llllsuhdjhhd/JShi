@@ -74,3 +74,32 @@ def test_new_group_preserves_old_labels_and_audio(tmp_path):
     assert (tmp_path/(iid+'.wav')).is_file()
     assert len(list(tmp_path.glob('group-*.json')))==1
     assert SpeakerTrial(tmp_path,{'first':model}).samples==[]
+
+
+def test_calibration_reports_score_distributions_and_suggested_thresholds(tmp_path):
+    trial=SpeakerTrial(tmp_path,{'first':model})
+    trial.add('lux','enroll',[row(1,5)],'one')
+    trial.add('lux','test',[row(1,2)],'two')
+    trial.add('other','test',[row(-1,2)],'three')
+    c=trial.run()['models']['first']['calibration']
+    assert c['status']=='ok' and c['genuine_pairs']==1 and c['impostor_pairs']==1
+    assert c['separable'] and c['eer']==0 and not c['reliable']
+    assert c['impostor']['max'] < c['strict_threshold'] <= c['genuine']['min']
+
+
+def test_calibration_with_overlapping_scores_balances_miss_and_false_accept():
+    from jshi.voice.comparison import calibrate
+    c=calibrate([.3,.5,.6,.7],[.2,.35,.55,.4])
+    assert c['status']=='ok' and not c['separable']
+    assert c['eer']==.25 and c['strict_threshold']==.56 and c['strict_miss_rate']==.5
+    assert calibrate([.9],[])['status']=='insufficient'
+
+
+def test_human_labeled_comparison_keeps_one_voiceprint_so_the_other_direction_misses(tmp_path):
+    trial=SpeakerTrial(tmp_path,{'first':model})
+    trial.add('lux','enroll',[row(1,5),row(-1,5,6000)],'one')
+    trial.add('lux','test',[row(2,2)],'two')
+    trial.add('lux','test',[row(-2,2)],'three')
+    result=trial.run()['models']['first']
+    assert result['enrollment_accepted']==1 and not result['enrollment_failures']
+    assert result['known_tests']==2 and result['misses']==1

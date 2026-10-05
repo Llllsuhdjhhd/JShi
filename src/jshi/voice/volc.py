@@ -66,6 +66,7 @@ class Transcript:
     speaker_cluster_id: str = ""  # local anonymous cluster, not a named identity
     identity_note: str = ""
     identity_uncertain: bool = False
+    identity_tentative: bool = False  # session continuity, not a fresh named match
 
 
 class TranscriptAssembler:

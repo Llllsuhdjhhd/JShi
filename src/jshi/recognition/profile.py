@@ -69,6 +69,16 @@ class ObjectProfileRepository:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS object_terms (
+                    object_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    count INTEGER NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    source_input_id TEXT NOT NULL,
+                    PRIMARY KEY (object_id, kind, text)
+                );
                 """
             )
 
@@ -157,6 +167,27 @@ class ObjectProfileRepository:
             )
         return updated
 
+    def rename(self, object_id: str, name: str, *, expected_label: str | None = None, keep_alias: bool = False) -> ObjectProfile:
+        """Change a label in place; references, voiceprints and memories keep their id."""
+        name = name.strip()
+        if not name or len(name) > 40 or any(ord(c) < 32 for c in name):
+            raise ValueError('姓名须为 1–40 个可显示字符')
+        with self._connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            row = connection.execute('SELECT * FROM object_profiles WHERE object_id = ?', (object_id,)).fetchone()
+            if row is None:
+                raise KeyError(object_id)
+            current = _profile(row)
+            if expected_label is not None and current.label != expected_label:
+                raise ValueError('姓名已变更，请刷新后再修改')
+            aliases = current.aliases
+            if keep_alias and current.label not in aliases:
+                aliases = (*aliases, current.label)
+            updated = replace(current, label=name, aliases=aliases, updated_at=utc_now())
+            connection.execute('UPDATE object_profiles SET label = ?, aliases = ?, updated_at = ? WHERE object_id = ?',
+                (name, json.dumps(list(aliases), ensure_ascii=False), updated.updated_at.isoformat(), object_id))
+        return updated
+
     def add_carrier(self, object_id: str, carrier: CarrierEntry) -> ObjectProfile:
         # One transaction prevents associating a voice reference with two people.
         with self._connect() as connection:
@@ -174,6 +205,90 @@ class ObjectProfileRepository:
             connection.execute("UPDATE object_profiles SET carriers = ?, updated_at = ? WHERE object_id = ?",
                                (_dump_carriers(carriers), updated.updated_at.isoformat(), object_id))
         return updated
+
+    def add_alias(self, object_id: str, name: str) -> ObjectProfile:
+        """Add an explicit name to this person; a name collision never merges ids."""
+        name = name.strip()
+        if not name or len(name) > 40 or any(ord(c) < 32 for c in name):
+            raise ValueError("别名须为1–40个可显示字符")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM object_profiles WHERE object_id = ?", (object_id,)).fetchone()
+            if row is None:
+                raise KeyError(object_id)
+            current = _profile(row)
+            if name == current.label or name in current.aliases:
+                return current
+            updated = replace(current, aliases=(*current.aliases, name), updated_at=utc_now())
+            connection.execute("UPDATE object_profiles SET aliases = ?, updated_at = ? WHERE object_id = ?",
+                               (json.dumps(list(updated.aliases), ensure_ascii=False), updated.updated_at.isoformat(), object_id))
+        return updated
+
+    def note_term(self, object_id: str, kind: str, text: str, source_input_id: str = "") -> None:
+        """记下一个人怎么称呼匠石，或别人怎么称呼他。原文必须已经出现在发言里。"""
+        text = (text or "").strip()
+        if not object_id or not text or kind not in {"calls_subject", "called_by_others"}:
+            return
+        now = utc_now().isoformat()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT count FROM object_terms WHERE object_id = ? AND kind = ? AND text = ?",
+                (object_id, kind, text),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO object_terms
+                    (object_id, kind, text, count, first_seen, last_seen, source_input_id)
+                    VALUES (?, ?, ?, 1, ?, ?, ?)
+                    """,
+                    (object_id, kind, text, now, now, source_input_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE object_terms
+                    SET count = ?, last_seen = ?, source_input_id = ?
+                    WHERE object_id = ? AND kind = ? AND text = ?
+                    """,
+                    (int(row["count"]) + 1, now, source_input_id, object_id, kind, text),
+                )
+
+    def terms_of(self, object_id: str, kind: str, limit: int = 5) -> tuple[str, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT text FROM object_terms
+                WHERE object_id = ? AND kind = ?
+                ORDER BY count DESC, last_seen DESC LIMIT ?
+                """,
+                (object_id, kind, limit),
+            ).fetchall()
+        return tuple(row["text"] for row in rows)
+
+    def all_terms(self, kind: str) -> tuple[str, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT text FROM object_terms WHERE kind = ? ORDER BY text",
+                (kind,),
+            ).fetchall()
+        return tuple(row["text"] for row in rows)
+
+    def address_line(self, object_id: str) -> str:
+        """人物肖像里的一行：这个人还有哪些名字，以及他怎么称呼匠石。"""
+        profile = self.get(object_id)
+        if profile is None:
+            return ""
+        parts: list[str] = [f"人物：{profile.label}"]
+        if profile.aliases:
+            parts.append(f"{profile.label}，又名{'、'.join(profile.aliases)}")
+        terms = self.terms_of(object_id, "calls_subject")
+        if terms:
+            parts.append("常称匠石为" + "、".join(f"「{item}」" for item in terms))
+        other_terms = self.terms_of(object_id, "called_by_others")
+        if other_terms:
+            parts.append("别人称此人为" + "、".join(f"「{item}」" for item in other_terms))
+        return "称呼：" + "；".join(parts) if parts else ""
 
     def list(self) -> Sequence[ObjectProfile]:
         with self._connect() as connection:

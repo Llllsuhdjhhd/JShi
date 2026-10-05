@@ -54,6 +54,9 @@ class InputEnvelope:
     utterances: tuple[SceneUtterance, ...] = ()
     current_utterances: tuple[SceneUtterance, ...] = ()
     deferred_interrupt: bool = False
+    jev_calls: tuple = ()
+    review_context: str = ""
+    review_candidates: tuple = ()
 
     def __post_init__(self) -> None:
         if not self.session_id or not self.source or not self.speaker.track_id:

@@ -29,7 +29,8 @@ class VoiceConfig:
     jev_timeout_s: float = 3.0
     end_window_ms: int = 500
     tts_transport: str = 'websocket'
-    input_pause_s: float = 2.0
+    input_pause_s: float = 2.5
+    candidate_timeout_s: float = 1.2
 
     def __post_init__(self) -> None:
         if self.asr_backend not in {"online", "local"}:
@@ -44,8 +45,10 @@ class VoiceConfig:
             raise ValueError("JSHI_VOICE_END_WINDOW_MS must be between 300 and 5000")
         if self.tts_transport not in {'websocket', 'sse'}:
             raise ValueError('voice TTS transport must be websocket or sse')
-        if not .3 <= self.input_pause_s <= 5:
-            raise ValueError('JSHI_VOICE_INPUT_PAUSE_MS must be between 300 and 5000')
+        if not .3 <= self.input_pause_s <= 15:
+            raise ValueError('JSHI_VOICE_INPUT_PAUSE_MS must be between 300 and 15000')
+        if not .1 <= self.candidate_timeout_s <= 5:
+            raise ValueError("JSHI_VOICE_CANDIDATE_TIMEOUT_MS must be between 100 and 5000")
 
     @classmethod
     def from_env(cls, *, asr: str | None = None, tts: str | None = None) -> VoiceConfig:
@@ -64,7 +67,8 @@ class VoiceConfig:
             identity_mode=os.getenv("JSHI_VOICE_IDENTITY_MODE", "diarization"),
             end_window_ms=int(os.getenv("JSHI_VOICE_END_WINDOW_MS", "500")),
             tts_transport=os.getenv('JSHI_VOICE_TTS_TRANSPORT', 'websocket'),
-            input_pause_s=int(os.getenv('JSHI_VOICE_INPUT_PAUSE_MS', '2000')) / 1000,
+            input_pause_s=int(os.getenv('JSHI_VOICE_INPUT_PAUSE_MS', '2500')) / 1000,
+            candidate_timeout_s=int(os.getenv('JSHI_VOICE_CANDIDATE_TIMEOUT_MS', '1200')) / 1000,
             template=VoiceTemplate(
                 speaker=os.getenv("JSHI_VOICE_SPEAKER", "zh_female_vv_uranus_bigtts"),
                 speech_rate=int(os.getenv("JSHI_VOICE_RATE", "-5")),

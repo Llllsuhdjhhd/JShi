@@ -247,7 +247,7 @@ def _build_user_body(request: ModelRequest) -> str:
     if speaker is not None and speaker.reason == "voice_scene":
         parts.append("这是现场观察，没有唯一说话人；按语音现场各段证据理解，不要求先确定一个对象，不把现场拟人。")
     elif speaker is not None and speaker.reason == "voice_unknown":
-        parts.append("声音身份尚未明确，可以自然询问怎么称呼；临时对象不是已认识的人。")
+        parts.append("声音姓名尚未明确，可按临时对象延续本会话交往；正常聊天不要求先报姓名，不重复追问。只使用有明确归属的经历。")
     elif speaker is not None and is_name_ambiguous(speaker.reason):
         parts.append(_ambiguous_speaker_note(speaker))
     elif speaker is not None and speaker.status != "confirmed":
@@ -298,6 +298,9 @@ def _build_user_body(request: ModelRequest) -> str:
     parts.append("【本轮】\n" + format_turn_input(
         label, request.input_text, stimulus=getattr(request, "stimulus", STIMULUS_SPEECH)
     ))
+    review = getattr(request, "input_review_text", "")
+    if review:
+        parts[-1] += "\n本批发言的识别标注（不是人物原话）：\n" + review
     return "\n".join(parts)
 
 

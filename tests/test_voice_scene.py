@@ -144,27 +144,45 @@ def test_busy_main_collects_multiple_batches_for_one_next_model_call(process, st
             await c.accept(Transcript('我是 lux','A',0,2000,True))
             assert await asyncio.to_thread(entered.wait,2)
             calls=judge.calls
+            if stage == 'write_zone':
+                for _ in range(50):
+                    if c.active_turn is None:
+                        break
+                    await asyncio.sleep(.02)
+                assert c.active_turn is None
             await c.accept(Transcript('我想去看看','A',2500,3500,True))
             await asyncio.wait_for(c.queue.join(),1)
             await c.accept(Transcript('我是小明','B',3600,4500,True))
             await asyncio.wait_for(c.queue.join(),1)
             await c.accept(Transcript('再补充一句','A',4600,5500,True))
             await asyncio.wait_for(c.queue.join(),1)
-            assert judge.calls==calls
-            assert c.turn_queue.qsize()==1
-            release.set()
-            await asyncio.wait_for(c.turn_queue.join(),3)
-            requests=process.cognition.requests
-            assert len(requests)==2
-            second=requests[1]
-            assert all(t in second.input_text for t in ('我想去看看','我是小明','再补充一句'))
-            assert 'lux' in second.input_text and '小明' in second.input_text
-            assert '【本批新发言】' in second.transport_context
-            assert '轨迹=A' in second.input_text and '轨迹=B' in second.input_text
-            assert '上一轮实测耗时' in second.transport_context
             if stage == 'cognition':
-                assert '发言与回应先后' in second.transport_context
-            assert '上午去古镇' in second.transport_context
+                assert judge.calls==calls
+                assert c.turn_queue.qsize()==1
+                release.set()
+                await asyncio.wait_for(c.turn_queue.join(),3)
+                requests=process.cognition.requests
+                assert len(requests)==2
+                second=requests[1]
+                assert all(t in second.input_text for t in ('我想去看看','我是小明','再补充一句'))
+                assert 'lux' in second.input_text and '小明' in second.input_text
+                assert '轨迹=' not in second.input_text
+                assert '【输入信封】' not in (second.transport_context or '')
+                assert '【语音现场】' not in (second.transport_context or '')
+                assert '有的话在匠石上一轮回应生成之前就已说出' in second.input_text
+            else:
+                # 写场不阻塞 JEV，但下一轮⑤必须等片场完整提交。
+                assert judge.calls > calls
+                assert len(process.cognition.requests) == 1
+                assert not release.is_set()
+                release.set()
+                await asyncio.wait_for(c.turn_queue.join(),3)
+                assert len(process.cognition.requests) == 2
+                later = process.cognition.requests[-1]
+                assert all(t in later.input_text for t in ('我想去看看','我是小明','再补充一句'))
+                assert '轨迹=' not in later.input_text
+                assert '【输入信封】' not in (later.transport_context or '')
+                assert '【语音现场】' not in (later.transport_context or '')
         finally:
             release.set()
             await c.close()
@@ -187,6 +205,23 @@ def test_short_pause_and_partial_continuation_form_one_input(process):
             assert len(process.cognition.requests)==1
             assert '你好' in process.cognition.requests[0].input_text
             assert '我想问一件事' in process.cognition.requests[0].input_text
+        finally: await c.close()
+    asyncio.run(run())
+
+
+def test_each_jev_call_records_its_duration_in_turn_timing(process):
+    async def run():
+        async def send(m): pass
+        c=VoiceConversation(process,'stone',FakeCloud(),send,input_pause_s=.02)
+        try:
+            await c.accept(Transcript('你好','A',0,1000,True))
+            await asyncio.wait_for(c.queue.join(),1)
+            await asyncio.wait_for(c.turn_queue.join(),2)
+            voice=c.last_debug['timing']['voice']
+            assert voice['jev_calls'] and voice['jev_calls'][0]['path']=='model'
+            assert voice['jev_ms']==sum(call['ms'] for call in voice['jev_calls'])
+            assert voice['jev_ms']>=0
+            assert {'ms','action','path','timed_out','reason'} <= voice['jev_calls'][0].keys()
         finally: await c.close()
     asyncio.run(run())
 
@@ -254,7 +289,8 @@ def test_multiple_speakers_in_one_batch_use_scene_instead_of_last_person(process
             await asyncio.wait_for(c.turn_queue.join(),2)
             request=process.cognition.requests[0]
             assert request.speaker.label=='语音现场'
-            assert 'lux-id' in request.transport_context and '电视台词' in request.input_text
+            assert 'lux-id' not in (request.transport_context or '') and '电视台词' in request.input_text
+            assert 'P1' in request.input_text or 'lux' in request.input_text
             assert len(c.scene)==2
         finally:await c.close()
     asyncio.run(run())
@@ -297,3 +333,81 @@ def test_diarization_preserves_offsets_and_never_identifies_overlapping_mix():
     assert speakers.calls==1
     assert not out[0].voiceprint_id and not out[1].voiceprint_id
     assert out[2].track_id=='known-B'
+
+
+def test_diarization_switches_segment_embedding_with_selected_voiceprint_model():
+    built=[]
+    diarizer=LocalDiarizer('cam-engine','cam-speakers',None,build_engine=lambda m:built.append(m) or m+'-engine',model='cam++')
+    diarizer.use('eres2netv2','eres-speakers')
+    assert (diarizer.engine,diarizer.speakers)==('eres2netv2-engine','eres-speakers')
+    diarizer.use('cam++','cam-speakers')
+    diarizer.use('eres2netv2','eres-speakers')
+    assert diarizer.engine=='eres2netv2-engine' and built==['eres2netv2']
+
+
+def test_address_and_previous_name_are_ready_for_the_portrait(process):
+    process.profiles.note_term('lux-id', 'calls_subject', '匠大哥', 'in1')
+    process.profiles.rename('lux-id', '陆信', expected_label='lux', keep_alias=True)
+    line = process.profiles.address_line('lux-id')
+    assert '陆信' in line and 'lux' in line and '匠大哥' in line
+
+
+def test_low_probability_line_stays_in_the_scene_but_not_the_main_input(process):
+    from jshi.voice.jev import VoiceJEV
+    class Gate:
+        name = 'test'
+        def generate(self, request):
+            return ModelResponse(text='{"items":[{"n":1,"to_jiangshi":"no","relevance":"unrelated","score":0.1,"reason":"旁人"},{"n":2,"to_jiangshi":"yes","score":0.9,"reason":"点名"}]}', model='test')
+    async def run():
+        async def send(m): pass
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate()), input_pause_s=.05)
+        try:
+            await c.accept(Transcript('你先去吃饭', 'A', 0, 1000, True))
+            await c.accept(Transcript('匠石明天怎么安排', 'A', 1200, 2500, True))
+            await asyncio.wait_for(c.queue.join(), 1)
+            await asyncio.wait_for(c.turn_queue.join(), 2)
+            assert len(c.scene) == 2
+            text = process.cognition.requests[0].input_text
+            assert '匠石明天怎么安排' in text and '你先去吃饭' not in text
+            assert 'JEV 初判' in text
+        finally:
+            await c.close()
+    asyncio.run(run())
+
+
+def test_next_cognition_waits_for_complete_previous_write(process):
+    from threading import Event
+    from jshi.style import SMITH
+    process.style_packs.set('stone', SMITH)
+    process.zone_store.apply_edit('stone', (), append_blocks=('匠石与 lux 正在聊天。',))
+    started, release = Event(), Event()
+    class Slow(Model):
+        def generate(self, request):
+            if not started.is_set():
+                started.set()
+                assert release.wait(5)
+            self.requests.append(request)
+            return ModelResponse(model='writer')
+    process.write_zone = Slow()
+    async def run():
+        async def send(m): pass
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, input_pause_s=.02)
+        try:
+            await c.accept(Transcript('我是 lux 第一句', 'A', 0, 2000, True))
+            assert await asyncio.to_thread(started.wait, 3)
+            await c.stop('写场尚未完成')
+            await c.accept(Transcript('第二句接着说', 'A', 3000, 4500, True))
+            await asyncio.wait_for(c.queue.join(), 1)
+            await asyncio.sleep(.05)
+            assert len(process.cognition.requests) == 1
+            release.set()
+            await asyncio.wait_for(c.turn_queue.join(), 3)
+            assert len(process.cognition.requests) == 2
+            second = process.cognition.requests[-1].persona_user_text
+            assert '片场尚未写入' not in second and '第一句' in second
+            assert '上午去古镇' in second
+            assert '第二句接着说' in second
+        finally:
+            release.set()
+            await c.close()
+    asyncio.run(run())

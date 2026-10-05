@@ -63,7 +63,7 @@ def test_unknown_audio_converses_without_using_device_owner(process):
     assert process.profiles.get(result.speaker.object_id).status == "provisional"
     req = process.cognition.requests[0]
     assert req.input_text == "你好"
-    assert "声音身份尚未明确" in build_user(req)
+    assert "声音姓名尚未明确" in build_user(req)
     assert "不要问你是" not in build_user(req)
     facts = process.repository.list_history("stone", HistoryKind.FACT)
     inbound = next(r for r in facts if r.event_type == "external_input")
@@ -90,7 +90,7 @@ def test_early_verbal_happens_before_write_zone(process):
     class Writer(Model):
         def generate(self, req):
             order.append("write")
-            assert "没有播放完成反馈" in req.transport_context
+            assert "【输入信封】" not in (req.transport_context or "")
             assert "我准备说" in req.persona_user_text
             return ModelResponse(rewritten_context="匠石准备说话。", model="writer")
     process.write_zone = Writer()

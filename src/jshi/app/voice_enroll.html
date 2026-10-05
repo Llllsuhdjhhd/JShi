@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>声音与姓名 · 匠石</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#20242b;background:#fafafa;font-size:14px;--muted:#687586;--accent:#3478f6;--line:#e5e7eb;--red:#cb3831}
+*{box-sizing:border-box}main{max-width:760px;margin:40px auto;padding:0 20px}
+header{display:flex;align-items:center;gap:12px;margin-bottom:12px}h1{font-size:23px;margin:0}
+.brand{background:var(--red);color:white;border-radius:50%;padding:6px 9px}a{color:var(--accent);text-decoration:none}header a{margin-left:auto}
+.intro{color:var(--muted);margin:0 0 20px}
+section{background:white;border:1px solid var(--line);border-radius:16px;padding:22px;margin-bottom:18px}
+h2{font-size:17px;margin:0 0 6px;display:flex;align-items:center;gap:10px}
+.step{display:inline-grid;place-items:center;width:26px;height:26px;border-radius:50%;background:var(--accent);color:white;font-size:14px}
+p{line-height:1.7;color:var(--muted);margin:6px 0}label{display:block;margin:14px 0}
+input,select{display:block;width:100%;border:1px solid #dde1e7;border-radius:9px;padding:10px;margin-top:6px;font:inherit}
+button{border:0;border-radius:9px;padding:10px 15px;background:var(--accent);color:white;font:inherit;cursor:pointer;margin:4px 8px 4px 0}
+button.secondary{background:#f1f3f5;color:#444}button.small{padding:5px 10px;font-size:13px}button:disabled{opacity:.45;cursor:default}
+.row{display:flex;gap:12px}.row label{flex:1;min-width:0}
+details{margin-top:10px}summary{cursor:pointer;color:var(--muted)}
+.read{background:#f5f8ff;border-left:3px solid var(--accent);border-radius:8px;padding:12px 14px;margin:12px 0;font-size:16px;line-height:1.8;color:#20242b}
+.meter{height:8px;background:#f1f3f5;border-radius:4px;overflow:hidden;margin:8px 0}.meter i{display:block;height:100%;width:0;background:var(--accent);transition:width .1s}
+.clips{list-style:none;padding:0;margin:10px 0}.clips li{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #f1f3f5}.clips audio{flex:1;height:32px}
+.result{border-radius:12px;padding:16px;margin:12px 0;font-size:16px}.result b{font-size:20px}
+.result.ok{background:#eef4ff;color:#1f4fae}.result.miss{background:#f3f4f6;color:#444}.result.wrong{background:#fdecec;color:var(--red)}
+.result small{display:block;font-size:13px;margin-top:6px;opacity:.85}
+.tally{display:flex;gap:10px;margin:12px 0}.tally div{flex:1;background:#f8f9fa;border-radius:10px;padding:10px;text-align:center}
+.tally strong{display:block;font-size:22px;color:#20242b}.tally span{color:var(--muted);font-size:12px}
+.advice{background:#f8f9fa;border-radius:10px;padding:12px 14px}
+#status{min-height:24px}output{color:var(--accent);font-weight:600}
+@media(max-width:550px){.row{display:block}main{margin:20px auto}}
+</style>
+<main>
+<header><span class="brand">匠</span><h1>声音与姓名</h1><a href="/">返回对话</a></header>
+<p class="intro">三步完成：选人，录一段话登记，然后试一试能不能认出来。请在结束语音对话后使用本页。</p>
+
+<section>
+  <h2><span class="step">1</span>是谁</h2>
+  <label>人物<select id="person"><option value="">＋ 新人物</option></select></label>
+  <label>姓名<input id="name" maxlength="40" placeholder="例如 小明"></label>
+  <p id="person-info"></p>
+  <button id="rename" class="secondary small" hidden>把此人改名为上面的姓名</button>
+  <details><summary>录音设备与声纹模型</summary>
+    <div class="row">
+      <label>麦克风<select id="device"><option value="">系统默认麦克风</option></select></label>
+      <label>输入通道<select id="channel"><option value="left">第一通道</option><option value="right">第二通道</option><option value="mix">两通道混合</option></select></label>
+    </div>
+    <label>声纹模型<select id="model"><option value="">服务默认</option></select></label>
+    <p>请和对话时选同一个麦克风与通道。不同模型的声纹分开保存，换模型需要重新登记。</p>
+  </details>
+</section>
+
+<section>
+  <h2><span class="step">2</span>录音登记</h2>
+  <p>录一段 10 秒，用平常说话的音量，读下面的句子，或随便说点什么都可以。不满 10 秒就按实际长度保存，不会把同一段话重复拼长。单段短于 3 秒不能登记。以后再录，新的声音放在最前面；超过 10 秒的旧声音从末尾去掉。</p>
+  <div class="read" id="prompt"></div>
+  <div class="meter"><i id="level"></i></div>
+  <button id="record">录 10 秒</button>
+  <ul class="clips" id="clips"></ul>
+  <button id="save" disabled>保存声纹</button><button id="clear" class="secondary" hidden>全部重录</button>
+  <p>用和日常说话接近的音量和距离。录音只保存声音特征，不会让匠石回答。</p>
+</section>
+
+<section>
+  <h2><span class="step">3</span>试一试</h2>
+  <p>录 5 秒，看系统能不能认出是谁。也请旁人试几次，选“未登记的人”，用来检查会不会认错。</p>
+  <label>这次是谁在说<select id="speaker"></select></label>
+  <button id="try">录 5 秒试试</button>
+  <div id="result" hidden></div>
+  <div class="tally"><div><strong id="t-correct">0</strong><span>认对</span></div><div><strong id="t-missed">0</strong><span>没认出</span></div><div><strong id="t-wrong">0</strong><span>认错</span></div></div>
+  <div class="advice" id="advice">还没有试过。</div>
+  <details><summary>匹配门槛 <output id="threshold-value">—</output></summary>
+    <p>相似度达到门槛，才认作此人。门槛低容易认错人，门槛高容易认不出。一般用上面的建议即可。</p>
+    <input id="threshold" type="range" min="0.30" max="0.95" step="0.01">
+    <button id="clear-trials" class="secondary small">清空试验记录</button>
+  </details>
+</section>
+
+<p id="status" role="status" aria-live="polite">正在读取人物…</p>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const PROMPTS = [
+  '今天天气不错，我早上出门买了点菜，回来顺便把阳台的花浇了。',
+  '匠石，你好。我想问问你，最近有没有什么好看的书可以推荐给我？',
+  '晚饭想吃点清淡的，煮个青菜，再炒两个鸡蛋，你觉得怎么样？',
+];
+let people = [], clips = [], busy = false, summary = null;
+
+function say(text) { $('status').textContent = text; }
+function person() { return people.find(p => p.object_id === $('person').value); }
+async function api(payload) {
+  const r = await fetch('/voice-registry', payload ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)} : {cache: 'no-store'});
+  if (!r.ok) throw Error(await r.text());
+  return r.json();
+}
+function b64(buffer) { let s = ''; for (const b of new Uint8Array(buffer)) s += String.fromCharCode(b); return btoa(s); }
+function wav(pcm) {
+  const b = new ArrayBuffer(44 + pcm.byteLength), v = new DataView(b);
+  const text = (at, s) => { for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i)); };
+  text(0, 'RIFF'); v.setUint32(4, 36 + pcm.byteLength, true); text(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 16000, true); v.setUint32(28, 32000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); text(36, 'data'); v.setUint32(40, pcm.byteLength, true);
+  new Uint8Array(b, 44).set(pcm);
+  return new Blob([b], {type: 'audio/wav'});
+}
+
+async function capture(seconds, button, label) {
+  const device = $('device').value;
+  const stream = await navigator.mediaDevices.getUserMedia({audio: {deviceId: device ? {exact: device} : undefined, channelCount: {ideal: 2},
+    // Same constraints as the conversation page; browser noise suppression reshapes the spectrum.
+    echoCancellation: true, noiseSuppression: false, autoGainControl: true}});
+  const ctx = new AudioContext();
+  try {
+    await ctx.audioWorklet.addModule('/voice_capture.js');
+    const node = new AudioWorkletNode(ctx, 'voice-capture');
+    node.port.postMessage({channel: $('channel').value});
+    const frames = [];
+    node.port.onmessage = ({data}) => {
+      if (!data.pcm) return;
+      frames.push(new Uint8Array(data.pcm));
+      $('level').style.width = Math.min(100, data.level * 400) + '%';
+    };
+    ctx.createMediaStreamSource(stream).connect(node);
+    const mute = ctx.createGain(); mute.gain.value = 0; node.connect(mute).connect(ctx.destination);
+    await ctx.resume();
+    for (let left = seconds; left > 0; left--) {
+      button.textContent = label + '，还剩 ' + left + ' 秒';
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    node.port.onmessage = null;
+    const pcm = new Uint8Array(frames.reduce((n, c) => n + c.length, 0));
+    let offset = 0;
+    for (const c of frames) { pcm.set(c, offset); offset += c.length; }
+    return pcm;
+  } finally {
+    stream.getTracks().forEach(t => t.stop());
+    await ctx.close();
+    $('level').style.width = '0';
+  }
+}
+
+function render() {
+  const p = person();
+  $('person-info').textContent = p ? (p.voiceprints ? '已有一条声纹，最长 10 秒。再保存时，新的声音放在最前面，末尾超出的旧声音会去掉。' : '此人还没有声纹。') : '填写姓名后，保存时会新建这个人物。';
+  $('rename').hidden = !p || !$('name').value.trim() || $('name').value.trim() === p.label;
+  $('prompt').textContent = PROMPTS[0];
+  $('record').textContent = clips.length ? '已录好，可删除后重录' : '录 10 秒';
+  $('clips').replaceChildren(...clips.map((c, i) => {
+    const li = document.createElement('li'), audio = document.createElement('audio'), remove = document.createElement('button');
+    li.append('第 ' + (i + 1) + ' 段'); audio.controls = true; audio.src = c.url;
+    remove.className = 'secondary small'; remove.textContent = '删除';
+    remove.onclick = () => { URL.revokeObjectURL(c.url); clips.splice(i, 1); render(); };
+    li.append(audio, remove); return li;
+  }));
+  $('save').textContent = '保存为 ' + ($('name').value.trim() || '…') + ' 的声纹';
+  $('save').disabled = busy || !clips.length || !$('name').value.trim();
+  $('record').disabled = busy || clips.length >= 1;
+  $('clear').hidden = !clips.length;
+  $('try').disabled = busy;
+  for (const id of ['device', 'channel', 'model', 'person', 'name', 'speaker', 'clear', 'rename', 'threshold', 'clear-trials']) $(id).disabled = busy;
+}
+
+function speakers() {
+  const keep = $('speaker').value || $('person').value;
+  const registered = people.filter(p => p.voiceprints);
+  $('speaker').replaceChildren(...registered.map(p => new Option(p.label, p.object_id)), new Option('未登记的人（旁人）', ''));
+  $('speaker').value = registered.some(p => p.object_id === keep) ? keep : (registered[0]?.object_id ?? '');
+}
+
+function showSummary(s) {
+  summary = s;
+  $('t-correct').textContent = s.correct; $('t-missed').textContent = s.missed; $('t-wrong').textContent = s.wrong;
+  $('threshold').value = s.threshold; $('threshold-value').textContent = Number(s.threshold).toFixed(2);
+  const advice = $('advice'), r = s.recommendation;
+  advice.replaceChildren();
+  if (!s.trials) { advice.textContent = '还没有试过。'; return; }
+  if (!r) {
+    advice.textContent = '已试 ' + s.trials + ' 次。再请另一位已登记的家人或旁人试几次，就能给出门槛建议。';
+    return;
+  }
+  const pct = x => Math.round(x * 100) + '%';
+  const text = r.basis === 'no_false_accept'
+    ? '建议门槛 ' + r.threshold.toFixed(2) + '：按目前的结果不会认错人，约 ' + pct(r.miss_rate) + ' 的话认不出。'
+    : '同一人和不同人的声音分数有重叠。建议门槛 ' + r.threshold.toFixed(2) + '，认错和认不出各约 ' + pct(r.error_rate) + '。以后可以再录一段日常说话，新的声音会放在声纹前面。';
+  advice.append(text + (r.reliable ? '' : ' 试的次数还少，多试几次结论更可靠。'));
+  if (Math.abs(r.threshold - s.threshold) >= .01) {
+    const adopt = document.createElement('button');
+    adopt.className = 'small'; adopt.textContent = '采用 ' + r.threshold.toFixed(2);
+    adopt.onclick = () => setThreshold(r.threshold);
+    advice.append(document.createElement('br'), adopt);
+  } else advice.append(' 当前门槛已是建议值。');
+}
+
+async function refreshSummary() {
+  try { showSummary((await api({action: 'summary', model: $('model').value})).summary); }
+  catch (e) { $('advice').textContent = e.message; }
+}
+
+async function setThreshold(value) {
+  busy = true; render();
+  try { showSummary((await api({action: 'threshold', model: $('model').value, value: Number(value)})).summary); say('门槛已改为 ' + Number(value).toFixed(2) + '，下次对话起生效。'); }
+  catch (e) { say(e.message); }
+  finally { busy = false; render(); }
+}
+
+async function load(select) {
+  const d = await api();
+  people = d.people;
+  const current = select ?? $('person').value;
+  $('person').replaceChildren(new Option('＋ 新人物', ''), ...people.map(p => new Option((/^未命名访客 \d+$/.test(p.label) ? p.label + ' · 内部名' : p.label) + (p.voiceprints ? '' : '（无声纹）'), p.object_id)));
+  $('person').value = people.some(p => p.object_id === current) ? current : '';
+  if ($('model').options.length === 1) $('model').append(...d.models.map(m => new Option(m, m)));
+  speakers(); render();
+}
+
+$('person').onchange = () => { const p = person(); $('name').value = p ? p.label : ''; $('speaker').value = p && p.voiceprints ? p.object_id : $('speaker').value; render(); };
+$('name').oninput = render;
+$('model').onchange = refreshSummary;
+
+$('record').onclick = async () => {
+  busy = true; render();
+  try {
+    const pcm = await capture(10, $('record'), '正在录音');
+    if (pcm.length < 96000) throw Error('录到的声音不足 3 秒，请重试');
+    clips.push({pcm, url: URL.createObjectURL(wav(pcm))});
+    say('这 10 秒已录好，可以点播放检查，然后保存。');
+  } catch (e) { say('录音失败：' + e.message); }
+  finally { busy = false; render(); }
+};
+$('clear').onclick = () => { clips.forEach(c => URL.revokeObjectURL(c.url)); clips = []; render(); };
+
+$('save').onclick = async () => {
+  busy = true; render(); say('正在保存…');
+  try {
+    const p = person();
+    const d = await api({action: 'enroll', object_id: p ? p.object_id : '', name: $('name').value.trim(), model: $('model').value, clips: clips.map(c => b64(c.pcm.buffer))});
+    $('clear').onclick();
+    await load(d.object_id);
+    $('speaker').value = d.object_id;
+    say('已保存 ' + d.label + ' 的 ' + d.clips + ' 段录音。接下来到第 3 步试一试。');
+    await refreshSummary();
+  } catch (e) { say('保存失败：' + e.message); }
+  finally { busy = false; render(); }
+};
+
+$('rename').onclick = async () => {
+  const p = person(); if (!p) return;
+  busy = true; render();
+  try {
+    const d = await api({action: 'rename', object_id: p.object_id, previous_name: p.label, name: $('name').value.trim()});
+    await load(d.object_id);
+    say('已改名为 ' + d.label + '。声纹和过去的对话记录仍属于此人。');
+  } catch (e) { say(e.message); }
+  finally { busy = false; render(); }
+};
+
+$('try').onclick = async () => {
+  busy = true; render();
+  try {
+    const pcm = await capture(5, $('try'), '请说话');
+    const d = await api({action: 'try', model: $('model').value, expected: $('speaker').value, clip: b64(pcm.buffer)});
+    const top = d.ranking[0], box = $('result');
+    const detail = top ? '最接近：' + top.label + '，相似度 ' + top.score.toFixed(2) + '；门槛 ' + d.summary.threshold.toFixed(2) : '还没有任何人登记声纹';
+    let kind, title;
+    if (d.matched && d.matched === d.expected) { kind = 'ok'; title = '认出来了：' + d.matched_label; }
+    else if (d.matched) { kind = 'wrong'; title = '认错了：当成了 ' + d.matched_label; }
+    else if (!d.expected) { kind = 'ok'; title = '正确：没有当成任何已登记的人'; }
+    else { kind = 'miss'; title = '没认出来'; }
+    box.className = 'result ' + kind; box.hidden = false;
+    box.replaceChildren(Object.assign(document.createElement('b'), {textContent: title}), Object.assign(document.createElement('small'), {textContent: detail}));
+    showSummary(d.summary);
+    say('');
+  } catch (e) { say('试听失败：' + e.message); }
+  finally { busy = false; render(); }
+};
+
+$('threshold').oninput = () => { $('threshold-value').textContent = Number($('threshold').value).toFixed(2); };
+$('threshold').onchange = () => setThreshold($('threshold').value);
+$('clear-trials').onclick = async () => {
+  if (!confirm('清空当前模型的所有试验记录？')) return;
+  try { showSummary((await api({action: 'clear_trials', model: $('model').value})).summary); $('result').hidden = true; }
+  catch (e) { say(e.message); }
+};
+
+load().then(() => { say(''); return refreshSummary(); }).catch(e => say(e.message));
+navigator.mediaDevices.enumerateDevices().then(devices => {
+  $('device').replaceChildren(new Option('系统默认麦克风', ''), ...devices.filter(d => d.kind === 'audioinput').map(d => new Option(d.label || '麦克风', d.deviceId)));
+}).catch(() => {});
+</script></html>

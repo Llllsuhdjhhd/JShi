@@ -12,7 +12,29 @@ from threading import RLock
 from time import perf_counter
 from uuid import uuid4
 
-from .local import LocalSpeakers, cosine
+from .local import LocalSpeakers, cosine, voiceprint_score
+
+
+def calibrate(genuine, impostor):
+    """Score distributions from labeled trials; a suggestion, never applied automatically."""
+    if not genuine or not impostor:
+        return {'status': 'insufficient', 'reason': '需要至少一组同人比较和一组异人比较（至少登记两人，或加入未登记者的测试）',
+                'genuine_pairs': len(genuine), 'impostor_pairs': len(impostor)}
+    def rates(t):
+        return (sum(s < t for s in genuine) / len(genuine), sum(s >= t for s in impostor) / len(impostor))
+    def spread(values):
+        return {'min': round(min(values), 3), 'median': round(median(values), 3), 'max': round(max(values), 3)}
+    candidates = sorted({*genuine, *impostor, max(impostor) + 1e-6})
+    eer_threshold = min(candidates, key=lambda t: (abs(rates(t)[0] - rates(t)[1]), -t))
+    frr, far = rates(eer_threshold)
+    strict = max(impostor) + .01
+    strict_frr, _ = rates(strict)
+    return {'status': 'ok', 'genuine_pairs': len(genuine), 'impostor_pairs': len(impostor),
+            'genuine': spread(genuine), 'impostor': spread(impostor),
+            'eer': round((frr + far) / 2, 3), 'eer_threshold': round(eer_threshold, 3),
+            'strict_threshold': round(strict, 3), 'strict_miss_rate': round(strict_frr, 3),
+            'separable': min(genuine) > max(impostor),
+            'reliable': len(genuine) >= 20 and len(impostor) >= 20}
 
 
 class SpeakerTrial:
@@ -111,8 +133,8 @@ class SpeakerTrial:
                     for s, _ in decoded:
                         if s['role'] == 'enroll' and s['id'] in vectors:
                             enrolled.setdefault(s['label'], []).append(vectors[s['id']])
-                    # Exercise the real enrollment gate in an isolated bank,
-                    # not merely report that embeddings can be extracted.
+                    # Use the same human-labeled enrollment and scoring as the
+                    # live UI, while keeping the identity bank isolated.
                     enrollment_labels = {s['label'] for s, _ in decoded if s['role']=='enroll'}
                     class TrialProfiles:
                         def get(self, key): return key if key in enrollment_labels else None
@@ -127,16 +149,19 @@ class SpeakerTrial:
                         for label in sorted({s['label'] for s, _ in decoded if s['role']=='enroll'}):
                             clips = [self._pcm(s) for s, _ in decoded if s['role']=='enroll' and s['label']==label]
                             try:
-                                isolated.enroll_samples(clips, label)
-                                accepted[label] = next(e['embedding'] for e in isolated.known.values() if e['object_id']==label)
+                                isolated.enroll_samples(clips, label, user_labeled=True)
+                                accepted[label] = next(e for e in isolated.known.values() if e['object_id']==label)
                             except ValueError as exc:
                                 failures[label] = str(exc)
-                    centroids = accepted
+                    entries = accepted
                     results, misses, wrong, false_accepts, unknowns, known_tests = [], 0, 0, 0, 0, 0
+                    genuine, impostor = [], []
                     labels = {s['label'] for s, _ in decoded if s['role'] == 'enroll'}
                     for s, _ in decoded:
                         if s['role'] != 'test': continue
-                        scores = sorted(((cosine(vectors[s['id']], v), label) for label, v in centroids.items()), reverse=True) if s['id'] in vectors else []
+                        scores = sorted(((voiceprint_score(vectors[s['id']], v), label) for label, v in entries.items()), reverse=True) if s['id'] in vectors else []
+                        for score, label in scores:
+                            (genuine if label == s['label'] else impostor).append(float(score))
                         predicted = scores[0][1] if scores and scores[0][0] >= model.threshold and (len(scores)<2 or scores[0][0]-scores[1][0] >= model.margin) else None
                         known = s['label'] in labels
                         if known:
@@ -157,7 +182,8 @@ class SpeakerTrial:
                         'known_tests': known_tests, 'misses': misses, 'wrong_identity': wrong,
                         'unknown_tests': unknowns, 'false_accepts': false_accepts,
                         'load_ms': round(load_ms, 1), 'embedding_p50_ms': round(median(latencies), 1),
-                        'embedding_max_ms': round(max(latencies), 1), 'results': results}
+                        'embedding_max_ms': round(max(latencies), 1), 'results': results,
+                        'calibration': calibrate(genuine, impostor)}
                 except Exception as exc:
                     report['models'][name] = {'status': 'unavailable', 'reason': str(exc)}
             self._save('report.json', report)
