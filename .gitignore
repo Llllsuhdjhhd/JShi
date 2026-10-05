@@ -8,6 +8,13 @@ __pycache__/
 .venv/
 # .jshi/ 可入库作会话样例；超大/易变文件仍忽略
 .jshi/hang.jsonl
+.jshi/voice_models/
+.jshi/voiceprints.json
+.jshi/voiceprints.tmp
+.jshi/voiceprints-*.json
+.jshi/voiceprints-*.tmp
+.jshi/voiceprints.settings.json
+.jshi/voice_trials/
 step_inputs.jsonl
 .jshi/rems/rems.db-wal
 .jshi/rems/rems.db-shm

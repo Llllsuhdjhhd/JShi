@@ -93,8 +93,11 @@ class ModelRequest:
     stimulus: str = "speech"
     # 200 交出的人话，03 原样装入；空则本路不出现。
     tool_input: str = ""
+    # Transport/actual playback facts, separate from the person's words.
+    transport_context: str = ""
     # 工具热状态（进行中 + 近时终态）；空则本路不出现。供 05 判断是否再开工具。
     tool_hot_state: str = ""
+    input_review_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,7 @@ class RecallRequest:
 class ResponseItem:
     channel: str  # verbal | embodied
     text: str = ""
+    target_ids: tuple[str, ...] = ()
 
 
 # 片场里未说出口念头的固定前缀（程序追加；提示词同文）。
@@ -154,10 +158,7 @@ class ResponsePlan:
     def verbal_text(self) -> str:
         if self.mode in {"think", "ignore", "wait"}:
             return ""
-        for item in self.items:
-            if item.channel == "verbal" and item.text.strip():
-                return item.text
-        return ""
+        return "\n".join(item.text for item in self.items if item.channel == "verbal" and item.text.strip())
 
     def has_embodied(self) -> bool:
         return any(item.channel == "embodied" for item in self.items)
@@ -266,6 +267,8 @@ class ModelResponse:
     # 本轮【工具相关】里已用上或判定不必再提的任务ID；只有这些标记为已送达并回写回应。
     tool_consumed: tuple[str, ...] = ()
     tool_handling: tuple[Mapping[str, Any], ...] = ()
+    speaker_judgments: tuple[Mapping[str, Any], ...] = ()
+    next_jev_note: str = ""
 
     @property
     def text(self) -> str:
@@ -301,6 +304,8 @@ class ModelResponse:
         tool_intent: ToolUseIntent | None = None,
         tool_consumed: tuple[str, ...] = (),
         tool_handling: tuple[Mapping[str, Any], ...] = (),
+        speaker_judgments: tuple[Mapping[str, Any], ...] = (),
+        next_jev_note: str = "",
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
     ) -> None:
@@ -336,6 +341,8 @@ class ModelResponse:
         object.__setattr__(self, "scene", tuple(scene))
         object.__setattr__(self, "value_narration", value_narration or "")
         object.__setattr__(self, "raw_text", raw_text or "")
+        object.__setattr__(self, "speaker_judgments", tuple(speaker_judgments))
+        object.__setattr__(self, "next_jev_note", str(next_jev_note or "")[:120])
         object.__setattr__(self, "tool_intent", tool_intent)
         from jshi.core.tool_handling import parse_tool_handling
         object.__setattr__(self, "tool_handling", parse_tool_handling(tool_handling))
@@ -462,12 +469,13 @@ def _verbal_text(plan: Mapping[str, Any]) -> str:
     mode = (plan.get("mode") or "").strip()
     if mode not in {"respond"}:
         return ""
+    texts = []
     for item in plan.get("items") or ():
         if isinstance(item, Mapping) and item.get("channel") == "verbal":
             text = (item.get("text") or "").strip()
             if text:
-                return text
-    return ""
+                texts.append(text)
+    return "\n".join(texts)
 
 
 def _provider_usage_metadata(result: Mapping[str, Any]) -> dict[str, Any]:

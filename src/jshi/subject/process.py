@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Mapping, Sequence
+from jshi.core.envelope import InputEnvelope
 
 from jshi.activezone import (
     ActiveZonePort,
@@ -210,6 +213,10 @@ class AssembledCurrentState:
     tool_input: str = ""
     tool_hot_state: str = ""
     stimulus: str = STIMULUS_SPEECH
+    transport_context: str = ""
+    audio_delivery: bool = False
+    input_review_text: str = ""
+    object_codes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -262,6 +269,14 @@ class SubjectActivityResult:
         default_factory=lambda: SpeakerCandidate(subject_id="", actor_object_id="")
     )
     timing: ActivityTiming | None = None
+    selected_tool_ids: tuple[str, ...] = ()
+
+
+def _plain_turn_input(text: str) -> str:
+    """写入记忆和片场的输入原话，不含入口的 JEV 初判。"""
+    return "\n".join(
+        line for line in (text or "").splitlines() if not line.startswith("JEV 初判")
+    ).strip()
 
 
 class SubjectProcess:
@@ -307,9 +322,17 @@ class SubjectProcess:
         self.cognition = cognition
         # 写场（②）独立端口：注入时走两调用；未注入退回单调用（保旧契约可跑）。
         self.write_zone = write_zone
+        self._write_lock = threading.RLock()
+        self._write_finished = threading.Condition(self._write_lock)
+        self._unwritten: list[dict] = []
+        self._deferred_write = None
+        self._voice_party_ids: tuple[str, ...] = ()
+        self._code_restore: Callable[[str], str] | None = None
         data_dir = repository.path.parent
         self.step_inputs = StepInputStore(data_dir / "step_inputs.jsonl")
         self._timings_path = data_dir / "activity_timings.jsonl"
+        self._write_timings_path = data_dir / "write_timings.jsonl"
+        self._write_timing_lock = threading.Lock()
         if tool_service is not None:
             self.tool_service = tool_service
         else:
@@ -496,7 +519,20 @@ class SubjectProcess:
         objects: Mapping[str, str] | None = None,
         on_reply: Callable[[str], None] | None = None,
         stimulus: str = STIMULUS_SPEECH,
+        envelope: InputEnvelope | None = None,
+        resolved_speaker: SpeakerCandidate | None = None,
+        on_verbal: Callable[[str], None] | None = None,
+        on_voice_plan: Callable[[ResponsePlan], None] | None = None,
+        defer_write: bool = False,
+        code_restore: Callable[[str], str] | None = None,
+        action_allowed: Callable[[], bool] | None = None,
+        on_conversation_review: Callable | None = None,
+        object_codes: Mapping[str, str] | None = None,
     ) -> SubjectActivityResult:
+        self._deferred_write = None
+        self._code_restore = code_restore
+        if envelope is not None and (not envelope.final or envelope.text != text.strip()):
+            raise ValueError("only final envelopes with matching text enter cognition")
         clock = StepClock()
         self.last_boot = "否"
         self.last_memory_control = None
@@ -505,8 +541,13 @@ class SubjectProcess:
         if idle:
             text = ""
         # 阶段① 对象必填校验 → 对象解析 → 置信度门禁 → 落位
-        self._require_object_source(object_ref, channel, carriers)
-        speaker = self.recognition.resolve(
+        if resolved_speaker is not None:
+            if (envelope is None or resolved_speaker.subject_id != subject_id
+                    or resolved_speaker.object_id != envelope.speaker.object_id):
+                raise ValueError("resolved speaker requires an envelope for this subject")
+        else:
+            self._require_object_source(object_ref, channel, carriers)
+        speaker = resolved_speaker or self.recognition.resolve(
             subject_id, text, object_ref, channel, carriers
         )
         if not speaker.object_id:
@@ -539,12 +580,24 @@ class SubjectProcess:
                 extra_aliases = profile.aliases
         objects = _speaker_object_mapping(speaker, objects, extra_aliases)
         mentioned_object_ids = _mentioned_with_speaker(speaker)
+        self._voice_party_ids = ()
+        if envelope is not None:
+            mentioned_object_ids = tuple(dict.fromkeys((*mentioned_object_ids,
+                *(u.speaker.object_id for u in envelope.utterances
+                  if u.speaker.status in {"introduced", "recognized"}))))
+            self._voice_party_ids = tuple(dict.fromkeys(
+                u.speaker.object_id for u in envelope.current_utterances
+                if u.speaker.object_id and u.speaker.method not in {"unassigned_audio", "voice_scene", "context_attribution"}
+                and u.speaker.status in {"introduced", "recognized"}
+            ))
+        recorded_text = (code_restore(_plain_turn_input(text)) if code_restore else text)
         fact = HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.FACT,
             event_type="idle_stimulus" if idle else "external_input",
             content={
-                "text": text,
+                "text": recorded_text,
+                **({"envelope": envelope.to_dict()} if envelope else {}),
                 "stimulus": STIMULUS_IDLE if idle else STIMULUS_SPEECH,
                 "objects": dict(objects),
                 "source": "idle" if idle else speaker.label,
@@ -561,14 +614,14 @@ class SubjectProcess:
             inbound = self.activity_ledger.append_external(
                 subject_id,
                 actor_object_id=speaker.actor_object_id,
-                text_raw=text,
+                text_raw=recorded_text,
                 objects=objects,
                 source_ids=(fact.id,),
                 mentioned_object_ids=mentioned_object_ids,
             )
 
         # 新对象落库（通过门禁后）：暂定档案，来源 = 输入事实 id
-        if self.profiles.get(speaker.object_id) is None:
+        if self.profiles.get(speaker.object_id) is None and speaker.reason != "voice_pending":
             self.object_system.ensure_provisional(
                 object_id=speaker.object_id,
                 label=speaker.label,
@@ -616,6 +669,10 @@ class SubjectProcess:
         current = self.assemble_current_state(
             subject_id, text, view, speaker=speaker, stimulus=stimulus
         )
+        if envelope is not None:
+            # 信封只留在入口和记录里。主流程看到的是已经整理好的文字。
+            current = replace(current, audio_delivery=True, input_review_text=envelope.review_context,
+                              object_codes=tuple((object_codes or {}).items()))
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -694,7 +751,7 @@ class SubjectProcess:
             content=(
                 f"闲时：{speaker.label}仍在场，无新原话"
                 if idle
-                else f"对方表达：{text}"
+                else f"对方表达：{recorded_text}"
             ),
             epistemic_status=EpistemicStatus.ACCEPTED,
             evidence_kind=EvidenceKind.REPORT,
@@ -711,9 +768,28 @@ class SubjectProcess:
         # 阶段⑤ 认知活动（一次调用；不执行同轮补召回）
         # 流式中途不早开口：等整份 response_plan 齐了，再在写场前把语言+动作合成一条交付，
         # 避免口头先出、动作拖到写场后另起一行。
+        verbal_delivered = False
+
+        def deliver_verbal(value: str) -> None:
+            nonlocal verbal_delivered
+            if on_verbal is not None and not verbal_delivered and value.strip():
+                verbal_delivered = True
+                on_verbal(value)
+
         response, working_recalled = self._cognize(
-            subject_id, activity, current, perception, clock=clock, on_reply=None
+            subject_id, activity, current, perception, clock=clock,
+            on_reply=deliver_verbal if on_verbal is not None else None,
         )
+        if on_conversation_review is not None and envelope is not None:
+            response, envelope, reviewed_speaker = on_conversation_review(response, envelope)
+            if reviewed_speaker is not None:
+                speaker = reviewed_speaker
+                objects = _speaker_object_mapping(speaker, objects, speaker.aliases)
+            current = replace(current, input_text=envelope.text, input_review_text=envelope.review_context,
+                              speaker=self._assembly_speaker(speaker=speaker, object_id=None))
+        deliver_verbal(verbal_text(response.response_plan))
+        if on_voice_plan is not None:
+            on_voice_plan(response.response_plan)
         self.last_model_response = response
         if on_reply is not None:
             early = format_speech_with_action(
@@ -736,7 +812,7 @@ class SubjectProcess:
                 source_ids=(activity.id,),
             )
         )
-        if response.object_assessment is not None:
+        if response.object_assessment is not None and envelope is None:
             speaker = self._apply_object_assessment(
                 subject_id, speaker, fact, activity.id, response.object_assessment
             )
@@ -749,7 +825,7 @@ class SubjectProcess:
         spoke = bool(spoken_text)
         embodied = should_trigger_embodied(plan)
         action_id = ""
-        if spoke or embodied:
+        if (spoke or embodied) and (action_allowed is None or action_allowed()):
             action_result = self.action_router.dispatch(
                 subject_id=subject_id,
                 activity_id=activity.id,
@@ -792,12 +868,14 @@ class SubjectProcess:
         }
         if spoke:
             reply_text = spoken_text
+            if current.audio_delivery:
+                reply_text = f"（准备通过语音说，实际交付待播放器反馈）{reply_text}"
             embodied_text = plan.embodied_text().strip()
             if embodied_text:
-                reply_text = f"{spoken_text}（动作：{embodied_text}）"
+                reply_text = f"{reply_text}（动作：{embodied_text}）"
             self.activity_ledger.append_subject_reply(
                 subject_id,
-                text_raw=reply_text,
+                text_raw=code_restore(reply_text) if code_restore else reply_text,
                 objects=objects,
                 mentioned_object_ids=mentioned_object_ids,
                 source_ids=(activity.id, *(item for item in (action_id,) if item)),
@@ -823,32 +901,23 @@ class SubjectProcess:
         clock.mark("⑥行动")
         pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
-        # 写场：两调用时由独立 write_zone 产出；未注入则读回复响应的写场字段（单调用兼容）。
-        write_result = (
-            self._write_zone(
-                subject_id, activity, current, response, speaker, working_recalled
+        if defer_write:
+            plain = _plain_turn_input(current.input_text)
+            with self._write_lock:
+                self._unwritten.append({"id": activity.id, "text": plain})
+            self._deferred_write = lambda: self._run_deferred_write(
+                subject_id, activity, current, response, speaker, working_recalled,
+                activity.id, code_restore, pack_id, registry,
             )
-            if self.write_zone is not None
-            else response
-        )
-        self.last_write_response = write_result
-        if is_persona(pack_id, registry=registry) and self._persona_ready(
-            subject_id, current
-        ):
-            self._apply_zone_edit(subject_id, response, current, write_result)
         else:
-            self.activity_ledger.save_rewritten_context(
-                subject_id,
-                getattr(write_result, "rewritten_context", "") or "",
-                speaker_object_id=(
-                    speaker.object_id if speaker is not None else None
-                ),
-                style_pack_id=pack_id,
+            self._commit_zone(
+                subject_id, activity, current, response, speaker, working_recalled,
+                code_restore, pack_id, registry,
             )
-
-        clock.mark("16编排")
+            clock.mark("16编排")
         # 落库 05 的工具指示：CLI 里 `jshi tool-log --turn` 靠它回看主流程这一拍交给 200 的是什么。
-        self._record_tool_intent(activity, response)
+        if action_allowed is None or action_allowed():
+            self._record_tool_intent(activity, response)
         # 只有 05 标明已消化的条目才算送达并回写；其余下一轮仍作为未消化材料出现。
         consumed = tuple(
             item for item in response.tool_consumed if item in set(turn_tool_ids)
@@ -861,6 +930,12 @@ class SubjectProcess:
                               "disposition": "deferred" if response.response_plan.unsaid_text() else "answered",
                               "evidence": response.response_plan.verbal_text(),
                               "work_complete": True} for task_id in consumed)
+        if current.audio_delivery:
+            # Generated text is not yet delivered speech. The voice host can
+            # confirm answered items once the player finishes the full reply.
+            handling = tuple({**item, "disposition": "deferred", "work_complete": False,
+                              "reason": "awaiting_voice_delivery"}
+                             if item.get("disposition") == "answered" else item for item in handling)
         if handling:
             consumed = self.tool_service.handle_results(
                 subject_id, speaker.object_id if speaker else "", handling,
@@ -960,6 +1035,7 @@ class SubjectProcess:
             current,
             speaker=speaker,
             timing=timing,
+            selected_tool_ids=turn_tool_ids,
         )
 
     def _governing_rules(self, subject_id: str) -> tuple[str, ...]:
@@ -1110,13 +1186,17 @@ class SubjectProcess:
         return lines
 
     def _person_experience_lines(
-        self, fragments: Sequence[AssemblyFragment]
+        self, fragments: Sequence[AssemblyFragment], codes: Mapping[str, str] | None = None
     ) -> list[str]:
-        return [
-            f"{fragment.id}（{self._object_display(fragment.object_id)}）：{fragment.content}"
-            for fragment in fragments
-            if fragment.source == "person_experience" and fragment.content.strip()
-        ]
+        lines = []
+        for fragment in fragments:
+            if fragment.source != "person_experience" or not fragment.content.strip():
+                continue
+            label = self._object_display(fragment.object_id)
+            code = (codes or {}).get(fragment.object_id)
+            who = f"{code}（{label}）" if code else label
+            lines.append(f"{who}：{fragment.content}")
+        return lines
 
     def _person_portrait_lines(
         self, fragments: Sequence[AssemblyFragment]
@@ -1134,17 +1214,18 @@ class SubjectProcess:
         boot: bool,
         include_tool: bool = True,
         now: datetime | None = None,
+        live_zone: bool = False,
     ) -> str:
         label = current.speaker.label if current.speaker else "对方"
         stamp = now or datetime.now().astimezone()
         memories = self._memory_lines(current.fragments, now=stamp)
-        experiences = self._person_experience_lines(current.fragments)
-        portraits = self._person_portrait_lines(current.fragments)
+        experiences = self._person_experience_lines(current.fragments, dict(getattr(current, 'object_codes', ())))
+        portraits = [*self._person_portrait_lines(current.fragments), *self._address_notes()]
         if boot:
             return self._boot_user_text(current, label, memories, experiences=experiences,
                                         portraits=portraits, now=stamp)
         subject_id = current.subject_state.subject_id
-        scene = self.zone_store.render(subject_id, now=stamp)
+        scene = self._zone_text_for_turn(subject_id, stamp, live=live_zone)
         pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
         cap = zone_chars_for(pack_id, registry=registry)
@@ -1158,12 +1239,13 @@ class SubjectProcess:
                 tool_cap=self._tool_block_cap(),
             ),
         ]
-        parts.append(
-            "【此时的输入】\n"
-            + format_turn_input(
-                label, current.input_text, stimulus=current.stimulus
-            )
-        )
+        turn = (current.input_text or "").strip()
+        if not current.audio_delivery:
+            turn = format_turn_input(label, current.input_text, stimulus=current.stimulus)
+        review = getattr(current, "input_review_text", "")
+        if review:
+            turn += "\n本批发言的识别标注（不是人物原话）：\n" + review
+        parts.append("【此时的输入】\n" + turn)
         if memories:
             parts.append("【你此时的回忆】\n" + "\n".join(memories))
         if portraits:
@@ -1303,6 +1385,7 @@ class SubjectProcess:
         reply_response,
         current: AssembledCurrentState,
         write_result,
+        code_restore: Callable[[str], str] | None = None,
     ) -> None:
         """人格轮：应用写场的 edit，再追加本轮输入与回应。
 
@@ -1315,17 +1398,35 @@ class SubjectProcess:
         unsaid_block = format_unsaid_zone_block(plan.unsaid_text())
         parts: list[str] = []
         if reply_text:
-            parts.append(f"我说：“{reply_text}”")
+            prefix = "我准备说" if current.audio_delivery else "我说"
+            parts.append(f"{prefix}：“{reply_text}”")
         if action_text and action_text != "无动作":
             parts.append(action_text)
         reply_block = " ".join(parts).strip()
+        restore = code_restore or self._code_restore
+        if restore is not None:
+            reply_block = restore(reply_block)
+            unsaid_block = restore(unsaid_block)
         label = current.speaker.label if current.speaker else "对方"
         inbound = (current.input_text or "").strip()
+        restore = code_restore or self._code_restore
+        if restore is not None and inbound:
+            inbound = restore(inbound)
         input_block = f"{label}说：“{inbound}”" if inbound else ""
         if input_block or reply_block or unsaid_block:
+            edits = tuple(getattr(write_result, "zone_edit", ()) or ())
+            restore = code_restore or self._code_restore
+            if restore is not None and edits:
+                restored = []
+                for op in edits:
+                    item = dict(op)
+                    if item.get("text"):
+                        item["text"] = restore(str(item["text"]))
+                    restored.append(item)
+                edits = tuple(restored)
             self.zone_store.apply_edit(
                 subject_id,
-                getattr(write_result, "zone_edit", ()) or (),
+                edits,
                 append_blocks=tuple(
                     item
                     for item in (input_block, reply_block, unsaid_block)
@@ -1507,7 +1608,9 @@ class SubjectProcess:
             persona_schema=persona_schema,
             persona_user_text=persona_user_text,
             tool_input=current.tool_input,
+            transport_context=current.transport_context,
             tool_hot_state=current.tool_hot_state,
+            input_review_text=current.input_review_text,
             stimulus=current.stimulus,
             context=self._model_context(
                 current.subject_state.subject_id,
@@ -1545,8 +1648,11 @@ class SubjectProcess:
         if prev:
             parts.append(f"【上一份现场】\n{prev}")
         parts.append(f"【本轮原话】{label}：{current.input_text}")
+        if current.input_review_text:
+            parts.append("【归属说明】本轮人物复判已应用在原话的姓名与标记中。“上下文推测”等标记须保留；候选与JEV短评是工作材料，不作为人物原话或已确认身份写入现场。")
         if reply_text:
-            parts.append(f"【你的回应】我说：{reply_text}")
+            prefix = "我准备说" if current.audio_delivery else "我说"
+            parts.append(f"【你的回应】{prefix}：{reply_text}")
         unsaid_block = format_unsaid_zone_block(unsaid_text)
         if unsaid_block:
             parts.append(f"【未说出口】{unsaid_block}")
@@ -1554,6 +1660,114 @@ class SubjectProcess:
         if memories:
             parts.append("【本轮新回忆】\n" + "\n".join(memories))
         return "\n".join(parts)
+
+    def take_deferred_write(self):
+        job = self._deferred_write
+        self._deferred_write = None
+        return job
+
+    def _zone_text_for_turn(self, subject_id: str, now: datetime, *, live: bool) -> str:
+        """⑤等前轮写场提交后才装载；写场自身读取实时片场。"""
+        with self._write_finished:
+            if not live:
+                while self._unwritten:
+                    if any(item.get("failed") for item in self._unwritten):
+                        raise RuntimeError("上一轮写场尚未成功，需先重试写场")
+                    self._write_finished.wait()
+            return self.zone_store.render(subject_id, now=now)
+
+    def _address_notes(self) -> list[str]:
+        profiles = self.profiles
+        if profiles is None or not hasattr(profiles, "address_line"):
+            return []
+        lines = []
+        for object_id in getattr(self, "_voice_party_ids", ()):
+            line = profiles.address_line(object_id)
+            if line:
+                lines.append(line)
+        return lines
+
+    def _commit_zone(
+        self, subject_id, activity, current, response, speaker, working_recalled,
+        code_restore, pack_id, registry,
+    ) -> bool:
+        started_at = datetime.now().astimezone().isoformat()
+        began = time.perf_counter()
+        self._record_write_timing(subject_id, activity.id, "write", "started", started_at)
+        status = "error"
+        try:
+            wrote = self._commit_zone_impl(
+                subject_id, activity, current, response, speaker, working_recalled,
+                code_restore, pack_id, registry,
+            )
+            status = "succeeded" if wrote else "failed"
+            return wrote
+        finally:
+            self._record_write_timing(subject_id, activity.id, "write", status, started_at,
+                finished_at=datetime.now().astimezone().isoformat(),
+                total_ms=round((time.perf_counter() - began) * 1000, 3))
+
+    def _record_write_timing(self, subject_id, activity_id, phase, status, started_at, **extra):
+        """写场独立实测；挂起时仍能查到开始记录，记录失败不阻断写场。"""
+        payload = dict(subject_id=subject_id, activity_id=activity_id,
+            phase=phase, status=status, started_at=started_at, **extra)
+        try:
+            with self._write_timing_lock:
+                self._write_timings_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._write_timings_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            logger.exception("write timing persist failed")
+
+    def _commit_zone_impl(
+        self, subject_id, activity, current, response, speaker, working_recalled,
+        code_restore, pack_id, registry,
+    ) -> bool:
+        written = current
+        if code_restore is not None:
+            written = replace(current, input_text=code_restore(_plain_turn_input(current.input_text or "")))
+        write_result = (
+            self._write_zone(subject_id, activity, written, response, speaker, working_recalled)
+            if self.write_zone is not None
+            else response
+        )
+        self.last_write_response = write_result
+        if (getattr(write_result, "metadata", None) or {}).get("skill_fallback") == "write_zone_retry_failed":
+            return False
+        if is_persona(pack_id, registry=registry) and self._persona_ready(subject_id, written):
+            self._apply_zone_edit(subject_id, response, written, write_result, code_restore)
+        else:
+            text = getattr(write_result, "rewritten_context", "") or ""
+            if code_restore is not None and text:
+                text = code_restore(text)
+            self.activity_ledger.save_rewritten_context(
+                subject_id, text,
+                speaker_object_id=speaker.object_id if speaker is not None else None,
+                style_pack_id=pack_id,
+            )
+        return True
+
+    def _run_deferred_write(
+        self, subject_id, activity, current, response, speaker, working_recalled,
+        turn_id, code_restore, pack_id, registry,
+    ) -> bool:
+        try:
+            wrote = self._commit_zone(
+                subject_id, activity, current, response, speaker, working_recalled,
+                code_restore, pack_id, registry,
+            )
+        except Exception:
+            logger.exception("deferred write_zone failed")
+            wrote = False
+        with self._write_lock:
+            if wrote:
+                self._unwritten = [item for item in self._unwritten if item["id"] != turn_id]
+            else:
+                for item in self._unwritten:
+                    if item["id"] == turn_id:
+                        item["failed"] = True
+            self._write_finished.notify_all()
+        return wrote
 
     def _write_zone(
         self,
@@ -1600,7 +1814,19 @@ class SubjectProcess:
             )
             persona_schema = write_schema_for(pack_id, registry=registry)
             persona_user_text = self._persona_user_text(
-                current, boot=False, include_tool=False, now=now
+                current, boot=False, include_tool=False, now=now, live_zone=True
+            )
+            plan = response.response_plan
+            persona_user_text += "\n\n【你的回应】\n" + json.dumps(
+                {
+                    "mode": plan.mode if plan is not None else "wait",
+                    "items": [
+                        {"channel": item.channel, "text": item.text,
+                         "target_ids": [dict(current.object_codes).get(oid, self._object_display(oid)) for oid in item.target_ids]}
+                        for item in plan.items
+                    ] if plan is not None else [],
+                    "unsaid": unsaid_text,
+                }, ensure_ascii=False,
             )
         else:
             persona_instruction = ""
@@ -1625,6 +1851,7 @@ class SubjectProcess:
             )
         request = ModelRequest(
             purpose="write_zone",
+            transport_context=current.transport_context,
             input_text=current.input_text,
             subject_state=current.subject_state,
             speaker=model_speaker,
@@ -1638,6 +1865,24 @@ class SubjectProcess:
             stimulus=current.stimulus,
             context=context,
         )
+        def generate(attempt):
+            started_at = datetime.now().astimezone().isoformat()
+            began = time.perf_counter()
+            status = "error"
+            self._record_write_timing(subject_id, activity.id, "model", "started", started_at,
+                attempt=attempt, model=getattr(self.write_zone, "name", "write_zone"))
+            try:
+                result = self.write_zone.generate(request)
+                if (result.metadata or {}).get("skill_fallback"):
+                    raise ValueError("写场结果无法解析")
+                status = "succeeded"
+                return result
+            finally:
+                self._record_write_timing(subject_id, activity.id, "model", status, started_at,
+                    attempt=attempt, model=getattr(self.write_zone, "name", "write_zone"),
+                    finished_at=datetime.now().astimezone().isoformat(),
+                    total_ms=round((time.perf_counter() - began) * 1000, 3))
+
         try:
             self._record_step_input(
                 request,
@@ -1645,11 +1890,11 @@ class SubjectProcess:
                 subject_id=subject_id,
                 activity_id=activity.id,
             )
-            return self.write_zone.generate(request)
+            return generate(1)
         except Exception:
             logger.exception("write_zone attempt 1 failed, retrying")
             try:
-                return self.write_zone.generate(request)
+                return generate(2)
             except Exception:
                 logger.exception(
                     "write_zone attempt 2 failed; keeping previous zone"
