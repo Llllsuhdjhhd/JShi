@@ -1,7 +1,7 @@
 """Transport facts stay separate from the person's words and identity."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 from uuid import uuid4
 
@@ -57,8 +57,11 @@ class InputEnvelope:
     jev_calls: tuple = ()
     review_context: str = ""
     review_candidates: tuple = ()
+    input_annotations: tuple = ()  # Entry facts for current inputs only; no review prompt.
 
     def __post_init__(self) -> None:
+        if not self.speaker.object_id and self.speaker.status == "unknown":
+            object.__setattr__(self, "speaker", replace(self.speaker, object_id="input:" + self.input_id))
         if not self.session_id or not self.source or not self.speaker.track_id:
             raise ValueError("envelope requires session, source and speaker track")
         if self.start_ms < 0 or self.end_ms < self.start_ms:

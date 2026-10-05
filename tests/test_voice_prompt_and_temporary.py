@@ -164,8 +164,9 @@ def test_recognized_temporary_voice_can_introduce_its_existing_name(process):
     old = ids.resolve('A', voiceprint_id='local:test:temp', cluster_id='temp')
     assert old.status == 'recognized'
     introduced, _ = ids.introduce('A', 'lux', cluster_id='temp')
-    assert introduced.object_id == 'lux-id'
-    assert ids.associations['temp-id'].object_id == 'lux-id'
+    assert introduced.object_id == 'temp-id' and introduced.label == 'lux'
+    assert introduced.status == 'unknown'
+    assert ids.associations['temp-id'].object_id == 'temp-id'
     assert process.profiles.get('temp-id') == before
 
 
@@ -200,7 +201,7 @@ def test_subject_nicknames_are_saved_in_portrait_for_the_identified_speaker(proc
         async def send(message): pass
         c = VoiceConversation(process, 'stone', FakeCloud(), send)
         try:
-            known, _ = c.identities.introduce('A', 'lux')
+            known, _ = c.identities.introduce('A', 'lux', basis='manual_selection')
             c.note_address(known, 'Hello hello jiang，我来了', 'nickname', addressed=True)
             c.note_address(known, '姜，听到了吗', 'nickname-2', addressed=True)
             portrait = process.profiles.address_line('lux-id')
@@ -227,7 +228,7 @@ def test_eight_supporting_samples_and_two_misses_use_distribution_without_traini
         if i < 9:
             assert not vpid and speakers.last_match['tentative']
     assert vpid and track == 'known-lux-id'
-    assert abs(confidence-.63) < 1e-6
+    assert abs(confidence-.606) < 1e-6
     assert speakers.last_match['collection']['support_fraction'] == .8
     assert json.dumps(speakers.known, sort_keys=True) == bank_before
 

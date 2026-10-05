@@ -15,6 +15,33 @@ if TYPE_CHECKING:
     from jshi.tool.service import ToolService
 
 
+class ManualInputSource:
+    """Read manually attributed cold history without merging unknown actors."""
+
+    name = "manual_history"
+    status = "implemented"
+
+    def __init__(self, path):
+        self.path = path
+        self.store = None
+
+    def load(self, ctx: AssemblyContext) -> LoadResult:
+        speaker = ctx.speaker
+        if (speaker is None or not self.path.exists() or speaker.reason in {
+                "voice_unknown", "voice_pending", "voice_scene", "context_attribution", "main_context_attribution"}):
+            return LoadResult()
+        if self.store is None:
+            from jshi.core.unknown_inputs import UnknownInputs
+            self.store = UnknownInputs(self.path, initialize=False)
+        rows = self.store.for_person(speaker.object_id, ctx.input_text)
+        return LoadResult(fragments=tuple(AssemblyFragment(
+            source=self.name, id="manual-input:" + row['input_id'], kind="recall_excerpt",
+            content="人工已将此句关联为" + speaker.label + "；" +
+                    ("原话节选：" if row['excerpted'] else "原话：") + row['text'],
+            object_id=speaker.object_id, source_ids=(row['input_id'],),
+        ) for row in rows))
+
+
 def speaker_summary(speaker: AssemblySpeaker) -> str:
     alias_text = "、".join(speaker.aliases)
     return (

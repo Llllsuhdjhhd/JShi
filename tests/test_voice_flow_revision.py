@@ -68,7 +68,8 @@ def test_short_alias_target_is_resolved_before_playback(process):
             await asyncio.wait_for(c.turn_queue.join(), 3)
             await asyncio.sleep(.02)
             reply = next(message for message in messages if message['type'] == 'reply')
-            assert reply['items'][0]['target_ids'] == ('lux-id',)
+            assert reply['items'][0]['target_ids'] == (c.scene[0].speaker.object_id,)
+            assert c.scene[0].speaker.object_id != 'lux-id'
         finally:
             await c.close()
     asyncio.run(run())
@@ -98,7 +99,9 @@ def test_context_does_not_treat_later_playback_as_heard_before_input(process):
     asyncio.run(run())
 
 
-def test_failed_write_holds_next_turn_until_retry(process):
+def test_failed_write_keeps_batch_and_next_turn_rewrites_without_wait(process):
+    from tests.test_write_zone_split import WriteModel
+    process.write_zone = WriteModel()
     attempts = []
     original = process._commit_zone
     def fail_once(*args, **kwargs):
@@ -115,16 +118,15 @@ def test_failed_write_holds_next_turn_until_retry(process):
             await asyncio.wait_for(c.queue.join(), 2)
             await asyncio.wait_for(c.turn_queue.join(), 3)
             await asyncio.wait_for(c.write_queue.join(), 3)
-            assert c.failed_write_jobs and process._unwritten[0]['failed']
+            assert c.failed_write_jobs and process.pending_scene.snapshot('stone')
             await c.stop('测试停播放')
             await c.accept(Transcript('第二轮问题', 'A', 2000, 3800, True))
             await asyncio.wait_for(c.queue.join(), 2)
-            await asyncio.sleep(.03)
-            assert len(process.cognition.requests) == 1
-            await c.retry_failed_writes()
+            await asyncio.wait_for(c.turn_queue.join(), 3)
+            assert len(process.cognition.requests) == 2
             await asyncio.wait_for(c.turn_queue.join(), 3)
             await asyncio.wait_for(c.write_queue.join(), 3)
-            assert len(process.cognition.requests) == 2 and not process._unwritten
+            assert len(process.cognition.requests) == 2 and not process.pending_scene.snapshot('stone')
         finally:
             await c.close()
     asyncio.run(run())
@@ -208,6 +210,6 @@ def test_unparseable_writer_is_not_treated_as_successful_empty_edit(process):
     process.experience('stone', incoming.text, envelope=incoming, resolved_speaker=identities.candidate(incoming.speaker), defer_write=True)
     job = process.take_deferred_write()
     assert job() is False and len(writer.requests) == 2
-    assert process._unwritten[0]['failed']
+    assert process.pending_scene.snapshot('stone')
     assert job() is True and len(writer.requests) == 3
-    assert not process._unwritten
+    assert not process.pending_scene.snapshot('stone')

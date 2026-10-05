@@ -79,10 +79,10 @@ def test_cognition_skill_produces_usage_segments(tmp_path):
     assert resp.response_plan.mode == "respond"
     assert "working_set_limit" in resp.response_plan.verbal_text()
     assert resp.context_assessment.focus == ("seg-12",)
-    assert resp.object_assessment.conclusion == "confirm"
+    assert resp.object_assessment is None
     # 回复调用不再产出写场（写场已独立到 WriteZoneSkill）。
     assert resp.rewritten_context == ""
-    assert resp.object_assessment.object_id == "OBJ-DP"
+    assert resp.object_assessment is None
     assert resp.recall_requests[0].level == 2
     # 第 5 用途段"重要性排序"（给 14，占位）
     assert resp.importance_ranking[0].id == "seg-12"
@@ -104,7 +104,8 @@ def test_instruction_keeps_rules_without_examples():
     assert "【关于输入】" in text
     assert "【价值】" in text
     assert "【回应方式】" in text
-    assert "【对象确认】" in text
+    assert "【本轮职责】" in text
+    assert "【对象确认】" not in text
     assert "【在途工具】" not in text
     assert "unsaid" in text
     assert "（未开口）" in text
@@ -122,14 +123,14 @@ def test_instruction_keeps_rules_without_examples():
     assert "rewritten_context" not in text
     assert "才提出 recall_requests" not in text
     assert "追加评价与召回" not in text
-    assert "对象确认" in text
+    assert "人物复判由独立流程处理" in text
     assert "【正例】" not in text
     assert "【反例】" not in text
     assert "【本轮材料】" not in text
     assert "【如何选择对外姿态】" not in text
 
 
-def test_empty_object_assessment_id_is_filled_from_speaker():
+def test_legacy_empty_object_assessment_is_ignored():
     payload = dict(_payload())
     payload["object_assessment"] = {
         "conclusion": "confirm",
@@ -138,11 +139,10 @@ def test_empty_object_assessment_id_is_filled_from_speaker():
         "reason": "渠道已绑定",
     }
     resp = CognitionSkill(FakeModel(payload)).run(make_request())
-    assert resp.object_assessment.object_id == "OBJ-DP"
-    assert resp.object_assessment.label == "dp"
+    assert resp.object_assessment is None
 
 
-def test_object_assessment_name_is_resolved_to_speaker_id():
+def test_legacy_named_object_assessment_is_ignored():
     payload = dict(_payload())
     payload["object_assessment"] = {
         "conclusion": "confirm",
@@ -151,7 +151,7 @@ def test_object_assessment_name_is_resolved_to_speaker_id():
         "reason": "渠道已绑定",
     }
     resp = CognitionSkill(FakeModel(payload)).run(make_request())
-    assert resp.object_assessment.object_id == "OBJ-DP"
+    assert resp.object_assessment is None
 
 
 def test_rewrite_replaces_patch_in_instruction():

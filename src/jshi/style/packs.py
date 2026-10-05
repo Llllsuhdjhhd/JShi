@@ -346,6 +346,8 @@ SMITH_VALUE_NARRATION = "我是匠石，是一段程序。我喜欢学习新的�
 WRITE_MATERIAL_NOTE = """【写场】
 片场是供后续交往继续使用的当前情境记录：保留正在发生的事情、相关的过往、人物关系和未了结事项，使下一轮能接着这一轮往下走。写场就是根据新材料更新这份记录，有取舍地保留、补入和删改；不另行生成回应。
 
+【本次合批整理的输入输出】若存在，覆盖一个或多个未整理轮次：以这份时间线为完整新进展，本轮原话和回应已经包含其中，不重复录入。程序在 edit 后按顺序保存合批事件；保持准备说、已播出、未开口、人物暂定等标记。
+
 一、四项主要输入
 1. 【此时的输入】：本轮收到的新内容，是这次交往的新进展。文字、语音等不同来源的内容都归在这里，不另设一类输入材料。
 2. 【你此时的回忆】：本轮想起的过往经历，为理解和延续当前交往提供背景；选择相关且值得继续留用的部分写入片场。
@@ -354,9 +356,10 @@ WRITE_MATERIAL_NOTE = """【写场】
 这四项共同决定更新后的片场，不把其中任何一项仅定义为操作对象或参考。
 
 人物肖像、相处经验等是参考材料，用于理解人物和交往关系，不当作新发生的事件搬入片场。字数预算和文风分别约束篇幅与表达。
-【此时的输入】只包含本批新内容及其识别标注，过往内容以已有片场和回忆为准。沿用本轮最终给出的人物归属；“上下文推测”等未确认标记须保留。候选姓名、分数和下一轮JEV短评是工作材料，不写成人物说过的话，也不当作已确认的身份事实搬入片场。
+【此时的输入】只包含本批新内容及其识别标注，过往内容以已有片场和回忆为准。沿用入口给出的人物归属，保留“可能”“不确定”“上下文推测”等标记，不把暂定对象改成已确认。独立人物判断的候选资料、分数和next_jev_note不属于本次写场材料，不假设它们已经提供。
 
 二、取舍原则
+- 程序追加的“我准备说”和“（播放器”开头的块记录交付状态，不得mod改写；过时整块可删。不得用add另造已播出结论。准备、开始播放、整句播完和中断必须分开；只认可播放器确认的完成片段，不把partial_text整句当成已听完。
 - 优先保留本轮输入和回应的实质，以及当前话题、重要事实、约定和未了结事项。
 - 主要整理此前积累的片场：删过时、重复或已无关的内容；需要修改时保留事实、对象归属和事情的先后关系。
 - 回忆只补当前需要的部分，不全量搬入，也不重复已有内容。参考性的判断不能改写成已经发生的事实。
@@ -418,12 +421,16 @@ def _persona_reply_instruction(style_note: str, *, task1: str) -> str:
         "先分清每条话是谁说的，再结合整批发言、片场和已经发生的交往，判断他在对谁说、你是否该接话。"
         "不默认最后一位是回应对象；可以回应一人、多人，也可以不回应。"
         "‘你’‘你们’、问句和命令句本身不证明是在叫你；声音身份已经确认，也不证明是在对你说。\n"
-        "「JEV 初判」和分数只作参考，不是对方原话，也不是必须回应的指令。"
+        "入口标注中的人物归属、确定程度和对话指向用于理解本批输入，不是人物原话，也不是必须回应的指令。"
+        "只有与你形成交往的当前发言才需要回应；maybe只是指向未明，不是开口许可。"
+        "旧任务、回忆和未开口事项只帮助理解，不能单独证明含糊短句在要求恢复旧任务；"
+        "没有本轮明确的承接依据，不把‘试一下’‘继续’或对象不明的请求补成旧任务。"
         "旁人发言可以帮助理解背景、条件、补充和纠正，但不自动成为交给你的问题、命令或委托。"
         "只回应当前与你形成的交往，不为了答全输入而插进旁人的对话。"
         "例如旁人说‘你妈回来’，没有证据是在对你说时，不要接成‘我没有妈妈’；"
         "也不必对每条对象不明的话追问‘你是在跟我说吗’。整批没有与你形成交往时，按实际场景选择 ignore 或 wait。"
-        "直接提问、承接你的话、分享、纠正或等你反应，仍可自然回应，不要求每句点名。已回答过的问题不重复回答。\n"
+        "明确向你提问、承接你实际已播出的话、向你分享或纠正你的话，仍可自然回应，不要求每句点名。"
+        "对话指向明确但事项不清时可简短澄清；仅仅不知旁人在跟谁说话时不要主动盘问。已回答过的问题不重复回答。\n"
         "「上下文推测」或「可能是」表示归属未经声纹确认。"
         "P1、P2 这类代号只在本次会话里指人。"
         "别张冠李戴：不要把别人（别的名字）的话或记忆，安到当前说话人头上。每条片场/回忆自带（名字）归属，"
@@ -475,6 +482,12 @@ SMITH_REPLY_INSTRUCTION = _persona_reply_instruction(
         + RESPONSE_MODE_BLOCK
     ),
 )
+
+# Smith uses the current flat reply schema only.
+SMITH_REPLY_INSTRUCTION = SMITH_REPLY_INSTRUCTION.replace(
+    "字段名称以本次输出 Schema 为准。使用 response_plan 的 Schema 时，说出口的话填入 items 中的 verbal，未开口事项填入 response_plan.unsaid。",
+    "字段名称以本次输出Schema为准；说出口的话填reply，未开口事项填unsaid。"
+) + "\n【reply_targets】回应对象只填本轮入口提供的P代号，或入口明确作为可靠声音对象提供的S代号；可靠性由入口决定，不由你从轨迹号推断。单人填一个，多人按回应顺序去重；现场回应而对象无明确代号时填[]。respond之外填[]。不填姓名、内部ID、N编号、unknown或new，不改变入口人物归属。不要输出response_plan、items、verbal、edit、object_assessment、speaker_judgments或next_jev_note。\n"
 
 # 阿丘：底本与斯密斯相同；回复侧多一句闲时，避免把「没有对方原话」接成刚说的一句。
 AQIU_REPLY_INSTRUCTION = _persona_reply_instruction(
@@ -651,8 +664,7 @@ def reply_instruction_for(
         return ""
     if zone_chars:
         text = text.replace("{zone_chars}", str(zone_chars))
-    from jshi.core.conversation_review import REVIEW_INSTRUCTION
-    return text + "\n\n" + REVIEW_INSTRUCTION
+    return text + '\n沿用入口对象归属，只处理当前输入与反应；人物复判由独立流程处理，本轮不输出人物判断。'
 
 
 def boot_instruction_for(
@@ -694,10 +706,10 @@ def _without_edit(schema: Mapping | None) -> Mapping | None:
     props = schema.get("properties") or {}
     if not isinstance(props, Mapping):
         return None
-    from jshi.core.conversation_review import REVIEW_SCHEMA
     return {
         "type": "object",
-        "properties": {**{key: value for key, value in props.items() if key != "edit"}, **REVIEW_SCHEMA},
+        "properties": {**{key: value for key, value in props.items() if key not in {'edit', 'object_assessment', 'speaker_judgments', 'next_jev_note'}},
+                       'reply_targets': {'type': 'array', 'items': {'type': 'string'}}},
     }
 
 

@@ -34,6 +34,7 @@ from jshi.assembly import (
     CurrentStateAssembler,
     IdentitySource,
     MemorySource,
+    ManualInputSource,
     ObjectSource,
     PersonExperienceSource,
     PersonPortraitSource,
@@ -217,6 +218,14 @@ class AssembledCurrentState:
     audio_delivery: bool = False
     input_review_text: str = ""
     object_codes: tuple[tuple[str, str], ...] = ()
+    tool_codes: tuple[tuple[str, str], ...] = ()
+    processing_modes: tuple[str, ...] = ("interaction",)
+    input_items: tuple[Mapping[str, object], ...] = ()
+    input_parts: tuple[Mapping[str, object], ...] = ()
+    pending_write_text: str = ""
+    pending_write_ids: tuple[str, ...] = ()
+    pending_write_blocks: tuple[str, ...] = ()
+    pending_through_sequence: int = 0
 
 
 @dataclass(frozen=True)
@@ -316,16 +325,25 @@ class SubjectProcess:
         tool_service: ToolService | None = None,
         introspection_model: ModelPort | None = None,
         long_term_experience: LongTermExperiencePort | None = None,
+        person_review_model: ModelPort | None = None,
     ) -> None:
         self.repository = repository
         self.identities = identities
         self.cognition = cognition
+        self.person_review_model = person_review_model or (cognition if hasattr(cognition, '_skill') else None)
         # 写场（②）独立端口：注入时走两调用；未注入退回单调用（保旧契约可跑）。
         self.write_zone = write_zone
         self._write_lock = threading.RLock()
-        self._write_finished = threading.Condition(self._write_lock)
-        self._unwritten: list[dict] = []
         self._deferred_write = None
+        self._scene_writer_lock = threading.Lock()
+        self._write_payloads = {}
+        self._latest_write_payloads = {}
+        self._scene_wakeup = threading.Event()
+        self._scene_subjects = set()
+        self._scene_thread = None
+        self._unknown_inputs = None
+        from .pending_scene import PendingScene
+        self.pending_scene = PendingScene(repository.path.parent / "pending_scene.json")
         self._voice_party_ids: tuple[str, ...] = ()
         self._code_restore: Callable[[str], str] | None = None
         data_dir = repository.path.parent
@@ -404,6 +422,7 @@ class SubjectProcess:
                 MemorySource(
                     repository, memory=self.memory, profiles=self.profiles
                 ),
+                ManualInputSource(data_dir / "unknown_inputs.sqlite3"),
                 ToolSource(self.tool_service),
             ),
             chance=self.chance,
@@ -467,7 +486,8 @@ class SubjectProcess:
         from jshi.tool.service import format_tool_related
 
         self._turn_tool_ids = tuple(str(item["id"]) for item in tool_entries)
-        tool_related = format_tool_related(tool_entries)
+        tool_codes = tuple((f"T{i}", str(item["id"])) for i, item in enumerate(tool_entries, 1))
+        tool_related = format_tool_related(tool_entries, task_codes={oid:code for code,oid in tool_codes})
         return AssembledCurrentState(
             input_text=input_text,
             speaker=working_set.speaker,
@@ -480,6 +500,7 @@ class SubjectProcess:
             source_report=working_set.report,
             # 主路径只呈现【工具相关】；裸 tool_input / 热状态标题不再分两路贴。
             tool_input=tool_related,
+            tool_codes=tool_codes,
             tool_hot_state="",
             stimulus=stimulus if stimulus == STIMULUS_IDLE else STIMULUS_SPEECH,
         )
@@ -528,6 +549,7 @@ class SubjectProcess:
         action_allowed: Callable[[], bool] | None = None,
         on_conversation_review: Callable | None = None,
         object_codes: Mapping[str, str] | None = None,
+        processing_modes: Sequence[str] = ("interaction",),
     ) -> SubjectActivityResult:
         self._deferred_write = None
         self._code_restore = code_restore
@@ -541,6 +563,13 @@ class SubjectProcess:
         if idle:
             text = ""
         # 阶段① 对象必填校验 → 对象解析 → 置信度门禁 → 落位
+        if resolved_speaker is None and envelope is not None:
+            evidence = envelope.speaker
+            profile = self.profiles.get(evidence.object_id)
+            resolved_speaker = SpeakerCandidate(subject_id, evidence.object_id, evidence.label,
+                confidence=evidence.confidence or 0.0,
+                status=profile.status if profile and evidence.status != "unknown" else "provisional",
+                reason="voice_unknown" if evidence.status == "unknown" else evidence.method)
         if resolved_speaker is not None:
             if (envelope is None or resolved_speaker.subject_id != subject_id
                     or resolved_speaker.object_id != envelope.speaker.object_id):
@@ -552,7 +581,7 @@ class SubjectProcess:
         )
         if not speaker.object_id:
             raise ValueError("object candidate must be referenceable (object_id)")
-        if speaker.confidence < MIN_OBJECT_CONFIDENCE:
+        if envelope is None and speaker.confidence < MIN_OBJECT_CONFIDENCE:
             self.repository.add_history(
                 HistoryRecord(
                     subject_id=subject_id,
@@ -583,14 +612,19 @@ class SubjectProcess:
         self._voice_party_ids = ()
         if envelope is not None:
             mentioned_object_ids = tuple(dict.fromkeys((*mentioned_object_ids,
-                *(u.speaker.object_id for u in envelope.utterances
+                *(u.speaker.object_id for u in envelope.current_utterances
                   if u.speaker.status in {"introduced", "recognized"}))))
             self._voice_party_ids = tuple(dict.fromkeys(
                 u.speaker.object_id for u in envelope.current_utterances
                 if u.speaker.object_id and u.speaker.method not in {"unassigned_audio", "voice_scene", "context_attribution"}
                 and u.speaker.status in {"introduced", "recognized"}
             ))
-        recorded_text = (code_restore(_plain_turn_input(text)) if code_restore else text)
+        if envelope is not None and envelope.current_utterances:
+            # The raw envelope may still carry legacy entry notes or history.
+            # Only this batch's original statements become the input fact.
+            recorded_text = '\n'.join(f'{u.speaker.label}：{u.text}' for u in envelope.current_utterances)
+        else:
+            recorded_text = (code_restore(_plain_turn_input(text)) if code_restore else text)
         fact = HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.FACT,
@@ -621,7 +655,7 @@ class SubjectProcess:
             )
 
         # 新对象落库（通过门禁后）：暂定档案，来源 = 输入事实 id
-        if self.profiles.get(speaker.object_id) is None and speaker.reason != "voice_pending":
+        if self.profiles.get(speaker.object_id) is None and speaker.reason != "voice_pending" and not (envelope and envelope.speaker.status == "unknown"):
             self.object_system.ensure_provisional(
                 object_id=speaker.object_id,
                 label=speaker.label,
@@ -669,9 +703,40 @@ class SubjectProcess:
         current = self.assemble_current_state(
             subject_id, text, view, speaker=speaker, stimulus=stimulus
         )
+        # A just-recorded input can be returned by the memory source. It is
+        # already in input_items, so don't present it as an additional memory.
+        current = replace(current, fragments=tuple(fragment for fragment in current.fragments
+            if fact.id not in fragment.source_ids))
+        from jshi.core.main_input import make_input
+        if not idle:
+            parts = tuple(asdict_part for asdict_part in (
+                {"kind": p.kind, "reference": p.reference, "media_type": p.media_type}
+                for p in envelope.parts)) if envelope else ()
+            incoming = envelope.current_utterances if envelope else ()
+            annotations = {row['input_id']: row for row in envelope.input_annotations} if envelope else {}
+            items = tuple(make_input(u.input_id, u.speaker.object_id,
+                (dict(object_codes or {}).get(u.speaker.object_id, "") + "（" + u.speaker.label + "）") if object_codes else u.speaker.label, u.text,
+                source="text" if "文字输入" in u.identity_note else "audio",
+                level="确定" if u.speaker.status == "recognized" or u.speaker.method == "manual_annotation" else (
+                    "可能" if u.speaker.method in {"self_report", "context_attribution"} else "不确定"),
+                evidence={"self_report": "对方自报称呼，尚未核定", "context_attribution": "入口上下文推测", "voiceprint_match": "入口声纹匹配", "manual_annotation": "人工关联"}.get(u.speaker.method, "入口未确认姓名"),
+                parts=parts, number=annotations.get(u.input_id, {}).get('n', ''),
+                direction=annotations.get(u.input_id, {}).get('direction', ''),
+                relevance=annotations.get(u.input_id, {}).get('relevance', '')) for u in incoming)
+            if not items:
+                items = (make_input(envelope.input_id if envelope else fact.id, speaker.object_id,
+                    speaker.label, text, source=next((p.kind for p in envelope.parts if p.kind != "text"), "text") if envelope else "text",
+                    level="确定" if speaker.status == "confirmed" else "不确定",
+                    evidence="入口提供的对象归属", parts=parts),)
+            current = replace(current, input_items=items, input_parts=parts)
+            if envelope and envelope.speaker.status == "unknown" and not incoming:
+                self.unknown_inputs.append(envelope.input_id, envelope.speaker.object_id,
+                    text, envelope.session_id, envelope.start_ms, envelope.end_ms)
+        modes = tuple(dict.fromkeys(str(mode).strip() for mode in processing_modes if str(mode).strip()))
+        current = replace(current, processing_modes=modes or ("interaction",))
         if envelope is not None:
             # 信封只留在入口和记录里。主流程看到的是已经整理好的文字。
-            current = replace(current, audio_delivery=True, input_review_text=envelope.review_context,
+            current = replace(current, audio_delivery=any(p.kind == "audio" for p in envelope.parts), input_review_text='',
                               object_codes=tuple((object_codes or {}).items()))
         self.repository.add_history(
             HistoryRecord(
@@ -684,6 +749,7 @@ class SubjectProcess:
                     "version": view.version,
                     "object_id": speaker.object_id,
                     "label": speaker.label,
+                    "tool_codes": dict(current.tool_codes),
                     "value_count": len(current.subject_state.salient_values),
                     "commitment_count": len(current.subject_state.commitments),
                     "recalled_event_ids": [
@@ -780,12 +846,18 @@ class SubjectProcess:
             subject_id, activity, current, perception, clock=clock,
             on_reply=deliver_verbal if on_verbal is not None else None,
         )
+        tool_ids = dict(current.tool_codes)
+        response = replace(response,
+            tool_consumed=tuple(tool_ids.get(token, token) for token in response.tool_consumed),
+            tool_handling=tuple({**item, "task_id": tool_ids.get(item.get("task_id"), item.get("task_id"))}
+                                for item in response.tool_handling))
+        response = replace(response, speaker_judgments=(), next_jev_note='', object_assessment=None)
         if on_conversation_review is not None and envelope is not None:
             response, envelope, reviewed_speaker = on_conversation_review(response, envelope)
             if reviewed_speaker is not None:
                 speaker = reviewed_speaker
                 objects = _speaker_object_mapping(speaker, objects, speaker.aliases)
-            current = replace(current, input_text=envelope.text, input_review_text=envelope.review_context,
+            current = replace(current, input_text=envelope.text, input_review_text='',
                               speaker=self._assembly_speaker(speaker=speaker, object_id=None))
         deliver_verbal(verbal_text(response.response_plan))
         if on_voice_plan is not None:
@@ -812,10 +884,6 @@ class SubjectProcess:
                 source_ids=(activity.id,),
             )
         )
-        if response.object_assessment is not None and envelope is None:
-            speaker = self._apply_object_assessment(
-                subject_id, speaker, fact, activity.id, response.object_assessment
-            )
 
         clock.mark("06标记")
         # 阶段⑥：10 按 item 分发。verbal 落记录并走独立语音占位；embodied 走肢体占位。
@@ -901,19 +969,42 @@ class SubjectProcess:
         clock.mark("⑥行动")
         pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
-        if defer_write:
-            plain = _plain_turn_input(current.input_text)
-            with self._write_lock:
-                self._unwritten.append({"id": activity.id, "text": plain})
-            self._deferred_write = lambda: self._run_deferred_write(
-                subject_id, activity, current, response, speaker, working_recalled,
-                activity.id, code_restore, pack_id, registry,
-            )
-        else:
-            self._commit_zone(
+        # Always save the input/output before returning. Failed writing retains it.
+        label = speaker.label if speaker else "未知来源"
+        plain = _plain_turn_input(current.input_text)
+        event_blocks = ["（空闲观察，距上次交往已过3分钟，没有新发言）"] if idle else [f'{label}说：“{plain}”']
+        if spoken_text:
+            prefix = "我准备说（尚未确认播放）" if current.audio_delivery else "我说"
+            for item in plan.items:
+                if item.channel == "verbal" and item.text.strip():
+                    block = f'{prefix}：“{item.text}”'
+                    if item.target_ids:
+                        block += "（回应对象：" + "、".join(self._object_display(oid) for oid in item.target_ids) + "）"
+                    event_blocks.append(block)
+        if plan.embodied_text().strip() and plan.embodied_text().strip() != "无动作":
+            action = "（动作计划：" + plan.embodied_text() + "）"
+            if spoken_text:
+                event_blocks[-1] += action
+            else:
+                event_blocks.append(action)
+        if plan.unsaid_text().strip():
+            event_blocks.append(format_unsaid_zone_block(plan.unsaid_text()))
+        if code_restore:
+            event_blocks = [code_restore(block) for block in event_blocks]
+        event_text = f"[{activity.created_at.isoformat()}] " + "\n".join(event_blocks)
+        with self._write_lock:
+            self.pending_scene.append(subject_id, activity.id, event_text, blocks=event_blocks,
+                sequence=max((segment.sequence for segment in self.activity_ledger.list_experiences(subject_id)), default=0),
+                input_ids=tuple(u.input_id for u in envelope.current_utterances) if envelope else (fact.id,))
+            self._write_payloads[activity.id] = (
                 subject_id, activity, current, response, speaker, working_recalled,
                 code_restore, pack_id, registry,
             )
+        self._latest_write_payloads[subject_id] = self._write_payloads[activity.id]
+        self._deferred_write = lambda: self._flush_pending_scene(subject_id)
+        if not defer_write:
+            self._deferred_write()
+            self._deferred_write = None
             clock.mark("16编排")
         # 落库 05 的工具指示：CLI 里 `jshi tool-log --turn` 靠它回看主流程这一拍交给 200 的是什么。
         if action_allowed is None or action_allowed():
@@ -1242,9 +1333,10 @@ class SubjectProcess:
         turn = (current.input_text or "").strip()
         if not current.audio_delivery:
             turn = format_turn_input(label, current.input_text, stimulus=current.stimulus)
-        review = getattr(current, "input_review_text", "")
-        if review:
-            turn += "\n本批发言的识别标注（不是人物原话）：\n" + review
+        if current.input_items and not live_zone:
+            from jshi.core.main_input import render_inputs
+            normalized = render_inputs(current.input_items)
+            turn = normalized
         parts.append("【此时的输入】\n" + turn)
         if memories:
             parts.append("【你此时的回忆】\n" + "\n".join(memories))
@@ -1403,19 +1495,22 @@ class SubjectProcess:
         if action_text and action_text != "无动作":
             parts.append(action_text)
         reply_block = " ".join(parts).strip()
-        restore = code_restore or self._code_restore
+        restore = code_restore
         if restore is not None:
             reply_block = restore(reply_block)
             unsaid_block = restore(unsaid_block)
         label = current.speaker.label if current.speaker else "对方"
         inbound = (current.input_text or "").strip()
-        restore = code_restore or self._code_restore
+        restore = code_restore
         if restore is not None and inbound:
             inbound = restore(inbound)
         input_block = f"{label}说：“{inbound}”" if inbound else ""
+        if current.pending_write_text:
+            input_block = current.pending_write_text.split("\n", 1)[-1]
+            reply_block = unsaid_block = ""
         if input_block or reply_block or unsaid_block:
             edits = tuple(getattr(write_result, "zone_edit", ()) or ())
-            restore = code_restore or self._code_restore
+            restore = code_restore
             if restore is not None and edits:
                 restored = []
                 for op in edits:
@@ -1427,10 +1522,13 @@ class SubjectProcess:
             self.zone_store.apply_edit(
                 subject_id,
                 edits,
-                append_blocks=tuple(
-                    item
-                    for item in (input_block, reply_block, unsaid_block)
-                    if item
+                covered_event_ids=current.pending_write_ids,
+                append_blocks_with_time=tuple(
+                    ZoneBlock(text=item, origin=(
+                        "speech_plan" if item.startswith("我准备说") else
+                        "delivery_fact" if item.startswith("（播放器") else ""))
+                    for item in (current.pending_write_blocks or tuple(
+                        value for value in (input_block, reply_block, unsaid_block) if value))
                 ),
             )
 
@@ -1570,7 +1668,7 @@ class SubjectProcess:
 
         当底层模型支持流式且调用方给了 ``on_reply`` 时，走 ``generate_stream``:
         ``response_plan`` 一旦完整且 mode=respond 就先回调 ``on_reply``(提前开口),
-        其余段(活跃区/打分/对象)继续收、最终返回完整 ``ModelResponse``。
+        其余段(活跃区/打分)继续收、最终返回完整 ``ModelResponse``。
         """
         speaker = None
         if current.speaker is not None:
@@ -1588,11 +1686,14 @@ class SubjectProcess:
             current.subject_state.subject_id, current
         )
         now = datetime.now().astimezone()
-        persona_user_text = (
-            self._persona_user_text(current, boot=False, now=now)
-            if persona_instruction
-            else ""
-        )
+        with self._write_lock:
+            self._reconcile_pending_scene(current.subject_state.subject_id)
+            current = replace(current, context_view=self.active_zone.load(current.subject_state.subject_id))
+            persona_user_text = (
+                self._persona_user_text(current, boot=False, now=now) if persona_instruction else ""
+            )
+            pending_text = self.pending_scene.render(current.subject_state.subject_id)
+        extra_context = ({"kind": "pending_scene", "content": pending_text},) if pending_text and not persona_instruction else ()
         request = ModelRequest(
             purpose="subject_activity",
             input_text=current.input_text,
@@ -1611,13 +1712,16 @@ class SubjectProcess:
             transport_context=current.transport_context,
             tool_hot_state=current.tool_hot_state,
             input_review_text=current.input_review_text,
+            processing_modes=current.processing_modes,
+            input_items=current.input_items,
+            input_parts=current.input_parts,
             stimulus=current.stimulus,
             context=self._model_context(
                 current.subject_state.subject_id,
                 working_recalled,
                 current.fragments,
                 current.context_view,
-            ),
+            ) + extra_context,
         )
         self._record_step_input(
             request,
@@ -1649,7 +1753,7 @@ class SubjectProcess:
             parts.append(f"【上一份现场】\n{prev}")
         parts.append(f"【本轮原话】{label}：{current.input_text}")
         if current.input_review_text:
-            parts.append("【归属说明】本轮人物复判已应用在原话的姓名与标记中。“上下文推测”等标记须保留；候选与JEV短评是工作材料，不作为人物原话或已确认身份写入现场。")
+            parts.append("【归属说明】原话的姓名与标记来自入口，主流程人物判断只是建议。“上下文推测”等标记须保留；候选与JEV短评是工作材料，不作为人物原话或已确认身份写入现场。")
         if reply_text:
             prefix = "我准备说" if current.audio_delivery else "我说"
             parts.append(f"【你的回应】{prefix}：{reply_text}")
@@ -1661,20 +1765,114 @@ class SubjectProcess:
             parts.append("【本轮新回忆】\n" + "\n".join(memories))
         return "\n".join(parts)
 
+    @property
+    def unknown_inputs(self):
+        with self._write_lock:
+            if self._unknown_inputs is None:
+                from jshi.core.unknown_inputs import UnknownInputs
+                self._unknown_inputs = UnknownInputs(self.repository.path.parent / "unknown_inputs.sqlite3")
+            return self._unknown_inputs
+
+    def schedule_scene_write(self, subject_id: str) -> None:
+        """Interactive text host: coalesced wakeups on an independent writer."""
+        with self._write_lock:
+            self._scene_subjects.add(subject_id)
+            self._scene_wakeup.set()
+            if self._scene_thread is None or not self._scene_thread.is_alive():
+                self._scene_thread = threading.Thread(target=self._scene_writer, daemon=True,
+                                                      name="jshi-scene-writer")
+                self._scene_thread.start()
+
+    def _scene_writer(self) -> None:
+        while True:
+            self._scene_wakeup.wait()
+            with self._write_lock:
+                subjects = tuple(self._scene_subjects)
+                self._scene_subjects.clear()
+                self._scene_wakeup.clear()
+            for subject_id in subjects:
+                self._flush_pending_scene(subject_id)
+            with self._write_lock:
+                if not self._scene_subjects:
+                    self._scene_thread = None
+                    return
+
     def take_deferred_write(self):
         job = self._deferred_write
         self._deferred_write = None
         return job
 
     def _zone_text_for_turn(self, subject_id: str, now: datetime, *, live: bool) -> str:
-        """⑤等前轮写场提交后才装载；写场自身读取实时片场。"""
-        with self._write_finished:
-            if not live:
-                while self._unwritten:
-                    if any(item.get("failed") for item in self._unwritten):
-                        raise RuntimeError("上一轮写场尚未成功，需先重试写场")
-                    self._write_finished.wait()
-            return self.zone_store.render(subject_id, now=now)
+        """认知读取已提交片场与未整理输入输出；写场只读已提交版本。"""
+        with self._write_lock:
+            scene = self.zone_store.render(subject_id, now=now)
+            self._reconcile_pending_scene(subject_id)
+            pending = "" if live else self.pending_scene.render(subject_id)
+            return "\n\n".join(part for part in (scene, pending) if part)
+
+    def _reconcile_pending_scene(self, subject_id: str) -> None:
+        ids = self.zone_store.covered_event_ids.get(subject_id, ())
+        ids = (*ids, *getattr(self.activity_ledger.current_context_view(subject_id), "covered_event_ids", ()))
+        if ids:
+            self.pending_scene.complete(ids)
+            for event_id in ids:
+                self._write_payloads.pop(event_id, None)
+
+    def _flush_pending_scene(self, subject_id: str) -> bool:
+        # Only one scene writer, but never hold the reader lock during a model call.
+        with self._scene_writer_lock:
+            with self._write_lock:
+                self._reconcile_pending_scene(subject_id)
+                rows = self.pending_scene.snapshot(subject_id)
+                if not rows:
+                    return True
+                payload = next((self._write_payloads.get(row["id"]) for row in reversed(rows)
+                                if row["id"] in self._write_payloads), self._latest_write_payloads.get(subject_id))
+                if payload is None:
+                    return False  # Restored records stay visible until a new turn supplies a writer.
+                sid, activity, current, response, speaker, recalled, restore, pack, registry = payload
+                current = replace(current, context_view=self.active_zone.load(subject_id), pending_write_text=self.pending_scene.render_rows(rows),
+                                  pending_write_ids=tuple(row["id"] for row in rows),
+                                  pending_write_blocks=tuple(block for row in rows for block in row.get("blocks", (row["text"],))),
+                                  pending_through_sequence=max((row.get("sequence", 0) for row in rows), default=0))
+            try:
+                wrote = self._commit_zone(sid, activity, current, response, speaker, recalled,
+                                          restore, pack, registry)
+            except Exception:
+                logger.exception("pending scene batch failed; keeping input/output")
+                return False
+            if wrote:
+                with self._write_lock:
+                    for event_id in current.pending_write_ids:
+                        self._write_payloads.pop(event_id, None)
+            return wrote
+
+    def note_scene_delivery(self, subject_id: str, event_id: str, text: str) -> None:
+        with self._write_lock:
+            self.pending_scene.append(subject_id, event_id, text)
+
+    def note_entry_background(self, subject_id: str, utterance) -> None:
+        """Retained entry observations live in scene history, never future new input."""
+        if not utterance.input_id:
+            return
+        with self._write_lock:
+            event_id = 'entry:' + utterance.input_id
+            covered = (*self.zone_store.covered_event_ids.get(subject_id, ()),
+                       *getattr(self.activity_ledger.current_context_view(subject_id), 'covered_event_ids', ()))
+            if event_id in covered:
+                return
+            text = f"[入口观察，input_id={utterance.input_id}，at={utterance.received_at_ms}] {utterance.speaker.label}：{utterance.text}（未触发回应）"
+            self.pending_scene.append(subject_id, event_id, text, blocks=(text,), input_ids=(utterance.input_id,))
+
+    def person_review_scene(self, subject_id: str) -> dict:
+        with self._write_lock:
+            self._reconcile_pending_scene(subject_id)
+            scene = self.zone_store.render(subject_id, now=datetime.now().astimezone())
+            if not scene:
+                scene = self.active_zone.load(subject_id).context_text or ''
+            pending = self.pending_scene.render(subject_id)
+            return {'committed_scene': scene[:12000], 'pending_events': pending[:16000],
+                    'scene_excerpted': len(scene) > 12000, 'pending_excerpted': len(pending) > 16000}
 
     def _address_notes(self) -> list[str]:
         profiles = self.profiles
@@ -1734,40 +1932,24 @@ class SubjectProcess:
         self.last_write_response = write_result
         if (getattr(write_result, "metadata", None) or {}).get("skill_fallback") == "write_zone_retry_failed":
             return False
-        if is_persona(pack_id, registry=registry) and self._persona_ready(subject_id, written):
-            self._apply_zone_edit(subject_id, response, written, write_result, code_restore)
-        else:
-            text = getattr(write_result, "rewritten_context", "") or ""
-            if code_restore is not None and text:
-                text = code_restore(text)
-            self.activity_ledger.save_rewritten_context(
-                subject_id, text,
-                speaker_object_id=speaker.object_id if speaker is not None else None,
-                style_pack_id=pack_id,
-            )
-        return True
-
-    def _run_deferred_write(
-        self, subject_id, activity, current, response, speaker, working_recalled,
-        turn_id, code_restore, pack_id, registry,
-    ) -> bool:
-        try:
-            wrote = self._commit_zone(
-                subject_id, activity, current, response, speaker, working_recalled,
-                code_restore, pack_id, registry,
-            )
-        except Exception:
-            logger.exception("deferred write_zone failed")
-            wrote = False
         with self._write_lock:
-            if wrote:
-                self._unwritten = [item for item in self._unwritten if item["id"] != turn_id]
+            if is_persona(pack_id, registry=registry) and self._persona_ready(subject_id, written):
+                self._apply_zone_edit(subject_id, response, written, write_result, code_restore)
             else:
-                for item in self._unwritten:
-                    if item["id"] == turn_id:
-                        item["failed"] = True
-            self._write_finished.notify_all()
-        return wrote
+                text = getattr(write_result, "rewritten_context", "") or ""
+                if not text.strip():
+                    return False
+                if code_restore is not None:
+                    text = code_restore(text)
+                self.activity_ledger.save_rewritten_context(
+                    subject_id, text,
+                    speaker_object_id=speaker.object_id if speaker is not None else None,
+                    style_pack_id=pack_id,
+                    covered_event_ids=current.pending_write_ids,
+                    through_sequence=current.pending_through_sequence,
+                )
+            self.pending_scene.complete(current.pending_write_ids)
+        return True
 
     def _write_zone(
         self,
@@ -1835,8 +2017,11 @@ class SubjectProcess:
                 current, reply_text, unsaid_text
             )
 
+        if current.pending_write_text:
+            persona_user_text += "\n\n【本次合批整理的输入输出】\n" + current.pending_write_text.split("\n", 1)[-1]
+            persona_user_text += "\n只将以上合批时间线作为本次新增事件；其他本轮原话、回应是对照材料，已包含的或此前已提交的内容不再追加。按时间顺序一起整理，计划与实际交付须区分。"
         context = self._model_context(
-            subject_id, working_recalled, current.fragments, current.context_view
+            subject_id, working_recalled, current.fragments, current.context_view, record_mappings=False
         )
         if reply_text:
             # 木头整份重写需要知道本轮回应（写"我说：…"），并入上下文。
@@ -2209,10 +2394,11 @@ class SubjectProcess:
         recalled: Sequence[RecalledFragment],
         fragments: Sequence[AssemblyFragment],
         context_view: ContextViewState | None = None,
+        *, record_mappings: bool = True,
     ) -> tuple[dict[str, object], ...]:
         items: list[dict[str, object]] = []
-        self._segment_short_map = {}
-        self._memory_short_map = {}
+        segment_map = {}
+        memory_map = {}
 
         actor_by_segment: dict[str, str | None] = {}
         time_by_segment: dict[str, datetime | None] = {}
@@ -2222,13 +2408,20 @@ class SubjectProcess:
                 time_by_segment[segment.segment_id] = segment.occurred_at
 
         m_counter = 0
+        manual_counter = 0
         for fragment in fragments:
             if fragment.source == "tool":
+                continue
+            if fragment.source == "manual_history":
+                manual_counter += 1
+                items.append({"id": f"U{manual_counter}", "kind": "recall_excerpt",
+                    "content": fragment.content, "source": "manual_history",
+                    "label": self._object_display(fragment.object_id), "status": "active"})
                 continue
             if fragment.source == "memory":
                 m_counter += 1
                 short_id = f"M{m_counter}"
-                self._memory_short_map[short_id] = fragment.id
+                memory_map[short_id] = fragment.id
                 items.append(
                     {
                         "id": short_id,
@@ -2287,7 +2480,7 @@ class SubjectProcess:
             for segment_id, text in context_view.segment_texts:
                 counter += 1
                 short_id = f"S{counter}"
-                self._segment_short_map[short_id] = segment_id
+                segment_map[short_id] = segment_id
                 segments.append(
                     {
                         "id": short_id,
@@ -2323,7 +2516,7 @@ class SubjectProcess:
             m_counter += 1
             short_id = f"M{m_counter}"
             ref = f"memory:{item.event_id}"
-            self._memory_short_map[short_id] = ref
+            memory_map[short_id] = ref
             items.append(
                 {
                     "id": short_id,
@@ -2336,6 +2529,9 @@ class SubjectProcess:
                     "occurred_at": _iso(item.occurred_at),
                 }
             )
+        if record_mappings:
+            self._segment_short_map = segment_map
+            self._memory_short_map = memory_map
         return tuple(items)
 
     def _bind_recall_object_ids(

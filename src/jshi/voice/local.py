@@ -13,6 +13,7 @@ from threading import RLock
 from time import monotonic, time
 
 from .volc import Transcript
+from .references import VoiceCandidates, references, score as reference_score, MAX_REFERENCES
 
 
 ASR_NAME = "sherpa-onnx-streaming-zipformer-small-ctc-zh-int8-2025-04-01"
@@ -33,8 +34,8 @@ def cosine(a, b) -> float:
 
 
 def voiceprint_score(vector, entry) -> float:
-    """One person has one embedding. Extra stored slices must not raise another person's score."""
-    return cosine(vector, entry['embedding'])
+    """Reference count never adds points; all callers use the same mean score."""
+    return reference_score(vector, entry)['score']
 
 
 def fit_voice_pcm(new_pcm: bytes, old_pcm: bytes, *, seconds: float = VOICEPRINT_SECONDS) -> bytes:
@@ -67,6 +68,7 @@ class LocalSpeakers:
                  anonymous_ttl_s: float = 7 * 86400, clock=time) -> None:
         self.extractor, self.model_id, self.path, self.profiles = extractor, model_id, path, profiles
         self.threshold, self.margin = threshold, margin
+        self.confirmation_threshold = max(threshold, .65)
         # Unnamed voices are remembered briefly, like a stranger met in passing.
         self.anonymous_ttl_s, self.clock = anonymous_ttl_s, clock
         self.enrollment_threshold = enrollment_threshold
@@ -82,6 +84,7 @@ class LocalSpeakers:
                 self.known = data.get("entries", {})
                 self._remove_withdrawn()
                 self._collapse_entries()
+        self.candidates = VoiceCandidates(path.with_suffix('.candidates.sqlite3'), clock=clock)
         self.tracks: dict[str, list[float]] = {}
         self.track_samples: dict[str, list[list[float]]] = {}
         self.pending_tracks: list[dict] = []
@@ -99,6 +102,10 @@ class LocalSpeakers:
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not .3 <= value <= .95:
                     raise ValueError('声纹匹配门槛设置无效')
                 self.threshold = float(value)
+                confirmation = saved.get('single_confirmation_threshold', max(value, .65))
+                if isinstance(confirmation, bool) or not isinstance(confirmation, (int, float)) or not math.isfinite(confirmation) or not .3 <= confirmation <= .95:
+                    raise ValueError('声纹姓名确认门槛设置无效')
+                self.confirmation_threshold = float(confirmation)
 
     def set_threshold(self, value):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not .3 <= value <= .95:
@@ -107,9 +114,11 @@ class LocalSpeakers:
             target = self.path.with_suffix('.settings.json')
             target.parent.mkdir(parents=True, exist_ok=True)
             temp = target.with_suffix('.tmp')
-            temp.write_text(json.dumps({'model_id': self.model_id, 'match_threshold': value}), encoding='utf-8')
+            temp.write_text(json.dumps({'model_id': self.model_id, 'match_threshold': value,
+                                        'single_confirmation_threshold': value}), encoding='utf-8')
             temp.replace(target)
             self.threshold = float(value)
+            self.confirmation_threshold = float(value)
             return self.threshold
 
     def embedding(self, samples):
@@ -133,7 +142,7 @@ class LocalSpeakers:
             if vector is None:
                 return []
             ranked = []
-            for item in self.known.values():
+            for _, item in self._person_entries():
                 profile = self.profiles.get(item.get("object_id"))
                 if profile is None or profile.status == "rejected" or not item.get("embedding"):
                     continue
@@ -141,15 +150,16 @@ class LocalSpeakers:
                     continue
                 from .identity import canonical_voice_profile
                 profile = canonical_voice_profile(self.profiles, profile)
-                ranked.append((voiceprint_score(vector, item), profile.object_id, profile.label))
-            ranked.sort(reverse=True)
+                stats = reference_score(vector, item)
+                ranked.append((stats['score'], profile.object_id, profile.label, stats))
+            ranked.sort(key=lambda row: row[:3], reverse=True)
             seen = set()
             result = []
-            for score, object_id, label in ranked:
+            for score, object_id, label, stats in ranked:
                 if object_id in seen:
                     continue
                 seen.add(object_id)
-                result.append({"object_id": object_id, "label": label, "score": round(score, 3)})
+                result.append({**stats, "object_id": object_id, "label": label, "score": round(score, 3)})
                 if len(result) >= limit:
                     break
             return result
@@ -180,29 +190,19 @@ class LocalSpeakers:
                 self.known.pop(key, None)
 
     def _collapse_entries(self):
-        """Older banks kept many embeddings per person. Matching now uses one averaged voiceprint."""
+        """Keep legacy bank bytes intact; group references at scoring time."""
+        return
+
+    def _person_entries(self):
+        """One person competes once, even when an old bank has multiple keys."""
         grouped = {}
         for key, entry in self.known.items():
             grouped.setdefault(entry.get('object_id'), []).append((key, entry))
-        if not grouped or all(len(items) == 1 and not items[0][1].get('templates') for items in grouped.values()):
-            return
-        merged = {}
         for object_id, items in grouped.items():
-            if len(items) == 1:
-                entry = {k: v for k, v in items[0][1].items() if k != 'templates'}
-                merged[items[0][0]] = entry
-                continue
-            centers = [_unit(entry['embedding']) for _, entry in items if entry.get('embedding')]
-            centers = [v for v in centers if v]
-            vector = _unit([sum(col) / len(centers) for col in zip(*centers)]) if centers else None
-            if vector is None:
-                continue
-            entry = {'object_id': object_id, 'embedding': vector, 'basis': 'merged'}
-            if all('expires_at' in old for _, old in items):
-                entry['expires_at'] = max(old['expires_at'] for _, old in items)
-            merged[items[-1][0]] = entry
-        self.known = merged
-        self._save_bank()
+            items.sort(key=lambda pair: pair[1].get('expires_at') is not None)
+            scoring_items = items if items[0][1].get('expires_at') is not None else [pair for pair in items if pair[1].get('expires_at') is None]
+            rows = [row for _, item in scoring_items for row in references(item)]
+            yield items[0][0], {**items[0][1], 'references': references({'references': rows})}
 
     def _pcm_of(self, object_id) -> bytes:
         for entry in self.known.values():
@@ -210,16 +210,47 @@ class LocalSpeakers:
                 return base64.b64decode(entry['pcm'])
         return b''
 
-    def _store_voice(self, object_id, embedding, pcm, *, basis, expires_at=None) -> bool:
+    def saved_reference_counts(self) -> list[dict]:
+        """Effective saved references for this model, grouped by person."""
+        with self.lock:
+            result = []
+            for _, entry in self._person_entries():
+                profile = self.profiles.get(entry['object_id'])
+                if not profile or profile.status == 'rejected' or entry.get('expires_at') is not None:
+                    continue
+                result.append({'object_id': profile.object_id, 'label': profile.label,
+                               'reference_count': len(references(entry))})
+            return result
+
+    def rank_short_hint(self, pcm: bytes) -> dict:
+        """Repeat a short clip for feature extraction, never identity binding."""
+        import numpy as np
+        if len(pcm) % 2 or not 6400 <= len(pcm) < 48000:
+            return {}
+        repetitions = math.ceil(96000 / len(pcm))
+        samples = np.frombuffer((pcm * repetitions)[:96000], dtype='<i2').astype('float32') / 32768
+        ranked = self.rank_known(samples)
+        return {'original_seconds': len(pcm) / 32000, 'repeat_count': repetitions,
+                'feature_seconds': len(samples) / 16000, 'candidates': ranked,
+                'basis': '同一短句首尾重复拼接，仅供参考，不增加独立证据',
+                'calibrated_probability': False}
+
+    def _store_voice(self, object_id, embedding, pcm, *, basis, expires_at=None, new_references=None) -> bool:
         vector = _unit(embedding)
         if vector is None or self.profiles.get(object_id) is None:
             return False
         keys = [k for k, e in self.known.items() if e.get('object_id') == object_id]
         key = keys[0] if keys else uuid4().hex
         previous = self.known[keys[0]] if keys else {}
-        for extra in keys[1:]:
-            del self.known[extra]
+        rows = [row for old_key in keys for row in references(self.known[old_key])]
         entry = {'object_id': object_id, 'embedding': vector, 'basis': basis}
+        if rows or new_references:
+            # Explicit new selections update a full bank. Keep the newest
+            # observations first; deduplicate before applying the ten-row cap.
+            merged = [*reversed(new_references or ()), *rows]
+            if new_references:
+                merged.sort(key=lambda row: row.get('at') or 0, reverse=True)
+            entry['references'] = references({'references': merged})
         if pcm:
             entry['pcm'] = base64.b64encode(pcm).decode('ascii')
             entry['seconds'] = round(len(pcm) / 32000, 2)
@@ -229,10 +260,17 @@ class LocalSpeakers:
         if expires_at is not None:
             entry['expires_at'] = expires_at
         self.known[key] = entry
+        try:
+            self._save_bank()
+        except Exception:
+            if keys:
+                self.known[key] = previous
+            else:
+                self.known.pop(key, None)
+            raise
         if not keys:
             from jshi.recognition import CarrierEntry
             self.profiles.add_carrier(object_id, CarrierEntry('voiceprint', f'local:{self.model_id}:{key}', basis))
-        self._save_bank()
         return True
 
     def _expire(self):
@@ -292,7 +330,7 @@ class LocalSpeakers:
         with self.lock:
             self._expire()
             best = {}
-            for item in self.known.values():
+            for _, item in self._person_entries():
                 profile = self.profiles.get(item['object_id'])
                 if profile is None or profile.status == 'rejected':
                     continue
@@ -319,7 +357,7 @@ class LocalSpeakers:
             return f"unidentified-{uuid4().hex}", "", None
         self._expire()
         by_person = {}
-        for key, item in self.known.items():
+        for key, item in self._person_entries():
             profile = self.profiles.get(item["object_id"])
             if profile is None or profile.status == "rejected":
                 continue
@@ -338,11 +376,11 @@ class LocalSpeakers:
             'best_score': round(known[0][0], 3) if known else None,
             'runner_up': round(known[1][0], 3) if len(known) > 1 else None,
             'threshold': self.threshold, 'margin': self.margin,
-            'single_confirmation_threshold': max(self.threshold, .65),
-            'candidates': [{'object_id': oid, 'label': self.profiles.get(oid).label, 'score': round(score, 3), 'source': 'voiceprint'}
-                for oid, (score, _) in sorted(by_person.items(), key=lambda pair: pair[1], reverse=True)[:3]]}
+            'single_confirmation_threshold': self.confirmation_threshold,
+            'candidates': [{**reference_score(vector, dict(self._person_entries())[key]), 'object_id': oid, 'label': self.profiles.get(oid).label, 'score': round(score, 3), 'source': 'voiceprint'}
+                for oid, (score, key) in sorted(by_person.items(), key=lambda pair: pair[1], reverse=True)[:3]]}
         group = self._collect_pending(vector, len(samples)/16000, now, start_ms, end_ms)
-        if known and known[0][0] >= max(self.threshold, .65) and (len(known) < 2 or known[0][0]-known[1][0] >= self.margin):
+        if known and known[0][0] >= self.confirmation_threshold and (len(known) < 2 or known[0][0]-known[1][0] >= self.margin):
             return self._matched_voice(vector, known[0][1], known[0][0], now, source_track)
         if group is None:
             self.last_match.update(tentative=True, anonymous_reason='接近多个待定声音，无法分组；不另建人物')
@@ -362,21 +400,23 @@ class LocalSpeakers:
                 'median_pair_similarity': round(pair_median, 3),
                 'stable': stable},
             anonymous_reason='已收集多段一致声音，仅确认声音组，未确认姓名' if stable else '收集待定声音；至少十段有效、不重叠发言后核对分布，不参与姓名竞争')
-        if stable:
+        if stable or (len(examples) >= 2 and median(cohesion) >= .80 and pair_median >= .75):
             # Recompute the distribution against the current bank; never train a
             # registered voice from uncertain observations.
             ranked = []
             for oid, (_, key) in by_person.items():
-                scores = [voiceprint_score(v, self.known[key]) for v in examples]
-                ranked.append((median(scores), oid, key, scores))
+                scores = [voiceprint_score(v, dict(self._person_entries())[key]) for v in examples]
+                ranked.append((sum(scores)/len(scores), oid, key, scores))
             ranked.sort(reverse=True)
             if ranked:
                 score, oid, key, scores = ranked[0]
-                support = sum(value >= max(self.threshold, .58) for value in scores)/len(scores)
+                match_floor = max(self.threshold, min(.58, self.confirmation_threshold) if stable else self.confirmation_threshold)
+                support = sum(value >= match_floor for value in scores)/len(scores)
                 gap = score-ranked[1][0] if len(ranked) > 1 else None
-                if score >= max(self.threshold, .58) and support >= .8 and (gap is None or gap >= self.margin):
-                    self.last_match['collection'].update(pick=oid, median_match=round(score, 3), support_fraction=round(support, 3))
+                if score >= match_floor and support >= .8 and (gap is None or gap >= self.margin):
+                    self.last_match['collection'].update(pick=oid, mean_match=round(score, 3), support_fraction=round(support, 3))
                     return self._matched_voice(vector, key, score, now, source_track)
+        if stable:
             # Compare stable unnamed groups in a separate pool, after the named
             # decision. They never affect the named ranking or its margin.
             anonymous = []
@@ -401,7 +441,7 @@ class LocalSpeakers:
         from .identity import canonical_voice_profile
         object_id = canonical_voice_profile(self.profiles, self.profiles.get(self.known[key]['object_id'])).object_id
         track = self.named_tracks.setdefault(object_id, 'known-' + object_id)
-        self.last_match.update(reason='多段分布支持已有姓名' if self.last_match.get('collection', {}).get('median_match') is not None else '已匹配登记声纹', tentative=False)
+        self.last_match.update(reason='多段分布支持已有姓名' if self.last_match.get('collection', {}).get('mean_match') is not None else '已匹配登记声纹', tentative=False)
         self.last_embedding[track] = vector
         self.binding[track] = object_id
         self.tracks.setdefault(track, vector)
@@ -449,6 +489,59 @@ class LocalSpeakers:
         with self.lock:
             self.pending_tracks = [g for g in self.pending_tracks if g['track'] != track]
 
+    def collect_candidate(self, pcm, input_id, actor_id, session_id, *, overlap=False, start_ms=None, end_ms=None):
+        if not pcm or overlap or len(pcm) < 48000:
+            return 'ineligible'
+        import numpy as np
+        # Bound feature extraction, including unusually long utterances.
+        values = np.frombuffer(pcm[:320000], dtype='<i2').astype('float32')/32768
+        with self.lock:
+            vector = self.embedding(values)
+            return self.candidates.collect(input_id, actor_id, session_id, vector, len(values)/16000,
+                                           overlap=overlap, start_ms=start_ms, end_ms=end_ms)
+
+    def review_candidate(self, input_id, object_id, *, agreement=False):
+        """Existing people only; two sessions + independent semantics, never one match."""
+        if not agreement:
+            return 'unverified'
+        with self.lock:
+            entry = next(((key, row) for key, row in self._person_entries()
+                          if row['object_id'] == object_id and row.get('expires_at') is None), None)
+            profile = self.profiles.get(object_id)
+            if not entry or not profile or profile.source == 'voice_anonymous':
+                return 'not_registered'
+            key, current = entry
+            self.candidates.verify(input_id, object_id)
+            rows = self.candidates.verified(object_id)
+            if len({row['session_id'] for row in rows}) < 2:
+                return 'awaiting_independent_session'
+            eligible = []
+            for row in rows:
+                ranked = self.rank_vector(row['embedding'])
+                if (row['quality'] >= .5 and ranked and ranked[0][1] == object_id
+                    and ranked[0][0] >= max(self.threshold, self.enrollment_threshold)
+                    and (len(ranked) == 1 or ranked[0][0]-ranked[1][0] >= self.margin)):
+                    eligible.append(row)
+            if len({row['session_id'] for row in eligible}) < 2:
+                return 'insufficient_evidence'
+            old_refs = references(current)
+            new_refs = references({'references': [*old_refs, *[
+                {'embedding': row['embedding'], 'quality': row['quality'], 'input_id': row['input_id'],
+                 'session_id': row['session_id'], 'at': row['at'], 'basis': 'cross_session_voice_and_semantics'}
+                for row in eligible]]})
+            if len(new_refs) == len(old_refs):
+                return 'full_or_duplicate'
+            old = self.known[key]
+            self.known[key] = {**old, 'references': new_refs}
+            try:
+                self._save_bank()
+            except Exception:
+                self.known[key] = old
+                raise
+            kept_ids = {row.get('input_id') for row in new_refs}
+            self.candidates.mark_promoted([row['input_id'] for row in eligible if row['input_id'] in kept_ids])
+            return 'promoted'
+
     def bind(self, track: str, object_id: str) -> bool:
         with self.lock:
             bound = self._bind(track, object_id)
@@ -456,7 +549,7 @@ class LocalSpeakers:
                 self.discard_pending(track)
             return bound
 
-    def enroll_samples(self, clips, object_id: str, *, user_labeled: bool = False) -> dict:
+    def enroll_samples(self, clips, object_id: str, *, user_labeled: bool = False, sample_ids=None, session_id='') -> dict:
         """Trust explicit human labels; reserve consistency gates for unconfirmed samples."""
         import numpy as np
         vectors = []
@@ -505,11 +598,21 @@ class LocalSpeakers:
             pcm = fit_voice_pcm(b''.join(reversed(clips)), self._pcm_of(object_id))
             samples = np.frombuffer(pcm, dtype='<i2').astype('float32') / 32768
             vector = self.embedding(samples)
-            if vector is None or not self._store_voice(object_id, vector, pcm, basis='manual_selection'):
+            new_rows = []
+            for index, duration in enumerate(durations):
+                parts = [v for v, owner in zip(normalized, owners) if owner[0] == index]
+                ref = _unit([sum(col)/len(parts) for col in zip(*parts)]) if parts else None
+                if ref:
+                    new_rows.append({'embedding': ref, 'quality': min(duration/6, 1),
+                                     'seconds': duration, 'at': self.clock(), 'session_id': session_id,
+                                     'input_id': sample_ids[index] if sample_ids else 'manual-' + uuid4().hex,
+                                     'basis': 'manual_selection'})
+            if vector is None or not self._store_voice(object_id, vector, pcm, basis='manual_selection', new_references=new_rows):
                 raise ValueError('声纹登记失败')
             stats = {'clips': len(clips), 'embeddings': 1, 'seconds': round(len(pcm) / 32000, 1),
                     'min_similarity': round(minimum, 3) if minimum is not None else None,
                     'enrollment_threshold': self.enrollment_threshold, 'voiceprint_seconds': VOICEPRINT_SECONDS}
+            stats['reference_count'] = len(references(next(e for e in self.known.values() if e['object_id'] == object_id)))
             if user_labeled:
                 stats.update(user_labeled=True,
                     warning='这几段声音差异较大，已按你的标注收成一条声纹；该分数不能证明混入了别人。' if minimum is not None and minimum < self.enrollment_threshold else '')

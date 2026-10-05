@@ -235,6 +235,7 @@ def _runtime(
         write_zone=write_zone,
         tool_service=_tool_service(data_dir, skill_store),
         introspection_model=introspection_model,
+        person_review_model=build_model_port(skill_store.profile('person_review')),
     )
     return process, identities, subjects
 

@@ -457,8 +457,9 @@ def test_cognition_ignores_old_tool_request_and_broken() -> None:
 
 
 def test_instruction_mentions_use_tool_not_template() -> None:
+    from jshi.style.packs import TOOL_REPLY_NOTE
     assert "use_tool" in CognitionSkill.instruction
-    assert "找合适时机告诉对方" in CognitionSkill.instruction
+    assert TOOL_REPLY_NOTE in CognitionSkill.instruction
     assert "【工具相关】" in CognitionSkill.instruction
     assert "【在途工具】" not in CognitionSkill.instruction
     assert "tool_request" not in CognitionSkill.instruction
@@ -487,7 +488,8 @@ def test_tool_wording_is_shared_by_all_three_instructions() -> None:
         assert "不要无故再开同样一条" not in text, name
         assert "若本轮有【工具热状态】" not in text, name
         assert "【工具相关】" in text, name
-        assert "找合适时机告诉对方" in text, name
+        from jshi.style.packs import TOOL_REPLY_NOTE
+        assert TOOL_REPLY_NOTE in text, name
         assert "【回话】" not in text, name
         assert "暂缓告知" in text, name
         assert "怎么对对象开口" in text or "见任务1" in text, name

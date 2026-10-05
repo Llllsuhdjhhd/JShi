@@ -324,6 +324,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             speaker_object_id=kept_speaker,
             focused_refs=tuple(focused),
             last_applied_sequence=last_applied,
+            covered_event_ids=state.context.covered_event_ids,
         )
         self._after_write(subject_id)
         return state.context
@@ -335,13 +336,18 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         *,
         speaker_object_id: str | None = None,
         style_pack_id: str = "",
+        covered_event_ids: tuple[str, ...] = (),
+        through_sequence: int | None = None,
     ) -> ContextViewState:
         """保存 05 整份现场正文。空正文保留上一份；超长从尾截断（保留开头）。"""
         state = self._state(subject_id)
+        old_context = state.context
         last_applied = state.context.last_applied_sequence
-        if state.pending_sequences:
-            last_applied = max(last_applied, max(state.pending_sequences))
-            state.pending_sequences.clear()
+        covered_sequences = {seq for seq in state.pending_sequences
+                             if through_sequence is None or seq <= through_sequence}
+        if covered_sequences:
+            last_applied = max(last_applied, max(covered_sequences))
+            state.pending_sequences[:] = [seq for seq in state.pending_sequences if seq not in covered_sequences]
         kept_speaker = speaker_object_id or state.context.speaker_object_id
         text = (context_text or "").strip()
         if not text:
@@ -351,7 +357,12 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
                     last_applied_sequence=last_applied,
                     speaker_object_id=kept_speaker,
                 )
-                self._after_write(subject_id)
+                try:
+                    self._after_write(subject_id)
+                except Exception:
+                    state.context = old_context
+                    state.pending_sequences[:] = sorted(set(state.pending_sequences) | covered_sequences)
+                    raise
             return state.context
         cap = self.active_window_chars
         if len(text) > cap:
@@ -362,8 +373,14 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             speaker_object_id=kept_speaker,
             last_applied_sequence=last_applied,
             style_pack_id=style_pack_id or state.context.style_pack_id,
+            covered_event_ids=covered_event_ids,
         )
-        self._after_write(subject_id)
+        try:
+            self._after_write(subject_id)
+        except Exception:
+            state.context = old_context
+            state.pending_sequences[:] = sorted(set(state.pending_sequences) | covered_sequences)
+            raise
         return state.context
 
     def list_experiences(

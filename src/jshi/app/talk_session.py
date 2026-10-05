@@ -658,7 +658,11 @@ class TalkSession:
                     carriers=self.carriers,
                     on_reply=_early,
                     stimulus=stimulus,
+                    defer_write=getattr(self.process, "write_zone", None) is not None,
                 )
+                if getattr(self.process, "write_zone", None) is not None:
+                    self.process.take_deferred_write()
+                    self.process.schedule_scene_write(self.subject_id)
             except ValueError as exc:
                 return TalkOutcome((TalkEvent("notice", f"错误：{exc}"),))
             except Exception as exc:

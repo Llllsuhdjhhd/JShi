@@ -95,11 +95,12 @@ def test_calibration_with_overlapping_scores_balances_miss_and_false_accept():
     assert calibrate([.9],[])['status']=='insufficient'
 
 
-def test_human_labeled_comparison_keeps_one_voiceprint_so_the_other_direction_misses(tmp_path):
+def test_human_labeled_comparison_uses_reference_mean_instead_of_best_direction(tmp_path):
     trial=SpeakerTrial(tmp_path,{'first':model})
     trial.add('lux','enroll',[row(1,5),row(-1,5,6000)],'one')
     trial.add('lux','test',[row(2,2)],'two')
     trial.add('lux','test',[row(-2,2)],'three')
     result=trial.run()['models']['first']
     assert result['enrollment_accepted']==1 and not result['enrollment_failures']
-    assert result['known_tests']==2 and result['misses']==1
+    assert result['known_tests']==2 and result['misses']==2
+    assert [row['score'] for row in result['results']]==[.5,.5]

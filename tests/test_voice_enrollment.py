@@ -100,6 +100,10 @@ def test_name_question_answer_then_text_rename_preserves_person_and_voiceprint(p
     assert ids.name_answer(short,'小明。')=='小明'
     named,_=ids.introduce('cloud-0','小明',basis='name_answer',uncertain=True)
     assert named.object_id==visitor.object_id and not ids.name_questions
+    assert process.profiles.get(named.object_id).label.startswith('未命名访客')
+    # Manual confirmation precedes enrollment and archive rename.
+    process.profiles.rename(named.object_id, '小明')
+    ids.associations.pop(named.object_id, None)
     s=LocalSpeakers(None,'test',tmp_path/'prints.json',process.profiles)
     s.embedding=lambda a:[1.,0.]
     s.enroll_samples([bytes(96000)],named.object_id,user_labeled=True)
@@ -130,6 +134,9 @@ def test_standalone_enrollment_and_text_correction_without_conversation(process,
             assert r.status==200,await r.text()
             data=await r.json();oid=data['object_id']
             assert data['seconds']==10 and len(s.known)==1
+            registry = await (await client.get('/voice-registry')).json()
+            saved = next(p for p in registry['people'] if p['object_id'] == oid)
+            assert saved['reference_count'] == data['reference_count'] == 1
             r=await client.post('/voice-registry',json={'action':'rename','object_id':oid,'previous_name':'小明','name':'小敏'},headers={'Origin':origin})
             assert r.status==200 and (await r.json())['object_id']==oid
             assert process.profiles.get(oid).label=='小敏'
@@ -224,17 +231,42 @@ def test_short_voiceprint_keeps_its_length_and_newer_audio_is_placed_in_front(pr
     assert next(iter(s.known.values()))['embedding']==[0.,1.]
 
 
-def test_old_multiple_entries_collapse_to_one_averaged_voiceprint(process, tmp_path):
+def test_old_multiple_entries_preserve_references_and_score_once_per_person(process, tmp_path):
     path=tmp_path/'prints.json'
     path.write_text(json.dumps({'model_id':'manual-test','entries':{
         'a':{'object_id':'lux-id','embedding':[1.,0.],'templates':[[1.,0.]]},
         'b':{'object_id':'lux-id','embedding':[0.,1.]},
     }}), encoding='utf-8')
+    original = path.read_bytes()
     s=LocalSpeakers(None,'manual-test',path,process.profiles)
-    assert len(s.known)==1
-    vector=next(iter(s.known.values()))['embedding']
-    assert vector[0]==pytest.approx(2**-.5) and vector[1]==pytest.approx(2**-.5)
-    assert 'templates' not in next(iter(s.known.values())) and 'pcm' not in next(iter(s.known.values()))
+    assert len(s.known)==2 and path.read_bytes()==original
+    s.embedding=lambda _: [1.,0.]
+    ranked=s.rank_known([])
+    assert len(ranked)==1 and ranked[0]['reference_count']==2
+    assert ranked[0]['score']==pytest.approx(.5)
+
+
+def test_repeat_manual_enrollment_accumulates_references_up_to_ten(process, tmp_path):
+    import math
+    path = tmp_path / 'prints.json'
+    speakers = LocalSpeakers(None, 'manual-test', path, process.profiles)
+    speakers.embedding = lambda values: [math.cos(float(values[0]) * 32768 * .2),
+                                         math.sin(float(values[0]) * 32768 * .2)]
+    clips = [np.full(24000, value, dtype='<i2').tobytes() for value in range(1, 14)]
+    first = speakers.enroll_samples(clips[:8], 'lux-id', user_labeled=True,
+                                   sample_ids=[str(i) for i in range(1, 9)])
+    assert first['clips'] == 8 and first['reference_count'] == 8
+    second = speakers.enroll_samples(clips[8:], 'lux-id', user_labeled=True,
+                                    sample_ids=[str(i) for i in range(9, 14)])
+    assert second['clips'] == 5 and second['reference_count'] == 10
+    restored = LocalSpeakers(None, 'manual-test', path, process.profiles)
+    assert len(next(iter(restored.known.values()))['references']) == 10
+    kept = {row['input_id'] for row in next(iter(restored.known.values()))['references']}
+    assert kept == {str(i) for i in range(4, 14)}
+    # Re-selecting the same utterance refreshes it without taking another slot.
+    speakers.enroll_samples([clips[3], clips[4], clips[5]], 'lux-id', user_labeled=True,
+                            sample_ids=['4', '5', '6'])
+    assert {row['input_id'] for row in next(iter(speakers.known.values()))['references']} == kept
 
 
 def test_selected_samples_create_normalized_persistent_centroid(process, tmp_path):
@@ -246,7 +278,7 @@ def test_selected_samples_create_normalized_persistent_centroid(process, tmp_pat
     speakers.embedding = embedding
     stats = speakers.enroll_samples([bytes(64000), bytes(64000)], 'lux-id')
     assert lengths == [32000, 32000, 64000]
-    assert stats == {'clips': 2, 'embeddings': 1, 'seconds': 4.0, 'min_similarity': 1.0, 'enrollment_threshold': .8, 'voiceprint_seconds': 10}
+    assert stats == {'clips': 2, 'embeddings': 1, 'seconds': 4.0, 'min_similarity': 1.0, 'enrollment_threshold': .8, 'voiceprint_seconds': 10, 'reference_count': 1}
     entry = next(iter(speakers.known.values()))
     assert entry['embedding'] == [1., 0.] and entry['object_id'] == 'lux-id'
     restored = LocalSpeakers(None, 'manual-test', tmp_path/'prints.json', process.profiles)
@@ -254,7 +286,7 @@ def test_selected_samples_create_normalized_persistent_centroid(process, tmp_pat
     assert restored.identify(np.ones(32000))[1].startswith('local:manual-test:')
 
 
-def test_human_labeled_variations_collapse_to_the_single_front_voiceprint(process, tmp_path):
+def test_human_labeled_variations_keep_both_references_and_use_mean_score(process, tmp_path):
     path=tmp_path/'prints.json'
     s=LocalSpeakers(None,'manual-test',path,process.profiles,threshold=.95)
     kept, unused = [1.,0.], [.4,(1-.4**2)**.5]
@@ -262,12 +294,14 @@ def test_human_labeled_variations_collapse_to_the_single_front_voiceprint(proces
     s.embedding=lambda a:next(vectors)
     stats=s.enroll_samples([bytes(96000),bytes(96000)],'lux-id',user_labeled=True)
     assert stats['min_similarity']==.4 and stats['user_labeled'] and stats['warning']
-    assert len(s.known)==1 and 'templates' not in next(iter(s.known.values()))
+    assert len(s.known)==1 and len(next(iter(s.known.values()))['references'])==2
     restored=LocalSpeakers(None,'manual-test',path,process.profiles,threshold=.95)
     restored.embedding=lambda a:kept
-    assert restored.identify(np.ones(32000))[1].startswith('local:manual-test:')
+    assert not restored.identify(np.ones(32000))[1]
+    assert restored.rank_known([])[0]['score']==pytest.approx(.7)
     restored.embedding=lambda a:unused
     assert not restored.identify(np.ones(32000))[1]
+    assert restored.rank_known([])[0]['score']==pytest.approx(.7)
 
 
 def test_matching_slider_changes_recognition_and_survives_restart(process, tmp_path):
@@ -279,15 +313,91 @@ def test_matching_slider_changes_recognition_and_survives_restart(process, tmp_p
     speakers.embedding=lambda a:[.64, (.5904)**.5]
     assert not speakers.identify([])[1]
     speakers.set_threshold(.60)
-    for _ in range(9):
-        assert not speakers.identify([0]*32000)[1]
     assert speakers.identify([0]*32000)[1]
+    assert speakers.confirmation_threshold == .60
     assert speakers.margin==.08 and speakers.enrollment_threshold==.8
     assert LocalSpeakers(None,'model',path,process.profiles).threshold==.60
     assert LocalSpeakers(None,'other-model',path,process.profiles).threshold==.65
     for bad in (.1,1,float('nan'),True,'0.6'):
         with pytest.raises(ValueError):speakers.set_threshold(bad)
     assert speakers.threshold==.60
+
+
+def test_legacy_low_threshold_keeps_confirmation_floor_until_user_adjusts(process, tmp_path):
+    path = tmp_path / 'voices.json'
+    path.with_suffix('.settings.json').write_text(json.dumps(
+        {'model_id': 'model', 'match_threshold': .30}), encoding='utf-8')
+    speakers = LocalSpeakers(None, 'model', path, process.profiles)
+    speakers.known = {'a': {'object_id': 'lux-id', 'embedding': [1., 0.]}}
+    speakers.embedding = lambda _: [.55, (1-.55**2)**.5]
+    assert speakers.threshold == .30 and speakers.confirmation_threshold == .65
+    assert not speakers.identify([0]*32000)[1]
+    speakers.set_threshold(.50)
+    assert speakers.identify([0]*32000)[1]
+    speakers._save_bank()
+    restored = LocalSpeakers(None, 'model', path, process.profiles)
+    restored.embedding = speakers.embedding
+    assert restored.confirmation_threshold == .50
+    assert restored.identify([0]*32000)[1]
+
+
+def test_lower_confirmation_threshold_still_requires_candidate_margin(process, tmp_path):
+    from jshi.recognition import ObjectProfile
+    process.profiles.create(ObjectProfile('other', 'other', status='confirmed'))
+    speakers = LocalSpeakers(None, 'model', tmp_path / 'voices.json', process.profiles)
+    speakers.known = {'a': {'object_id': 'lux-id', 'embedding': [.55, (1-.55**2)**.5]},
+                      'b': {'object_id': 'other', 'embedding': [.53, (1-.53**2)**.5]}}
+    speakers.embedding = lambda _: [1., 0.]
+    speakers.set_threshold(.50)
+    assert not speakers.identify([0]*32000)[1]
+
+
+def test_short_repeat_hint_extracts_without_collecting_or_binding(process, tmp_path):
+    speakers = LocalSpeakers(None, 'model', tmp_path / 'voices.json', process.profiles)
+    speakers.known = {'a': {'object_id': 'lux-id', 'embedding': [1., 0.]}}
+    lengths = []
+    def embedding(values):
+        lengths.append(len(values))
+        return [1., 0.]
+    speakers.embedding = embedding
+    before = json.dumps(speakers.known)
+    hint = speakers.rank_short_hint(bytes(8000))
+    assert hint['original_seconds'] == .25 and hint['repeat_count'] == 12
+    assert lengths == [48000] and hint['candidates'][0]['score'] == 1
+    assert hint['calibrated_probability'] is False
+    assert not speakers.pending_tracks and not speakers.binding and not speakers.last_embedding
+    assert json.dumps(speakers.known) == before
+    assert not speakers.rank_short_hint(bytes(3000))
+
+
+def test_short_repeat_candidate_is_hint_to_jev_not_confirmed_identity(process, tmp_path):
+    from jshi.core.envelope import SpeakerEvidence, SceneUtterance
+    from jshi.voice.jev import BatchItem
+    async def run():
+        speakers = LocalSpeakers(None, 'model', tmp_path / 'voices.json', process.profiles)
+        speakers.known = {'a': {'object_id': 'lux-id', 'embedding': [1., 0.]}}
+        speakers.embedding = lambda _: [1., 0.]
+        c = VoiceConversation(process, 'stone', FakeCloud(), lambda _: asyncio.sleep(0), local_speakers=speakers)
+        try:
+            speaker = SpeakerEvidence('A', 'unknown', '声音归属待定', method='unassigned_audio')
+            transcript = Transcript('好啊', 'A', 0, 250, True, input_id='short')
+            c.input_records['short'] = {'pcm': bytes(8000)}
+            found, status = await c.rank_candidates(transcript, speaker)
+            assert status == 'short_repeat_hint' and found[0]['source'] == 'repeated_short_audio'
+            c.candidate_cache['short'] = found
+            utterance = SceneUtterance('好啊', speaker, 0, 250, input_id='short')
+            row = c._jev_batch((utterance,))[0]
+            assert row['short_voice_hint']['repeat_count'] == 12
+            assert row['voice_evidence']['strength'] == 'unavailable'
+            pick = row['candidates'][0]['who']
+            c._apply_attribution((utterance,), (BatchItem(1, speaker_pick=pick, speaker_level='确定'),))
+            assert c.annotations['short'] == speaker
+            overlapped = replace(transcript, overlap=True)
+            assert (await c.rank_candidates(overlapped, speaker))[1] == 'short_audio'
+        finally:
+            await c.close()
+    from dataclasses import replace
+    asyncio.run(run())
 
 
 def test_different_people_selected_together_are_not_registered(process, tmp_path):

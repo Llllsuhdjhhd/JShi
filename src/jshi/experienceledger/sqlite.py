@@ -84,6 +84,7 @@ def _context_to_dict(view: ContextViewState) -> dict[str, Any]:
         "focused_refs": list(view.focused_refs),
         "last_applied_sequence": view.last_applied_sequence,
         "style_pack_id": view.style_pack_id,
+        "covered_event_ids": list(view.covered_event_ids),
     }
 
 
@@ -104,6 +105,7 @@ def _context_from_dict(data: dict[str, Any] | None) -> ContextViewState:
         focused_refs=tuple(data.get("focused_refs") or ()),
         last_applied_sequence=int(data.get("last_applied_sequence") or 0),
         style_pack_id=str(data.get("style_pack_id") or ""),
+        covered_event_ids=tuple(data.get("covered_event_ids") or ()),
     )
 
 

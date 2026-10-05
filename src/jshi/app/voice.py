@@ -21,6 +21,7 @@ from jshi.voice.attention import ConversationAttention
 from jshi.voice.audio_buffer import SessionAudio
 from jshi.voice.delivery import DeliveryTracker
 from jshi.voice.identity import VoiceIdentities, attach_voiceprint
+from jshi.voice.interaction import InteractionFeedback
 from jshi.voice.jev import BatchDecision, InterruptDecision, VoiceJEV
 from jshi.voice.volc import Transcript, TranscriptAssembler, VolcVoice, pack_asr, unpack_asr
 
@@ -71,10 +72,21 @@ class VoiceConversation:
         self.candidate_timeout_s = max(.01, float(candidate_timeout_s))
         self.candidate_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-voice-candidates")
         self.candidate_future = None
+        self.sample_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='jshi-voice-samples')
+        self.sample_jobs = set()
         self.sound_owner = {}
         self.sound_source = {}
         self.source_speakers = {}
         self.main_reviews = deque(maxlen=2)
+        self.interaction_feedback = InteractionFeedback()
+        self.reply_input_ids = {}
+        from jshi.voice.person_review import PersonReviewer
+        review_model = getattr(process, 'person_review_model', None)
+        self.person_reviewer = PersonReviewer(review_model, process) if review_model is not None else None
+        self.person_review_queue = asyncio.Queue(maxsize=8)
+        self.person_review_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='jshi-person-review')
+        self.person_review_worker = asyncio.create_task(self._person_reviews())
+        self.unknown_inputs = process.unknown_inputs
         self.write_queue = asyncio.Queue()
         self.failed_write_jobs = []
         self.write_retried = asyncio.Event()
@@ -183,7 +195,8 @@ class VoiceConversation:
             evidence, _ = self.identities.introduce('manual-' + uuid4().hex, name, basis='manual_selection')
             if evidence.status != 'introduced':
                 raise ValueError('这个姓名对应多个对象，请使用唯一的姓名或别名')
-            stats = await asyncio.to_thread(self.local_speakers.enroll_samples, [r['pcm'] for r in selected], evidence.object_id, user_labeled=True)
+            stats = await asyncio.to_thread(self.local_speakers.enroll_samples, [r['pcm'] for r in selected], evidence.object_id, user_labeled=True,
+                                          sample_ids=[iid for iid, _ in selected_pairs], session_id=self.session_id)
             retired = set()
             for iid, row in selected_pairs:
                 old = previous[iid]
@@ -204,6 +217,7 @@ class VoiceConversation:
             self.scene = deque((replace(u, speaker=self.identities.associated(self.annotations.get(u.input_id, u.speaker))) for u in self.scene), maxlen=24)
             self.record('voice_manual_enrollment', {'input_ids': input_ids, 'object_id': evidence.object_id, 'label': evidence.label,
                 'retired_temporary_voice_ids': sorted(retired), **stats})
+            self.unknown_inputs.bind(tuple(input_ids), evidence.object_id)
             await self.emit('enrollment', input_ids=input_ids, object_id=evidence.object_id, label=evidence.label, **stats)
         except Exception as exc:
             ids = list(dict.fromkeys(input_ids)) if isinstance(input_ids, list) else []
@@ -290,6 +304,12 @@ class VoiceConversation:
                 self.turn_queue.task_done()
         await self.emit("stop", reply_id=rid)
         self.record("voice_delivery", self.delivery.snapshot())
+
+        snapshot = self.delivery.snapshot()
+        if rid and snapshot.get('state') == 'stopped':
+            self.process.note_scene_delivery(self.subject_id, f"stopped:{rid}",
+                "（播放器交付中断）" + json.dumps(snapshot, ensure_ascii=False)
+                + "；partial_text只表示该句曾开始播放，不知道具体播到哪个字；pending_text尚未播放。")
 
     async def accept(self, transcript) -> None:
         self.last_input_at = asyncio.get_running_loop().time()
@@ -388,9 +408,6 @@ class VoiceConversation:
                     bits.append("第 " + "、".join(maybe) + " 条可能在对匠石说")
                 if no:
                     bits.append("第 " + "、".join(no) + " 条保留作背景，不直接对匠石说")
-                scores = [f"{item.n}={item.score:.2f}" for item in items if item.keep]
-                if scores:
-                    bits.append("指向参考分（非校准概率）：" + "、".join(scores))
                 if bits:
                     lines.append("JEV 初判：" + "；".join(bits) + "。")
         lines.extend(fact for fact in facts if fact)
@@ -424,16 +441,71 @@ class VoiceConversation:
         current_ids = {u.input_id for u in utterances}
         return [row["public"] for row in self.main_reviews
                 if time() - row["at"] < 120 and not current_ids.intersection(row["input_ids"])
-                and row["basis_at_ms"] <= cutoff]
+                and row["basis_at_ms"] <= cutoff and row.get('completed_at_ms', row['basis_at_ms']) <= cutoff]
+
+    def _preserve_background(self, utterances):
+        for u in utterances:
+            self.process.note_entry_background(self.subject_id, u)
+
+    def schedule_person_review(self, current, items, *, requested=False):
+        if self.person_reviewer is None or not current or self.closed:
+            return
+        marks = {item.n: item for item in items}
+        if not requested and not any(u.speaker.status == 'unknown' or
+            (marks.get(n) is not None and (marks[n].speaker_level != '确定' or
+             marks[n].evidence_relation == 'conflict')) for n, u in enumerate(current, 1)):
+            return
+        context, rows = self.review_material(tuple(current), items, needs_main_review=requested)
+        if not rows:
+            return
+        cutoff = max((u.received_at_ms or 0 for u in current), default=0)
+        codes = {oid:code for code,oid in self.code_owner.items()
+                 if oid in {oid for row in rows for oid in row['allowed']}}
+        payload = {'batch_evidence': json.loads(context), **self.process.person_review_scene(self.subject_id),
+            'recent_scene': [asdict(u) for u in list(self.scene)[-24:]
+                             if u.input_id not in {item.input_id for item in current}
+                             and (u.received_at_ms is None or not cutoff or u.received_at_ms <= cutoff)],
+            'actual_delivery': [dict(row) for row in self.played_history
+                                if not cutoff or row['at'] <= cutoff][-12:],
+            'interaction': self.interaction_feedback.snapshot(cutoff_ms=cutoff or None)}
+        snapshot = {'current': tuple(current), 'rows': rows, 'payload': payload,
+                    'candidate_codes': dict(list(codes.items())[:6]), 'queued_at': time(),
+                    'basis_at_ms': cutoff, 'review_id': 'person-review-' + uuid4().hex}
+        if self.person_review_queue.full():
+            self.record('person_review_skipped', {'reason': 'queue_limit', 'input_ids': [u.input_id for u in current]})
+            return
+        self.person_review_queue.put_nowait(snapshot)
+
+    async def _person_reviews(self):
+        loop = asyncio.get_running_loop()
+        while True:
+            snapshot = await self.person_review_queue.get()
+            try:
+                if self.closed or time()-snapshot['queued_at'] > 120:
+                    continue
+                def run():
+                    return self.person_reviewer.run(self.subject_id, snapshot, on_request=lambda req:
+                        self.process._record_step_input(req, self.person_reviewer.model,
+                            subject_id=self.subject_id, activity_id=snapshot['review_id']))
+                result = await loop.run_in_executor(self.person_review_executor, run)
+                self.record('person_review_diagnostics', {'review_id': snapshot['review_id'],
+                    'model_raw': snapshot.get('model_raw', ''), 'result': result})
+                if not self.closed and time()-snapshot['queued_at'] <= 120:
+                    self.accept_person_review(result, snapshot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.record('person_review_failed', {'review_id': snapshot['review_id'],
+                    'model_raw': snapshot.get('model_raw', ''), 'error': f'{type(exc).__name__}: {exc}'})
+            finally:
+                self.person_review_queue.task_done()
 
     def review_material(self, current, items, *, needs_main_review=False):
-        # Main receives only this batch here; past dialogue comes from the written scene.
+        # Evidence belongs to the independent review, never to main cognition.
         rows, public = [], []
         marks = {item.n: item for item in items}
         for index, u in enumerate(current, 1):
             item = marks.get(index)
-            if item is not None and not item.keep:
-                continue
             candidates, profiles = [], []
             for candidate in self.candidate_cache.get(u.input_id, ()):
                 oid = candidate["object_id"]
@@ -442,112 +514,121 @@ class VoiceConversation:
                     continue
                 code = self.assign_code(oid, profile.label)
                 candidates.append({"who": code, "names": [profile.label, *profile.aliases],
-                                   "score": candidate.get("score"), "source": candidate.get("source", "voiceprint")})
+                                   "score": candidate.get("score"), "source": candidate.get("source", "voiceprint"),
+                                   **{key:candidate[key] for key in ('reference_count', 'stddev', 'sample_limited') if key in candidate}})
                 profiles.append({"who": code, "candidate_only": True, "portrait_names": self.process.profiles.address_line(oid)})
             sound = self.sound_code(u)
             n = f"N{index}"
             voice = self.voice_evidence(u, candidates)
             rows.append({"n": n, "input_id": u.input_id, "allowed": [row["object_id"] for row in self.candidate_cache.get(u.input_id, ())], "sound": sound, "voice_evidence": voice})
-            public.append({"n": n, "who": self.display_speaker(u.speaker), "sound": sound,
+            public.append({"n": n, "input_id": u.input_id, "text": u.text,
+                "who": self.display_speaker(u.speaker), "sound": sound,
                 "identity_confirmation": ("用户已手动将本句声音关联为 " + self.display_speaker(u.speaker) + "；旧临时声纹不再作为不同人物竞争，不因旧初判否认此次关联") if u.speaker.method == "manual_annotation" else "",
                 "source": self.source_speakers.get(u.input_id, u.speaker).method,
                 "seconds": round((u.end_ms - u.start_ms) / 1000, 2), "overlap": u.overlap,
-                "candidates": candidates, "candidate_portraits": profiles, "voice_evidence": voice,
-                "jev": asdict(item) if item else {"reason": "未能初判"}})
+                "short_voice_hint": {k:v for k,v in self.input_records.get(u.input_id, {}).get('short_voice_hint', {}).items() if k != 'candidates'},
+                "candidates": [{k:v for k,v in candidate.items() if k != "score"} for candidate in candidates],
+                "candidate_portraits": profiles, "voice_evidence": {k:v for k,v in voice.items() if k in {"pick", "strength", "basis"}},
+                "jev": {k:v for k,v in asdict(item).items() if "score" not in k} if item else {"reason": "未能初判"}})
         text = json.dumps({"本批复判请求（非逐条开关）": bool(needs_main_review),
             "本批证据（N编号对应本批序号）": public}, ensure_ascii=False)
         return text, tuple(rows)
 
+    def accept_person_review(self, result, snapshot):
+        """Publish bounded advice for future JEV; never rewrite attribution here."""
+        if self.closed or time() - snapshot['queued_at'] > 120:
+            return
+        from jshi.core.conversation_review import parse_review, parse_evidence_support
+        judgments = parse_review(result)
+        sources = {row['n']: row for row in snapshot['rows']}
+        utterances = {u.input_id: u for u in snapshot['current']}
+        accepted = []
+        codes = snapshot['candidate_codes']
+        owners = {code: oid for oid, code in codes.items()}
+        for item in judgments['speaker_judgments']:
+            row = sources.get(item['n'])
+            if row is None or row['input_id'] not in utterances:
+                continue
+            if item.get('input_id') and item['input_id'] != row['input_id']:
+                continue
+            u = utterances[row['input_id']]
+            oid = owners.get(item['speaker_pick'])
+            if item['speaker_pick'] not in {'unknown', 'new'} and oid not in row['allowed']:
+                continue
+            # A manual association made after the snapshot supersedes old advice.
+            latest = self.annotations.get(u.input_id, u.speaker)
+            if latest.method == 'manual_annotation' and latest != u.speaker:
+                continue
+            item = {**item, **parse_evidence_support(item, voice=row.get('voice_evidence') or {},
+                allowed={code for code, owner in owners.items() if owner in row['allowed']})}
+            if item['evidence_relation'] == 'conflict' and item['level'] == '确定':
+                item['level'] = '可能'
+            elif item['evidence_relation'] == 'insufficient':
+                item['level'], item['speaker_pick'] = '不确定', 'unknown'
+                oid = None
+            protected = latest.status in {'recognized', 'introduced'} or latest.method in {
+                'voiceprint_match', 'self_introduction', 'manual_annotation'}
+            if protected and oid and oid != latest.object_id:
+                continue
+            item = {**item, 'input_id': u.input_id}
+            accepted.append(item)
+            self.record('voice_identity_suggestion', {'input_id': u.input_id, **item,
+                'source': '独立人物判断建议，交给下一次JEV评估，不改本轮与档案'})
+        # An unvalidated free-text conclusion cannot bypass rejected judgments.
+        # Free text may assign a valid P code to the wrong utterance even when
+        # every structured judgment is valid. Only forward structured advice.
+        note = ''
+        if not accepted:
+            return
+        public = {'judgments': accepted, 'next_jev_note': note,
+            'source': '独立人物判断建议，非人物原话、非声纹确认；JEV结合新证据决定',
+            'basis': [{'n': row['n'], 'input_id': row['input_id'],
+                'actor_id': utterances[row['input_id']].speaker.object_id,
+                'sound': row['sound'], 'text': utterances[row['input_id']].text}
+                for row in sources.values() if row['n'] in {item['n'] for item in accepted}]}
+        self.main_reviews.append({'public': public, 'at': time(), 'input_ids': list(utterances),
+            'basis_at_ms': snapshot['basis_at_ms'], 'completed_at_ms': int(time()*1000)})
+        self.record('voice_person_review', {'review_id': snapshot['review_id'], **public,
+            'model_next_jev_note': judgments['next_jev_note']})
+
     def apply_main_review(self, response, envelope, epoch):
-        """Runs before action dispatch/write preparation on the main-turn worker."""
+        """Compatibility callback: resolve reply targets only, no identity judgment."""
+        response = replace(response, speaker_judgments=(), next_jev_note='', object_assessment=None)
         if self.closed or epoch != self.epoch:
             return response, envelope, None
-        from jshi.core.conversation_review import parse_review
-        judgments = parse_review({"speaker_judgments": list(response.speaker_judgments), "next_jev_note": response.next_jev_note})
-        sources = {row["n"]: row for row in envelope.review_candidates}
-        utterances = {u.input_id: u for u in envelope.current_utterances}
-        accepted = []
-        for item in judgments["speaker_judgments"]:
-            row = sources.get(item["n"])
-            if row is None or row["input_id"] not in utterances:
-                continue
-            u = utterances[row["input_id"]]
-            oid = self.code_owner.get(item["speaker_pick"])
-            if item["speaker_pick"] not in {"unknown", "new"} and oid not in row["allowed"]:
-                continue
-            from jshi.core.conversation_review import parse_evidence_support
-            item = {**item, **parse_evidence_support(item, voice=row.get("voice_evidence") or {},
-                allowed={code for code, owner in self.code_owner.items() if owner in row["allowed"]})}
-            if item["evidence_relation"] == "conflict" and item["level"] == "确定":
-                item["level"] = "可能"
-            elif item["evidence_relation"] == "insufficient":
-                item["level"], item["speaker_pick"] = "不确定", "unknown"
-                oid = None
-            protected = u.speaker.status in {"recognized", "introduced"} or u.speaker.method in {"voiceprint_match", "self_introduction", "manual_annotation"}
-            if protected and oid and oid != u.speaker.object_id:
-                continue
-            accepted.append(item)
-            if item["level"] == "确定" and oid and not protected:
-                profile = self.process.profiles.get(oid)
-                if profile and profile.status != "rejected":
-                    who = replace(u.speaker, object_id=oid, label=profile.label, method="main_context_attribution", status="provisional")
-                    utterances[u.input_id] = replace(u, speaker=who)
-                    self.annotations[u.input_id] = who
-                    self.record("voice_main_attribution", {"input_id": u.input_id, **item, "source": "主流程上下文复判"})
-            elif not protected and u.speaker.method == "context_attribution":
-                original = self.source_speakers.get(u.input_id)
-                if original is not None:
-                    # A main rejection/uncertainty must not leave JEV's tentative person applied.
-                    utterances[u.input_id] = replace(u, speaker=original)
-                    self.annotations[u.input_id] = original
-                    self.record("voice_main_attribution", {"input_id": u.input_id, **item, "source": "主流程撤回JEV暂定归属，恢复入口证据"})
-        self.scene = deque((utterances.get(u.input_id, u) for u in self.scene), maxlen=24)
-        current = tuple(utterances[u.input_id] for u in envelope.current_utterances)
-        speaker = current[-1].speaker if len({u.speaker.object_id for u in current}) == 1 else envelope.speaker
-        # Preserve displayed numbering and inlet facts; update only speaker names.
-        text = envelope.text
-        lines = text.splitlines()
-        for old, new in zip(envelope.current_utterances, current):
-            if old.speaker != new.speaker:
-                row = next((row for row in sources.values() if row["input_id"] == old.input_id), None)
-                if row:
-                    prefix = row["n"].removeprefix("N") + ". "
-                    lines = [prefix + self.display_speaker(new.speaker) + "：" + new.text if line.startswith(prefix) else line for line in lines]
-        text = "\n".join(lines)
-        envelope = replace(envelope, current_utterances=current, speaker=speaker,
-                           utterances=tuple(utterances.get(u.input_id, u) for u in envelope.utterances),
-                           parts=(InputPart("text", text), *envelope.parts[1:]),
-                           review_context=envelope.review_context + "\n本轮主流程复判（程序采用后仍标上下文来源）：" + json.dumps(accepted, ensure_ascii=False))
-        allowed_targets = {self.assign_code(u.speaker.object_id, u.speaker.label): u.speaker.object_id for u in current if u.speaker.method != "unassigned_audio"}
-        allowed_targets.update({row["sound"]: utterances[row["input_id"]].speaker.object_id for row in sources.values() if row["sound"]})
-        for code, oid in allowed_targets.items():
-            if code.startswith("S"):
-                self.sound_owner[code] = oid
+        current = envelope.current_utterances
+        self.interaction_feedback.main([u.input_id for u in current], '')
+        allowed_targets = {self.assign_code(u.speaker.object_id, u.speaker.label): u.speaker.object_id
+            for u in current if u.speaker.method != 'unassigned_audio'}
+        for u in current:
+            sound = self.sound_code(u)
+            if sound:
+                allowed_targets[sound] = u.speaker.object_id
+                self.sound_owner[sound] = u.speaker.object_id
         plan_items = []
         valid_ids = set(allowed_targets.values())
         for item in response.response_plan.items:
-            resolved = tuple(dict.fromkeys(allowed_targets.get(token, token) for token in item.target_ids if allowed_targets.get(token, token) in valid_ids))
-            # An invalid explicit target falls back to untargeted speech; don't lose the reply.
+            resolved = tuple(dict.fromkeys(allowed_targets.get(token, token) for token in item.target_ids
+                if allowed_targets.get(token, token) in valid_ids))
             plan_items.append(replace(item, target_ids=resolved))
-        response = replace(response, response_plan=replace(response.response_plan, items=tuple(plan_items)), speaker_judgments=tuple(accepted))
-        if accepted or response.next_jev_note:
-            public = {"judgments": accepted, "next_jev_note": response.next_jev_note,
-                      "source": "上轮主流程上下文复判，非人物原话、非声纹确认",
-                      "basis": [{"n": row["n"], "sound": row["sound"], "text": utterances[row["input_id"]].text} for row in sources.values()]}
-            self.main_reviews.append({"public": public, "at": time(), "input_ids": list(utterances),
-                "basis_at_ms": max((u.received_at_ms or 0 for u in current), default=0)})
-            self.record("voice_main_review", public)
-        return response, envelope, self.identities.candidate(speaker)
+        response = replace(response, response_plan=replace(response.response_plan, items=tuple(plan_items)))
+        return response, envelope, self.identities.candidate(envelope.speaker)
 
     async def rank_candidates(self, transcript, speaker):
         record = self.input_records.get(transcript.input_id, {})
         if speaker.status in {"introduced", "recognized"}:
-            return [{"object_id": speaker.object_id, "label": speaker.label, "score": transcript.confidence, "source": speaker.method}], "already_identified"
+            try:
+                matched = json.loads(transcript.identity_note or '{}')
+            except ValueError:
+                matched = {}
+            stats = next((row for row in matched.get('candidates', ()) if row.get('object_id') == speaker.object_id), {})
+            return [{**{key:stats[key] for key in ('reference_count', 'stddev', 'sample_limited') if key in stats},
+                     "object_id": speaker.object_id, "label": speaker.label, "score": transcript.confidence, "source": speaker.method}], "already_identified"
         try:
             matched = json.loads(transcript.identity_note or "{}")
         except (ValueError, TypeError):
             matched = {}
-        if isinstance(matched, dict) and isinstance(matched.get("candidates"), list):
+        if isinstance(matched, dict) and isinstance(matched.get("candidates"), list) and matched["candidates"]:
             import math
             reused = []
             for candidate in matched["candidates"][:3]:
@@ -564,18 +645,25 @@ class VoiceConversation:
         pcm = record.get("pcm")
         if not self.local_speakers or not pcm:
             return [], "no_audio_or_model"
-        if len(pcm) < 48000:
+        short = len(pcm) < 48000
+        if short and (transcript.overlap or len(pcm) < 6400):
             return [], "short_audio"
         if self.candidate_future is not None and not self.candidate_future.done():
             return [], "previous_candidate_still_running"
         def rank():
+            if short:
+                return self.local_speakers.rank_short_hint(pcm)
             import numpy as np
             samples = np.frombuffer(pcm, dtype="<i2").astype("float32") / 32768
             return self.local_speakers.rank_known(samples)
         self.candidate_future = asyncio.get_running_loop().run_in_executor(self.candidate_executor, rank)
         self.candidate_future.add_done_callback(lambda future: future.exception() if not future.cancelled() else None)
         try:
-            return await asyncio.wait_for(asyncio.shield(self.candidate_future), self.candidate_timeout_s), "ranked"
+            result = await asyncio.wait_for(asyncio.shield(self.candidate_future), self.candidate_timeout_s)
+            if short:
+                record['short_voice_hint'] = result
+                return [{**row, 'source': 'repeated_short_audio'} for row in result.get('candidates', [])], "short_repeat_hint"
+            return result, "ranked"
         except asyncio.TimeoutError:
             return [], "candidate_timeout"
         except Exception:
@@ -619,8 +707,11 @@ class VoiceConversation:
                 wrote = await asyncio.get_running_loop().run_in_executor(self.write_executor, job)
                 if wrote is False:
                     self.failed_write_jobs.append(job)
-                    await self.emit("notice", text="上一轮写场失败，后续发言已保留；重试写场后再继续主流程。")
+                    await self.emit("notice", text="写场未完成，输入与回应已保留；主流程继续，下一批合并重写。")
                     await self.emit("write_failed")
+                elif wrote is True:
+                    self.failed_write_jobs.clear()
+                    await self.emit("write_completed")
             except Exception:
                 self.failed_write_jobs.append(job)
                 logging.getLogger(__name__).exception("写场队列失败")
@@ -630,17 +721,9 @@ class VoiceConversation:
 
     async def retry_failed_writes(self) -> None:
         jobs, self.failed_write_jobs = self.failed_write_jobs, []
-        for job in jobs:
-            self.write_queue.put_nowait(job)
+        if jobs:
+            self.write_queue.put_nowait(jobs[-1])
         self.write_retried.set()
-
-    async def _wait_previous_writes(self) -> None:
-        while True:
-            await self.write_queue.join()
-            if not self.failed_write_jobs:
-                return
-            self.write_retried.clear()
-            await self.write_retried.wait()
 
     @staticmethod
     def batch_text(utterances) -> str:
@@ -698,11 +781,11 @@ class VoiceConversation:
         physical.sort(reverse=True)
         if not physical:
             return {"pick": "", "strength": "unavailable", "basis": "没有本句有效的声纹比较；近期人物和自我介绍另作语义参考"}
-        threshold = getattr(self.local_speakers, "threshold", None)
+        threshold = getattr(self.local_speakers, "confirmation_threshold", getattr(self.local_speakers, "threshold", None))
         margin = getattr(self.local_speakers, "margin", None)
         score, code = physical[0]
         gap = score - physical[1][0] if len(physical) > 1 else None
-        clear = threshold is not None and margin is not None and score >= max(threshold, .65) and (gap is None or gap >= margin)
+        clear = threshold is not None and margin is not None and score >= threshold and (gap is None or gap >= margin)
         return {"pick": code, "strength": "clear" if clear else "weak", "score": score,
                 "gap": gap, "threshold": threshold, "margin": margin,
                 "basis": "本句声纹比较；相似度不是概率"}
@@ -715,11 +798,15 @@ class VoiceConversation:
                 code = self.assign_code(item["object_id"], item.get("label") or "")
                 profile = self.process.profiles.get(item["object_id"])
                 candidates.append({"who": code, "score": item.get("score"), "source": item.get("source") or "voiceprint",
+                    **{key:item[key] for key in ('reference_count', 'stddev', 'sample_limited') if key in item},
                     "names": [profile.label, *profile.aliases] if profile else [],
                     "portrait_names": self.process.profiles.address_line(item["object_id"])})
-            batch.append({"n": index, "who": self.display_speaker(utterance.speaker), "text": utterance.text,
+            batch.append({"n": index, "input_id": utterance.input_id,
+                          "sound": self.sound_code(utterance),
+                          "who": self.display_speaker(utterance.speaker), "text": utterance.text,
                           "seconds": round(max(0, utterance.end_ms - utterance.start_ms) / 1000, 2),
                           "basis": utterance.speaker.method, "at_ms": utterance.start_ms, "candidates": candidates,
+                          "short_voice_hint": self.input_records.get(utterance.input_id, {}).get('short_voice_hint', {}),
                           "voice_evidence": self.voice_evidence(utterance, candidates)})
         return batch
 
@@ -748,9 +835,20 @@ class VoiceConversation:
         for index, utterance in enumerate(utterances, start=1):
             item = next((it for it in items if it.n == index), None)
             speaker = utterance.speaker
+            if self.local_speakers is not None and hasattr(self.local_speakers, 'review_candidate'):
+                code = self.assign_code(speaker.object_id, speaker.label)
+                agreement = bool(item and speaker.status == 'recognized' and speaker.method == 'voiceprint_match'
+                                 and item.evidence_relation == 'agree' and item.voice_pick == code
+                                 and item.semantic_pick == code and item.semantic_reason)
+                if agreement:
+                    self._sample_job(utterance.input_id, 'voice_candidate_review',
+                        lambda iid=utterance.input_id, oid=speaker.object_id:
+                        self.local_speakers.review_candidate(iid, oid, agreement=True))
             if item and item.speaker_level == "确定" and item.speaker_pick.startswith("P"):
                 object_id = self.code_owner.get(item.speaker_pick)
-                allowed = {row["object_id"] for row in self.candidate_cache.get(utterance.input_id, [])}
+                allowed = {row["object_id"] for row in self.candidate_cache.get(utterance.input_id, [])
+                           if row.get('source') != 'repeated_short_audio' or
+                           (item.semantic_pick == item.speaker_pick and item.semantic_reason)}
                 if object_id and object_id in allowed and speaker.status not in {"recognized", "introduced"} and speaker.method not in {"voiceprint_match", "self_introduction"}:
                     profile = self.process.profiles.get(object_id)
                     if profile is not None:
@@ -765,9 +863,32 @@ class VoiceConversation:
             self.annotations[utterance.input_id] = speaker
             if item and item.to_jiangshi == "yes":
                 self.note_address(speaker, utterance.text, utterance.input_id, addressed=True)
+                self.interaction_feedback.incoming(utterance.input_id, speaker.object_id, utterance.text,
+                    directed=True, received_at_ms=utterance.received_at_ms)
         by_id = {u.input_id: u for u in updated if u.input_id}
         self.scene = deque((by_id.get(u.input_id, u) for u in self.scene), maxlen=24)
         return updated
+
+    def _sample_job(self, input_id, event_type, work):
+        """A bounded serial worker keeps sampling and review outside entry latency."""
+        if self.closed or len(self.sample_jobs) >= 32:
+            return 'queue_limit'
+        future = asyncio.get_running_loop().run_in_executor(self.sample_executor, work)
+        self.sample_jobs.add(future)
+        def completed(done):
+            self.sample_jobs.discard(done)
+            try:
+                status = done.result()
+                if not self.closed:
+                    row = self.input_records.get(input_id)
+                    if row is not None:
+                        row['voice_candidate_status'] = status
+                    self.record(event_type, {'input_id': input_id, 'status': status})
+            except BaseException as exc:
+                if not self.closed:
+                    self.record('voice_candidate_error', {'input_id': input_id, 'error': str(exc)[:160]})
+        future.add_done_callback(completed)
+        return 'queued'
 
     async def _judge(self, utterances, speaker, overlap) -> tuple[InterruptDecision, dict, tuple]:
         from jshi.voice.jev import BatchItem
@@ -783,8 +904,12 @@ class VoiceConversation:
         state = (snapshot or {}).get("state") or "completed"
         delivery = {"state": state, "spoken": spoken[:200],
                     "pending": (snapshot or {}).get("pending_text", "")[:200], "names_for_jiangshi": names,
-                    "attention": self.attention.hint(speaker, overlap=overlap), "main_review": self.recent_main_reviews(utterances)}
+                    "attention": self.attention.hint(speaker, overlap=overlap), "person_review": self.recent_main_reviews(utterances)}
         cutoff = min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=float("inf"))
+        feedback = self.interaction_feedback.snapshot(cutoff_ms=cutoff)
+        for row in feedback['questions']:
+            row['targets'] = [self.assign_code(oid, self.code_labels.get(oid, '')) for oid in row.pop('target_ids')]
+        delivery['interaction_feedback'] = feedback
         metrics = self.voice_timings.get(self.reply_epochs.get((snapshot or {}).get("reply_id")), (None, {}))[1]
         if metrics.get("reply_ready_at_ms", 0) > cutoff:
             delivery["pending"] = ""
@@ -831,6 +956,8 @@ class VoiceConversation:
                   "items": [asdict(item) for item in result.items], "needs_main_review": result.needs_main_review,
                   "prompt_activity_id": prompt_activity_id,
                   "prompt_requested": bool(sent_requests) if type(self.jev) is VoiceJEV else None}
+        self.record('voice_jev_diagnostics', {**record, 'model_raw': result.model_raw,
+            'model_error': result.model_error})
         return decision, record, result.items
 
     async def _work(self) -> None:
@@ -896,7 +1023,7 @@ class VoiceConversation:
                         await self.emit("identity", **asdict(evidence), detail=binding_note)
                     if remembered and evidence.label.startswith('未命名访客') and evidence.object_id not in self.remembered_voices:
                         self.remembered_voices.add(evidence.object_id)
-                        await self.emit('notice', text=f'{evidence.label} 是内部名，还不知道姓名。声音会短期记住；说出或写上姓名后，改为长期保存。')
+                        await self.emit('notice', text=f'{evidence.label} 是内部名，还不知道姓名。声音暂存；自报先记称呼线索，正式关联按人工确认。')
                     received = self.input_records.get(transcript.input_id, {}).get('received_at_ms')
                     origin = self.sample_source.started_at_ms if self.sample_source else None
                     utterance = SceneUtterance(transcript.text, evidence, transcript.start_ms, transcript.end_ms, transcript.overlap, transcript.input_id,
@@ -906,10 +1033,22 @@ class VoiceConversation:
                     self.note_person_names(evidence, transcript.text, transcript.input_id)
                     input_record["identity_ms"] = round((monotonic() - identity_started) * 1000)
                     pcm = (self.input_records.get(transcript.input_id) or {}).get("pcm")
+                    if self.local_speakers is not None and hasattr(self.local_speakers, 'collect_candidate'):
+                        actor = evidence.object_id if evidence.method != 'unassigned_audio' else 'input:' + transcript.input_id
+                        input_record['voice_candidate_status'] = self._sample_job(transcript.input_id, 'voice_candidate_collected',
+                            lambda pcm=pcm, t=transcript, actor=actor: self.local_speakers.collect_candidate(pcm, t.input_id,
+                                actor, self.session_id, overlap=t.overlap, start_ms=t.start_ms, end_ms=t.end_ms))
                     candidate_started = monotonic()
                     found, candidate_status = await self.rank_candidates(transcript, evidence)
                     input_record["candidate_ms"] = round((monotonic() - candidate_started) * 1000)
                     input_record["candidate_status"] = candidate_status
+                    if input_record.get('short_voice_hint'):
+                        try:
+                            note = json.loads(utterance.identity_note or '{}')
+                        except ValueError:
+                            note = {'reason': utterance.identity_note}
+                        utterance = replace(utterance, identity_note=json.dumps(
+                            {**note, 'short_voice_hint': input_record['short_voice_hint']}, ensure_ascii=False))
                     if not found and transcript.end_ms - transcript.start_ms < 1500:
                         seen = []
                         for old in reversed(self.scene):
@@ -926,6 +1065,12 @@ class VoiceConversation:
                         self.candidate_cache[transcript.input_id] = [{"object_id": evidence.object_id, "label": evidence.label,
                             "score": None, "source": "temporary_voice"}, *[row for row in found if row["object_id"] != evidence.object_id]]
                     self.scene.append(utterance)
+                    if evidence.status == "unknown":
+                        saved = self.unknown_inputs.append(utterance.input_id,
+                            "input:" + utterance.input_id if evidence.method == "unassigned_audio" else evidence.object_id,
+                            transcript.text, self.session_id, transcript.start_ms, transcript.end_ms)
+                        if not saved:
+                            await self.emit("notice", text="未知人物暂存已达到500MB上限；本轮交往仍继续保留，暂不增加独立历史。")
                     current.append(utterance)
                     self.last_track = transcript.track_id
                     self.record("voice_scene_input", asdict(utterance))
@@ -953,6 +1098,8 @@ class VoiceConversation:
                     self.record("voice_jev", {"input": self.render_input(current, items), "track_id": transcript.track_id, **asdict(decision)})
                     await self.emit("jev", **asdict(decision))
                 if decision.action in {"resume", "ignore"}:
+                    self._preserve_background(current)
+                    self.schedule_person_review(current, items, requested=bool(jev_calls and jev_calls[-1].get('needs_main_review')))
                     self.unreported_jev.extend(jev_calls)
                     await self.noise()
                     continue  # Scene/history already recorded; no main reply.
@@ -1002,10 +1149,8 @@ class VoiceConversation:
             # single accumulated next turn, including input received in write.
             await self.input_idle.wait()
             envelope, epoch = await self.turn_queue.get()
-            # JEV 和收音继续运行；⑤只装载上一轮已完整写好的片场。
-            write_wait_started = monotonic()
-            await self._wait_previous_writes()
-            write_wait_ms = round((monotonic() - write_wait_started) * 1000)
+            # Writing is independent; cognition sees committed scene + pending events.
+            write_wait_ms = 0
             if not self.input_idle.is_set():
                 await self.input_idle.wait()
             pending = [envelope]
@@ -1031,6 +1176,8 @@ class VoiceConversation:
                     if decision.action in {'ignore', 'resume', 'stop'}:
                         self.unreported_jev.extend(envelope.jev_calls)
                     if decision.action in {'ignore', 'resume'}:
+                        self._preserve_background(current)
+                        self.schedule_person_review(current, items, requested=bool(record.get('needs_main_review')))
                         await self.noise()
                         continue
                     playing = self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}
@@ -1050,15 +1197,23 @@ class VoiceConversation:
                 if delivery.get('state') in {'playing', 'paused'} and (delivery.get('partial_text') or delivery.get('played_text')):
                     heard = delivery.get('partial_text') or delivery.get('played_text')
                     facts.append(f'匠石上一轮回应播到“{heard[:40]}”时还没说完。')
+                self.schedule_person_review(current, items,
+                    requested=bool(envelope.jev_calls and envelope.jev_calls[-1].get('needs_main_review')))
                 text = self.render_input(current, items, facts)
-                review_context, review_candidates = self.review_material(current, items,
-                    needs_main_review=bool(envelope.jev_calls and envelope.jev_calls[-1].get("needs_main_review")))
-                envelope = replace(envelope, review_context=review_context, review_candidates=review_candidates)
+                marks = {item.n: item for item in items}
+                annotations = tuple({'input_id': u.input_id, 'n': f'N{n}',
+                    'direction': marks[n].to_jiangshi if n in marks else '',
+                    'relevance': marks[n].relevance if n in marks else ''}
+                    for n, u in enumerate(current, 1))
+                envelope = replace(envelope, review_context='', review_candidates=(), input_annotations=annotations)
                 for u in current:
                     if u.input_id in self.input_records:
                         self.input_records[u.input_id]["write_barrier_ms"] = write_wait_ms
                 if items:
                     dropped = {item.n for item in items if not item.keep}
+                    for index, utterance in enumerate(current, 1):
+                        if index in dropped:
+                            self._preserve_background((utterance,))
                     for index, utterance in enumerate(current, start=1):
                         if index in dropped and utterance.input_id:
                             await self.emit('input_route', input_id=utterance.input_id, kept=False)
@@ -1073,7 +1228,7 @@ class VoiceConversation:
                             self.process.profiles.create(ObjectProfile(self.scene_id, "语音现场", status="provisional", source="voice_scene"))
                         speaker = SpeakerEvidence("scene", self.scene_id, "语音现场", "unknown", "voice_scene")
                     envelope = replace(envelope, current_utterances=current,
-                        utterances=tuple(annotated(u) for u in envelope.utterances), speaker=speaker,
+                        utterances=current, speaker=speaker,
                         delivery_context='',
                         parts=(InputPart('text', text), *envelope.parts[1:]))
                 self.active_turn = {"state": "thinking", "object_id": envelope.speaker.object_id,
@@ -1091,6 +1246,9 @@ class VoiceConversation:
         emitted = False
         self.turn_sequence += 1
         turn_key = (epoch, self.turn_sequence)
+        self.reply_input_ids[turn_key] = [u.input_id for u in envelope.current_utterances]
+        while len(self.reply_input_ids) > 32:
+            self.reply_input_ids.pop(next(iter(self.reply_input_ids)))
         began = monotonic()
         rows = [self.input_records[u.input_id] for u in envelope.current_utterances if u.input_id in self.input_records]
         calls = [*self.unreported_jev, *envelope.jev_calls]
@@ -1098,6 +1256,8 @@ class VoiceConversation:
         metrics = {'queue_wait_ms': round((began - min(r['at'] for r in rows)) * 1000) if rows else None,
                    'asr_lag_ms': max((r['asr_lag_ms'] for r in rows if r['asr_lag_ms'] is not None), default=None),
                    'jev_ms': sum(call['ms'] for call in calls), 'jev_calls': calls}
+        metrics['speech_end_at_ms'] = max((u.recorded_end_at_ms for u in envelope.current_utterances
+                                          if u.recorded_end_at_ms is not None), default=None)
         metrics.update({"speech_group_wait_ms": max((round((r.get("group_ready_at", r["at"]) - r["at"]) * 1000) for r in rows), default=0),
             "input_worker_wait_ms": max((round((r.get("worker_started_at", r["at"]) - r["at"]) * 1000) for r in rows), default=0),
             "speech_collection_ms": max((round((r.get("group_ready_at", r["at"]) - r.get("worker_started_at", r["at"])) * 1000) for r in rows), default=0),
@@ -1117,6 +1277,10 @@ class VoiceConversation:
             emitted = True
             metrics['model_to_reply_ms'] = round((monotonic() - began) * 1000)
             metrics['reply_ready_at_ms'] = time() * 1000
+            metrics['speech_to_reaction_ms'] = (round(max(0, metrics['reply_ready_at_ms'] - metrics['speech_end_at_ms']))
+                                               if metrics['speech_end_at_ms'] is not None else None)
+            metrics['received_to_reaction_ms'] = (round(max(0, metrics['reply_ready_at_ms'] - max(r['received_at_ms'] for r in rows)))
+                                                 if rows else None)
             # Only enqueue on the event loop. Neither synthesis nor playback
             # blocks cognition or the independent write-zone call.
             valid = {u.speaker.object_id for u in (*envelope.utterances, *envelope.current_utterances)} | {envelope.speaker.object_id}
@@ -1145,6 +1309,11 @@ class VoiceConversation:
         result, response, selected = await loop.run_in_executor(self.turn_executor, experience)
         job = self.process.take_deferred_write()
         if job is not None:
+            # Queued requests are wakeups, not one immutable write per turn.
+            self.failed_write_jobs.clear()
+            while not self.write_queue.empty():
+                self.write_queue.get_nowait()
+                self.write_queue.task_done()
             self.write_queue.put_nowait(job)
         self.last_debug = {"activity_id": result.activity.id,
             'input': envelope.to_dict(), 'scene': [asdict(u) for u in envelope.utterances],
@@ -1156,6 +1325,7 @@ class VoiceConversation:
                      "intent": asdict(response.tool_intent) if response.tool_intent else None,
                      "handling": response.tool_handling, "consumed": response.tool_consumed}}
         self.debug_history.append(self.last_debug)
+        self.record('voice_turn_diagnostics', self.last_debug)
         await self.emit('debug_turn', activity_id=result.activity.id, input=envelope.text[:100])
         handling = response.tool_handling
         if not handling and response.tool_consumed and not response.response_plan.unsaid_text():
@@ -1234,6 +1404,9 @@ class VoiceConversation:
             logging.getLogger(__name__).exception("Voice synthesis failed")
             self.delivery.fail(d.reply_id, str(exc))
             self.record("voice_delivery", self.delivery.snapshot())
+            self.process.note_scene_delivery(self.subject_id, f"failed:{d.reply_id}",
+                "（播放器交付失败）" + json.dumps(self.delivery.snapshot(), ensure_ascii=False)
+                + "；partial_text未确认整句播完，pending_text尚未播放。")
             await self.emit("stop", reply_id=d.reply_id)
             await self.emit("notice", text=f"语音合成失败，文字回应已保留：{exc}")
             await self._next_plan()
@@ -1247,8 +1420,15 @@ class VoiceConversation:
             if payload.get("phase") == "completed":
                 d = self.delivery.current
                 targets = d.targets[int(payload['segment'])] if d.targets else (d.object_id,)
+                self.process.note_scene_delivery(
+                    self.subject_id, f"played:{d.reply_id}:{payload['segment']}",
+                    "（播放器确认已播出）匠石：" + d.texts[int(payload['segment'])],
+                )
+                self.write_queue.put_nowait(lambda: self.process._flush_pending_scene(self.subject_id))
                 self.played_history.append({"who": "匠石", "basis": "已播出", "text": d.texts[int(payload['segment'])],
                                             "targets": list(targets), "at": time() * 1000})
+                self.interaction_feedback.played(d.reply_id, int(payload['segment']), d.texts[int(payload['segment'])],
+                    targets, self.reply_input_ids.get(self.reply_epochs.get(d.reply_id), ()))
                 if len(targets) == 1:
                     self.identities.name_question_played(targets[0], d.texts[int(payload['segment'])])
                 ledger = getattr(self.process, "activity_ledger", None)
@@ -1284,7 +1464,9 @@ class VoiceConversation:
         self.annotations.clear()
         self.worker.cancel()
         self.turn_worker.cancel()
-        await asyncio.gather(self.worker, self.turn_worker, return_exceptions=True)
+        self.person_review_worker.cancel()
+        await asyncio.gather(self.worker, self.turn_worker, self.person_review_worker, return_exceptions=True)
+        self.person_review_executor.shutdown(wait=False, cancel_futures=True)
         if self.tts_task:
             await asyncio.gather(self.tts_task, return_exceptions=True)
         # Running synchronous cognition finishes its write; stale callbacks are
@@ -1299,6 +1481,9 @@ class VoiceConversation:
         await asyncio.to_thread(self.write_executor.shutdown, wait=True, cancel_futures=True)
         await asyncio.to_thread(self.jev_executor.shutdown, wait=True, cancel_futures=True)
         await asyncio.to_thread(self.candidate_executor.shutdown, wait=True, cancel_futures=True)
+        await asyncio.to_thread(self.sample_executor.shutdown, wait=True, cancel_futures=True)
+        if self.sample_jobs:
+            await asyncio.gather(*self.sample_jobs, return_exceptions=True)
 
 
 def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=None, local_tts=None, online_speakers=None, *, speaker_models=None, trial_root=None):
@@ -1325,8 +1510,15 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     async def registry(request):
         nonlocal registry_busy
         if request.method == 'GET':
+            try:
+                speakers, _ = await registry_speakers(request.query.get('model', ''))
+                counter = getattr(speakers, 'saved_reference_counts', None)
+                counts = {r['object_id']: r['reference_count'] for r in counter()} if callable(counter) else None
+            except ValueError:
+                counts = None
             return web.json_response({'models': list(speaker_models or {}), 'people': [
-                {'object_id': p.object_id, 'label': p.label, 'voiceprints': len([c for c in p.carriers if c.kind == 'voiceprint'])}
+                {'object_id': p.object_id, 'label': p.label, 'voiceprints': len([c for c in p.carriers if c.kind == 'voiceprint']),
+                 'reference_count': counts.get(p.object_id, 0) if counts is not None else None}
                 for p in process.profiles.list() if p.status != 'rejected' and
                 (p.source.startswith('voice_') or any(c.kind == 'voiceprint' for c in p.carriers))]},
                 headers={'Cache-Control': 'no-store'})
@@ -1409,7 +1601,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 raise ValueError('这段录音提取不到声纹，请靠近麦克风再说一次')
             ranking = speakers.rank_vector(vector)
             from jshi.voice.selftest import decide
-            matched = decide(ranking, speakers.threshold, speakers.margin)
+            matched = decide(ranking, speakers.confirmation_threshold, speakers.margin)
             expected = str(payload.get('expected', ''))
             if expected and process.profiles.get(expected) is None:
                 raise ValueError('所选人物不存在，请刷新')
@@ -1512,7 +1704,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 await conversation.emit("ready", identity_mode="local" if use_local else config.identity_mode,
                     voiceprint_available=speakers is not None,
                     voiceprint_count=len(getattr(speakers, 'known', {})) if speakers else 0,
+                    saved_references=getattr(speakers, 'saved_reference_counts', lambda: [])() if speakers else [],
                     match_threshold=getattr(speakers, 'threshold', None),
+                    single_confirmation_threshold=getattr(speakers, 'confirmation_threshold', None),
                     match_margin=getattr(speakers, 'margin', None),
                     comparison_available=trial is not None,
                     names=[p.label for p in process.profiles.list() if p.status != 'rejected' and p.source != 'voice_scene'][:100],
@@ -1572,9 +1766,11 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                             try:
                                 if speakers is None: raise ValueError('本地声纹模型尚未加载')
                                 threshold = await asyncio.to_thread(speakers.set_threshold, payload.get('match_threshold'))
-                                await conversation.emit('voice_settings', match_threshold=threshold, match_margin=speakers.margin)
+                                await conversation.emit('voice_settings', match_threshold=threshold,
+                                    single_confirmation_threshold=speakers.confirmation_threshold, match_margin=speakers.margin)
                             except Exception as exc:
-                                await conversation.emit('voice_settings_error', text=str(exc), match_threshold=getattr(speakers, 'threshold', None))
+                                await conversation.emit('voice_settings_error', text=str(exc), match_threshold=getattr(speakers, 'threshold', None),
+                                    single_confirmation_threshold=getattr(speakers, 'confirmation_threshold', None))
                         elif kind == 'text':
                             await conversation.typed(payload.get('text', ''))
                         elif kind == 'rename_confirm':

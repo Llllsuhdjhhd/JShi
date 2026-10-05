@@ -63,7 +63,7 @@ class SelfTest:
             ranking = speakers.rank_vector(trial['vector'])
             registered = {object_id for _, object_id in ranking}
             expected = trial['expected'] if trial['expected'] in registered else ''
-            matched = decide(ranking, speakers.threshold, speakers.margin)
+            matched = decide(ranking, getattr(speakers, 'confirmation_threshold', speakers.threshold), speakers.margin)
             counts['trials'] += 1
             if matched == expected or (not expected and matched is None):
                 counts['correct'] += 1
@@ -74,5 +74,5 @@ class SelfTest:
             for score, object_id in ranking:
                 (genuine if object_id == expected else impostor).append(score)
         calibration = calibrate(genuine, impostor)
-        return {**counts, 'threshold': speakers.threshold, 'margin': speakers.margin,
+        return {**counts, 'threshold': getattr(speakers, 'confirmation_threshold', speakers.threshold), 'margin': speakers.margin,
                 'calibration': calibration, 'recommendation': recommend(calibration)}

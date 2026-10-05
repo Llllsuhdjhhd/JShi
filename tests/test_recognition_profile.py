@@ -247,20 +247,20 @@ class ConfirmModel:
         )
 
 
-def test_cognitive_confirmation_upgrades_profile(tmp_path):
+def test_cognition_confirmation_is_ignored_without_changing_archive(tmp_path):
     process, repository = runtime(tmp_path, model=ConfirmModel())
 
     result = process.experience("stone", "你好", object_ref="李四")
 
-    assert process.profiles.list()[0].status == "confirmed"
-    assert result.speaker.status == "confirmed"
+    assert process.profiles.list()[0].status == "provisional"
+    assert result.speaker.status == "provisional"
     assessed = [
         item
         for item in repository.list_history("stone", HistoryKind.SUBJECT)
-        if item.event_type == "object_identity_assessed"
+        if item.event_type == "object_identity_suggested"
     ]
-    assert len(assessed) == 1
-    assert assessed[0].content["conclusion"] == "confirm"
+    assert not assessed
+    assert process.last_model_response.object_assessment is None
 
 
 class DenyModel:
@@ -274,19 +274,17 @@ class DenyModel:
         )
 
 
-def test_deny_marks_rejected_and_blocks_next_activity(tmp_path):
+def test_cognitive_denial_is_ignored_and_does_not_block_next_turn(tmp_path):
     process, repository = runtime(tmp_path, model=DenyModel())
     process.experience("stone", "你好", object_ref="李四")
-    assert process.profiles.list()[0].status == "rejected"
-
-    with pytest.raises(ValueError, match="confidence too low"):
-        process.experience("stone", "又见面了", object_ref="李四")
+    assert process.profiles.list()[0].status == "provisional"
+    process.experience("stone", "又见面了", object_ref="李四")
 
     event_types = [
         item.event_type
         for item in repository.list_history("stone", HistoryKind.SUBJECT)
     ]
-    assert event_types.count("object_rejected") == 1
+    assert event_types.count("object_identity_suggested") == 0
 
 
 def test_confidence_is_dynamic_with_profile_status(tmp_path):

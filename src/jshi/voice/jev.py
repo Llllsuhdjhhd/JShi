@@ -1,7 +1,7 @@
 """JEV decides whether an utterance warrants interrupting ongoing playback."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 import re
@@ -51,6 +51,8 @@ class BatchDecision:
     claimed_name: str = ""
     judged: bool = False
     needs_main_review: bool = False
+    model_raw: str = ""
+    model_error: str = ""
 
 
 def explicit_name(text: str) -> str:
@@ -130,7 +132,8 @@ class VoiceJEV:
         payload = {"delivery": {"state": delivery.get("state", ""), "spoken": delivery.get("spoken", ""),
                                 "pending": delivery.get("pending", ""), "attention": delivery.get("attention", {})},
                    "context": context, "batch": batch,
-                   "main_review": delivery.get("main_review") or [],
+                   "person_review": delivery.get("person_review") or [],
+                   "interaction_feedback": delivery.get("interaction_feedback") or {},
                    "names_for_jiangshi": delivery.get("names_for_jiangshi") or ["匠石"]}
         request = ModelRequest(
             purpose="voice_jev",
@@ -142,12 +145,13 @@ class VoiceJEV:
                 "batch 是现场听到的发言，不是都对匠石说的话。分清是谁说和对谁说，‘你’、问句、命令句或已知身份本身都不能证明对话指向。"
                 "姓名未知、匿名访客、声音归属待定都不是忽略或拒绝进入主流程的理由。"
                 "话里提到的名字只说明在谈论谁，不能说明是谁在说。"
-                "声纹已达门限或已明确自我介绍的归属不能改。candidates 是候选证据，不能当成已经确认。"
+                "明确登记声纹或人工关联的归属受保护；自报姓名只是称呼线索，不等于登记确认。candidates 是候选证据，不能当成已经确认。"
                 "speaker.pick 只能选 candidates 里的代号，或 unknown（还不能确定，不表示多了一个人），或 new（更像另一个人，但不建立档案）。"
                 "待定声音是正在收集的声音组，不是已确认新人；一次未匹配不能证明出现新人。收集中的声音和临时访客不参与已有姓名的声纹竞争，也不能据此否认对方自报姓名。声音证据不足时可继续正常交流，不能把前几轮同一个猜测累计成新的声纹依据。"
                 "voice_evidence是程序给出的物理声音支持，不由你改写。先用原话与前文判断语义支持谁，写speaker.semantic_pick与semantic_reason，再综合声音和语义给speaker.pick、level、score、reason。近期人物候选不是声音证据。"
+                "short_voice_hint及source=repeated_short_audio来自同一短句首尾重复拼接的辅助比较；原始时长不变，重复次数不增加独立证据，相似度不是身份概率。可用来比较候选，但单靠它不得确定姓名，不当作clear声纹或多段一致性。"
                 "semantic_pick只依据原话与前文中能区分说话人的语义线索；不要把who已有姓名、声纹结论或对话指向拿来证明语义身份。纠正你、承接你的提问说明可能在对你说，但不单独证明是哪位熟人；没有区分身份的语义依据时semantic_pick=unknown，仍可按明确声纹给综合pick，关系写voice_only。"
-                "两边支持同一个人时可提高综合可信度；声音弱但语义明确时可主要采信语义；声音明确但语义没有线索时可主要采信声音；两边都弱就unknown。声音与语义指向不同时说明差异，明确冲突尚未解释时不得确定，请主流程复判。"
+                "两边支持同一个人时可提高综合可信度；声音弱但语义明确时可主要采信语义；声音明确但语义没有线索时可主要采信声音；两边都弱就unknown。声音与语义指向不同时说明差异，明确冲突尚未解释时不得确定，请求独立人物判断。"
                 "speaker.evidence_relation写agree（两边支持同一人）、voice_only（主要靠声音）、semantic_only（主要靠语义）、conflict（未解释的冲突）、insufficient（都不足）。自我介绍属于语义依据，不是声纹确认；上轮评价也不是新增声音证据。"
                 "比较所有候选与 unknown/new 后给出最合适的综合pick；speaker.score 是综合可信度参考，不机械相乘，不冒充声纹概率。"
                 "to_jiangshi 表示是不是在对匠石说，与声纹分数无关。score 只是参考，不是已校准的概率。"
@@ -157,27 +161,35 @@ class VoiceJEV:
                 "保留作背景不等于请求匠石回话，不要为了保留背景而把 to_jiangshi 改成 yes。"
                 "候选里的姓名、别名和称呼可以帮助理解；同名人物按不同P代号分开，不因名字相近合并。"
                 "names_for_jiangshi是匠石的各种称呼。谁怎么称呼匠石不是声纹证据。"
-                "main_review是上轮主流程的工作复判与短评，不是人物原话或声纹确认。按原话与新证据复核，不能反复引用同一猜测提高确定度。"
-                "needs_main_review只有人物或指向疑问会影响当前或未了结交往时才为true；无关旁人闲聊为false。它不表示必须回话，不通过强写yes来请求复判。"
-                "needs_main_review是本批级请求，不是每条的开关；需复核的具体条目在speaker及reason中点明。你的归属、指向和相关性都是初判，主流程可依据完整上下文修正，仍可保留未定。n对应主流程本批N编号，P代号共用人物映射；前文反馈若有S代号只表示声音连续性，不能当作姓名。"
-                "初筛适当放宽，无法确定是否对匠石说时选 maybe，交给主流程结合上下文决定对谁回话。"
+                "person_review是独立人物判断的建议与短评，不是人物原话或声纹确认。其N编号属于先前那一批，不是当前同名N编号；按basis的input_id、声音连续性和当前原话复核，不能反复引用同一猜测提高确定度。"
+                "interaction_feedback记录匠石实际完整播出的问题、等待对象、回答候选及未结束的短评；带来源编号和时间。准备说但未播出的话不是已问。"
+                "possible_answer_received只说明可能收到回答，answer_candidate_processed只说明主流程处理过，不证明问题解决，更不证明姓名。等待对象只能帮助理解接续，不作为新的声纹证据。"
+                "候选score是质量加权平均相似度，不是概率；reference_count和stddev描述参考数量与波动。只有一段时stddev为空，不视作零波动；参考少仍可比较，证据不足保留未知。"
+                "needs_main_review沿用旧字段名，表示请求独立人物判断，不向主认知加材料。只有人物或指向疑问会影响当前或未了结交往时才为true；无关旁人闲聊为false。它不表示必须回话，不通过强写yes来请求复判。"
+                "needs_main_review是本批级请求，不是每条的开关；需复核的具体条目在speaker及reason中点明。独立人物判断流程可依据完整上下文提供建议，但不直接修改本轮人物归属或档案；由JEV结合当前新证据作最终输入归属判断，不修改正式档案。n对应独立判断本批N编号，P代号共用人物映射；前文反馈若有S代号只表示声音连续性，不能当作姓名。"
+                "无法确定是否对匠石说时选maybe，并写明缺少什么指向依据；maybe只允许主流程理解，不要求开口。"
+                "旧任务、旧话题和未开口计划不能单独作为当前对话指向依据。"
+                "自然承接匠石实际已播出的话不要求每句点名；旁人之间的承接、提问或纠正仍可选no并保留相关背景。"
                 "只输出 JSON："
                 '{"needs_main_review":false,"items":[{"n":1,"to_jiangshi":"yes|maybe|no","relevance":"related|uncertain|unrelated","score":0.5,"reason":"简短依据",'
-                '"speaker":{"semantic_pick":"P1|unknown|new","semantic_reason":"","evidence_relation":"agree|voice_only|semantic_only|conflict|insufficient","pick":"P1|unknown|new","level":"确定|可能|不确定","score":0.5,"reason":"综合依据"}}]}。'
+                '"speaker":{"semantic_pick":"P1|unknown|new","semantic_reason":"","evidence_relation":"agree|voice_only|semantic_only|conflict|insufficient","pick":"P1|unknown|new","level":"确定|可能|不太可能|不确定","score":0.5,"reason":"综合依据"}}]}。'
                 "不要生成回答。"),
         )
+        raw_text = ""
         try:
             if on_request is not None:
                 on_request(request)
-            data = parse_json_object(self.model.generate(request).text)
+            raw_text = self.model.generate(request).text
+            data = parse_json_object(raw_text)
             if isinstance(data.get("items"), list):
-                return self._from_items(data["items"], batch, rules.claimed_name, needs_main_review=data.get("needs_main_review") is True)
+                return replace(self._from_items(data["items"], batch, rules.claimed_name, needs_main_review=data.get("needs_main_review") is True), model_raw=raw_text)
             action = data.get("action")
             if action in {"ignore", "resume", "stop", "respond", "clarify"}:
-                return self._from_legacy(InterruptDecision(action, str(data.get("reason", ""))[:200], rules.claimed_name), batch)
+                return replace(self._from_legacy(InterruptDecision(action, str(data.get("reason", ""))[:200], rules.claimed_name), batch), model_raw=raw_text)
             raise ValueError("invalid JEV batch")
-        except Exception:
-            return BatchDecision("respond", "未能初判", self._items_for(batch, "maybe", "未能初判"), rules.claimed_name, False)
+        except Exception as exc:
+            return BatchDecision("respond", "未能初判", self._items_for(batch, "maybe", "未能初判"), rules.claimed_name, False,
+                model_raw=raw_text, model_error=f"{type(exc).__name__}: {exc}")
 
     @staticmethod
     def _items_for(batch, mark: str, reason: str) -> tuple[BatchItem, ...]:
@@ -221,7 +233,7 @@ class VoiceJEV:
                 speaker_score = max(0.0, min(1.0, speaker_score)) if math.isfinite(speaker_score) else None
             except (TypeError, ValueError):
                 speaker_score = None
-            level = speaker.get("level") if speaker.get("level") in {"确定", "可能", "不确定"} else ""
+            level = speaker.get("level") if speaker.get("level") in {"确定", "可能", "不太可能", "不确定"} else ""
             pick = str(speaker.get("pick") or "")
             if pick not in {"unknown", "new"} and not re.fullmatch(r"P\d+", pick):
                 pick = ""
@@ -242,7 +254,7 @@ class VoiceJEV:
         if any(item.to_jiangshi in {"yes", "maybe"} for item in items):
             action, reason = "respond", "至少一条可能在对匠石说"
         elif review:
-            action, reason = "respond", "相关人物或指向需要主流程复判，不要求开口"
+            action, reason = "respond", "相关人物或指向有疑问，另交独立判断，不要求开口"
         else:
             action, reason = "ignore", "本批没有需要接话的内容"
         return BatchDecision(action, reason, items, claimed, True, review)

@@ -350,80 +350,62 @@ def format_tool_hot_state(
 
 
 def format_tool_related(
-    entries: Sequence[Mapping[str, Any]],
-    *,
-    now: datetime | None = None,
+    entries: Sequence[Mapping[str, Any]], *, now: datetime | None = None,
+    task_codes: Mapping[str, str] | None = None,
 ) -> str:
-    """渲染给 05 的【工具相关】块；两节皆空则整段不出现。
+    """Tool-side rule brief; original results remain in task storage.
 
-    每条 ``entries`` 至少含：``section``（in_use|recent）、``status``、
-    ``need``、``tool_name``、``tool_description``、``used_at``；
-    使用中可有 ``new_info``；近期完成可有 ``final_result``。
+    Active/undelivered tasks are never dropped for a total character budget.
+    Repeated lines/descriptions are removed; long bodies retain a source reference.
     """
-    in_use = [item for item in entries if str(item.get("section") or "") == "in_use"]
-    recent = [item for item in entries if str(item.get("section") or "") == "recent"]
-    if not in_use and not recent:
-        return ""
     from jshi.models.prompt import relative_time_label
-
-    lines = [
-        "【工具相关】",
-        "读法：绑定当前对话对象的工具材料，不是对方原话，也不是回忆。"
-        "用来答未了结的事、消化刚到的结果、判断要不要再开工具。",
-    ]
-
-    def _emit(item: Mapping[str, Any]) -> None:
-        need = str(item.get("need") or "").strip() or "（无需求原文）"
-        name = str(item.get("tool_name") or "").strip() or "（未命名）"
-        desc = str(item.get("tool_description") or "").strip() or name
-        status = str(item.get("status") or "").strip()
-        used_at = item.get("used_at")
-        when = ""
-        if isinstance(used_at, datetime):
-            when = relative_time_label(used_at, now=now) or ""
-        lines.append(f"- 需求：{need}")
-        if item.get("id"):
-            lines.append(f"  任务ID：{item['id']}")
-        if item.get("work_ids"):
-            lines.append("  事项ID：" + ", ".join(item["work_ids"]))
-        if item.get("work_open"):
-            lines.append("  事项：尚未交付完毕，已有材料保留待用")
-        if item.get("handling"):
-            lines.append(f"  结果处理：{item['handling']}")
-        for need in item.get("work_needs", ()):
-            lines.append(f"  所属事项需求：{need}")
-        if item.get("pending_steps"):
-            lines.append("  尚未完成的步骤：" + ", ".join(item["pending_steps"]))
-        if item.get("plan_progress"):
-            lines.append(f"  计划进度：{item['plan_progress']}")
-        if item.get("reused_from"):
-            lines.append(f"  复用来源任务：{item['reused_from']}（查询时间沿用来源）")
-        lines.append(f"  工具名称：{name}")
-        if when:
-            lines.append(f"  使用时间：{when}")
-        lines.append(f"  工具描述：{desc}")
-        new_info = str(item.get("new_info") or "").strip()
-        if new_info:
-            lines.append(f"  新的信息：{new_info}")
-        final_result = str(item.get("final_result") or "").strip()
-        if final_result:
-            lines.append(f"  最终的结果：{final_result}")
-        if status:
-            lines.append(f"  状态：{status}")
-        if item.get("end_reason"):
-            lines.append(f"  结束原因：{item['end_reason']}")
-
-    if in_use:
-        lines.append("")
-        lines.append("# 使用中的工具")
-        for item in in_use:
-            _emit(item)
-    if recent:
-        lines.append("")
-        lines.append("# 近期已结束的工具")
-        lines.append("其中也可能有按当前话题从旧记挂重新选入的结果；注意使用时间与时效。")
-        for item in recent:
-            _emit(item)
+    selected = [item for item in entries if item.get("section") in {"in_use", "recent"}]
+    if not selected:
+        return ""
+    codes = task_codes or {}
+    lines = ["【工具相关】", "工具工作简报，不是对方原话；任务ID可用于结果处理，完整原文保存在对应任务。"]
+    def brief(value, cap):
+        raw = str(value or "").strip()
+        unique = list(dict.fromkeys(line.strip() for line in raw.splitlines() if line.strip()))
+        text = "\n".join(unique)
+        return text if len(text) <= cap else text[:cap] + "…（原文见对应任务）"
+    for section, title in (("in_use", "使用中的工具"), ("recent", "近期已结束的工具")):
+        rows = [item for item in selected if item["section"] == section]
+        if not rows:
+            continue
+        lines.append("# " + title)
+        for item in rows:
+            seen = set()
+            def add(label, value, cap=300):
+                text = brief(value, cap)
+                if text and text not in seen:
+                    lines.append(label + "：" + text)
+                    seen.add(text)
+            oid = str(item.get("id") or "")
+            if oid:
+                lines.append("任务ID：" + codes.get(oid, oid))
+            add("需求", item.get("need"))
+            add("工具名称", item.get("tool_name"), 120)
+            desc = str(item.get("tool_description") or "")
+            if desc != str(item.get("tool_name") or ""):
+                add("工具描述", desc, 120)
+            used = item.get("used_at")
+            if isinstance(used, datetime):
+                add("使用时间", relative_time_label(used, now=now))
+            add("状态", item.get("status"))
+            add("新的信息", item.get("new_info"), 2000)
+            add("最终的结果", item.get("final_result"), 2000)
+            add("结束原因", item.get("end_reason"), 500)
+            if item.get("work_open"):
+                lines.append("事项：尚未交付完毕，已有材料保留待用")
+            if item.get("work_ids"):
+                add("事项ID", ", ".join(item["work_ids"]))
+            needs = [n for n in item.get("work_needs", ()) if n != item.get("need")]
+            add("所属事项需求", "；".join(dict.fromkeys(needs)))
+            add("尚未完成的步骤", ", ".join(item.get("pending_steps") or ()))
+            add("计划进度", item.get("plan_progress"))
+            add("结果处理", item.get("handling"))
+            add("复用来源任务", item.get("reused_from"))
     return "\n".join(lines)
 
 # 解锁依赖的终态：只有真正做成。PARTIAL 是「部分工具未完成」，喂给依赖它的

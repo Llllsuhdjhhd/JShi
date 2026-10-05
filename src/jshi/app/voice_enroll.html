@@ -88,7 +88,7 @@ let people = [], clips = [], busy = false, summary = null;
 function say(text) { $('status').textContent = text; }
 function person() { return people.find(p => p.object_id === $('person').value); }
 async function api(payload) {
-  const r = await fetch('/voice-registry', payload ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)} : {cache: 'no-store'});
+  const r = await fetch('/voice-registry' + (payload ? '' : '?model=' + encodeURIComponent($('model').value)), payload ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)} : {cache: 'no-store'});
   if (!r.ok) throw Error(await r.text());
   return r.json();
 }
@@ -139,7 +139,7 @@ async function capture(seconds, button, label) {
 
 function render() {
   const p = person();
-  $('person-info').textContent = p ? (p.voiceprints ? '已有一条声纹，最长 10 秒。再保存时，新的声音放在最前面，末尾超出的旧声音会去掉。' : '此人还没有声纹。') : '填写姓名后，保存时会新建这个人物。';
+  $('person-info').textContent = p ? (p.reference_count == null ? '当前方案的已保存条数暂不可用。' : '当前方案累计已保存 '+p.reference_count+' 条有效参考（最多10条）；新选择优先，满10条后替换最旧的参考，重复或高度相似的样本不重复计数。兼容录音最多保留10秒。') : '填写姓名后，保存时会新建这个人物。';
   $('rename').hidden = !p || !$('name').value.trim() || $('name').value.trim() === p.label;
   $('prompt').textContent = PROMPTS[0];
   $('record').textContent = clips.length ? '已录好，可删除后重录' : '录 10 秒';
@@ -205,7 +205,7 @@ async function load(select) {
   const d = await api();
   people = d.people;
   const current = select ?? $('person').value;
-  $('person').replaceChildren(new Option('＋ 新人物', ''), ...people.map(p => new Option((/^未命名访客 \d+$/.test(p.label) ? p.label + ' · 内部名' : p.label) + (p.voiceprints ? '' : '（无声纹）'), p.object_id)));
+  $('person').replaceChildren(new Option('＋ 新人物', ''), ...people.map(p => new Option((/^未命名访客 \d+$/.test(p.label) ? p.label + ' · 内部名' : p.label) + (p.reference_count == null ? '（条数暂不可用）' : '（已保存 '+p.reference_count+' / 10 条）'), p.object_id)));
   $('person').value = people.some(p => p.object_id === current) ? current : '';
   if ($('model').options.length === 1) $('model').append(...d.models.map(m => new Option(m, m)));
   speakers(); render();
@@ -213,7 +213,7 @@ async function load(select) {
 
 $('person').onchange = () => { const p = person(); $('name').value = p ? p.label : ''; $('speaker').value = p && p.voiceprints ? p.object_id : $('speaker').value; render(); };
 $('name').oninput = render;
-$('model').onchange = refreshSummary;
+$('model').onchange = () => load().then(refreshSummary).catch(e => say(e.message));
 
 $('record').onclick = async () => {
   busy = true; render();
@@ -235,7 +235,7 @@ $('save').onclick = async () => {
     $('clear').onclick();
     await load(d.object_id);
     $('speaker').value = d.object_id;
-    say('已保存 ' + d.label + ' 的 ' + d.clips + ' 段录音。接下来到第 3 步试一试。');
+    say('已保存 '+d.label+'：本次选择 '+d.clips+' 段，累计已保存 '+d.reference_count+' 条有效参考（最多10条）。接下来到第3步试一试。');
     await refreshSummary();
   } catch (e) { say('保存失败：' + e.message); }
   finally { busy = false; render(); }

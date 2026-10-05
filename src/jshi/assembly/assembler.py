@@ -92,7 +92,7 @@ class CurrentStateAssembler:
         for fragment in fragments:
             if fragment.always or fragment.source in _PROTECTED_SOURCES:
                 protected_frags.append(fragment)
-            elif fragment.source in {"person_experience", "person_portrait", "memory"}:
+            elif fragment.source in {"person_experience", "person_portrait", "memory", "manual_history"}:
                 memory_frags.append(fragment)
             elif fragment.source == "tool":
                 tool_frags.append(fragment)

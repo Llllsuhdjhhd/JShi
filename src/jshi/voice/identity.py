@@ -103,6 +103,8 @@ class VoiceIdentities:
         if linked:
             evidence = replace(linked, track_id=evidence.track_id,
                 status='unknown', method='voice_continuity', confidence=None, voiceprint_id='') if evidence.method == 'voice_continuity' else replace(linked, track_id=evidence.track_id)
+        if evidence.method == 'self_report' or (linked and linked.method == 'self_report'):
+            return evidence
         profile = self.profiles.get(evidence.object_id)
         return replace(evidence, label=profile.label) if profile else evidence
 
@@ -129,8 +131,6 @@ class VoiceIdentities:
                 self.tracks[track_id] = evidence
                 if cluster_id:
                     old = self.clusters.get(cluster_id)
-                    if old and old.object_id != evidence.object_id:
-                        self.associations[old.object_id] = evidence
                     self.clusters[cluster_id] = evidence
                 return evidence
         if uncertain or track_id.startswith(('unidentified-', 'overlap-')):
@@ -168,6 +168,29 @@ class VoiceIdentities:
             previous = self.tracks.get(track_id)
             if previous and monotonic()-self.name_questions.get(previous.object_id, -1e20) <= 8:
                 old = previous
+        if basis != 'manual_selection':
+            matches = [p for p in self.profiles.find_by_names(name) if p.status != 'rejected']
+            if len(matches) > 1:
+                return old, '这个称呼对应多个已有对象，需要进一步确认；不自动关联。'
+            if old.status in {'recognized', 'introduced'} and not (self.profiles.get(old.object_id) and self.profiles.get(old.object_id).source == 'voice_anonymous'):
+                known = self.profiles.get(old.object_id)
+                if known and name not in (known.label, *known.aliases):
+                    return old, "自报姓名与入口归属冲突，保留两种证据，待礼貌核对。"
+                return old, "自报姓名与当前声纹归属一致；不更改档案。"
+            updated = replace(old, label=matches[0].label if len(matches) == 1 else name, status='unknown', method='self_report')
+            if old.method != 'unassigned_audio':
+                self.tracks[track_id] = updated
+                self.associations[old.object_id] = updated
+            if cluster_id:
+                self.clusters[cluster_id] = updated
+            self.name_questions.pop(old.object_id, None)
+            if self.repository is not None:
+                self.repository.add_history(HistoryRecord(
+                    subject_id=self.subject_id, kind=HistoryKind.FACT,
+                    event_type='voice_identity_clue',
+                    content={'session_id': self.session_id, 'object_id': old.object_id,
+                             'reported_name': name, 'basis': basis, 'scope': 'clue_only'}, source_ids=()))
+            return updated, f"对方自报称呼{name}，可以这样称呼；仍保留独立内部编号，不迁移历史、不登记声纹。"
         matches = tuple(p for p in self.profiles.find_by_names(name) if p.status != "rejected")
         # A known voice can have several names, including a name shared by others.
         # Self-introducing another name does not move its voiceprint to that person.
@@ -189,7 +212,7 @@ class VoiceIdentities:
             profile = self.profiles.create(ObjectProfile(
                 object_id=new_object_id(), label=name, status="provisional", source="voice_manual_annotation" if basis == 'manual_selection' else "voice_self_introduction"))
         updated = SpeakerEvidence(track_id, profile.object_id, profile.label,
-                                  "introduced", "self_introduction")
+                                  "introduced", "manual_annotation" if basis == "manual_selection" else "self_introduction")
         self.name_questions.pop(old.object_id, None)
         if old.method != 'unassigned_audio':
             self.tracks[track_id] = updated

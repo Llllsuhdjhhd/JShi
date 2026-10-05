@@ -87,10 +87,12 @@
     <label>姓名 <input id="enroll-name" type="text" maxlength="40" list="known-names" placeholder="例如 lux"><datalist id="known-names"></datalist></label>
     <p id="enroll-count">尚未选择声音</p>
     <button id="enroll" disabled>登记声纹</button><button id="enroll-clear" class="secondary">清空选择</button>
+    <p id="saved-reference-counts" class="tip">累计已保存参考：连接后显示。</p>
+    <p class="tip">新选择优先保留，满10条后替换最旧的参考；重复或高度相似的样本不重复计数。</p>
     <p id="enroll-status" role="status">声音片段仅在当前会话内暂存，登记后保存声纹特征。</p>
-    <details><summary>匹配门槛 <output id="match-value">—</output></summary>
+    <details open><summary>姓名确认门槛 <output id="match-value">—</output></summary>
     <input id="match-threshold" type="range" min="0.30" max="0.95" step="0.01" value="0.60" disabled style="width:100%">
-    <p class="tip">相似度达到门槛才认作此人。低了容易认错人，高了容易认不出。建议在登记页“试一试”后采用推荐值。</p>
+    <p class="tip">此滑条直接调节实际姓名确认门槛，没有额外的0.65下限；与第二候选仍须有足够差距。降低后更容易认出，也更容易认错；可在登记页“试一试”核对。</p>
     <small id="match-status">连接后可调节；每种本地模型分别保存。</small></details>
   </details>
   <details class="panel"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4m4-8v12m4-15v18m4-15v12m4-8v4"/></svg>声纹方案对比（高级）</summary>
@@ -129,6 +131,15 @@
 </main>
 <script>
 const $ = id => document.getElementById(id);
+const savedReferences = new Map();
+function renderSavedReferences(){
+  $('saved-reference-counts').textContent='累计已保存参考：'+([...savedReferences.values()].map(r=>r.label+' '+(r.reference_count ?? '数量未知')+' 条 / 最多10条').join('；') || '当前方案暂无已保存参考。');
+}
+fetch('/voice-registry', {cache:'no-store'}).then(r=>r.ok ? r.json() : Promise.reject()).then(d=>{
+  if(ready)return;
+  for(const row of d.people || [])if(row.voiceprints || row.reference_count)savedReferences.set(row.object_id,row);
+  renderSavedReferences();
+}).catch(()=>{$('saved-reference-counts').textContent='累计已保存参考：暂未读取，连接后显示。';});
 const panelVisibility={conversation:true,inspector:true};
 try{const saved=JSON.parse(localStorage.getItem('jshi.voice.panels') || '{}');for(const id of Object.keys(panelVisibility))if(typeof saved[id]==='boolean')panelVisibility[id]=saved[id];}catch{}
 function refreshPanels(){
@@ -224,7 +235,7 @@ function clearPlayback() {
 }
 function message(m) {
   if(m.type==='voice_settings' || m.type==='voice_settings_error'){
-    if(m.match_threshold!=null){$('match-threshold').value=m.match_threshold;$('match-value').textContent=Number(m.match_threshold).toFixed(2);}
+    if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);}
     $('match-status').textContent=m.type==='voice_settings_error' ? '设置失败：'+m.text : '已生效并保存；与第二候选仍须相差 '+m.match_margin;return;
   }
   if(m.type==='comparison_pending'){$('compare-status').textContent='正在用同一组录音比较两个本地模型…';$('compare-run').disabled=true;return;}
@@ -270,13 +281,14 @@ function message(m) {
     $('enroll-status').textContent='未登记：'+m.text;selectionChanged();return;
   }
   if(m.type==='enrollment'){
+    savedReferences.set(m.object_id, {label:m.label, reference_count:m.reference_count});renderSavedReferences();
     speakerLabels.set(m.object_id,m.label);
     for(const id of m.input_ids){const row=inputRows.get(id);if(row){row.p.style.outline='';row.meta.textContent=m.label+' · 手动关联';row.p.classList.remove('selected');row.button.textContent='选择声音';}}
-    selectedInputs.clear();selectionChanged();$('enroll-status').textContent='已关联 '+m.label+'：'+m.clips+' 段，声纹已保存 '+m.seconds+' 秒。新的声音在最前面，一条声纹最长 10 秒。'+(m.min_similarity!=null ? '样本最低相似度 '+m.min_similarity+'（仅供参考）。' : '')+(m.warning || '');return;
+    selectedInputs.clear();selectionChanged();$('enroll-status').textContent='已关联 '+m.label+'：本次选择 '+m.clips+' 段，累计已保存 '+(m.reference_count ?? 1)+' 段（最多10段）；比对采用平均匹配分。兼容录音保留 '+m.seconds+' 秒。'+(m.min_similarity!=null ? '样本最低相似度 '+m.min_similarity+'（仅供参考）。' : '')+(m.warning || '');return;
   }
-  if (m.type==='ready') { ready=true; $('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '');
+  if (m.type==='ready') { savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true; $('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '');
     $('match-threshold').disabled=m.match_threshold==null;
-    if(m.match_threshold!=null){$('match-threshold').value=m.match_threshold;$('match-value').textContent=Number(m.match_threshold).toFixed(2);$('match-status').textContent='单句确认至少 '+Math.max(.65,m.match_threshold).toFixed(2)+'，与第二候选须相差 '+m.match_margin+'；较弱声音先收集多段核对，待定声音不参与姓名竞争。';}
+    if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);$('match-status').textContent='单句确认至少 '+Number(m.single_confirmation_threshold ?? Math.max(.65,m.match_threshold)).toFixed(2)+'，与第二候选须相差 '+m.match_margin+'；较弱声音先收集多段核对，待定声音不参与姓名竞争。';}
     voiceprintAvailable=m.voiceprint_available!==false;selectionChanged();
     if(!voiceprintAvailable)$('enroll-status').textContent='本地声纹模型尚未加载，暂时无法登记声音。';
     else $('enroll-status').textContent='已加载 '+(m.voiceprint_count || 0)+' 份登记声纹；未命中不代表登记丢失。';
@@ -296,6 +308,7 @@ function message(m) {
   else if(m.type==='renamed'){speakerLabels.set(m.object_id,m.label);$('rename-ask').hidden=true;}
   else if(m.type==='notice') log(m.text);
   else if(m.type==='write_failed') $('retry-write').hidden=false;
+  else if(m.type==='write_completed') $('retry-write').hidden=true;
   else if(m.type==='transcript') {
     $('live').textContent=m.final ? '' : m.text;
     // Final utterances appear once, with speaker and timestamps, in timeline.
@@ -318,8 +331,9 @@ function message(m) {
     const ranking=document.createElement('small');ranking.className='voice-ranking';
     try{
       const d=JSON.parse(m.identity_note || '{}');
-      const hits=(Array.isArray(d.candidates) ? d.candidates : []).filter(x=>Number.isFinite(x.score)).sort((a,b)=>b.score-a.score).slice(0,2);
-      ranking.textContent=hits.length ? hits.map((x,i)=>(i===0 ? '第一名：' : '第二名：')+(x.label || speakerLabels.get(x.object_id) || '名称未提供')+' '+Number(x.score).toFixed(3)).join(' · ')+'（相似度，未必已确认身份）' : '本句没有有效声纹排名';
+      const hint=d.short_voice_hint;
+      const hits=(Array.isArray(hint?.candidates) ? hint.candidates : Array.isArray(d.candidates) ? d.candidates : []).filter(x=>Number.isFinite(x.score)).sort((a,b)=>b.score-a.score).slice(0,2);
+      ranking.textContent=hits.length ? (hint ? '短句重复拼接参考（原 '+Number(hint.original_seconds).toFixed(2)+' 秒，重复 '+hint.repeat_count+' 次）：' : '')+hits.map((x,i)=>(i===0 ? '第一名：' : '第二名：')+(x.label || speakerLabels.get(x.object_id) || '名称未提供')+' '+Number(x.score).toFixed(3)).join(' · ')+(hint ? '（相似度，仅作提示，不确认身份）' : '（相似度，未必已确认身份）') : '本句没有有效声纹排名';
     }catch{ranking.textContent='本句没有有效声纹排名';}
     p.appendChild(ranking);
     {

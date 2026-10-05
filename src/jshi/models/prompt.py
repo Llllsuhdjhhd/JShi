@@ -236,11 +236,11 @@ def build_user(request: ModelRequest) -> str:
 
 
 def _build_user_body(request: ModelRequest) -> str:
-    if not _is_cognition(request):
-        return request.input_text
     persona = (getattr(request, "persona_user_text", "") or "").strip()
     if persona:
         return persona
+    if not _is_cognition(request):
+        return request.input_text
     speaker = request.speaker
     label = speaker.label.strip() if speaker and speaker.label.strip() else "对方"
     parts: list[str] = [f"【说话人】{label}"]
@@ -261,6 +261,7 @@ def _build_user_body(request: ModelRequest) -> str:
                 for sid, slabel, text, time_label in segments
             )
         )
+    parts.extend(_texts_of_kind(request.context, "pending_scene"))
     memories = _memories(
         request.context,
         {text for _sid, _slabel, text, _time in segments},
@@ -295,12 +296,12 @@ def _build_user_body(request: ModelRequest) -> str:
     hot = (getattr(request, "tool_hot_state", "") or "").strip()
     if hot and "【工具相关】" not in extra:
         parts.append(hot)
-    parts.append("【本轮】\n" + format_turn_input(
-        label, request.input_text, stimulus=getattr(request, "stimulus", STIMULUS_SPEECH)
-    ))
-    review = getattr(request, "input_review_text", "")
-    if review:
-        parts[-1] += "\n本批发言的识别标注（不是人物原话）：\n" + review
+    if request.input_items:
+        from jshi.core.main_input import render_inputs
+        turn = render_inputs(request.input_items)
+    else:
+        turn = format_turn_input(label, request.input_text, stimulus=getattr(request, "stimulus", STIMULUS_SPEECH))
+    parts.append("【本轮】\n" + turn)
     return "\n".join(parts)
 
 

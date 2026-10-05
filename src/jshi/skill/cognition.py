@@ -2,15 +2,14 @@
 
 - 输入：``ModelRequest``（本轮上下文：``input_text`` / ``speaker`` / ``subject_state`` /
   ``context``）。
-- 输出：``ModelResponse``（含 ``response_plan`` / ``rewritten_context`` /
-  ``object_assessment`` 等用途段）。
+- 输出：``ModelResponse``（回应、工具需要与材料评价；人物判断由独立流程负责）。
 - 一次调用即产出多用途段；主流程不执行 ``recall_requests``。
 """
 
 from __future__ import annotations
 
 from jshi.core.tool_handling import TOOL_HANDLING_SCHEMA, parse_tool_handling
-from jshi.core.conversation_review import REVIEW_SCHEMA, REVIEW_INSTRUCTION, parse_review, parse_reply_targets
+from jshi.core.conversation_review import parse_reply_targets
 
 import json
 import re
@@ -25,7 +24,6 @@ from jshi.models import (
     ModelPort,
     ModelRequest,
     ModelResponse,
-    ObjectAssessment,
     RecallRequest,
     ResponseItem,
     ResponsePlan,
@@ -42,7 +40,6 @@ from jshi.style.packs import (
 _RESPONSE_MODES = frozenset({"respond", "think", "ignore", "wait"})
 _SILENT_MODES = frozenset({"think", "ignore", "wait"})
 _CHANNELS = frozenset({"verbal", "embodied"})
-_CONCLUSIONS = frozenset({"confirm", "deny", "uncertain"})
 _RELEVANCE = frozenset({"related", "partial", "unrelated"})
 _USED_IN_REPLY = frozenset({"unused", "alluded", "relied"})
 _OBJECT_FIT = frozenset({"match", "other", "none"})
@@ -82,15 +79,6 @@ COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
                 "remove": {"type": "array", "items": {"type": "string"}},
                 "drop_recall": {"type": "array", "items": {"type": "string"}},
                 "focus": {"type": "array", "items": {"type": "string"}},
-            },
-        },
-        "object_assessment": {
-            "type": "object",
-            "properties": {
-                "conclusion": {"enum": ["confirm", "deny", "uncertain"]},
-                "object_id": {"type": "string"},
-                "label": {"type": "string"},
-                "reason": {"type": "string"},
             },
         },
         "recall_requests": {
@@ -292,19 +280,6 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         focus=_clean_refs(ca_raw.get("focus")),
     )
 
-    oa_raw = data.get("object_assessment")
-    object_assessment = None
-    if isinstance(oa_raw, dict):
-        conclusion = str(oa_raw.get("conclusion", "uncertain"))
-        if conclusion not in _CONCLUSIONS:
-            conclusion = "uncertain"
-        object_assessment = ObjectAssessment(
-            conclusion=conclusion,
-            object_id=str(oa_raw.get("object_id") or ""),
-            label=str(oa_raw.get("label") or ""),
-            reason=str(oa_raw.get("reason", "")),
-        )
-
     # ---- recall_requests（budget 钳制 ≤3；level 钳制 1–9，见 05 文档）----
     rr_raw = data.get("recall_requests") or []
     recall_requests = tuple(
@@ -335,47 +310,12 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         model=model,
         response_plan=response_plan,
         recall_requests=recall_requests,
-        object_assessment=object_assessment,
         context_assessment=context_assessment,
         importance_ranking=importance_ranking,
         memory_ratings=_parse_memory_ratings(data),
         tool_intent=_parse_tool_intent(data),
         tool_consumed=_parse_tool_consumed(data),
         tool_handling=parse_tool_handling(data.get("tool_handling")),
-        **parse_review(data),
-    )
-
-
-def _bind_speaker_fields(response: ModelResponse, request: ModelRequest) -> ModelResponse:
-    """模型没写 object_id / label 时，用本轮说话人补上。已填写的不覆盖。"""
-    speaker = request.speaker
-    assessment = response.object_assessment
-    if speaker is None or assessment is None:
-        return response
-    raw_id = (assessment.object_id or "").strip()
-    names = {speaker.label, *speaker.aliases, ""}
-    object_id = speaker.object_id if raw_id in names else (raw_id or speaker.object_id)
-    label = (assessment.label or "").strip() or speaker.label
-    if object_id == (assessment.object_id or "") and label == (assessment.label or ""):
-        return response
-    return ModelResponse(
-        model=response.model,
-        metadata=response.metadata,
-        response_plan=response.response_plan,
-        recall_requests=response.recall_requests,
-        object_assessment=ObjectAssessment(
-            conclusion=assessment.conclusion,
-            object_id=object_id,
-            label=label,
-            reason=assessment.reason,
-        ),
-        context_assessment=response.context_assessment,
-        importance_ranking=response.importance_ranking,
-        memory_ratings=response.memory_ratings,
-        rewritten_context=response.rewritten_context,
-        tool_intent=response.tool_intent,
-        tool_consumed=response.tool_consumed,
-        tool_handling=response.tool_handling,
     )
 
 
@@ -506,7 +446,6 @@ def _persona_to_model_response(
         tool_intent=_parse_tool_intent(data),
         tool_consumed=_parse_tool_consumed(data),
         tool_handling=parse_tool_handling(data.get("tool_handling")),
-        **parse_review(data),
     )
 
 
@@ -587,8 +526,8 @@ user 里的【活跃区】和【回忆】每行都带对象名；带方括号时
 
 {style_instruction}
 
-【对象确认】
-- 对象确认（object_assessment）可空。不确定则跳过。不要用同轮召回补材料。
+【本轮职责】
+- 沿用入口给出的对象归属，理解当前输入并产生反应。人物复判由独立流程处理，本轮不输出人物判断或登记建议。
 - 不要做 memory_ratings；来不及就空着。不要整理现场——那是写场调用的事，本轮只回应。
 
 ''' + TOOL_TASK_NOTE + '''
@@ -597,8 +536,10 @@ user 里的【活跃区】和【回忆】每行都带对象名；带方括号时
 你的输出格式：你每轮只输出一个 JSON 对象，字段按下方 Schema；枚举字段只取允许值，不输出任何解释文字。
 未说出口、须留下的明确事项写在 response_plan.unsaid，用连贯叙述点名当前说话人；说出口的话写在 items 的 verbal。不要把 unsaid 写进 verbal。不要另加「（名字）」标签。
 '''
-    instruction += "\n\n" + REVIEW_INSTRUCTION
-    schema: Mapping[str, Any] = {**COGNITION_JSON_SCHEMA, "properties": {**COGNITION_JSON_SCHEMA["properties"], **REVIEW_SCHEMA}}
+    schema: Mapping[str, Any] = {**COGNITION_JSON_SCHEMA, "properties": {
+        **{key:value for key,value in COGNITION_JSON_SCHEMA['properties'].items() if key != 'object_assessment'},
+        'reply_targets': {'type': 'array', 'items': {'type': 'string'}},
+    }}
 
     def __init__(
         self,
@@ -644,7 +585,7 @@ user 里的【活跃区】和【回忆】每行都带对象名；带方括号时
                 raw,
             )
         response = self.parse(data)
-        bound = _bind_speaker_fields(response, request).with_raw(raw_text)
+        bound = response.with_raw(raw_text)
         return _keep_usage_metadata(bound, raw)
 
     def run_stream(self, request: ModelRequest, on_reply: Callable[[str], None] | None = None) -> ModelResponse:

@@ -52,7 +52,7 @@ def process(tmp_path):
 def envelope(p, text="你好", track="A"):
     identities = VoiceIdentities(p.profiles, "stone", "session", p.repository)
     evidence = identities.resolve(track)
-    return InputEnvelope("session", "family-mic", (InputPart("text", text),), evidence), identities
+    return InputEnvelope("session", "family-mic", (InputPart("text", text), InputPart("audio", reference="session:audio")), evidence), identities
 
 
 def test_unknown_audio_converses_without_using_device_owner(process):
@@ -60,7 +60,7 @@ def test_unknown_audio_converses_without_using_device_owner(process):
     result = process.experience("stone", e.text, envelope=e, resolved_speaker=ids.candidate(e.speaker))
     assert result.speaker.object_id != "lux-id"
     assert result.speaker.reason == "voice_unknown"
-    assert process.profiles.get(result.speaker.object_id).status == "provisional"
+    assert process.profiles.get(result.speaker.object_id) is None
     req = process.cognition.requests[0]
     assert req.input_text == "你好"
     assert "声音姓名尚未明确" in build_user(req)
@@ -106,18 +106,21 @@ def test_unknown_cannot_be_confirmed_by_model_assessment(process):
     process.cognition = Confirmer()
     e, ids = envelope(process)
     process.experience("stone", e.text, envelope=e, resolved_speaker=ids.candidate(e.speaker))
-    assert process.profiles.get(e.speaker.object_id).status == "provisional"
+    assert process.profiles.get(e.speaker.object_id) is None
 
 
-def test_identity_self_introduction_links_existing_and_records_old_reference(process):
+def test_self_report_keeps_unknown_actor_and_records_clue(process):
     e, ids = envelope(process)
     updated, note = ids.introduce("A", "lux")
-    assert updated.object_id == "lux-id"
-    assert e.speaker.object_id in note
+    assert updated.object_id == e.speaker.object_id != "lux-id"
+    assert updated.label == "lux" and updated.status == "unknown"
+    assert "不迁移历史" in note
     assert ids.resolve("A") == updated
     assert ids.resolve("B").object_id != updated.object_id
     event = process.repository.list_history("stone", HistoryKind.FACT)[-1]
-    assert event.content["previous_object_id"] == e.speaker.object_id
+    assert event.event_type == "voice_identity_clue"
+    assert event.content["object_id"] == e.speaker.object_id
+    assert event.content["scope"] == "clue_only"
 
 
 def test_same_name_is_not_automatically_bound(process):

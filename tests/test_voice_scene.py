@@ -23,7 +23,7 @@ def test_unassigned_bucket_does_not_create_visitors_or_claim_their_history(proce
     assert unclear.object_id!=a.object_id and unclear.label=='声音归属待定'
     assert ids.resolve('8',uncertain=True).object_id==unclear.object_id
     named,note=ids.introduce('0','lux',uncertain=True)
-    assert named.object_id=='lux-id' and '本句' in note
+    assert named.object_id==unclear.object_id != 'lux-id' and '不迁移历史' in note
     assert ids.associated(unclear).object_id==unclear.object_id
     assert ids.resolve('0',cluster_id='A').object_id==a.object_id
     assert len(ids.clusters)==1
@@ -59,8 +59,9 @@ def test_anonymous_voice_survives_cloud_track_changes_then_gets_a_name(process):
     other = ids.resolve('7', cluster_id='local-B')
     assert other.object_id != first.object_id
     named, _ = ids.introduce('2', 'lux', cluster_id='local-A')
-    assert ids.resolve('8', cluster_id='local-A').object_id == 'lux-id'
-    assert ids.associated(first).object_id == 'lux-id'
+    assert ids.resolve('8', cluster_id='local-A').object_id == first.object_id
+    assert ids.resolve('8', cluster_id='local-A').label == 'lux'
+    assert ids.associated(first).object_id == first.object_id
     assert ids.associated(other).object_id != named.object_id
 
 
@@ -114,7 +115,7 @@ def test_spelled_name_with_greeting_links_existing_lux(process):
     ids=VoiceIdentities(process.profiles,'stone','session')
     assert explicit_name('我是 L U X 你好')=='LUX'
     who,note=ids.introduce('voice-A',explicit_name('我是 L U X 你好'))
-    assert who.object_id=='lux-id' and who.status=='introduced'
+    assert who.object_id!='lux-id' and who.label=='lux' and who.status=='unknown'
 
 
 @pytest.mark.parametrize('stage', ['cognition', 'write_zone'])
@@ -171,18 +172,15 @@ def test_busy_main_collects_multiple_batches_for_one_next_model_call(process, st
                 assert '【语音现场】' not in (second.transport_context or '')
                 assert '有的话在匠石上一轮回应生成之前就已说出' in second.input_text
             else:
-                # 写场不阻塞 JEV，但下一轮⑤必须等片场完整提交。
+                await asyncio.wait_for(c.turn_queue.join(), 3)
                 assert judge.calls > calls
-                assert len(process.cognition.requests) == 1
+                assert len(process.cognition.requests) >= 2
                 assert not release.is_set()
+                from jshi.models.prompt import build_user
+                rendered = build_user(process.cognition.requests[-1])
+                assert '尚未整理的输入输出' in rendered
+                assert all(t in rendered for t in ('我想去看看', '我是小明', '再补充一句'))
                 release.set()
-                await asyncio.wait_for(c.turn_queue.join(),3)
-                assert len(process.cognition.requests) == 2
-                later = process.cognition.requests[-1]
-                assert all(t in later.input_text for t in ('我想去看看','我是小明','再补充一句'))
-                assert '轨迹=' not in later.input_text
-                assert '【输入信封】' not in (later.transport_context or '')
-                assert '【语音现场】' not in (later.transport_context or '')
         finally:
             release.set()
             await c.close()
@@ -375,7 +373,7 @@ def test_low_probability_line_stays_in_the_scene_but_not_the_main_input(process)
     asyncio.run(run())
 
 
-def test_next_cognition_waits_for_complete_previous_write(process):
+def test_next_cognition_reads_pending_events_while_write_is_running(process):
     from threading import Event
     from jshi.style import SMITH
     process.style_packs.set('stone', SMITH)
@@ -399,12 +397,12 @@ def test_next_cognition_waits_for_complete_previous_write(process):
             await c.accept(Transcript('第二句接着说', 'A', 3000, 4500, True))
             await asyncio.wait_for(c.queue.join(), 1)
             await asyncio.sleep(.05)
-            assert len(process.cognition.requests) == 1
-            release.set()
             await asyncio.wait_for(c.turn_queue.join(), 3)
             assert len(process.cognition.requests) == 2
+            assert not release.is_set()
+            release.set()
             second = process.cognition.requests[-1].persona_user_text
-            assert '片场尚未写入' not in second and '第一句' in second
+            assert '尚未整理的输入输出' in second and '第一句' in second
             assert '上午去古镇' in second
             assert '第二句接着说' in second
         finally:

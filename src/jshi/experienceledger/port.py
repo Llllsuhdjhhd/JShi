@@ -74,6 +74,7 @@ class ContextViewState:
     focused_refs: tuple[str, ...] = ()
     last_applied_sequence: int = 0
     style_pack_id: str = ""
+    covered_event_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -186,6 +187,8 @@ class ExperienceLedgerPort(Protocol):
         *,
         speaker_object_id: str | None = None,
         style_pack_id: str = "",
+        covered_event_ids: tuple[str, ...] = (),
+        through_sequence: int | None = None,
     ) -> ContextViewState: ...
 
     def list_experiences(

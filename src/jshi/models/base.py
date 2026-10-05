@@ -98,6 +98,10 @@ class ModelRequest:
     # 工具热状态（进行中 + 近时终态）；空则本路不出现。供 05 判断是否再开工具。
     tool_hot_state: str = ""
     input_review_text: str = ""
+    # Overlapping modes share one cognition/reaction; reserved for future inputs.
+    processing_modes: tuple[str, ...] = ("interaction",)
+    input_parts: tuple[Mapping[str, Any], ...] = ()
+    input_items: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)

@@ -93,10 +93,17 @@ class ZoneBlock:
 
     text: str
     at: datetime | None = None
+    origin: str = ""
 
     def label(self, *, now: datetime | None = None) -> str:
         """提示词里显示的相对时间标签（无时间则空）。"""
         return relative_time_label(self.at, now=now) if self.at else ""
+
+
+def delivery_origin(text: str) -> str:
+    # These prefixes are emitted by the program, including before provenance
+    # was persisted. Ordinary input blocks start with their speaker's label.
+    return "speech_plan" if text.startswith("我准备说") else "delivery_fact" if text.startswith("（播放器") else ""
 
 
 def coerce_block(raw: object) -> ZoneBlock:
@@ -106,8 +113,9 @@ def coerce_block(raw: object) -> ZoneBlock:
     if isinstance(raw, Mapping):
         text = str(raw.get("text") or "").strip()
         stamp = raw.get("at") or raw.get("at_iso") or ""
-        return ZoneBlock(text=text, at=_parse_at(stamp))
-    return ZoneBlock(text=str(raw or "").strip(), at=None)
+        return ZoneBlock(text=text, at=_parse_at(stamp), origin=str(raw.get("origin") or delivery_origin(text)))
+    text = str(raw or "").strip()
+    return ZoneBlock(text=text, at=None, origin=delivery_origin(text))
 
 
 def _parse_at(raw: object) -> datetime | None:
@@ -148,6 +156,7 @@ class ZoneStore:
 
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path) if path is not None else None
+        self.covered_event_ids: dict[str, tuple[str, ...]] = {}
         self._zones: dict[str, tuple[str, tuple[ZoneBlock, ...]]] = {}
         # 最近一次 apply_edit 里被改判为 del 的 mod：(块号, 原文, 模型给的改写)。
         self.last_hollow_mods: tuple[tuple[str, str, str], ...] = ()
@@ -164,6 +173,7 @@ class ZoneStore:
                         if block.text
                     )
                     self._zones[str(key)] = (narration, blocks)
+                    self.covered_event_ids[str(key)] = tuple(value.get("covered_event_ids") or ())
 
     def _state(self, subject_id: str) -> tuple[str, tuple[ZoneBlock, ...]]:
         return self._zones.get(subject_id, ("", ()))
@@ -199,6 +209,7 @@ class ZoneStore:
         *,
         at: datetime | None = None,
         keep_time: bool = True,
+        covered_event_ids: tuple[str, ...] | None = None,
     ) -> tuple[str, ...]:
         """整份保存场景块。
 
@@ -220,8 +231,20 @@ class ZoneStore:
                 else:
                     block = _replace(block, at=stamp)
             cleaned.append(block)
+        old = self._zones.get(subject_id)
+        old_ids = self.covered_event_ids.get(subject_id, ())
         self._zones[subject_id] = (value, tuple(cleaned))
-        self._flush()
+        if covered_event_ids is not None:
+            self.covered_event_ids[subject_id] = covered_event_ids
+        try:
+            self._flush()
+        except Exception:
+            if old is None:
+                self._zones.pop(subject_id, None)
+            else:
+                self._zones[subject_id] = old
+            self.covered_event_ids[subject_id] = old_ids
+            raise
         return tuple(block.text for block in cleaned)
 
     def boot(
@@ -276,6 +299,7 @@ class ZoneStore:
         append_text: str = "",
         append_blocks: Sequence[str] = (),
         append_blocks_with_time: Sequence[ZoneBlock] = (),
+        covered_event_ids: tuple[str, ...] | None = None,
     ) -> tuple[str, ...]:
         """按原始编号一次性应用模型给出的增/删/改，再追加程序块；不自动删开头。
 
@@ -309,6 +333,8 @@ class ZoneStore:
             if op == "del":
                 del_indices.add(scene_index)
             elif op == "mod":
+                if current[scene_index].origin in {"speech_plan", "delivery_fact"}:
+                    continue  # Only player events establish or change delivery facts.
                 text = _clean_block_text(edit.get("text"))
                 if not text:
                     continue
@@ -336,7 +362,7 @@ class ZoneStore:
             cleaned = str(text or "").strip()
             if cleaned:
                 result.append(ZoneBlock(text=cleaned, at=stamp))
-        return self.save(subject_id, result, keep_time=False)
+        return self.save(subject_id, result, keep_time=False, covered_event_ids=covered_event_ids)
 
     def _flush(self) -> None:
         if self.path is None:
@@ -345,14 +371,14 @@ class ZoneStore:
         payload = {
             key: {
                 "value": value,
+                "covered_event_ids": self.covered_event_ids.get(key, ()),
                 "blocks": [
-                    {"text": block.text, "at": block.at.isoformat() if block.at else ""}
+                    {"text": block.text, "at": block.at.isoformat() if block.at else "", "origin": block.origin}
                     for block in blocks
                 ],
             }
             for key, (value, blocks) in self._zones.items()
         }
-        self.path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        temp = self.path.with_suffix(self.path.suffix + ".tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(self.path)

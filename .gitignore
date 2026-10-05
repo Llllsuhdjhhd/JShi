@@ -14,6 +14,7 @@ __pycache__/
 .jshi/voiceprints-*.json
 .jshi/voiceprints-*.tmp
 .jshi/voiceprints.settings.json
+.jshi/voiceprints*.candidates.sqlite3*
 .jshi/voice_trials/
 step_inputs.jsonl
 .jshi/rems/rems.db-wal

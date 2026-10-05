@@ -4,7 +4,7 @@ import asyncio
 import json
 from dataclasses import replace
 from threading import Event
-from time import monotonic
+from time import monotonic, time
 from types import SimpleNamespace
 
 import numpy as np
@@ -23,6 +23,12 @@ from tests.test_voice import FakeCloud, Model, process
 
 async def discard(message):
     pass
+
+
+def review_snapshot(c, current, rows):
+    return {'current': tuple(current), 'rows': rows, 'queued_at': time(),
+        'basis_at_ms': max((u.received_at_ms or 0 for u in current), default=0),
+        'review_id': 'test-review', 'candidate_codes': {oid: code for code, oid in c.code_owner.items()}}
 
 
 @pytest.mark.parametrize('physical,semantic,relation,expected,level', [
@@ -72,7 +78,7 @@ def test_main_review_cannot_confirm_unresolved_evidence_conflict():
     assert parsed['speaker_judgments'][0]['evidence_relation'] == 'conflict'
 
 
-def test_main_can_withdraw_jev_guess_and_batch_request_is_visible(process):
+def test_independent_review_suggests_withdrawal_without_rewriting_current_input(process):
     async def run():
         c = VoiceConversation(process, 'stone', FakeCloud(), discard)
         try:
@@ -89,10 +95,13 @@ def test_main_can_withdraw_jev_guess_and_batch_request_is_visible(process):
                 current_utterances=(u,), utterances=(u,), review_context=context, review_candidates=rows)
             response = ModelResponse(model='test', speaker_judgments=({'n': 'N1', 'speaker_pick': 'unknown',
                 'level': '不确定', 'evidence': '接话也可能来自旁人', 'to_jiangshi': 'maybe'},))
+            c.accept_person_review({'speaker_judgments': response.speaker_judgments}, review_snapshot(c, (u,), rows))
             final, updated, _ = c.apply_main_review(response, envelope, c.epoch)
-            assert updated.current_utterances[0].speaker == raw
-            assert 'lux' not in updated.text and '待定声音' in updated.text
-            assert final.speaker_judgments[0]['to_jiangshi'] == 'maybe'
+            assert updated.current_utterances[0].speaker == guess
+            assert c.recent_main_reviews()[0]["judgments"][0]["speaker_pick"] == "unknown"
+            assert updated == envelope
+            assert not final.speaker_judgments
+            assert c.recent_main_reviews()[0]['judgments'][0]['to_jiangshi'] == 'maybe'
             protected = replace(u, speaker=replace(guess, status='recognized', method='voiceprint_match'))
             protected_envelope = replace(envelope, speaker=protected.speaker, current_utterances=(protected,), utterances=(protected,))
             _, updated, _ = c.apply_main_review(response, protected_envelope, c.epoch)
@@ -111,16 +120,17 @@ def test_review_parser_and_persona_keep_short_reason_and_targets():
     assert parse_reply_targets({'reply_targets': ['P1', 'S1', 'P1', 'invented']}) == ('P1', 'S1')
     response = _persona_to_model_response({'mode': 'respond', 'reply': '你好', 'action': '无动作',
         'speaker_judgments': [judgment], 'reply_targets': ['S1'], 'next_jev_note': 'S1可能是P1，接续上一句。'}, 'test')
-    assert response.speaker_judgments[0]['speaker_pick'] == 'P1'
+    assert not response.speaker_judgments
     assert response.response_plan.items[0].target_ids == ('S1',)
-    assert response.next_jev_note.startswith('S1可能')
+    assert response.next_jev_note == ''
 
 
 def test_names_and_subject_nicknames_are_portrait_material_without_merging(process):
     async def run():
         c = VoiceConversation(process, 'stone', FakeCloud(), discard)
         try:
-            known, _ = c.identities.introduce('A', 'lux')
+            known, _ = c.identities.introduce('A', 'lux', basis='manual_selection')
+            process.profiles.add_alias('lux-id', '小鹿')
             same, _ = c.identities.introduce('A', '小鹿')
             assert same.object_id == known.object_id == 'lux-id'
             c.note_person_names(known, '大家都叫我小琴', 'alias')
@@ -175,7 +185,7 @@ def test_candidates_use_normalized_audio_budget_and_reuse(process):
     asyncio.run(run())
 
 
-def test_main_review_distinguishes_two_unassigned_lines_and_passes_feedback(process):
+def test_independent_review_distinguishes_two_unassigned_lines_and_passes_feedback(process):
     async def run():
         c = VoiceConversation(process, 'stone', FakeCloud(), discard)
         try:
@@ -198,14 +208,22 @@ def test_main_review_distinguishes_two_unassigned_lines_and_passes_feedback(proc
                 'to_jiangshi': 'yes', 'address_reason': '直接提问'} for n, p in (('N1', p1), ('N2', p2)))
             response = ModelResponse(model='test', response_plan=ResponsePlan('respond', items=(ResponseItem('verbal', '下午再说', (p2,)),)),
                 speaker_judgments=judgments, next_jev_note='两句分别接续不同话题，仍是上下文归属。')
+            c.accept_person_review({'speaker_judgments': judgments, 'next_jev_note': response.next_jev_note},
+                review_snapshot(c, (one, two), rows))
             final, updated, actor = c.apply_main_review(response, envelope, c.epoch)
-            assert [u.speaker.object_id for u in updated.current_utterances] == ['lux-id', 'other']
-            assert updated.text.splitlines()[0].startswith(f'1. {p1}（lux，上下文推测）')
-            assert updated.text.splitlines()[1].startswith(f'2. {p2}（lux，上下文推测）')
-            assert final.response_plan.items[0].target_ids == ('other',)
-            next_u = replace(one, input_id='next', received_at_ms=12)
+            assert [u.speaker.object_id for u in updated.current_utterances] == ['unknown', 'unknown']
+            assert updated == envelope
+            assert final.response_plan.items[0].target_ids == ()
+            assert not final.speaker_judgments
+            assert len(c.recent_main_reviews()[0]["judgments"]) == 2
+            next_u = replace(one, input_id='next', received_at_ms=int(time()*1000)+1)
             feedback = c.recent_main_reviews((next_u,))
-            assert feedback[0]['next_jev_note'] == response.next_jev_note
+            assert feedback[0]['next_jev_note'] == ''
+            assert [item['input_id'] for item in feedback[0]['judgments']] == ['one', 'two']
+            before_mismatch = len(c.main_reviews)
+            c.accept_person_review({'speaker_judgments': [{**judgments[0], 'input_id': 'two'}]},
+                review_snapshot(c, (one, two), rows))
+            assert len(c.main_reviews) == before_mismatch
             assert '非声纹确认' in feedback[0]['source']
             assert not c.recent_main_reviews((replace(next_u, received_at_ms=9),))
             before = len(c.main_reviews)
@@ -226,7 +244,7 @@ def test_review_request_can_open_related_batch_without_forcing_speech():
     assert decision.action == 'ignore'
 
 
-def test_main_review_is_applied_before_write_and_next_jev_receives_it(process):
+def test_independent_review_stays_advice_and_next_jev_receives_it(process):
     calls = []
     written = []
     class Judge:
@@ -244,6 +262,14 @@ def test_main_review_is_applied_before_write_and_next_jev_receives_it(process):
                 speaker_judgments=({'n': 'N1', 'speaker_pick': 'P1', 'level': '确定', 'score': .8,
                     'evidence': '明确接续原话', 'to_jiangshi': 'yes', 'address_reason': '接着对匠石说'},),
                 next_jev_note='这句接续lux的原话，归属来自上下文，未确认声纹。')
+    class Reviewer(Model):
+        def generate(self, request):
+            self.requests.append(request)
+            assert request.purpose == 'voice_person_review'
+            return ModelResponse(model='test', text=json.dumps({'speaker_judgments': [
+                {'n':'N1', 'speaker_pick':'unknown', 'level':'不确定', 'evidence':'姓名未确认'}],
+                'next_jev_note':'独立核对：归属来自上下文，未确认声纹。'}))
+    process.person_review_model = Reviewer()
     original = process._write_zone
     def write(subject_id, activity, current, *args, **kwargs):
         written.append(current.input_text)
@@ -261,18 +287,21 @@ def test_main_review_is_applied_before_write_and_next_jev_receives_it(process):
                 await asyncio.wait_for(c.queue.join(), 3)
                 await asyncio.wait_for(c.turn_queue.join(), 3)
                 await asyncio.wait_for(c.write_queue.join(), 3)
+                await asyncio.wait_for(c.person_review_queue.join(), 3)
             await c.accept(Transcript('我是 lux', 'A', 0, 1800, True))
             await finish()
             await c.accept(Transcript('我还要接着说', 'B', 2000, 2800, True, identity_uncertain=True))
             await finish()
-            assert 'lux（上下文推测）' in written[1]
+            assert '待定声音' in written[1]
+            assert 'lux（上下文推测）' not in written[1]
             response = next(message for message in messages if message['type'] == 'reply' and '继续说吧' in message['text'])
-            assert response['items'][0]['target_ids'] == ('lux-id',)
+            assert response['items'][0]['target_ids'] == ()
             from jshi.models.prompt import build_user
             assert '前文与本批证据' not in build_user(writer.requests[1])
             await c.accept(Transcript('下一句', 'C', 3000, 3800, True, identity_uncertain=True))
             await finish()
-            assert '归属来自上下文，未确认声纹' in calls[-1]
+            assert json.loads(calls[-1])['person_review'][0]['next_jev_note'] == ''
+            assert json.loads(calls[-1])['person_review'][0]['judgments']
             assert 'input_worker_wait_ms' in next(iter(c.voice_timings.values()))[1]
         finally:
             await c.close()

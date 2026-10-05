@@ -23,6 +23,15 @@ from jshi.memory import RecallStrategyStore
 from jshi.style.packs import write_instruction_for, zone_chars_for
 
 
+@pytest.fixture(autouse=True)
+def isolated_overlay():
+    # Earlier process/CLI tests can install the process-global snapshot.
+    from jshi.core.param_overlay import _clear
+    _clear()
+    yield
+    _clear()
+
+
 def test_overlay_replaces_default_and_does_not_add(tmp_path):
     path = tmp_path / "param_overlay.json"
     write_overlay(path, {"MEMORY_FLUSH_CHARS": 4000})
