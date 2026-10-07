@@ -311,6 +311,9 @@ def build_rems_pipeline(data_dir: Path, pipeline_cls: Any, config_cls: Any) -> A
     data_dir.mkdir(parents=True, exist_ok=True)
     config = config_cls()
     apply_jshi_llm_settings(config)
+    if hasattr(config, 'portrait_max_chars'):
+        config.portrait_max_chars = 800
+        config.portrait_max_levels = 3
     llm = getattr(config, "llm", None)
     if llm is not None and not (getattr(llm, "api_key", None) or "").strip():
         raise RemsUnavailableError(
@@ -347,6 +350,8 @@ class Rems3MemoryBackend:
         disable_local_embedding_if_needed(self._pipeline)
         self.long_term_experience = None
         self._portrait_refresh = None
+        from .portrait_views import PortraitViews
+        self._portrait_views = PortraitViews(Path(data_dir or '.jshi/rems') / 'jshi_person_views.json')
         if all(
             hasattr(self._pipeline, name)
             for name in ("config", "role_repo", "db", "llm")
@@ -458,6 +463,7 @@ class Rems3MemoryBackend:
             try:
                 if self._portrait_refresh is not None:
                     self._portrait_refresh.refresh(subject_id, object_id)
+                self._portrait_views.refresh(self._pipeline.portrait(subject_id, object_id), getattr(self._pipeline, 'llm', None))
             except Exception:
                 logger.exception("人物描述肖像维护失败：%s/%s", subject_id, object_id)
             finally:
@@ -538,7 +544,13 @@ class Rems3MemoryBackend:
 
     def portrait(self, subject_id: str, object_id: str) -> dict | None:
         """对象人物肖像(REMS 特性)。同进程 REMSPipeline 已实现 ``portrait``。"""
-        return self._pipeline.portrait(subject_id, object_id)
+        raw = self._pipeline.portrait(subject_id, object_id)
+        if not raw:
+            return raw
+        view, ready = self._portrait_views.get(raw)
+        if not ready:
+            self._schedule_experience_refresh(subject_id, object_id)
+        return view
 
     def assemble_recall_block(
         self,

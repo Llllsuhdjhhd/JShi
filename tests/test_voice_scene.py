@@ -158,10 +158,11 @@ def test_busy_main_collects_multiple_batches_for_one_next_model_call(process, st
             await c.accept(Transcript('再补充一句','A',4600,5500,True))
             await asyncio.wait_for(c.queue.join(),1)
             if stage == 'cognition':
-                assert judge.calls==calls
+                assert judge.calls==calls + 3
                 assert c.turn_queue.qsize()==1
                 release.set()
                 await asyncio.wait_for(c.turn_queue.join(),3)
+                assert judge.calls==calls + 3  # coalesced turns reuse input-ID-bound judgments
                 requests=process.cognition.requests
                 assert len(requests)==2
                 second=requests[1]

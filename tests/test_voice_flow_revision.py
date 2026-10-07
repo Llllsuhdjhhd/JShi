@@ -85,6 +85,7 @@ def test_context_does_not_treat_later_playback_as_heard_before_input(process):
             current = SceneUtterance('那下午呢', who, 2000, 3000, input_id='current', received_at_ms=20)
             later = SceneUtterance('后面才说的', who, 4000, 5000, input_id='later', received_at_ms=40)
             c.scene.extend((prior, current, later))
+            c._capture_jev_inputs((prior, current, later))
             c.played_history.extend((
                 {'who': '匠石', 'basis': '已播出', 'text': '先去古镇', 'targets': ['lux-id'], 'at': 15},
                 {'who': '匠石', 'basis': '已播出', 'text': '再去博物馆', 'targets': ['lux-id'], 'at': 30},
@@ -93,7 +94,7 @@ def test_context_does_not_treat_later_playback_as_heard_before_input(process):
             text = json.dumps(context, ensure_ascii=False)
             assert '明天去哪' in text and '先去古镇' in spoken
             assert '再去博物馆' not in text and '后面才说的' not in text
-            assert context[-1]['targets'] == ['lux-id']
+            assert context[0]['at'] == 10
         finally:
             await c.close()
     asyncio.run(run())
@@ -181,11 +182,13 @@ def test_contextual_attribution_survives_into_next_jev_without_overwriting_known
             c.candidate_cache['first'] = [{'object_id': 'lux-id', 'score': .28}]
             items = (BatchItem(1, speaker_pick=code, speaker_level='确定', speaker_score=.75),)
             result = c._apply_attribution([first], items)
-            assert result[0].speaker.method == 'context_attribution'
+            assert result[0].speaker.method == 'jev_attribution'
+            c._capture_jev_inputs(result, items)
             assert c.annotations['first'].object_id == 'lux-id'
             next_input = SceneUtterance('再问一句', unknown, 1000, 1500, input_id='next', received_at_ms=20)
             context, _ = c._jev_context((next_input,))
-            assert 'lux' in context[0]['who'] and '上下文推测' in context[0]['who']
+            assert context[0]['p'] == code
+            assert context[0]['judgment']['certainty'] == '确定'
             assert process.profiles.get('lux-id').status == 'confirmed'
             known = SpeakerEvidence('B', 'other-id', '已确认的人', 'recognized', 'manual_annotation')
             utterance = SceneUtterance('你好', known, 2000, 2500, input_id='known')

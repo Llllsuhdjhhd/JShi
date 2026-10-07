@@ -27,7 +27,7 @@ class ManualInputSource:
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
         speaker = ctx.speaker
-        if (speaker is None or not self.path.exists() or speaker.reason in {
+        if (not ctx.recall_enabled or speaker is None or not self.path.exists() or speaker.reason in {
                 "voice_unknown", "voice_pending", "voice_scene", "context_attribution", "main_context_attribution"}):
             return LoadResult()
         if self.store is None:
@@ -213,6 +213,11 @@ class MemorySource:
         self._profiles = profiles
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
+        if not ctx.recall_enabled:
+            return LoadResult()
+        return self._load(ctx)
+
+    def _load(self, ctx: AssemblyContext) -> LoadResult:
         seen: set[str] = set()
         fragments: list[AssemblyFragment] = []
         object_id = ctx.speaker.object_id if ctx.speaker else None
@@ -351,7 +356,7 @@ class PersonPortraitSource:
     name = "person_portrait"
     status = "implemented"
 
-    def __init__(self, memory: object, *, budget_chars: int = 350) -> None:
+    def __init__(self, memory: object, *, budget_chars: int = 800) -> None:
         self._memory = memory
         self._budget_chars = max(0, budget_chars)
 
@@ -386,12 +391,16 @@ class PersonPortraitSource:
         if not texts:
             text = str(portrait.get("visible_summary") or "").strip()
         else:
-            fitting = [item for item in texts if len(item) <= self._budget_chars]
+            fitting = [item for item in texts if len(item) <= min(self._budget_chars, ctx.portrait_budget_chars)]
             text = max(fitting, key=len) if fitting else min(texts, key=len)
+            selected = levels.get({800:'L1',400:'L2',200:'L3'}.get(ctx.portrait_budget_chars,''))
+            if isinstance(selected,str) and selected.strip() and len(selected) <= min(self._budget_chars,ctx.portrait_budget_chars):
+                text = selected
+        from jshi.memory.portrait_views import bounded_portrait
+        text = bounded_portrait(text, min(self._budget_chars, ctx.portrait_budget_chars))
         if not text:
             return LoadResult()
-        if len(text) > self._budget_chars:
-            text = text[: self._budget_chars - 1].rstrip() + "…"
+        # Prefer an existing shorter summary; never cut an identity/qualifier mid-sentence.
         updated_at = portrait.get("updated_at")
         return LoadResult(
             fragments=(
@@ -400,6 +409,8 @@ class PersonPortraitSource:
                     id=f"person-portrait:{speaker.object_id}",
                     content=text,
                     kind="portrait",
+                    alternatives=tuple(texts),
+                    portrait_levels=tuple((k,v) for k,v in levels.items() if isinstance(v,str)) if isinstance(levels,dict) else (),
                     object_id=speaker.object_id,
                     query_object_role="interlocutor",
                     status="active",

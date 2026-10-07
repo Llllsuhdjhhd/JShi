@@ -94,6 +94,7 @@ class ZoneBlock:
     text: str
     at: datetime | None = None
     origin: str = ""
+    tier: int = 1
 
     def label(self, *, now: datetime | None = None) -> str:
         """提示词里显示的相对时间标签（无时间则空）。"""
@@ -113,9 +114,13 @@ def coerce_block(raw: object) -> ZoneBlock:
     if isinstance(raw, Mapping):
         text = str(raw.get("text") or "").strip()
         stamp = raw.get("at") or raw.get("at_iso") or ""
-        return ZoneBlock(text=text, at=_parse_at(stamp), origin=str(raw.get("origin") or delivery_origin(text)))
+        return ZoneBlock(text=text, at=_parse_at(stamp), origin=str(raw.get("origin") or delivery_origin(text)), tier=valid_tier(raw.get("tier")) or 1)
     text = str(raw or "").strip()
     return ZoneBlock(text=text, at=None, origin=delivery_origin(text))
+
+
+def valid_tier(value):
+    return value if type(value) is int and value in (1, 2, 3) else None
 
 
 def _parse_at(raw: object) -> datetime | None:
@@ -276,7 +281,7 @@ class ZoneStore:
         self._flush()
         return tuple(block.text for block in blocks)
 
-    def render(self, subject_id: str, *, now: datetime | None = None) -> str:
+    def render(self, subject_id: str, *, now: datetime | None = None, max_tier: int = 3, show_tiers: bool = False) -> str:
         """渲染片场：``B{n}[时间] 正文``。时间缺失的块不显示方括号。"""
         value, blocks = self._state(subject_id)
         rows: list[str] = []
@@ -286,9 +291,12 @@ class ZoneStore:
             rows.append(f"B{n}  {value}")
         for block in blocks:
             n += 1
+            if block.tier > (valid_tier(max_tier) or 3):
+                continue
             label = block.label(now=now)
             stamp = f"[{label}]" if label else ""
-            rows.append(f"B{n}{stamp}  {block.text}")
+            tier = f"[档位{block.tier}]" if show_tiers else ""
+            rows.append(f"B{n}{stamp}{tier}  {block.text}")
         return "\n".join(rows)
 
     def apply_edit(
@@ -313,16 +321,24 @@ class ZoneStore:
         offset = self._block_offset(subject_id)
         del_indices: set[int] = set()
         mods: dict[int, str] = {}
-        add_blocks: list[str] = []
+        tiers: dict[int, int] = {}
+        append_tiers: dict[int, int] = {}
+        add_blocks: list[ZoneBlock] = []
         hollow: list[tuple[str, str, str]] = []
         for edit in edits or ():
             if not isinstance(edit, Mapping):
                 continue
             op = str(edit.get("op") or "").strip()
+            tier = valid_tier(edit.get("tier"))
+            ref = str(edit.get("id") or "").strip()
+            if op == "tier" and ref.startswith("A"):
+                if ref[1:].isdigit() and tier is not None:
+                    append_tiers[int(ref[1:]) - 1] = tier
+                continue
             if op == "add":
                 text = _clean_block_text(edit.get("text"))
                 if text:
-                    add_blocks.append(text)
+                    add_blocks.append(ZoneBlock(text=text, tier=tier or 1))
                 continue
             index = _block_index(edit.get("id"))
             if index is None:
@@ -330,6 +346,8 @@ class ZoneStore:
             scene_index = index - offset
             if scene_index < 0 or scene_index >= len(current):
                 continue  # 引用价值叙述(B1)或不存在块 → 忽略
+            if op in {"tier", "mod"} and tier is not None:
+                tiers[scene_index] = tier
             if op == "del":
                 del_indices.add(scene_index)
             elif op == "mod":
@@ -352,16 +370,16 @@ class ZoneStore:
             if i in del_indices:
                 continue
             if i in mods:
-                result.append(ZoneBlock(text=mods[i], at=block.at or stamp))
+                result.append(_replace(block, text=mods[i], at=block.at or stamp, tier=tiers.get(i, block.tier)))
             else:
-                result.append(block)
-        result.extend(ZoneBlock(text=text, at=stamp) for text in add_blocks)
-        result.extend(append_blocks_with_time or ())
+                result.append(_replace(block, tier=tiers.get(i, block.tier)))
+        result.extend(_replace(block, at=stamp) for block in add_blocks)
+        result.extend(_replace(block, tier=append_tiers.get(i, block.tier)) for i, block in enumerate(append_blocks_with_time or ()))
         extra = [*(append_blocks or ()), append_text]
-        for text in extra:
+        for i, text in enumerate(extra, start=len(append_blocks_with_time or ())):
             cleaned = str(text or "").strip()
             if cleaned:
-                result.append(ZoneBlock(text=cleaned, at=stamp))
+                result.append(ZoneBlock(text=cleaned, at=stamp, tier=append_tiers.get(i, 1)))
         return self.save(subject_id, result, keep_time=False, covered_event_ids=covered_event_ids)
 
     def _flush(self) -> None:
@@ -373,7 +391,7 @@ class ZoneStore:
                 "value": value,
                 "covered_event_ids": self.covered_event_ids.get(key, ()),
                 "blocks": [
-                    {"text": block.text, "at": block.at.isoformat() if block.at else "", "origin": block.origin}
+                    {"text": block.text, "at": block.at.isoformat() if block.at else "", "origin": block.origin, "tier": block.tier}
                     for block in blocks
                 ],
             }

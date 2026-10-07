@@ -262,6 +262,8 @@ def _build_user_body(request: ModelRequest) -> str:
             )
         )
     parts.extend(_texts_of_kind(request.context, "pending_scene"))
+    for scene in _texts_of_kind(request.context, 'jev_scene'):
+        parts.append('【JEV情境参考】\n' + scene + '\n此前情境可能滞后，以本批原话为先；由你判断受话对象与是否回应。')
     memories = _memories(
         request.context,
         {text for _sid, _slabel, text, _time in segments},

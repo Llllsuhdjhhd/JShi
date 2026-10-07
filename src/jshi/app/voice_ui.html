@@ -52,9 +52,33 @@
   .debug pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:44vh;overflow:auto;font:12px/1.6 monospace;background:var(--surface);color:#4e5666;border-radius:8px;padding:12px}
   .debug-controls{display:flex;gap:4px;flex-wrap:wrap;margin-top:10px}.debug-controls button{margin:0}#debug-title{font-size:12px;overflow-wrap:anywhere}
   .empty{color:#8b909a;padding:40px 20px;text-align:center;font-size:13px}
-  #composer{display:flex;gap:8px;margin-top:12px}#composer input{flex:1;margin:0}#composer button{margin:0;background:var(--accent)}
+  #composer{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}#composer textarea{width:100%;min-height:80px;resize:vertical;padding:12px;border:1px solid #e0e3e8;border-radius:9px;font:inherit}#composer select{flex:1;min-width:150px}#composer button{margin:0;background:var(--accent)}
   #rename-ask{margin:8px 0 0;padding:10px 12px;border-radius:10px;background:#f5f8ff;border:1px solid #d5e4ff}
   @media(max-width:900px){main{padding:20px}.workspace{grid-template-columns:1fr;gap:24px}.inspector{position:static;max-height:none;border-left:0;padding:0}.conversation{min-height:28vh}#log p.input{margin-left:5%}#log p.reply{margin-right:3%}}
+  /* Conversation first; specialist tools live in an on-demand workspace. */
+  body{background:#f8f9fc}main{max-width:1160px;height:100dvh;display:flex;flex-direction:column;padding:24px 32px 16px}
+  .workspace{display:flex;flex:1;min-height:0;align-items:stretch}.conversation{display:flex;flex-direction:column;flex:1;min-height:0;width:100%}
+  .message-scroll{flex:1;min-height:0;overflow:auto;padding:12px 8px 24px;scrollbar-gutter:stable}
+  #log{max-width:840px;margin:0 auto}#log p.reply{padding:14px 18px;background:#fff;border:1px solid #e9edf3;margin-right:10%}#log p.input{padding:14px 18px;margin-left:10%}
+  #log .voice-ranking{display:none}#log p:has(details[open]) .voice-ranking{display:block;margin-top:6px}
+  .send-state{display:block;font-size:11px;color:#8b97a8;margin-top:5px}.send-state.failed{color:#b56655}
+  .empty{display:grid;place-content:center;min-height:35vh;gap:8px;color:#8b94a3}.empty strong{font-size:22px;font-weight:500;color:#48556b}.empty span{font-size:13px}
+  .input-dock{flex:none;background:#f8f9fc;padding:12px 0 0;border-top:1px solid #e5e9f1}
+  .input-modes{display:flex;align-items:center;gap:6px;margin-bottom:10px}.input-modes button{background:transparent;color:#758094;padding:7px 16px;border-radius:20px;margin:0}.input-modes button[aria-pressed=true]{background:#e6edfb;color:#2b66cf}.input-modes .dock-help{margin-left:auto;color:#8993a2;font-size:12px}
+  .voice-dock{padding:10px 14px;color:#7a8697;font-size:13px;display:flex;gap:10px;align-items:center}.voice-dot{width:8px;height:8px;background:#9ba9bf;border-radius:50%;flex:none}.voice-dock.active .voice-dot{background:#3d9d7b;box-shadow:0 0 0 5px #3d9d7b12}
+  #composer{margin:0;padding:12px 14px;background:#fff;border:1px solid #dfe5ee;border-radius:16px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;box-shadow:0 3px 16px #243b5e04}
+  .composer-top{grid-column:1/-1;display:flex;align-items:center;gap:8px}.composer-top label{margin:0;font-size:12px;color:#8390a1;white-space:nowrap}#composer select{width:auto;max-width:250px;flex:0 1 220px;min-width:120px;border:0;background:#f5f7fa;padding:6px 10px;font-size:12px}#composer #text-people-refresh{background:transparent;color:#8a95a6;font-size:12px;padding:5px 9px}
+  #composer textarea{grid-column:1;min-height:48px;max-height:160px;resize:vertical;border:0;padding:4px 0;font-size:14px;outline:none}#composer #send-text{grid-column:2;align-self:end;border-radius:10px;padding:8px 18px;background:var(--accent);color:#fff}#text-status{margin:5px 12px 0;font-size:11px}
+  #toggle-inspector{display:flex;gap:6px;background:#edf0f5;color:#576477;font-size:12px;padding:8px 12px}.view-controls #toggle-conversation{display:none}
+  .dialog-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:#fff;border-bottom:1px solid #e5e9f0;gap:12px}.dialog-header h2{font-size:16px;margin:0;font-weight:600}.dialog-header p{margin:3px 0 0;color:#8b95a4;font-size:12px}.dialog-close{background:#f2f4f7;color:#667285;margin:0;font-size:12px;padding:7px 10px}
+  .inspector{position:static;border:0;padding:22px 24px;max-height:calc(100% - 84px);overflow:auto;display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}.inspector>.panel{margin:0;padding:18px;border:1px solid #e2e7ef}.inspector>.debug{grid-column:1/-1}.inspector a,.inspector a:visited{color:#45668d;text-decoration:none}.inspector a:hover{color:#286ad5}.inspector .tip{font-size:12px;line-height:1.8}.inspector .panel>summary{font-size:14px}
+  .data-shortcuts{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}.data-shortcuts button{margin:0;text-align:left;background:#f4f7fb;color:#506887;padding:12px;font-size:12px}.data-shortcuts button:hover{background:#eaf1fc;color:#286ad5}.data-shortcuts .all-data{grid-column:1/-1;background:#edf3ff;color:#3567bc}.registry-link{display:inline-block;background:#f4f7fb;padding:8px 12px;border-radius:8px;font-size:12px}
+  #data-frame{display:block;width:100%;height:100%;border:0}.debug pre{max-height:none;min-height:100px}.debug-controls{margin:14px 0}
+  main:has(.debug-open){max-width:1600px}.workspace.debug-open{display:grid;grid-template-columns:minmax(300px,.8fr) minmax(520px,1.2fr);gap:20px}.workspace.debug-full{display:flex}
+  .debug-workspace{min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid #e1e6ee;border-radius:16px;background:#fff;overflow:hidden;flex:1}.debug-toolbar{display:flex;gap:6px;flex:none}.debug-toolbar button{margin:0}.debug-nav{display:flex;gap:6px;padding:10px 20px;border-bottom:1px solid #edf0f5;background:#fff}.debug-nav button{margin:0;background:transparent;color:#7a8798;padding:6px 12px}.debug-nav button[aria-pressed=true]{background:#edf3fd;color:#356cc5}
+  #settings-pane{flex:1;min-height:0;overflow:auto;background:#f8f9fc}#data-pane{flex:1;min-height:0}.inspector{max-height:none;overflow:visible;grid-template-columns:1fr;padding:16px;gap:12px}.debug-full .inspector{grid-template-columns:1fr 1fr}.debug-full .inspector>.debug{grid-column:1/-1}.inspector>.panel:has(>summary){grid-column:auto}.inspector>.panel[open]{grid-column:1/-1}.panel>summary{padding:2px 0}.panel[open]>summary{padding-bottom:12px;border-bottom:1px solid #eef1f6;margin-bottom:14px}.panel label{color:#65738a;font-size:12px}.debug>.debug-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.debug>.debug-form label{margin:0}.debug .tip{margin:12px 0}.debug pre{background:#f3f6fa;border:1px solid #e5eaf2;padding:18px;line-height:1.8}
+  @media(max-width:900px){.workspace.debug-open{display:flex}.workspace.debug-open .conversation{display:none}.debug-workspace{width:100%}}
+  @media(max-width:700px){main{padding:16px 14px 10px}.page-header h1{font-size:18px}.header-actions{gap:3px}.header-actions button{padding:7px 9px}.input-modes .dock-help{display:none}.inspector,.debug-full .inspector{grid-template-columns:1fr;padding:12px}.debug>.debug-form{grid-template-columns:1fr}.dialog-header{padding:12px}.dialog-header p{display:none}#log p.input{margin-left:5%}#log p.reply{margin-right:5%}#toggle-inspector svg{display:none}}
 </style>
 <main>
   <header class="page-header"><h1><span class="brand-mark" aria-hidden="true">匠</span>和匠石说话</h1>
@@ -68,7 +92,7 @@
       </div></details>
     <nav class="view-controls" aria-label="面板显示">
       <button id="toggle-conversation" class="view-toggle" aria-label="隐藏对话区" aria-controls="conversation" aria-expanded="true" aria-pressed="false" title="隐藏对话区"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path d="M5 7h2v10H5z" fill="currentColor" stroke="none"/></svg></button>
-      <button id="toggle-inspector" class="view-toggle" aria-label="隐藏右侧检查区" aria-controls="inspector" aria-expanded="true" aria-pressed="false" title="隐藏右侧检查区"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/><path d="M17 7h2v10h-2z" fill="currentColor" stroke="none"/></svg></button>
+      <button id="toggle-inspector" class="view-toggle" aria-label="打开设置与调试" aria-controls="debug-workspace" aria-expanded="false" title="设置与调试"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 10h16M4 15h16M4 20h16"/></svg>设置与调试</button>
     </nav></div></header>
   <div class="state-row" aria-label="当前状态">
     <span id="status" role="status" aria-live="polite">尚未连接</span>
@@ -77,12 +101,16 @@
   </div>
   <p id="layout-empty" class="layout-empty" hidden>对话与检查面板已隐藏，点击右上角图标恢复。</p>
   <div class="workspace" id="workspace"><section class="conversation" id="conversation" aria-label="对话">
-  <div id="live"></div><section id="log" aria-live="polite"><div class="empty" id="empty">等待第一句对话。</div></section>
-  <form id="composer"><input id="typed" type="text" maxlength="200" placeholder="打字发送，以当前说话人的身份。更正姓名可写：我其实是小敏，不是小明" disabled><button id="send-text" disabled>发送</button></form>
-  <p id="rename-ask" hidden></p>
-  </section><aside class="inspector" id="inspector" aria-label="声音登记与检查">
-  <details class="panel" open><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20v-2a7 7 0 0 1 14 0v2"/></svg>声音与姓名</summary>
-    <p><a href="/voice-enroll" target="_blank" rel="noopener"><strong>登记声纹、试一试能否认出、改名 →</strong></a></p>
+  <div class="message-scroll"><div id="live"></div><section id="log" aria-live="polite"><div class="empty" id="empty"><strong>在这里，和匠石聊聊</strong><span>开启语音，或在下方切换文字输入</span></div></section><p id="rename-ask" hidden></p></div>
+  <div class="input-dock"><div class="input-modes" aria-label="输入方式"><button id="mode-voice" aria-pressed="true">语音</button><button id="mode-text" aria-pressed="false">文字</button><span class="dock-help">登记、记忆与调试在右上角</span></div>
+  <div class="voice-dock" id="voice-dock"><span class="voice-dot"></span><span id="voice-hint">点击右上角「开始对话」，开启语音输入</span></div>
+  <div id="text-dock" hidden><form id="composer" aria-label="文字对话"><div class="composer-top"><label for="text-person">发言人物</label><select id="text-person" aria-label="选择文字输入人物"><option value="">请选择人物</option></select><button id="text-people-refresh" type="button" class="secondary">刷新</button></div><textarea id="typed" maxlength="2000" placeholder="写点什么…  Ctrl / ⌘ + Enter 发送"></textarea><button id="send-text">发送</button></form>
+  <p id="text-status" class="tip" role="status" aria-live="polite">选择发言人物后即可发送。Enter 换行。</p>
+  </div></div></section>
+  <section id="debug-workspace" class="debug-workspace" aria-labelledby="inspector-heading" hidden><header class="dialog-header"><div><h2 id="inspector-heading">设置与调试</h2><p>声音、数据与运行记录</p></div><div class="debug-toolbar"><button id="maximize-debug" class="secondary" aria-pressed="false">铺满</button><button id="close-inspector" class="secondary" aria-label="隐藏设置与调试">隐藏</button></div></header><nav class="debug-nav" aria-label="调试工作区"><button id="debug-settings-tab" aria-pressed="true">设置与实时调试</button><button id="debug-data-tab" aria-pressed="false">保存数据</button></nav><div id="settings-pane"><aside class="inspector" id="inspector" aria-label="声音登记与检查">
+  <details class="panel" open><summary>保存的数据</summary><p class="tip">查看历史记录，或按人物、任务与活动查找。</p><div class="data-shortcuts"><button id="open-memory">记忆与肖像</button><button id="open-work">工件与工具任务</button><button id="open-prompts">实际提示词</button><button id="open-timing">运行与耗时</button><button id="open-all-data" class="all-data">打开数据工作台 →</button></div></details>
+  <details class="panel"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20v-2a7 7 0 0 1 14 0v2"/></svg>声音与姓名</summary>
+    <p><button id="open-enrollment" class="secondary">声纹登记与测试 →</button></p>
     <p class="tip">也可以在这里直接登记：在左侧点几句同一个人说的话的“选择声音”，填写姓名后点登记。</p>
     <label>姓名 <input id="enroll-name" type="text" maxlength="40" list="known-names" placeholder="例如 lux"><datalist id="known-names"></datalist></label>
     <p id="enroll-count">尚未选择声音</p>
@@ -106,14 +134,16 @@
     <pre id="compare-report" style="white-space:pre-wrap;font-size:12px;overflow-wrap:anywhere"></pre>
   </details>
   <details class="panel debug"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 8h8m-8 4h5m-5 4h8"/></svg>轮次信息 · PROMPT / TIMING / tool</summary>
+    <div class="debug-form">
     <label>轮次 <select id="debug-turn"><option value="">最近已完成轮次</option></select></label>
-    <label>模型调用 <select id="debug-purpose"><option value="all">全部调用</option><option value="voice_jev">JEV 初判</option><option value="subject_activity">认知 / 回应</option><option value="write_zone">写场</option></select></label>
+    <label>模型调用 <select id="debug-purpose"><option value="all">全部调用</option><option value="voice_jev">JEV 入口判断</option><option value="voice_jev_scene">JEV片场（会话后台）</option><option value="subject_activity">认知 / 回应</option><option value="write_zone">写场</option></select></label>
     <label>提示词区块 <select id="debug-part"><option value="all">完整提示词</option><option value="system">system</option><option value="user">user</option><option value="schema">JSON Schema</option></select></label>
-    <p class="tip">PROMPT 为实际发送记录；可选择 JEV 初判、认知或写场，查看 system、user 或具体区块。本轮涉及多次 JEV 时逐次列出。</p>
+    </div>
+    <p class="tip">PROMPT 为实际发送记录；可选择 JEV入口、后台JEV片场、认知或写场，查看 system、user 或具体区块。本轮涉及多次 JEV 时逐次列出。</p>
     <div class="debug-controls">
     <button class="secondary" id="debug-prompt">/PROMPT</button><button class="secondary" id="debug-timing">/TIMING</button><button class="secondary" id="debug-tool">/tool</button>
     <button class="secondary" id="debug-copy">复制内容</button></div>
-    <label>更多信息 <select id="debug-extra"><option value="">选择查看</option><option value="input">输入信封</option><option value="scene">现场上下文</option><option value="identity">身份依据</option><option value="delivery">播放交付</option><option value="jev">接话判断</option><option value="response">模型结构化输出</option></select></label>
+    <label>更多信息 <select id="debug-extra"><option value="">选择查看</option><option value="input">输入信封</option><option value="scene">现场上下文</option><option value="identity">身份依据</option><option value="delivery">播放交付</option><option value="jev">接话判断</option><option value="jev_scene">JEV片场与待办</option><option value="response">模型结构化输出</option></select></label>
     <p id="debug-title">尚未读取</p><pre id="debug-content"></pre>
   </details>
   <details class="panel"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1m-7 8v3m-4 0h8"/></svg>麦克风与声音检查</summary>
@@ -127,30 +157,41 @@
     <p class="tip">先听一下：声音应清楚、无明显杂音。双发射器可分别检查两个通道。试听只留在当前网页，播放时请结束对话。</p>
     <small id="backend">尚未连接语音后端</small>
   </details>
-  </aside></div>
-</main>
+  </aside></div><div id="data-pane" hidden><iframe id="data-frame" title="保存数据与调试工作台"></iframe></div></section></div></main>
 <script>
 const $ = id => document.getElementById(id);
 const savedReferences = new Map();
 function renderSavedReferences(){
-  $('saved-reference-counts').textContent='累计已保存参考：'+([...savedReferences.values()].map(r=>r.label+' '+(r.reference_count ?? '数量未知')+' 条 / 最多10条').join('；') || '当前方案暂无已保存参考。');
+  $('saved-reference-counts').textContent='累计已保存参考：'+([...savedReferences.values()].filter(r=>r.reference_count!==0).map(r=>r.label+' '+(r.reference_count ?? '数量未知')+'/10 条').join(' · ') || '当前方案暂无已保存参考。');
 }
 fetch('/voice-registry', {cache:'no-store'}).then(r=>r.ok ? r.json() : Promise.reject()).then(d=>{
   if(ready)return;
   for(const row of d.people || [])if(row.voiceprints || row.reference_count)savedReferences.set(row.object_id,row);
   renderSavedReferences();
 }).catch(()=>{$('saved-reference-counts').textContent='累计已保存参考：暂未读取，连接后显示。';});
-const panelVisibility={conversation:true,inspector:true};
-try{const saved=JSON.parse(localStorage.getItem('jshi.voice.panels') || '{}');for(const id of Object.keys(panelVisibility))if(typeof saved[id]==='boolean')panelVisibility[id]=saved[id];}catch{}
+const panelVisibility={conversation:true,inspector:false};
+let debugFull=false,debugView='settings';
 function refreshPanels(){
-  for(const [id,visible] of Object.entries(panelVisibility)){
-    $(id).hidden=!visible;const button=$('toggle-'+id),name=id==='conversation' ? '对话区' : '右侧检查区';
-    button.ariaExpanded=String(visible);button.ariaPressed=String(!visible);button.ariaLabel=(visible ? '隐藏' : '显示')+name;button.title=button.ariaLabel;
-  }
-  if(!panelVisibility.conversation || !panelVisibility.inspector)$('workspace').classList.add('single-pane');else $('workspace').classList.remove('single-pane');
-  $('layout-empty').hidden=panelVisibility.conversation || panelVisibility.inspector;
+  $('conversation').hidden=!panelVisibility.conversation || (panelVisibility.inspector&&debugFull);
+  $('debug-workspace').hidden=!panelVisibility.inspector;
+  $('workspace').classList[panelVisibility.inspector?'add':'remove']('debug-open');
+  $('workspace').classList[panelVisibility.inspector&&debugFull?'add':'remove']('debug-full');
+  $('toggle-inspector').ariaExpanded=String(panelVisibility.inspector);
+  $('maximize-debug').textContent=debugFull?'还原':'铺满';$('maximize-debug').ariaPressed=String(debugFull);
+  $('layout-empty').hidden=panelVisibility.conversation;
 }
-for(const id of Object.keys(panelVisibility))$('toggle-'+id).onclick=()=>{panelVisibility[id]=!panelVisibility[id];refreshPanels();try{localStorage.setItem('jshi.voice.panels',JSON.stringify(panelVisibility));}catch{}};
+$('toggle-conversation').onclick=()=>{panelVisibility.conversation=!panelVisibility.conversation;refreshPanels();};
+$('toggle-inspector').onclick=()=>{panelVisibility.inspector=!panelVisibility.inspector;refreshPanels();if(panelVisibility.inspector)refreshDebugTurns();};
+$('close-inspector').onclick=()=>{panelVisibility.inspector=false;refreshPanels();};
+$('maximize-debug').onclick=()=>{debugFull=!debugFull;refreshPanels();};
+function debugTab(view){debugView=view;$('settings-pane').hidden=view!=='settings';$('data-pane').hidden=view!=='data';$('debug-settings-tab').ariaPressed=String(view==='settings');$('debug-data-tab').ariaPressed=String(view==='data');}
+function openData(source=''){$('data-frame').src='/data?embedded=1'+(source?'&source='+encodeURIComponent(source):'');panelVisibility.inspector=true;debugTab('data');refreshPanels();}
+for(const [id,source] of [['open-memory','memory:events'],['open-work','tool_work'],['open-prompts','prompts'],['open-timing','timing'],['open-all-data','']])$(id).onclick=()=>openData(source);
+$('debug-settings-tab').onclick=()=>{debugTab('settings');refreshDebugTurns();};$('debug-data-tab').onclick=()=>{if(!$('data-frame').src)openData();else debugTab('data');};
+$('open-enrollment').onclick=()=>{$('data-frame').src='/voice-enroll';debugTab('data');};
+function inputMode(mode){$('text-dock').hidden=mode!=='text';$('voice-dock').hidden=mode!=='voice';$('mode-text').ariaPressed=String(mode==='text');$('mode-voice').ariaPressed=String(mode==='voice');if(mode==='text')$('typed').focus();}
+$('mode-text').onclick=()=>inputMode('text');$('mode-voice').onclick=()=>inputMode('voice');
+inputMode('voice');
 refreshPanels();
 let ws, mic, captureContext, outputContext, capture, ready = false;
 let replyId = '', paused = false, queue = [], playing = null, source = null;
@@ -160,6 +201,7 @@ let silenceTimer = null, previewUrl = '';
 const speakerLabels=new Map();
 const invalidReplies = new Set();
 const selectedInputs = new Map(), inputRows = new Map();
+let latestInputId='';
 let debugSection='prompt';
 let voiceprintAvailable=true;
 function personLabel(label){return /^未命名访客 \d+$/.test(label || '') ? label+' · 内部名，还不知道姓名' : (label || '待确认');}
@@ -168,6 +210,7 @@ function send(message) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSO
 function log(text, kind='notice', atMs=null) {
   if($('empty') && $('empty').remove) $('empty').remove();
   const p = document.createElement('p'); p.className = kind; p.textContent = text;
+  if(kind==='notice' && text.length>140){p.textContent=text.slice(0,90)+'…';const details=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('span');summary.textContent='查看完整信息';body.textContent=text;details.appendChild(summary);details.appendChild(body);p.appendChild(details);}
   const time=document.createElement('time');time.textContent=(kind==='input' ? '收到 ' : kind==='reply' ? '生成 ' : '')+new Date(atMs || Date.now()).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});p.prepend(time);
   $('log').prepend(p); while ($('log').children.length > 100) {
     const old=$('log').lastChild;
@@ -234,6 +277,8 @@ function clearPlayback() {
   startedSegments.clear(); endedSegments.clear(); finishedSegments.clear();
 }
 function message(m) {
+  if(m.type==='typed_input'){if(pendingTyped&&pendingTyped.text===m.text){pendingTyped.badge.textContent='已接收';pendingTyped=null;textSending=false;$('send-text').disabled=false;}else log(m.label+'（文字）：'+m.text,'input');$('text-status').textContent='已进入当前对话，等待主流程处理。';return;}
+  if(m.type==='typed_error'){if(pendingTyped){pendingTyped.badge.textContent='未发送：'+m.text;pendingTyped.badge.classList.add('failed');if(!$('typed').value)$('typed').value=pendingTyped.text;pendingTyped=null;}textSending=false;$('send-text').disabled=false;$('text-status').textContent=m.text;return;}
   if(m.type==='voice_settings' || m.type==='voice_settings_error'){
     if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);}
     $('match-status').textContent=m.type==='voice_settings_error' ? '设置失败：'+m.text : '已生效并保存；与第二候选仍须相差 '+m.match_margin;return;
@@ -286,7 +331,7 @@ function message(m) {
     for(const id of m.input_ids){const row=inputRows.get(id);if(row){row.p.style.outline='';row.meta.textContent=m.label+' · 手动关联';row.p.classList.remove('selected');row.button.textContent='选择声音';}}
     selectedInputs.clear();selectionChanged();$('enroll-status').textContent='已关联 '+m.label+'：本次选择 '+m.clips+' 段，累计已保存 '+(m.reference_count ?? 1)+' 段（最多10段）；比对采用平均匹配分。兼容录音保留 '+m.seconds+' 秒。'+(m.min_similarity!=null ? '样本最低相似度 '+m.min_similarity+'（仅供参考）。' : '')+(m.warning || '');return;
   }
-  if (m.type==='ready') { savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true; $('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '');
+  if (m.type==='ready') { try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true; $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '');
     $('match-threshold').disabled=m.match_threshold==null;
     if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);$('match-status').textContent='单句确认至少 '+Number(m.single_confirmation_threshold ?? Math.max(.65,m.match_threshold)).toFixed(2)+'，与第二候选须相差 '+m.match_margin+'；较弱声音先收集多段核对，待定声音不参与姓名竞争。';}
     voiceprintAvailable=m.voiceprint_available!==false;selectionChanged();
@@ -318,7 +363,18 @@ function message(m) {
   else if(m.type==='input_pending') $('judge').textContent='主流程忙碌，新发言正在合并为下一批输入。';
   else if(m.type==='speaker') {
     const basis={self_introduction:'本次自我介绍关联',voiceprint_match:'已登记声纹匹配',unidentified:'身份未知',unassigned_audio:'本句暂不能归属，未新增访客',anonymous_voice_cluster:'匿名声纹轨迹，姓名未确认',voice_continuity:'沿用会话对象 · 本句姓名未确认',voice_scene:'多人现场',manual_annotation:'手动关联',context_attribution:'上下文推测，声纹未确认'};
-    $('speaker').textContent='当前说话人：'+personLabel(m.label)+' · '+(basis[m.method] || m.method);
+    $('speaker').textContent='当前说话人：'+personLabel(m.label)+' · '+(m.jev_status==='pending' ? '声纹初判，等待 JEV 最终判断' : (basis[m.method] || m.method));
+  }
+  else if(m.type==='identity_final') {
+    const row=inputRows.get(m.input_id), done=m.jev_status==='completed';
+    const verdict=m.speaker.method==='manual_annotation' ? '手动关联' : done ? 'JEV 最终判断：'+(m.certainty || '不确定') : 'JEV 判断失败，保留声纹初判';
+    speakerLabels.set(m.speaker.object_id,m.speaker.label);
+    if(row){
+      const routed=row.meta.textContent.includes('未交主流程') ? ' · 未交主流程' : '';
+      row.meta.textContent=personLabel(m.speaker.label)+' · 轨迹 '+m.speaker.track_id+' · '+verdict+(row.overlap ? ' · 声音重叠' : '')+routed;
+      row.meta.title=row.time+'\n声纹初判：'+personLabel(m.voice_initial.label)+'\n'+verdict+'\n'+(m.reason || '');
+    }
+    if(m.input_id===latestInputId) $('speaker').textContent='当前说话人：'+personLabel(m.speaker.label)+' · '+verdict;
   }
   else if(m.type==='identity') log('身份关联：'+m.label+'\n'+m.detail,'notice');
   else if(m.type==='timeline') {
@@ -326,7 +382,7 @@ function message(m) {
     const time=ms=>Math.floor(ms/60000)+':'+((ms%60000)/1000).toFixed(1).padStart(4,'0');
     const wall=ms=>new Date(ms).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
     const stamp='会话 +'+time(m.start_ms)+'–'+time(m.end_ms)+(m.recorded_start_at_ms!=null ? ' · 录音约 '+wall(m.recorded_start_at_ms)+'–'+wall(m.recorded_end_at_ms) : ''), p=log('','input',m.received_at_ms),meta=document.createElement('span'),body=document.createElement('span');
-    meta.textContent=personLabel(m.speaker.label)+' · 轨迹 '+m.speaker.track_id+(m.overlap ? ' · 声音重叠' : '');meta.className='message-meta';meta.title=stamp;
+    meta.textContent=personLabel(m.speaker.label)+' · 轨迹 '+m.speaker.track_id+(m.overlap ? ' · 声音重叠' : '')+' · 声纹初判，等待 JEV';meta.className='message-meta';meta.title=stamp;
     body.textContent=m.text;body.className='message-body';p.appendChild(meta);p.appendChild(body);
     const ranking=document.createElement('small');ranking.className='voice-ranking';
     try{
@@ -345,7 +401,7 @@ function message(m) {
     if(m.input_id){const button=document.createElement('button');button.className='select-input';button.textContent=m.overlap ? '重叠，无法登记' : '选择声音';button.disabled=!!m.overlap;
       button.onclick=()=>{if(selectedInputs.has(m.input_id)){selectedInputs.delete(m.input_id);p.classList.remove('selected');button.textContent='选择声音';}
         else if(selectedInputs.size<32){selectedInputs.set(m.input_id,true);p.classList.add('selected');button.textContent='已选择 ✓';}selectionChanged();};
-      p.prepend(button);p.inputId=m.input_id;inputRows.set(m.input_id,{p,meta,button,time:stamp});
+      p.prepend(button);p.inputId=m.input_id;inputRows.set(m.input_id,{p,meta,button,time:stamp,overlap:m.overlap});latestInputId=m.input_id;
     }
   }
   else if(m.type==='input_route' && m.kept===false) {
@@ -374,6 +430,8 @@ function message(m) {
   else if(m.type==='stop' && (!m.reply_id || m.reply_id===replyId)) { clearPlayback(); $('status').textContent='已停止播放'; }
 }
 async function end() {
+  if(pendingTyped){pendingTyped.badge.textContent='连接已关闭，接收状态待确认';if(!$('typed').value)$('typed').value=pendingTyped.text;pendingTyped=null;textSending=false;$('send-text').disabled=false;}
+  $('voice-dock').classList.remove('active');$('voice-hint').textContent='语音已停止，点击「开始对话」重新连接';
   ready=false; mainBusy=false;clearTimeout(silenceTimer); clearPlayback();
   $('match-threshold').disabled=true;
   const oldWs=ws, oldCapture=captureContext, oldOutput=outputContext;
@@ -391,16 +449,65 @@ async function end() {
   $('status').textContent='对话已结束';
 }
 $('devices').onclick=()=>devices().catch(e=>log('设备访问失败：'+e.message));
-function requestDebug(section=debugSection){
+let debugRequest=0;
+async function refreshDebugTurns(){
+ if(ws&&ws.readyState===WebSocket.OPEN)return;
+ try{const r=await fetch('/api/debug?section=turns',{cache:'no-store'});if(!r.ok)throw Error(await r.text());const d=await r.json();
+  const pick=$('debug-turn'),previous=pick.value;pick.replaceChildren(new Option('最近已保存轮次',''));
+  for(const t of d.turns||[])pick.add(new Option(t.activity_id.slice(0,8)+' · '+t.label,t.activity_id));
+  if(Array.from(pick.options).some(o=>o.value===previous))pick.value=previous;
+ }catch(e){$('debug-title').textContent='轮次读取失败：'+e.message;}
+}
+async function requestDebug(section=debugSection){
   debugSection=section;
-  if(!ws || ws.readyState!==WebSocket.OPEN) { $('debug-content').textContent='请先连接对话；轮次信息在当前连接中读取。'; return; }
-  $('debug-content').textContent='正在读取…'; send({type:'debug',section,activity_id:$('debug-turn').value,part:$('debug-part').value,purpose:$('debug-purpose').value});
+  const current=++debugRequest;
+  $('debug-title').textContent='/'+section.toUpperCase()+' · 正在读取';$('debug-content').textContent='正在读取…';
+  const payload={type:'debug',section,activity_id:$('debug-turn').value,part:$('debug-part').value,purpose:$('debug-purpose').value};
+  if(ws&&ws.readyState===WebSocket.OPEN){send(payload);return;}
+  try{const query=new URLSearchParams(payload);const r=await fetch('/api/debug?'+query,{cache:'no-store'});if(!r.ok)throw Error(await r.text());const d=await r.json();if(current===debugRequest)message(d);}
+  catch(e){if(current===debugRequest){$('debug-title').textContent='读取失败';$('debug-content').textContent=e.message+'。请确认服务已重启。';}}
 }
 for(const section of ['prompt','timing','tool']) $('debug-'+section).onclick=()=>requestDebug(section);
-for(const id of ['debug-turn','debug-part','debug-purpose']) $(id).onchange=()=>requestDebug();
+$('debug-turn').onchange=()=>requestDebug();
+for(const id of ['debug-part','debug-purpose']) $(id).onchange=()=>requestDebug('prompt');
 $('debug-extra').onchange=()=>{if($('debug-extra').value)requestDebug($('debug-extra').value);};
-$('debug-copy').onclick=()=>navigator.clipboard.writeText($('debug-content').textContent).catch(e=>{$('debug-title').textContent='复制失败：'+e.message;});
-$('composer').onsubmit=event=>{event.preventDefault();const text=$('typed').value.trim();if(!text||!ready)return;send({type:'text',text});$('typed').value='';};
+$('debug-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('debug-content').textContent);$('debug-title').textContent='已复制当前内容';}catch(e){$('debug-title').textContent='复制失败：'+e.message;}};
+let textSending=false,pendingTyped=null;
+async function refreshTextPeople(){
+ const previous=$('text-person').value;
+ try{const r=await fetch('/text-people',{cache:'no-store'});if(!r.ok)throw Error(await r.text());const d=await r.json();
+ $('text-person').replaceChildren(new Option('请选择人物',''));for(const p of d.people)$('text-person').add(new Option(p.label,p.object_id));
+ if(d.people.some(p=>p.object_id===previous))$('text-person').value=previous;
+ else{try{const saved=localStorage.getItem('jshi.text.person');if(d.people.some(p=>p.object_id===saved))$('text-person').value=saved;}catch{}}
+ }catch(e){$('text-status').textContent='人物列表读取失败：'+e.message;}
+}
+$('text-people-refresh').onclick=refreshTextPeople;
+$('text-person').onchange=()=>{try{localStorage.setItem('jshi.text.person',$('text-person').value);}catch{}};
+refreshTextPeople();
+$('typed').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)&&!e.isComposing){e.preventDefault();$('composer').onsubmit(e);}};
+$('composer').onsubmit=async event=>{
+ event.preventDefault();if(textSending)return;const text=$('typed').value.trim(),object_id=$('text-person').value;
+ if(!text){$('typed').focus();return;}if(!object_id){$('text-status').textContent='先选择这段文字由谁说。';$('text-person').focus();return;}
+ const actor=Array.from($('text-person').options).find(p=>p.value===object_id)?.textContent||speakerLabels.get(object_id)||'对方';
+ const row=log(actor+'（文字）：'+text,'input'),badge=document.createElement('span');badge.className='send-state';badge.textContent='正在发送…';row.appendChild(badge);$('typed').value='';$('typed').focus();
+ textSending=true;$('send-text').disabled=true;
+ if(ready&&ws&&ws.readyState===WebSocket.OPEN){pendingTyped={text,badge};send({type:'text',text,object_id});$('text-status').textContent='已显示输入，等待接收确认。';return;}
+ let phase='正在生成回应',started=Date.now(),timer,shown=false,complete=false,replyRow;
+ function progress(){const seconds=Math.floor((Date.now()-started)/1000);$('text-status').textContent=phase+(seconds?' · 已用时 '+seconds+' 秒':'…');timer=setTimeout(progress,1000);}progress();
+ function eventReceived(d){
+  if(d.type==='error')throw Error(d.message||'主流程处理失败');
+  if(d.type==='accepted'){badge.textContent='已接收';return;}
+  if(d.reply&&!shown){replyRow=log('匠石 → '+(d.label||actor)+'：'+d.reply,'reply');shown=true;}
+  if(d.type==='reply'){phase=shown?'回复已显示，正在完成本轮处理':'正在完成本轮处理';badge.textContent='已接收';$('text-status').textContent=phase;}
+  if(d.type==='complete'){complete=true;badge.textContent='已处理';phase=(shown?'本轮已完成。':'已记录，本轮未生成回应（'+d.mode+'）。')+(d.scene_write==='background'?'片场在后台整理，可继续发送。':'');}
+ }
+ try{const r=await fetch('/text-input',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/x-ndjson'},body:JSON.stringify({text,object_id})});if(!r.ok)throw Error(await r.text());
+  if((r.headers.get('Content-Type')||'').includes('application/x-ndjson')){const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(line.trim())eventReceived(JSON.parse(line));}}buffer+=decoder.decode();if(buffer.trim())eventReceived(JSON.parse(buffer));if(!complete)throw Error('连接中断，未收到处理完成确认');}
+  else eventReceived({...(await r.json()),type:'complete'});
+  $('text-status').textContent=phase;
+ }catch(e){badge.textContent=shown?'回复已显示，后续处理未完成':'发送或处理失败';badge.classList.add('failed');if(!shown&&!$('typed').value)$('typed').value=text;$('text-status').textContent=(shown?'后续保存异常：':'发送失败，输入仍保留在对话区：')+e.message;}
+ finally{clearTimeout(timer);textSending=false;$('send-text').disabled=false;$('typed').focus();}
+};
 $('enroll-clear').onclick=()=>{for(const id of selectedInputs.keys()){const row=inputRows.get(id);if(row){row.p.classList.remove('selected');row.button.textContent='选择声音';}}selectedInputs.clear();selectionChanged();};
 $('enroll').onclick=()=>{
   if(!ws || ws.readyState!==WebSocket.OPEN){$('enroll-status').textContent='请在当前会话连接中登记声音。';return;}
@@ -444,13 +551,14 @@ $('test').onclick=async()=>{
   finally {if(stream) stream.getTracks().forEach(t=>t.stop()); if(testContext) await testContext.close(); $('test').textContent='录制 5 秒试听'; $('test').disabled=false; $('start').disabled=false;}
 };
 $('start').onclick=async()=>{
+  inputMode('voice');
   $('start').disabled=true;
   $('test').disabled=true; $('preview').pause();
   try {
     const health=await fetch('/status',{cache:'no-store'});
     if(!health.ok) throw new Error('无法读取本地语音服务状态');
     const settings=await health.json();
-    if(settings.busy) throw new Error('上一轮对话仍在收尾，请稍后再开始。');
+    if(settings.busy) throw new Error(settings.cleanup_stage ? '上一轮正在收尾：'+settings.cleanup_stage+'，请稍后再开始。' : '已有语音会话正在运行，请先结束它。');
     const asr=$('asr').value || settings.asr;
     if(asr==='online' && !settings.online_available) throw new Error('在线识别尚未配置 JSHI_VOICE_API_KEY，请配置后重启服务');
     if(asr==='local' && !settings.local_available) throw new Error('本地识别未加载，请用 --asr local 启动服务');
@@ -466,7 +574,8 @@ $('start').onclick=async()=>{
     captureContext.createMediaStreamSource(mic).connect(capture);
     // The worklet emits silence, so connecting it never routes the mic to speakers.
     const mute=captureContext.createGain(); mute.gain.value=0; capture.connect(mute).connect(captureContext.destination);
-    ws=new WebSocket('ws://'+location.host+'/voice?asr='+encodeURIComponent(asr)+'&speaker_model='+encodeURIComponent($('speaker-model').value)); ws.binaryType='arraybuffer';
+    let resumeSession='';try{resumeSession=sessionStorage.getItem('jshi.voice.session')||'';}catch{}
+    ws=new WebSocket('ws://'+location.host+'/voice?asr='+encodeURIComponent(asr)+'&speaker_model='+encodeURIComponent($('speaker-model').value)+'&session='+encodeURIComponent(resumeSession)); ws.binaryType='arraybuffer';
     const activeWs=ws;
     ws.onmessage=e=>{ try {message(JSON.parse(e.data));} catch(err){log('播放消息异常：'+err.message);} };
     ws.onerror=()=>log('连接失败，请检查本地语音服务。');

@@ -33,6 +33,8 @@ class AssemblyContext:
     working_set_limit: int | None = None
     # 本轮【工具相关】选集；由主流程算一次，ToolSource 直接取用。None = 源自行读取。
     tool_entries: tuple[Mapping[str, Any], ...] | None = None
+    recall_enabled: bool = True
+    portrait_budget_chars: int = 800
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,8 @@ class AssemblyFragment:
     always: bool = False
     occurred_at: datetime | None = None
     variant: str = ""
+    alternatives: tuple[str, ...] = ()  # Existing complete dossier summaries, short to long views.
+    portrait_levels: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,7 @@ class SourceLoadReport:
     skipped_ids: tuple[str, ...] = ()
     budget: int = 0
     error: str | None = None
+    elapsed_ms: float = 0.0
 
 
 class AssemblySourcePort(Protocol):

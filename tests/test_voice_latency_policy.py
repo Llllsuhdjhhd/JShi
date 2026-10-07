@@ -1,0 +1,131 @@
+import asyncio
+import json
+from time import monotonic, sleep
+from dataclasses import replace
+from threading import Event
+from urllib.error import HTTPError
+
+import pytest
+
+from jshi.app.voice import VoiceConversation
+from jshi.assembly.port import AssemblyContext, AssemblySpeaker
+from jshi.assembly.sources import MemorySource
+from jshi.core.envelope import InputEnvelope, SceneUtterance, SpeakerEvidence
+from jshi.core.prompt_profile import PromptProfile, select_profile
+from jshi.models import ModelResponse
+from jshi.voice.jev import VoiceJEV, BatchItem
+from jshi.voice.jev_scene import JEVSceneStore, JEVSceneWriter
+from jshi.voice.volc import Transcript
+from tests.test_voice import process, FakeCloud, Model
+
+
+def test_failed_jev_keeps_tools_without_speculative_history_search():
+    for failure in ({'timed_out': True}, {'model_error': 'HTTP 402'}, {'model_error': 'invalid JSON'}):
+        assert select_profile(['a'], [{'input_ids': ['a'], **failure}]) == PromptProfile(1, recall_memory=False)
+    assert select_profile(['a'], [{'input_ids': ['old'], 'model_error': 'HTTP 402'}]) == PromptProfile()
+    assert select_profile(['a'], []) == PromptProfile()
+
+
+def test_main_thinking_is_not_playback_for_rule_fallback():
+    assert VoiceJEV().decide('stone', '我再补充一句', {}, {'state': 'thinking'}).action == 'respond'
+    assert VoiceJEV().decide('stone', '我再补充一句', {}, {'state': 'playing'}).action == 'resume'
+
+
+def test_selected_memory_can_finish_after_1_5_seconds(process):
+    class Memory:
+        calls = 0
+        def recall(self, *args, **kwargs):
+            self.calls += 1
+            sleep(1.8)
+            return ()
+    memory = Memory()
+    source = MemorySource(process.repository, memory)
+    ctx = AssemblyContext('stone', '还记得昨天吗', AssemblySpeaker('lux-id', 'lux'))
+    start = monotonic()
+    assert source.load(ctx).fragments == ()
+    assert monotonic() - start >= 1.7
+    assert memory.calls == 1
+    assert source.load(replace(ctx, recall_enabled=False)).fragments == ()
+    assert memory.calls == 1
+
+
+def test_ready_speech_group_can_start_main_while_more_speech_keeps_arriving(process):
+    entered = Event()
+    class Main(Model):
+        def generate(self, request):
+            entered.set()
+            return super().generate(request)
+    process.cognition = Main()
+    async def run():
+        async def send(message): pass
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, input_pause_s=.06, input_max_batch_s=.08)
+        stop = asyncio.Event()
+        async def producer():
+            n = 0
+            while not stop.is_set():
+                await c.accept(Transcript(f'继续说第{n}句话', 'A', n*1000, n*1000+900, True))
+                n += 1
+                await asyncio.sleep(.01)
+        task = asyncio.create_task(producer())
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            assert not task.done()  # continuous input no longer prevents a ready turn
+        finally:
+            stop.set()
+            await task
+            await asyncio.wait_for(c.queue.join(), 3)
+            await asyncio.wait_for(c.turn_queue.join(), 3)
+            timing = c.last_debug['timing']['voice']
+            assert timing['input_timings']
+            assert timing['current_jev_ms'] + timing['historical_jev_ms'] == timing['jev_ms']
+            await c.close()
+    asyncio.run(run())
+
+
+def test_coalesced_judgments_follow_input_ids_not_last_batch_positions():
+    who = SpeakerEvidence('A')
+    a = SceneUtterance('前一句', who, 0, 1000, input_id='a')
+    b = SceneUtterance('后一句', who, 1000, 2000, input_id='b')
+    envelope = InputEnvelope('session', 'microphone', (), who, current_utterances=(a, b), jev_calls=(
+        {'input_ids': ['a'], 'items': [dict(n=1, to_jiangshi='yes', speaker_pick='P1')]},
+        {'input_ids': ['b'], 'items': [dict(n=1, to_jiangshi='no', speaker_pick='P2', relevance='unrelated')]},
+    ))
+    items = VoiceConversation.envelope_items(envelope)
+    assert [(i.n, i.speaker_pick, i.keep) for i in items] == [(1, 'P1', True), (2, 'P2', False)]
+
+
+def test_402_cooldown_preserves_failure_and_resumes_after_interval(monkeypatch, tmp_path):
+    now = [100.0]
+    monkeypatch.setattr('jshi.voice.jev.monotonic', lambda: now[0])
+    monkeypatch.setattr('jshi.voice.jev_scene.monotonic', lambda: now[0])
+    class Model:
+        calls = 0
+        def generate(self, request):
+            self.calls += 1
+            raise HTTPError('https://example.invalid', 402, 'Payment Required', None, None)
+    model = Model()
+    gate = VoiceJEV(model)
+    batch = [{'n': 1, 'text': '你好'}]
+    assert '402' in gate.decide_batch('stone', batch, [], {}).model_error
+    assert '冷却' in gate.decide_batch('stone', batch, [], {}).model_error
+    assert model.calls == 1
+    now[0] += 61
+    gate.decide_batch('stone', batch, [], {})
+    assert model.calls == 2
+    writer = JEVSceneWriter(model)
+    store = JEVSceneStore(tmp_path / 'scene.json')
+    store.append('a', {'text': '你好'})
+    with pytest.raises(HTTPError):
+        writer.run('stone', store.snapshot(), '')
+    with pytest.raises(RuntimeError, match='保留待办'):
+        writer.run('stone', store.snapshot(), '')
+    assert model.calls == 3 and len(store.snapshot()['events']) == 1
+
+
+def test_invalid_prompt_routing_not_reported_as_successful_jev():
+    class Model:
+        def generate(self, request):
+            return ModelResponse(model='fake', text=json.dumps({'level': 9, 'recall_memory': False,
+                'items': [{'i': 1, 'person': 'unknown', 'certainty': 'unknown', 'to': 'yes', 'keep': 'related'}]}))
+    result = VoiceJEV(Model()).decide_batch('stone', [{'n': 1, 'text': '你好'}], [], {})
+    assert not result.judged and result.model_error and not result.main_prompt_hint

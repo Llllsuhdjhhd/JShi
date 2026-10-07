@@ -51,7 +51,7 @@ def test_ignored_input_enters_pending_scene_once_and_never_next_input(process):
     class Judge(Model):
         def generate(self, req):
             self.requests.append(req)
-            text = json.loads(req.input_text)['batch'][0]['text']
+            text = json.loads(req.input_text)['input']['lines'][0]['text']
             return ModelResponse(model='test', text=json.dumps({'items': [{'n':1,
                 'to_jiangshi':'no' if text == '背景广播' else 'yes',
                 'relevance':'unrelated' if text == '背景广播' else 'related'}]}))
@@ -85,8 +85,7 @@ def test_independent_review_gets_current_text_scene_and_candidate_knowledge_with
             self.requests.append(req)
             started.set()
             release.wait(5)
-            return ModelResponse(model='test', text=json.dumps({'speaker_judgments':[
-                {'n':'N1', 'speaker_pick':'unknown', 'level':'不确定'}], 'next_jev_note':'还需核对'}))
+            return ModelResponse(model='test', text=json.dumps({'scene':'人物尚未确定，保留本轮交往。'}))
     process.person_review_model = Slow()
     async def run():
         c = VoiceConversation(process, 'stone', FakeCloud(), discard, input_pause_s=.01)
@@ -94,6 +93,7 @@ def test_independent_review_gets_current_text_scene_and_candidate_knowledge_with
             who = SpeakerEvidence('A', 'unknown', '声音待定', method='unassigned_audio')
             old = SceneUtterance('独立核对历史', who, 0, 1800, input_id='history', received_at_ms=int(time()*1000)-1)
             c.scene.append(old)
+            c._capture_jev_inputs((old,))
             await c.accept(Transcript('当前人物疑问', 'A', 2000, 3800, True, identity_uncertain=True))
             await asyncio.wait_for(c.queue.join(), 3)
             await asyncio.wait_for(c.turn_queue.join(), 3)
@@ -101,15 +101,15 @@ def test_independent_review_gets_current_text_scene_and_candidate_knowledge_with
             assert await asyncio.to_thread(started.wait, 1)
             assert not release.is_set()
             request = process.person_review_model.requests[-1]
-            assert request.purpose == 'voice_person_review'
+            assert request.purpose == 'voice_jev_scene'
             payload = json.loads(request.input_text)
-            assert payload['batch_evidence']['本批证据（N编号对应本批序号）'][0]['text'] == '当前人物疑问'
-            assert payload['recent_scene'][0]['text'] == '独立核对历史'
-            assert 'candidate_knowledge' in payload and 'pending_events' in payload
+            assert any(r['text'] == '当前人物疑问' for r in payload['input_output'])
+            assert any(r['text'] == '独立核对历史' for r in payload['input_output'])
+            assert 'main_scene' in payload and 'scene' in payload
             assert '独立核对历史' not in build_user(process.cognition.requests[-1])
             release.set()
             await asyncio.wait_for(c.person_review_queue.join(), 3)
-            assert c.recent_main_reviews()[0]['next_jev_note'] == ''
+            assert c.jev_scene_store.snapshot()['scene'] == '人物尚未确定，保留本轮交往。'
         finally:
             release.set()
             await c.close()

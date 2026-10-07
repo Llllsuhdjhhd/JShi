@@ -306,9 +306,11 @@ SUXIPO_BOOT_SCHEMA: Mapping = {
 # --------------------------------------------------------------------------- #
 # 斯密斯：人格块（任务1回应 / 任务2工具 / 文风平实 / 输出）
 # --------------------------------------------------------------------------- #
+from .prompt_levels import DIALOGUE_DIRECTION_NOTE
+
 SMITH_BLOCK = """【你的任务】
 【任务1 · 回应】
-你是匠石。【此时的片场】是已经写好的场面，记着你与各对象之间的来往；【此时的输入】是对方这一轮刚对你说的话；【你此时的回忆】是这一轮让你想起来的旧片段。
+你是匠石。【此时的片场】是已经写好的场面，记着你与各对象之间的来往；【此时的输入】是这一轮新输入，可能包含多人发言，不是每句都在对你说话；【你此时的回忆】是这一轮让你想起来的旧片段。
 """ + PERSONA_SITUATION_NOTE + """
 假设你在这个片场，你要结合片场的情景，按照【此时的输入】中对方的语言以及你的回忆，给出你这一拍回应。
 """ + RESPONSE_MODE_BLOCK + """
@@ -324,7 +326,7 @@ SMITH_BLOCK = """【你的任务】
 
 """ + PERSONA_OUTPUT_RULES
 
-SMITH_INSTRUCTION = f"{COMMON_CORE}\n\n{SMITH_BLOCK}"
+SMITH_INSTRUCTION = f"{COMMON_CORE}\n\n{DIALOGUE_DIRECTION_NOTE}\n{SMITH_BLOCK}"
 
 SMITH_BOOT_INSTRUCTION = """【写场景】
 现在还没有片场。下面是木头攒下的素材，你据此写这个片场的开场 scene（value 已由程序给定，不用你生成）：
@@ -404,6 +406,17 @@ SMITH_WRITE_INSTRUCTION = _persona_write_instruction(
     "平实、准确的语言，口语化。不要杜撰，不要文艺加工。注意时间、地点、人物等信息。语句连贯。"
 )
 
+SCENE_TIER_NOTE = """【片场块重要性分档】
+仍只整理一份片场，沿用上述字数上限与增删改规则，不输出长、中、短三份正文。完成取舍后，为留下来的块标重要性tier：
+1档：当前交往不可缺少的事实、有效承诺与待办、重要纠正、必要身份关联及真实交付边界；
+2档：理解和接续当前话题有用的背景、关联经历与进展；
+3档：完整情境中可保留、但短版可以省略的补充细节。
+档位表示保留优先级，不是时间排序；不要改事实、改变先后关系或把所有块机械标为1。
+对本轮保留的已有块，包括未mod的块，输出 {"op":"tier","id":"B2","tier":1}。引用更新前的B编号，删除的块不用分档。add可直接带tier，不另抄正文。
+【程序将追加的新块】若提供，A1、A2等只用于标记其tier；输出 {"op":"tier","id":"A1","tier":2}，不要用add重复写入，不得mod/del这些新块。B1固定自述始终保留。
+有交付计划或播放器事实时，保留重要状态的相关上下文，不能把未播计划当已播出。程序按1、1+2、1+2+3读取短、中、全三个视图，不再调用模型生成另两份。
+只输出一个JSON对象：{"edit":[...]}。分类只写编号与tier，不重复块正文。"""
+
 
 def _persona_reply_instruction(style_note: str, *, task1: str) -> str:
     """人格回复调用（①）专用指令：只回应、不写场（写场走 WriteZoneSkill/write_instruction）。"""
@@ -421,8 +434,8 @@ def _persona_reply_instruction(style_note: str, *, task1: str) -> str:
         "先分清每条话是谁说的，再结合整批发言、片场和已经发生的交往，判断他在对谁说、你是否该接话。"
         "不默认最后一位是回应对象；可以回应一人、多人，也可以不回应。"
         "‘你’‘你们’、问句和命令句本身不证明是在叫你；声音身份已经确认，也不证明是在对你说。\n"
-        "入口标注中的人物归属、确定程度和对话指向用于理解本批输入，不是人物原话，也不是必须回应的指令。"
-        "只有与你形成交往的当前发言才需要回应；maybe只是指向未明，不是开口许可。"
+        "入口标注中的人物归属、确定程度用于理解本批输入，不是人物原话，也不是必须回应的指令。"
+        "只有与你形成交往的当前发言才需要回应；对话指向由你结合原话与情境判断，指向未明不是开口许可。"
         "旧任务、回忆和未开口事项只帮助理解，不能单独证明含糊短句在要求恢复旧任务；"
         "没有本轮明确的承接依据，不把‘试一下’‘继续’或对象不明的请求补成旧任务。"
         "旁人发言可以帮助理解背景、条件、补充和纠正，但不自动成为交给你的问题、命令或委托。"
@@ -479,7 +492,7 @@ SMITH_REPLY_INSTRUCTION = _persona_reply_instruction(
         + PERSONA_SITUATION_NOTE
         + "\n假设你在这个片场，你要结合片场的情景、【此时的输入】里的整批发言以及你的回忆，先判断当前与你形成的交往，"
         "给出你这一拍回应。\n"
-        + RESPONSE_MODE_BLOCK
+        + DIALOGUE_DIRECTION_NOTE + "\n" + RESPONSE_MODE_BLOCK
     ),
 )
 
@@ -656,15 +669,22 @@ def reply_instruction_for(
     registry: StylePackRegistry | None = None,
     *,
     zone_chars: int = 0,
+    prompt_level: int = 1,
+    prompt_modules: tuple[str, ...] = (),
 ) -> str:
     """回复调用（①）指令：木头空（走 CognitionSkill 默认），人格用「只回应」专用指令。"""
     pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
     text = pack.reply_instruction
     if not text:
         return ""
+    if pack.pack_id == SMITH:
+        from jshi.core.prompt_profile import PromptProfile, valid_level
+        from .prompt_levels import smith_reply
+        text = smith_reply(text, PromptProfile(valid_level(prompt_level), prompt_modules))
     if zone_chars:
         text = text.replace("{zone_chars}", str(zone_chars))
-    return text + '\n沿用入口对象归属，只处理当前输入与反应；人物复判由独立流程处理，本轮不输出人物判断。'
+    boundary = '沿用入口对象归属，只处理当前输入与反应；人物复判由独立流程处理，本轮不输出人物判断。'
+    return text if text.rstrip().endswith(boundary) else text + '\n' + boundary
 
 
 def boot_instruction_for(
@@ -686,6 +706,8 @@ def write_instruction_for(
     text = pack.write_instruction
     if not text:
         return ""
+    if pack.pack_id == SMITH:
+        text += "\n\n" + SCENE_TIER_NOTE
     if zone_chars:
         text = text.replace("{zone_chars}", str(zone_chars))
     return text
@@ -726,23 +748,38 @@ def _edit_schema(schema: Mapping | None) -> Mapping | None:
 def reply_schema_for(
     pack_id: str | None,
     registry: StylePackRegistry | None = None,
+    *, prompt_level: int = 1,
 ) -> Mapping | None:
     """回复调用的 schema：木头 None（走 CognitionSkill 默认），人格去掉 ``edit``。"""
     pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
     if not pack.instruction:
         return None
-    return _without_edit(pack.schema)
+    result = _without_edit(pack.schema)
+    if pack.pack_id == SMITH and result:
+        from jshi.core.prompt_profile import valid_level
+        if valid_level(prompt_level) != 1:
+            result["properties"] = {k:v for k,v in result["properties"].items()
+                if k in {"mode", "reply", "action", "unsaid", "reason", "reply_targets"}}
+            result["additionalProperties"] = False
+    return result
 
 
 def write_schema_for(
     pack_id: str | None,
     registry: StylePackRegistry | None = None,
 ) -> Mapping | None:
-    """写场调用的 schema：木头 None（走 WriteZoneSkill 默认），人格只留 ``edit``。"""
+    """写场只用一个edit契约；Smith增加块的重要性tier标记。"""
     pack = (registry or DEFAULT_REGISTRY).resolve(pack_id)
     if not pack.instruction:
         return None
-    return _edit_schema(pack.schema)
+    result = _edit_schema(pack.schema)
+    if pack.pack_id == SMITH and result:
+        from copy import deepcopy
+        result = deepcopy(result)
+        props = result["properties"]["edit"]["items"]["properties"]
+        props["op"] = {"enum": ["add", "del", "mod", "tier"]}
+        props["tier"] = {"type": "integer", "enum": [1, 2, 3]}
+    return result
 
 
 def boot_schema_for(

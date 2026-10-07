@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>匠石 · 数据与调试</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f7f8fb;color:#202936;font:14px/1.6 system-ui,sans-serif}main{max-width:1500px;margin:auto;padding:28px}header{display:flex;align-items:center;gap:18px;flex-wrap:wrap}h1{font-size:23px;margin:0}a{color:#2768cf}small,.muted{color:#697587}button,select,input{font:inherit;padding:9px 12px;border:1px solid #d9dfe8;border-radius:8px;background:white;color:inherit}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}button:hover:not(:disabled){background:#edf3ff}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #3879ed;outline-offset:2px}.layout{display:grid;grid-template-columns:240px minmax(0,1fr);gap:22px;margin-top:24px}aside{align-self:start;background:white;border:1px solid #e1e5ec;padding:15px;border-radius:12px;position:sticky;top:16px}aside select{width:100%;height:55vh}form{display:flex;gap:8px;flex-wrap:wrap}form input{flex:1;min-width:160px}.pager{display:flex;gap:10px;align-items:center;margin:14px 0}.record{background:white;border:1px solid #e0e6ef;border-radius:10px;margin:10px 0;padding:12px 16px}summary{cursor:pointer;overflow-wrap:anywhere;font-weight:600}.meta{font-size:12px;color:#6c7889;margin:5px 0}.fields{margin:12px 0}dt{font-size:12px;color:#687588;margin-top:12px}dd{margin:2px 0;white-space:pre-wrap;overflow-wrap:anywhere;max-height:35vh;overflow:auto}pre{background:#f4f6fa;padding:12px;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:55vh;overflow:auto;font:12px/1.6 monospace}.error{color:#a33424}.empty{padding:40px;text-align:center;color:#6c7889}#status{min-height:24px}label{display:block;margin-bottom:8px}@media(max-width:760px){main{padding:16px}.layout{grid-template-columns:1fr}aside{position:static}aside select{height:150px}}
+</style>
+<style>a,a:visited{color:#4a6b93;text-decoration:none}body.embedded main{padding:20px}body.embedded header{display:none}body.embedded .layout{margin-top:0}</style>
+<style>
+.layout{grid-template-columns:200px minmax(0,1fr);gap:16px}aside{padding:12px;max-height:calc(100vh - 120px);overflow:auto}.embedded aside{max-height:calc(100vh - 40px)}#sources{display:none}.source-group{font-size:11px;color:#9aa4b3;margin:14px 8px 5px}.source-item{display:block;width:100%;border:0;text-align:left;background:transparent;padding:7px 10px;font-size:12px;line-height:1.5;margin:2px 0;color:#64738a}.source-item.active{background:#edf3fe;color:#376bc1}.source-item:disabled{opacity:.45}.source-item:hover:not(:disabled){background:#f1f5fa}#source-path{font-size:10px;overflow-wrap:anywhere;color:#9ba6b6}aside>small{font-size:11px}.record{padding:14px 18px}.record>summary{font-size:13px;font-weight:500}.record[open]>summary{padding-bottom:12px;border-bottom:1px solid #edf0f6}.meta{font-size:11px;margin:8px 0;overflow-wrap:anywhere}.value-section{margin-top:16px}.value-label{font-size:11px;color:#8391a5;margin-bottom:6px}.value-body{padding:12px 14px;border:1px solid #e8edf4;border-radius:9px;background:#fafbfd;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.85;max-height:none}.nested-fields{margin:0;display:grid;grid-template-columns:minmax(80px,130px) minmax(0,1fr);gap:8px 14px}.nested-fields dt{margin:0;color:#8592a4;font-size:11px}.nested-fields dd{margin:0;max-height:none;overflow:visible;font-size:12px}.array-item{padding:8px 0;border-bottom:1px solid #e9edf4}.array-item:last-child{border:0}.record .auxiliary{margin-top:16px;padding:12px 0;border-top:1px solid #edf0f5}.record .auxiliary>summary{font-size:11px;color:#8693a5}.record .copy-record{margin-top:12px;padding:6px 10px;font-size:11px;background:#f5f7fb;color:#69809e}.record pre{max-height:none;background:#f5f7fa}.record .value-body pre{padding:0;margin:0;background:transparent}form{gap:6px}form input{font-size:12px;padding:9px}form button,.pager button{font-size:12px;padding:8px 10px}.pager{font-size:11px;color:#7c889c}#status{font-size:11px;color:#8b97a8}.fields dt{font-size:11px}.fields dd{font-size:12px}body.embedded main{padding:16px}
+@media(max-width:850px){.layout{grid-template-columns:1fr}aside{position:static;max-height:none}#sources{display:block;height:auto}#source-menu,aside>small,#source-path{display:none}aside{padding:10px}.nested-fields{grid-template-columns:90px minmax(0,1fr)}body.embedded main{padding:12px}}
+</style>
+<main><header><h1>数据与调试</h1><a href="/">← 返回对话</a><small>直接读取已保存数据；查看无需开麦，不修改记录。</small></header>
+<div class="layout"><aside><label for="sources">数据分类</label><select id="sources" aria-label="数据分类"></select><nav id="source-menu" aria-label="保存数据分类"></nav><p class="muted" id="source-path"></p><small>灰色分类表示尚无数据。原始字段与 JSON 保留在详情中。</small></aside>
+<section><form id="search"><input id="query" type="search" maxlength="200" placeholder="搜索文字、人物编号、活动 / 工作 / 任务 ID" aria-label="搜索数据"><button>搜索</button><button id="refresh" type="button">刷新</button><button id="export" type="button">导出本页 JSON</button></form>
+<div class="pager"><button id="prev">上一页</button><span id="count"></span><button id="next">下一页</button><select id="presentation" aria-label="展示方式"><option value="organized">整理视图</option><option value="original">原始字段</option></select></div><p id="memory-note" class="muted" hidden></p><p id="status" role="status" aria-live="polite"></p><div id="rows"></div></section></div></main>
+<script>
+const $=id=>document.getElementById(id);
+if(new URLSearchParams(location.search).get('embedded')==='1')document.body.classList.add('embedded');
+let page=0,rows=[],sources=[],serial=0,people={};
+const fieldNames={content:'内容',text:'文字',text_raw:'原始内容',payload:'数据',query:'召回查询',response:'模型结果',result:'结果',plan:'计划',need:'需求',handling:'交付处理',tasks:'任务对应',scene:'JEV片场',created_at:'记录时间',create_time:'事件时间',object_id:'人物编号',subject_id:'主体编号',activity_id:'活动编号',work_id:'工作编号',task_id:'任务编号',event_type:'事件类型',system_hash:'系统提示词索引',system_text:'实际 system 提示词',user_text:'实际 user 输入',status:'状态',closed:'已完成',source_ids:'来源记录',sequence:'记录序号',kind:'类别',id:'记录编号',model:'模型',purpose:'调用用途',summary:'摘要',name:'名称',label:'显示名称'};
+Object.assign(fieldNames,{content_raw:'记忆原文',summaries:'分档摘要',levels:'分档肖像',decoration:'补充描述',insight:'理解与观察',emotion:'情绪线索',role_list:'涉及人物',steps:'各阶段耗时（毫秒）',total_ms:'总耗时（毫秒）',voice:'语音入口',input:'输入',output:'输出',input_output:'输入输出',unwritten:'尚未整理',pending:'待处理',codes:'人物代号',labels:'人物显示名称',items:'条目',result_fields:'交付字段',feedback_plan:'反馈计划',reason:'依据',why:'判断依据',mode:'回应方式',tool_handling:'工具结果处理',work_complete:'工作完成',duration_ms:'耗时（毫秒）',file:'记录文件',basis:'依据',at:'事件时间',state:'状态',version:'版本',updated_at:'更新时间',parts:'输入内容',speaker:'发言人物',source:'来源',current_utterances:'本批发言',utterances:'现场发言'});
+Object.assign(fieldNames,{recalled_event_ids:'实际装入的记忆编号',skipped_ids:'跳过的记忆编号',input_segment_id:'输入片段编号',recall_id:'召回编号',n_items:'候选条目数',anchor_event_ids:'锚点事件',score:'召回排序分数（不是正确率）',level:'召回档位',limit:'结果上限',logical_gaps:'待补信息',identified_roles:'已识别人物',source_events:'来源事件',occurred_at:'事件发生时间',buffer_items:'暂存材料',content_fragments:'待整理原文片段',object_confidence:'入口人物置信度',object_status:'人物归属状态'});
+Object.assign(fieldNames,{baseline:'长期基线',adjustments:'按情境调整',uncertainties:'存疑事项',context:'适用情境',approach:'已保存的相处方式',brief:'精要',shape:'经历结构',epistemic_status:'采信状态',evidence_kind:'证据类型',from_state:'原状态',to_state:'新状态',target_type:'对象类型',target_id:'对象编号'});
+function addSection(box,label,value){const section=document.createElement('section');section.className='value-section';const title=document.createElement('div');title.className='value-label';title.textContent=label;let body;
+ if(typeof value==='string'&&value.length>1600){body=document.createElement('div');const preview=document.createElement('div');preview.textContent=value.slice(0,400)+'…（预览）';const full=document.createElement('details'),sum=document.createElement('summary');sum.textContent='展开完整内容 · '+value.length+' 字符';full.append(sum,valueView(value));body.append(preview,full);}else body=valueView(value);
+ body.className='value-body';section.append(title,body);box.appendChild(section);return body;}
+function relatedButton(box,label,source,query){const b=document.createElement('button');b.className='copy-record';b.textContent=label;b.onclick=()=>{$('sources').value=source;$('query').value=query;page=0;load();};box.appendChild(b);}
+function memoryLinks(box,ids,label='查看记忆'){
+ if(!ids.length)return;
+ const group=document.createElement('details'),title=document.createElement('summary');group.className='auxiliary';title.textContent='逐条对照记忆原文与摘要 · '+ids.length+' 条';group.appendChild(title);
+ for(const id of ids)relatedButton(group,label+' '+id.slice(0,14),'memory:events',id);box.appendChild(group);
+}
+function memoryView(box,data,source){
+ if(source==='memory:events'){
+  addSection(box,'原始记忆正文',data.content_raw||'未保存正文');
+  addSection(box,'模型已整理的分档摘要',data.summaries||'暂无摘要');
+  addSection(box,'记忆状态与来源',{status:data.status,事件发生时间:data.occurred_at||'未记录（保存时间不代表发生时间）',来源记录:data.source_ids||[],来源事件:data.source_events||[],涉及人物:data.role_list||[]});
+  if(data.insight)addSection(box,'已保存的理解与观察',data.insight);
+  if(data.event_id){relatedButton(box,'查看主流程召回记录','recall',data.event_id);relatedButton(box,'查看后端召回候选','memory:recall_traces',data.event_id);}
+  for(const id of (Array.isArray(data.source_ids)?data.source_ids:[]).slice(0,8))relatedButton(box,'查看来源 '+id.slice(0,12),'subject:histories',id);
+ }else if(source==='recall'||source==='memory:recall_traces'){
+  addSection(box,'当次召回查询（原始记录）',data.query||'未保存查询');
+  addSection(box,'召回条件',{人物:data.object_id||'未限定人物',档位:data.level,活动:data.activity_id||'后端记录未提供活动编号',输入片段:data.input_segment_id||'未记录'});
+  if(source==='recall'){
+   const selected=Array.isArray(data.recalled_event_ids)?data.recalled_event_ids:[],skipped=Array.isArray(data.skipped_ids)?data.skipped_ids:[];
+   addSection(box,'主流程装入情况',{实际装入数量:selected.length,跳过数量:skipped.length,说明:'装入代表作为认知材料提供，不证明模型最终采用；跳过不等于已删除。'});
+   addSection(box,'实际装入的记忆',selected);
+   memoryLinks(box,selected);
+   addSection(box,'未装入的记忆编号',skipped);
+   relatedButton(box,'对照后端候选','memory:recall_traces',data.query||'');
+  }else{
+   addSection(box,'后端返回候选（不等于主流程实际装入）',{候选条目数:data.n_items,条目:data.items||[]});
+   const ids=[...new Set((Array.isArray(data.items)?data.items:[]).map(x=>x.event_id).filter(Boolean))];
+   memoryLinks(box,ids,'查看候选记忆');
+   relatedButton(box,'对照主流程装入记录','recall',data.query||'');
+  }
+ }else if(source==='memory_placement'){
+  const c=data.content||{};
+  addSection(box,'输入原话 / 落位记录',c.text||c);
+  addSection(box,'人物与来源',{记录类型:data.event_type,人物编号:c.object_id,显示名称:c.source||c.label,归属状态:c.object_status||c.status,入口置信度:c.object_confidence,输入来源:c.channel,人物对应:c.objects||{}});
+  if(c.envelope)addSection(box,'原始输入信封',c.envelope);
+  addSection(box,'落位含义','这里只表示输入或人物被记录；长期记忆可能仍待整理。关联查看无结果时，不能认定记忆已形成或丢失。');
+  if(data.id)relatedButton(box,'查看由这条来源形成的记忆','memory:events',data.id);
+ }else if(source==='memory:unclosed_events'){
+  addSection(box,'待整理原文',data.content_fragments||[]);addSection(box,'当前整理状态',{已识别人物:data.identified_roles||[],待补信息:data.logical_gaps||[],暂存材料:data.buffer_items||[]});
+ }else if(source==='memory:object_portraits'||source==='memory:portrait_summaries'||source==='memory:person_experience_portraits'){
+  if(data.brief)addSection(box,'经历精要（已保存）',data.brief);
+  addSection(box,'已整理人物肖像',data.levels||data.content||data.text||data.summary||data);
+  if(data.shape)addSection(box,'长期基线、变化与存疑',data.shape);
+  if(data.object_id)relatedButton(box,'查看人物的原始记忆','memory:events',data.object_id);
+  if(data.source_event_id)relatedButton(box,'查看来源事件','memory:events',data.source_event_id);
+ }else return false;
+ return true;
+}
+function organizedView(box,data,source){
+ if(memoryView(box,data,source))return true;
+ if(source==='timing'||source==='write_timing'){
+  addSection(box,'耗时概览',{总耗时毫秒:data.total_ms,各阶段:data.steps||[],语音入口:data.voice||{}});
+  if(data.activity_id){relatedButton(box,'对照实际提示词','prompts',data.activity_id);relatedButton(box,'对照主流程记录','subject:histories',data.activity_id);}return true;
+ }
+ if(source==='tool'||source==='tool_work'){
+  addSection(box,'任务需求',data.need||data.verbal||'未保存需求');
+  addSection(box,'任务与交付状态',{状态:data.status||'未记录',已关闭:data.closed,处理:data.handling||{},错误:data.plan_error||''});
+  for(const [key,label] of [['plan','执行计划'],['tasks','子任务'],['stages','执行过程'],['delivered_block','已交付主流程的材料'],['result','工具结果']])if(data[key])addSection(box,label,data[key]);
+  if(data.work_id)relatedButton(box,'查看相关任务','tool',data.work_id);
+  if(data.activity_id)relatedButton(box,'查看该轮实际提示词','prompts',data.activity_id);return true;
+ }
+ if(source==='subject:activities'){
+  addSection(box,'活动与回应状态',{活动类型:data.kind,状态:data.status,回应:data.response_statuses||[],触发来源:data.trigger});
+  for(const [label,target] of [['认知结果','subject:cognitive_contents'],['实际提示词','prompts'],['阶段耗时','timing'],['工具任务','tool']])relatedButton(box,'查看'+label,target,data.id);
+  if(data.trigger)relatedButton(box,'查看触发输入','subject:histories',data.trigger);return true;
+ }
+ if(source==='subject:transitions'){
+  addSection(box,'状态变化',{对象类型:data.target_type,从:data.from_state,变为:data.to_state,依据:data.reason});return true;
+ }
+ if(source==='subject:object_profiles'){
+  addSection(box,'人物基本资料',{姓名:data.label,别名:data.aliases||[],状态:data.status,来源:data.source,声音参考数量:(data.carriers||[]).filter(c=>c.kind==='voiceprint').length});
+  for(const [label,target] of [['肖像','memory:object_portraits'],['经历','memory:person_experience_portraits'],['记忆','memory:events']])relatedButton(box,'查看人物'+label,target,data.object_id);return true;
+ }
+ if(source==='subject:experience_ledger'){
+  const p=data.payload||{};addSection(box,'尚未整理的经历与游标',{待处理序号:p.pending_sequences||[],整理游标:p.cursors||{},当前上下文:p.context||{}});addSection(box,'经历片段',p.segments||[]);addSection(box,'输入接收记录',p.ingest_entries||[]);return true;
+ }
+ if(source==='zone'||source==='pending'||source==='jev_scenes'){
+  addSection(box,'已保存的片场 / 待写材料',data.data||data.value||data);
+  addSection(box,'查看说明','这是当前保存材料；待写内容、准备回应和实际已播出须按记录状态区分。');return true;
+ }
+ return false;
+}
+function recordTitle(data,source){
+ const person=people[data.object_id]||data.name||data.label||(data.object_id?'人物 '+String(data.object_id).slice(0,16):'');
+ if(source==='memory:person_experience_portraits')return (person||'未关联人物')+' · 经历肖像 · '+(data.brief||data.content||'暂无正文');
+ if(source==='memory:object_portraits')return (person||'未关联人物')+' · 分档肖像';
+ if(source==='subject:activities')return '主流程活动 · '+(data.status||'状态未记录')+' · '+String(data.id||'').slice(0,8);
+ if(source==='subject:transitions')return (data.from_state||'?')+' → '+(data.to_state||'?')+' · '+(data.reason||'');
+ if(source==='timing'||source==='write_timing')return (source==='timing'?'主流程':'写场')+'耗时 · '+(data.total_ms===undefined?'未记录':(data.total_ms/1000).toFixed(2)+' 秒');
+ return data.need||data.query||data.brief||data.text||data.label||data.name||(data.content&&data.content.text)||data.content_raw||(typeof data.content==='string'&&data.content)||data.event_type||data.purpose||data.key||data.kind||data.file||data.event_id||data.object_id||data.id||'记录';
+}
+const pretty=v=>typeof v==='string'?v:JSON.stringify(v,null,2);
+function valueView(value,depth=0){
+ const body=document.createElement('div');
+ if(value===null||typeof value!=='object'||depth>=3){body.textContent=typeof value==='boolean'?(value?'是':'否'):pretty(value);return body;}
+ if(Array.isArray(value)){if(!value.length){body.textContent='无';return body;}value.forEach((v,i)=>{const item=valueView(v,depth+1);item.className='array-item';body.appendChild(item);});return body;}
+ const dl=document.createElement('dl');dl.className='nested-fields';Object.entries(value).forEach(([key,v])=>{const dt=document.createElement('dt');dt.textContent=fieldNames[key]||key;const dd=document.createElement('dd');dd.appendChild(valueView(v,depth+1));dl.appendChild(dt);dl.appendChild(dd);});body.appendChild(dl);return body;
+}
+const auxKeys=new Set(['id','sequence','subject_id','object_id','activity_id','work_id','task_id','event_id','created_at','create_time','updated_at','source_ids','system_hash','hash','kind','purpose','model']);
+const memoryBodyKeys=new Set(['name','content_raw','summaries','levels','content','text','summary','query','decoration','insight','emotion','role_list','status','content_fragments']);
+async function copy(value){try{await navigator.clipboard.writeText(value);$('status').textContent='已复制。';}catch{$('status').textContent='复制失败，请展开原始 JSON 后手动复制。';}}
+function render(){
+ $('rows').replaceChildren();
+ if(!rows.length){const p=document.createElement('p');p.className='empty';p.textContent='没有匹配记录。可以清空搜索或切换分类。';$('rows').appendChild(p);return;}
+ rows.forEach((r,i)=>{
+  const data=typeof r==='object'&&r!==null?r:{value:r};
+  const box=document.createElement('details');box.className='record';
+  const title=document.createElement('summary');
+  const text=recordTitle(data,$('sources').value);
+  title.textContent=(page*20+i+1)+'. '+String(text).slice(0,160);box.appendChild(title);
+  const meta=document.createElement('div');meta.className='meta';const at=data.created_at||data.create_time;const when=at&&!Number.isNaN(Date.parse(at))?new Date(at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})+'（北京时间）':at;meta.textContent=[when,data.status,data.activity_id,data.work_id,data.task_id,data.object_id].filter(Boolean).join(' · ');box.appendChild(meta);
+  const fields=document.createElement('dl');fields.className='fields';
+  const organized=$('presentation').value==='organized'&&organizedView(box,data,$('sources').value);
+  const priority=['need','summary','text','content_raw','summaries','levels','system_text','user_text','content','result','response','scene','plan','handling','tasks','payload','value','data'];
+  const entries=Object.entries(data).sort((a,b)=>(priority.indexOf(a[0])<0?99:priority.indexOf(a[0]))-(priority.indexOf(b[0])<0?99:priority.indexOf(b[0])));
+  entries.forEach(([key,value])=>{if(organized||auxKeys.has(key)||($('sources').value.startsWith('memory:')&&!memoryBodyKeys.has(key))){const dt=document.createElement('dt');dt.textContent=(fieldNames[key]||key)+' · '+key;const dd=document.createElement('dd');dd.textContent=pretty(value);fields.appendChild(dt);fields.appendChild(dd);return;}
+   const section=document.createElement('section');section.className='value-section';const label=document.createElement('div');label.className='value-label';label.textContent=fieldNames[key]||key;const body=valueView(value);body.className='value-body';section.appendChild(label);section.appendChild(body);box.appendChild(section);
+  });
+  const info=document.createElement('details'),infoTitle=document.createElement('summary');info.className='auxiliary';infoTitle.textContent='编号、来源与记录信息';info.appendChild(infoTitle);info.appendChild(fields);box.appendChild(info);
+  const raw=document.createElement('details'),sum=document.createElement('summary'),pre=document.createElement('pre');raw.className='auxiliary';sum.textContent='原始 JSON';pre.textContent=JSON.stringify(r,null,2);raw.appendChild(sum);raw.appendChild(pre);box.appendChild(raw);
+  const button=document.createElement('button');button.className='copy-record';button.textContent='复制这条记录';button.onclick=()=>copy(pre.textContent);box.appendChild(button);$('rows').appendChild(box);
+ });
+}
+async function load(){
+ const token=++serial;const source=$('sources').value;if(!source)return;
+ $('status').className='';$('status').textContent='正在读取…';$('prev').disabled=$('next').disabled=true;
+ $('source-path').textContent=(sources.find(s=>s.id===source)||{}).path||'';
+ $('memory-note').hidden=false;$('memory-note').textContent=(sources.find(s=>s.id===source)||{}).label+'：整理视图按已有记录组织，模型已生成内容会按保存结果呈现；原始字段和 JSON 可切换查看。关联查询只显示实际保存记录。';
+ for(const button of $('source-menu').querySelectorAll('button'))button.classList.toggle('active',button.dataset.source===source);
+ try{const res=await fetch('/api/data?'+new URLSearchParams({source,q:$('query').value,page}),{cache:'no-store'});if(!res.ok)throw Error(await res.text());const d=await res.json();if(token!==serial)return;
+ rows=d.rows;render();$('count').textContent='第 '+(page+1)+' 页 · 共 '+d.total+' 条'+(d.limited?'（限定范围）':'');$('status').textContent=d.note||'已读取保存记录。';$('prev').disabled=page===0;$('next').disabled=(page+1)*d.size>=d.total;
+ }catch(e){if(token!==serial)return;$('status').className='error';$('status').textContent='读取失败：'+e.message;rows=[];$('rows').replaceChildren();}
+}
+$('sources').onchange=()=>{page=0;load();};$('search').onsubmit=e=>{e.preventDefault();page=0;load();};$('refresh').onclick=()=>load();$('prev').onclick=()=>{page--;load();};$('next').onclick=()=>{page++;load();};
+$('presentation').onchange=()=>render();
+$('export').onclick=()=>{const blob=new Blob([JSON.stringify({source:$('sources').value,query:$('query').value,page,rows},null,2)],{type:'application/json'});const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='jshi-data-page-'+(page+1)+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+Promise.all([fetch('/api/data',{cache:'no-store'}).then(async r=>{if(!r.ok)throw Error(await r.text());return r.json();}),fetch('/text-people',{cache:'no-store'}).then(r=>r.ok?r.json():{}).catch(()=>({}))]).then(([d,p])=>{
+ people=Object.fromEntries((p.people||[]).map(x=>[x.object_id,x.label]));
+ const order=['主流程','记忆','片场','工具','调试'];sources=d.sources.sort((a,b)=>order.indexOf(a.group)-order.indexOf(b.group));const groups=new Map();sources.forEach(s=>{if(!groups.has(s.group)){const group=document.createElement('optgroup');group.label=s.group;groups.set(s.group,group);$('sources').appendChild(group);const heading=document.createElement('div');heading.className='source-group';heading.textContent=s.group;$('source-menu').appendChild(heading);}const option=new Option(s.label+(s.available?'':'（暂无）'),s.id);option.disabled=!s.available;groups.get(s.group).appendChild(option);const button=document.createElement('button');button.className='source-item';button.dataset.source=s.id;button.textContent=s.label;button.disabled=!s.available;button.onclick=()=>{$('sources').value=s.id;page=0;load();};$('source-menu').appendChild(button);});
+ const desired=new URLSearchParams(location.search).get('source');$('sources').value=sources.find(s=>s.id===desired&&s.available)?.id||sources.find(s=>s.available)?.id||'';load();
+}).catch(e=>{$('status').className='error';$('status').textContent='分类读取失败：'+e.message;});
+</script></html>

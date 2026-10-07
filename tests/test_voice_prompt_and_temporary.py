@@ -19,8 +19,10 @@ def test_turn_diagnostics_include_each_actual_jev_prompt(process):
     class Judge:
         name = 'captured-jev'
         def generate(self, request):
+            if request.purpose == 'voice_jev_scene':
+                return ModelResponse(model=self.name,text='{"scene":"已保留现场交往。"}')
             requests.append(request)
-            background = any(item['text'] == '电视解说' for item in json.loads(request.input_text)['batch'])
+            background = any(item['text'] == '电视解说' for item in json.loads(request.input_text)['input']['lines'])
             return ModelResponse(model=self.name, text=json.dumps({'items': [{'n': 1,
                 'to_jiangshi': 'no' if background else 'yes',
                 'relevance': 'unrelated' if background else 'related'}]}))

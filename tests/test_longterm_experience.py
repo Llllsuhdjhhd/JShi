@@ -82,7 +82,20 @@ def test_portrait_source_uses_confirmed_speaker_and_bounded_level() -> None:
     fragment = source.load(ctx).fragments[0]
     assert fragment.source == "person_portrait"
     assert fragment.content == "许澄谨慎核对证据。"
+    assert "许澄谨慎核对证据。" in fragment.alternatives
     assert memory.calls == [("stone", "OBJ-USER")]
+
+
+def test_portrait_without_short_version_is_not_cut_mid_fact():
+    full = "过往观察：许澄喜欢安静，但尚不确定这是不是永久偏好。"
+    class Memory:
+        def portrait(self, subject_id, object_id):
+            return {'subject_id': subject_id, 'object_id': object_id, 'levels': {'L1': full}}
+    source = PersonPortraitSource(Memory(), budget_chars=10)
+    ctx = AssemblyContext('stone', '你好', AssemblySpeaker('OBJ-USER', '许澄', status='confirmed'))
+    content = source.load(ctx).fragments[0].content
+    assert len(content) <= 10
+    assert '喜欢安静' not in content  # Do not cut away the uncertainty qualifier.
 
 
 def test_rems_adapter_maps_person_result_without_event_recall() -> None:

@@ -10,10 +10,12 @@ class Element {
   get options(){return this.children;}
   get lastChild(){return this.children.at(-1);}
   focus(){}
+  showModal(){this.open=true;}
+  close(){this.open=false;if(this.onclose)this.onclose();}
 }
 const nodes=new Map(),node=id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id);};
 const sent=[];
-const ctx=vm.createContext({document:{getElementById:node,createElement:()=>new Element()},navigator:{},setTimeout,clearTimeout,console,
+const ctx=vm.createContext({document:{getElementById:node,createElement:()=>new Element()},navigator:{},setTimeout,clearTimeout,console,fetch:async()=>({ok:true,json:async()=>({people:[]})}),
   Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},WebSocket:{OPEN:1},sent,
 });
 vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1],ctx);
@@ -25,18 +27,18 @@ assert.equal(node('enroll-count').textContent,'已选 2 段声音');
 node('enroll-name').value='lux';node('enroll').onclick();
 assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))),{type:'enroll_inputs',input_ids:['one','two'],name:'lux'});
 vm.runInContext(`message({type:'enrollment',input_ids:['one','two'],object_id:'lux-id',label:'lux',clips:2,seconds:3.9});`,ctx);
-assert.match(node('enroll-status').textContent,/声纹已保存/);
+assert.match(node('enroll-status').textContent,/累计已保存/);
 assert.equal(node('enroll-count').textContent,'尚未选择声音');
 vm.runInContext(`message({type:'enrollment',input_ids:[],object_id:'lux-id',label:'lux',clips:2,seconds:6,user_labeled:true,min_similarity:.428,warning:'已按标注保存'});`,ctx);
-assert.match(node('enroll-status').textContent,/保存 6 秒/);
-assert.match(node('enroll-status').textContent,/一条声纹最长 10 秒/);
+assert.match(node('enroll-status').textContent,/兼容录音保留 6 秒/);
+assert.match(node('enroll-status').textContent,/最多10段/);
 assert.match(node('enroll-status').textContent,/仅供参考/);
 assert.doesNotMatch(node('enroll-status').textContent,/要求 0.8/);
 vm.runInContext(`message({type:'debug',section:'prompt',activity_id:'activity',text:'真实提示词',sections:['当前时间','关于输入']});`,ctx);
 assert.ok(node('debug-part').options.some(x=>x.value==='关于输入'));
 node('debug-part').value='关于输入';node('debug-purpose').value='write_zone';node('debug-turn').value='activity';node('debug-prompt').onclick();
 assert.equal(sent.at(-1).part,'关于输入');assert.equal(sent.at(-1).purpose,'write_zone');assert.equal(sent.at(-1).activity_id,'activity');
-assert.match(html, /value="voice_jev">JEV 初判/);
+assert.match(html, /value="voice_jev">JEV 入口判断/);
 node('debug-part').value='user';node('debug-purpose').value='voice_jev';node('debug-prompt').onclick();
 assert.equal(sent.at(-1).purpose,'voice_jev');assert.equal(sent.at(-1).part,'user');
 vm.runInContext(`message({type:'timeline',input_id:'mixed',start_ms:5000,end_ms:8000,text:'混合声音',overlap:true,speaker:{object_id:'U',label:'未知',track_id:'9'}});`,ctx);
@@ -73,3 +75,37 @@ const ranking=vm.runInContext(`inputRows.get('ranked').p.children.find(x=>x.clas
 assert.match(ranking,/第一名：lux 0\.810 · 第二名：luguang 0\.700/);
 assert.doesNotMatch(ranking,/qf-id|lux-id|lg-id/);
 assert.match(vm.runInContext(`inputRows.get('mixed').p.children.find(x=>x.className==='voice-ranking').textContent`,ctx),/没有有效声纹排名/);
+vm.runInContext(`message({type:'identity_final',input_id:'ranked',jev_status:'completed',certainty:'确定',reason:'声音辅助与相邻对话共同支持',
+  speaker:{object_id:'lux-id',label:'lux',track_id:'A'},voice_initial:{label:'待定声音 1'}});`,ctx);
+assert.match(vm.runInContext(`inputRows.get('ranked').meta.textContent`,ctx),/lux.*JEV 最终判断：确定/);
+assert.match(node('speaker').textContent,/lux.*JEV 最终判断：确定/);
+assert.match(vm.runInContext(`inputRows.get('ranked').meta.title`,ctx),/声纹初判：待定声音 1/);
+vm.runInContext(`message({type:'identity_final',input_id:'one',jev_status:'failed',reason:'输出无效',speaker:{label:'未知',object_id:'old',track_id:'7'},voice_initial:{label:'未知'}});`,ctx);
+assert.match(node('speaker').textContent,/lux/); // Older batches must not replace the latest speaker.
+vm.runInContext(`message({type:'identity_final',input_id:'ranked',jev_status:'failed',reason:'输出无效',speaker:{label:'待定声音',object_id:'unknown',track_id:'A'},voice_initial:{label:'待定声音'}});`,ctx);
+assert.match(node('speaker').textContent,/JEV 判断失败，保留声纹初判/);
+// Ordinary conversations should not expose debugging or a permanent text box.
+assert.equal(node('text-dock').hidden,true);
+node('mode-text').onclick();
+assert.equal(node('text-dock').hidden,false);
+assert.equal(node('voice-dock').hidden,true);
+node('mode-voice').onclick();
+assert.equal(node('text-dock').hidden,true);
+node('toggle-inspector').onclick();
+assert.equal(node('debug-workspace').hidden,false);
+assert.equal(node('conversation').hidden,false);
+node('maximize-debug').onclick();
+assert.equal(node('conversation').hidden,true);
+assert.equal(node('maximize-debug').textContent,'还原');
+node('open-work').onclick();
+assert.equal(node('settings-pane').hidden,true);
+assert.equal(node('data-pane').hidden,false);
+assert.match(node('data-frame').src,/source=tool_work/);
+node('debug-settings-tab').onclick();
+assert.equal(node('settings-pane').hidden,false);
+node('close-inspector').onclick();
+assert.equal(node('debug-workspace').hidden,true);
+assert.equal(node('conversation').hidden,false);
+assert.equal(node('toggle-inspector').ariaExpanded,'false');
+assert.doesNotMatch(html,/<dialog\b/);
+console.log('Conversation layout: inline debugging, maximize, restore and hide passed');

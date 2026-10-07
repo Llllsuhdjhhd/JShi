@@ -265,10 +265,8 @@ def test_independent_review_stays_advice_and_next_jev_receives_it(process):
     class Reviewer(Model):
         def generate(self, request):
             self.requests.append(request)
-            assert request.purpose == 'voice_person_review'
-            return ModelResponse(model='test', text=json.dumps({'speaker_judgments': [
-                {'n':'N1', 'speaker_pick':'unknown', 'level':'不确定', 'evidence':'姓名未确认'}],
-                'next_jev_note':'独立核对：归属来自上下文，未确认声纹。'}))
+            assert request.purpose == 'voice_jev_scene'
+            return ModelResponse(model='test', text=json.dumps({'scene':'P1与匠石持续交谈，身份按入口保留待定。'}))
     process.person_review_model = Reviewer()
     original = process._write_zone
     def write(subject_id, activity, current, *args, **kwargs):
@@ -300,8 +298,9 @@ def test_independent_review_stays_advice_and_next_jev_receives_it(process):
             assert '前文与本批证据' not in build_user(writer.requests[1])
             await c.accept(Transcript('下一句', 'C', 3000, 3800, True, identity_uncertain=True))
             await finish()
-            assert json.loads(calls[-1])['person_review'][0]['next_jev_note'] == ''
-            assert json.loads(calls[-1])['person_review'][0]['judgments']
+            assert 'person_review' not in json.loads(calls[-1])
+            assert 'scene' in json.loads(calls[-1])
+            assert json.loads(calls[-1])['scene']
             assert 'input_worker_wait_ms' in next(iter(c.voice_timings.values()))[1]
         finally:
             await c.close()

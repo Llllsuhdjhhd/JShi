@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 import json
 import math
 import re
+from time import monotonic
 
 from jshi.core import SubjectState
 from jshi.models import ModelRequest
@@ -36,6 +37,7 @@ class BatchItem:
     semantic_pick: str = ""
     semantic_reason: str = ""
     evidence_relation: str = ""
+    identity_only: bool = False  # Current protocol leaves addressing to cognition.
 
     @property
     def keep(self) -> bool:
@@ -53,6 +55,8 @@ class BatchDecision:
     needs_main_review: bool = False
     model_raw: str = ""
     model_error: str = ""
+    main_prompt_hint: dict | None = None
+    routing_error: str = ""  # Valid identity judgments survive invalid routing fields.
 
 
 def explicit_name(text: str) -> str:
@@ -68,12 +72,16 @@ def explicit_name(text: str) -> str:
 class VoiceJEV:
     def __init__(self, model=None) -> None:
         self.model = model
+        self._unavailable_until = 0.0
+        self._unavailable_error = ''
 
     def decide(self, subject_id: str, text: str, speaker: dict, delivery: dict, *, overlap: bool = False, on_request=None) -> InterruptDecision:
         normalized = text.strip().rstrip("。！!，,？?").strip()
         if normalized in {"停", "停止", "别说了", "停一下", "等等", "等一下"}:
             return InterruptDecision("stop", "explicit stop")
-        active = bool(delivery) and delivery.get("state") not in {"completed", "stopped", "failed"}
+        if re.match(r'^(?:匠石[，,：:\s]*)?(?:停止|别说了|停一下|先停|不要说了)(?:[，,。！!？?\s]|$)', normalized):
+            return InterruptDecision('stop', 'explicit stop')
+        active = bool(delivery) and delivery.get("state") in {"playing", "paused", "queued"}
         if overlap:
             return InterruptDecision("resume" if active else "ignore", "overlapping speech; avoid blind interruption")
         if not normalized:
@@ -129,52 +137,62 @@ class VoiceJEV:
             return BatchDecision("stop", rules.reason, self._items_for(batch, "no", "明确停止"), rules.claimed_name, True)
         if self.model is None or overlap or not joined.strip():
             return self._from_legacy(rules, batch)
-        payload = {"delivery": {"state": delivery.get("state", ""), "spoken": delivery.get("spoken", ""),
-                                "pending": delivery.get("pending", ""), "attention": delivery.get("attention", {})},
-                   "context": context, "batch": batch,
-                   "person_review": delivery.get("person_review") or [],
-                   "interaction_feedback": delivery.get("interaction_feedback") or {},
-                   "names_for_jiangshi": delivery.get("names_for_jiangshi") or ["匠石"]}
-        request = ModelRequest(
-            purpose="voice_jev",
-            input_text=json.dumps(payload, ensure_ascii=False),
-            subject_state=SubjectState(subject_id, "匠石", "判断这一批发言"),
-            system_extra=(
-                "你是匠石的 JEV。context 是前文，只用于理解，不评分、不重复回答。"
-                "batch 是本批新发言，只给这些评分。前文里匠石的话以已播出为准，标为准备说的内容对方还没听到。"
-                "batch 是现场听到的发言，不是都对匠石说的话。分清是谁说和对谁说，‘你’、问句、命令句或已知身份本身都不能证明对话指向。"
-                "姓名未知、匿名访客、声音归属待定都不是忽略或拒绝进入主流程的理由。"
-                "话里提到的名字只说明在谈论谁，不能说明是谁在说。"
-                "明确登记声纹或人工关联的归属受保护；自报姓名只是称呼线索，不等于登记确认。candidates 是候选证据，不能当成已经确认。"
-                "speaker.pick 只能选 candidates 里的代号，或 unknown（还不能确定，不表示多了一个人），或 new（更像另一个人，但不建立档案）。"
-                "待定声音是正在收集的声音组，不是已确认新人；一次未匹配不能证明出现新人。收集中的声音和临时访客不参与已有姓名的声纹竞争，也不能据此否认对方自报姓名。声音证据不足时可继续正常交流，不能把前几轮同一个猜测累计成新的声纹依据。"
-                "voice_evidence是程序给出的物理声音支持，不由你改写。先用原话与前文判断语义支持谁，写speaker.semantic_pick与semantic_reason，再综合声音和语义给speaker.pick、level、score、reason。近期人物候选不是声音证据。"
-                "short_voice_hint及source=repeated_short_audio来自同一短句首尾重复拼接的辅助比较；原始时长不变，重复次数不增加独立证据，相似度不是身份概率。可用来比较候选，但单靠它不得确定姓名，不当作clear声纹或多段一致性。"
-                "semantic_pick只依据原话与前文中能区分说话人的语义线索；不要把who已有姓名、声纹结论或对话指向拿来证明语义身份。纠正你、承接你的提问说明可能在对你说，但不单独证明是哪位熟人；没有区分身份的语义依据时semantic_pick=unknown，仍可按明确声纹给综合pick，关系写voice_only。"
-                "两边支持同一个人时可提高综合可信度；声音弱但语义明确时可主要采信语义；声音明确但语义没有线索时可主要采信声音；两边都弱就unknown。声音与语义指向不同时说明差异，明确冲突尚未解释时不得确定，请求独立人物判断。"
-                "speaker.evidence_relation写agree（两边支持同一人）、voice_only（主要靠声音）、semantic_only（主要靠语义）、conflict（未解释的冲突）、insufficient（都不足）。自我介绍属于语义依据，不是声纹确认；上轮评价也不是新增声音证据。"
-                "比较所有候选与 unknown/new 后给出最合适的综合pick；speaker.score 是综合可信度参考，不机械相乘，不冒充声纹概率。"
-                "to_jiangshi 表示是不是在对匠石说，与声纹分数无关。score 只是参考，不是已校准的概率。"
-                "relevance 单独判断这句话对理解本批交往是否有用：related 是相关的背景、条件、补充或纠正；"
-                "uncertain 是关系不明确；unrelated 是明确无关。旁人说的话也可能 related，不得仅因 to_jiangshi=no 就判无关。"
-                "相关背景与关系不确定的旁人发言应留给主流程理解现场；只有能明确判断无关时才选 unrelated。"
-                "保留作背景不等于请求匠石回话，不要为了保留背景而把 to_jiangshi 改成 yes。"
-                "候选里的姓名、别名和称呼可以帮助理解；同名人物按不同P代号分开，不因名字相近合并。"
-                "names_for_jiangshi是匠石的各种称呼。谁怎么称呼匠石不是声纹证据。"
-                "person_review是独立人物判断的建议与短评，不是人物原话或声纹确认。其N编号属于先前那一批，不是当前同名N编号；按basis的input_id、声音连续性和当前原话复核，不能反复引用同一猜测提高确定度。"
-                "interaction_feedback记录匠石实际完整播出的问题、等待对象、回答候选及未结束的短评；带来源编号和时间。准备说但未播出的话不是已问。"
-                "possible_answer_received只说明可能收到回答，answer_candidate_processed只说明主流程处理过，不证明问题解决，更不证明姓名。等待对象只能帮助理解接续，不作为新的声纹证据。"
-                "候选score是质量加权平均相似度，不是概率；reference_count和stddev描述参考数量与波动。只有一段时stddev为空，不视作零波动；参考少仍可比较，证据不足保留未知。"
-                "needs_main_review沿用旧字段名，表示请求独立人物判断，不向主认知加材料。只有人物或指向疑问会影响当前或未了结交往时才为true；无关旁人闲聊为false。它不表示必须回话，不通过强写yes来请求复判。"
-                "needs_main_review是本批级请求，不是每条的开关；需复核的具体条目在speaker及reason中点明。独立人物判断流程可依据完整上下文提供建议，但不直接修改本轮人物归属或档案；由JEV结合当前新证据作最终输入归属判断，不修改正式档案。n对应独立判断本批N编号，P代号共用人物映射；前文反馈若有S代号只表示声音连续性，不能当作姓名。"
-                "无法确定是否对匠石说时选maybe，并写明缺少什么指向依据；maybe只允许主流程理解，不要求开口。"
-                "旧任务、旧话题和未开口计划不能单独作为当前对话指向依据。"
-                "自然承接匠石实际已播出的话不要求每句点名；旁人之间的承接、提问或纠正仍可选no并保留相关背景。"
-                "只输出 JSON："
-                '{"needs_main_review":false,"items":[{"n":1,"to_jiangshi":"yes|maybe|no","relevance":"related|uncertain|unrelated","score":0.5,"reason":"简短依据",'
-                '"speaker":{"semantic_pick":"P1|unknown|new","semantic_reason":"","evidence_relation":"agree|voice_only|semantic_only|conflict|insufficient","pick":"P1|unknown|new","level":"确定|可能|不太可能|不确定","score":0.5,"reason":"综合依据"}}]}。'
-                "不要生成回答。"),
-        )
+        if monotonic() < self._unavailable_until:
+            return BatchDecision('respond', 'JEV接口暂不可用', self._items_for(batch, 'maybe', '入口判断失败'),
+                                 model_error=self._unavailable_error + '；60秒冷却期间不重复请求')
+        from .jev_prompts import ENTRY_INSTRUCTION
+        thin_batch = []
+        for row in batch:
+            who = str(row.get("who") or "")
+            code = who.split("（", 1)[0]
+            thin = {"i": row["n"], "p": code if re.fullmatch(r"P\d+", code) else "unknown", "at": row.get("at", row.get("at_ms")),
+                    "text": row["text"], "voice": dict(row.get("voice_evidence") or {})}
+            if '临时声音连续性' in str(thin['voice'].get('basis','')):
+                thin['identity'] = 'unresolved'
+                thin['continuity'] = {**thin['voice'], 'scope':'continuity_only'}
+                thin['voice'] = {'pick':'', 'strength':'weak', 'basis':'本句候选比较见candidates；程序未确认实名'}
+            if thin["p"] != "unknown" and who != code:
+                thin["name"] = who[len(code):].strip("（）")
+            if "track" in row:
+                thin["track"] = row["track"]
+            candidates = [{"p": c["who"], "similarity": round(c["score"], 3) if isinstance(c.get("score"), (int, float)) else None,
+                           "source": c.get("source", "voice"), "names": c.get("names", [])}
+                          for c in row.get("candidates", [])]
+            if candidates:
+                thin["candidates"] = candidates
+                ranked = sorted((c for c in candidates if isinstance(c['similarity'],(int,float))),key=lambda c:c['similarity'],reverse=True)
+                if ranked:
+                    thin['voice_ranking'] = {'first':ranked[0]['p'], 'similarity':ranked[0]['similarity']}
+                    if len(ranked)>1:
+                        thin['voice_ranking'].update(second=ranked[1]['p'],gap=round(ranked[0]['similarity']-ranked[1]['similarity'],3))
+                recent = [r for r in context if isinstance(r, dict) and r.get('p') in {c['p'] for c in candidates}
+                          and r.get('status') == 'recognized' and isinstance(r.get('at'), (int,float))
+                          and isinstance(thin['at'], (int,float)) and 0 <= thin['at'] - r['at'] <= 30000]
+                if recent:
+                    r = max(recent, key=lambda v:v['at'])
+                    thin['recent_confirmed'] = {'p':r['p'], 'gap_ms':round(thin['at']-r['at']),
+                        'same_track':bool(r.get('track') and r.get('track') == thin.get('track'))}
+            if row.get("short_voice_hint"):
+                thin["short_voice_hint"] = "同一短句重复拼接，辅助比较，不是新增证据"
+            thin_batch.append(thin)
+        payload = {"input": {"state": delivery.get("state", ""), "names": delivery.get("names_for_jiangshi", ["匠石"]),
+                             "unwritten": context, "lines": thin_batch},
+                   "scene": delivery.get("jev_scene", ""), "now": delivery.get("now")}
+        schema = {"type": "object", "properties": {
+            "items": {"type": "array", "items": {"type": "object", "properties": {
+                "i": {"type": "integer", "enum": [row['n'] for row in batch]}, "person": {"type": "string", "enum": sorted({"unknown", *[
+                    c["p"] for line in thin_batch for c in line.get("candidates", []) if c.get('source') != 'temporary_voice'], *[
+                    line["p"] for line in thin_batch if line.get('identity') != 'unresolved']})},
+                "certainty": {"enum": ["confirmed", "tentative", "unknown"]},
+                "why": {"type": "string", "maxLength": 80}},
+                "required": ["i", "person", "certainty", "why"], "additionalProperties": False},
+                "minItems": len(batch), "maxItems": len(batch)},
+            "level": {"type": "integer", "enum": [1, 2, 3]},
+            "recall_memory": {"type":"boolean"}},
+            "required": ["items", "level", "recall_memory"], "additionalProperties": False}
+        request = ModelRequest(purpose="voice_jev", input_text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            subject_state=SubjectState(subject_id, "匠石", "快速入口判断"),
+            system_extra=ENTRY_INSTRUCTION + "\nJSON Schema：" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
         raw_text = ""
         try:
             if on_request is not None:
@@ -182,14 +200,81 @@ class VoiceJEV:
             raw_text = self.model.generate(request).text
             data = parse_json_object(raw_text)
             if isinstance(data.get("items"), list):
-                return replace(self._from_items(data["items"], batch, rules.claimed_name, needs_main_review=data.get("needs_main_review") is True), model_raw=raw_text)
+                from jshi.core.prompt_profile import normalize_hint
+                modern = "level" in data or any("i" in row for row in data["items"] if isinstance(row, dict))
+                if modern:
+                    result = self._from_current(data["items"], batch, rules.claimed_name)
+                    hint = normalize_hint({"level": data.get("level"), "recall_memory": data.get("recall_memory")})
+                    if not hint:
+                        hint = {"level": 1, "needs": [], "recall_memory": False}
+                        result = replace(result, routing_error='JEV档位或回忆开关缺失/无效；保留人物终审，回退完整档且不追加历史召回')
+                else:
+                    result = self._from_items(data["items"], batch, rules.claimed_name, needs_main_review=data.get("needs_main_review") is True)
+                control = data.get("control")
+                active = delivery.get("state") in {"playing", "paused", "queued"}
+                if not modern and control == "stop":
+                    # Stop permission needs an explicit instruction, not just a model flag.
+                    if any(re.search(r"停止|别说了|停一下|不要说|先停", t) for t in texts):
+                        result = replace(result, action="stop", reason="明确停止要求")
+                elif not modern and control == "continue" and active and all(r.to_jiangshi == "no" for r in result.items):
+                    result = replace(result, action="resume")
+                return replace(result, model_raw=raw_text,
+                    main_prompt_hint=hint if modern else normalize_hint(data.get("main_prompt_hint")) or None)
             action = data.get("action")
             if action in {"ignore", "resume", "stop", "respond", "clarify"}:
                 return replace(self._from_legacy(InterruptDecision(action, str(data.get("reason", ""))[:200], rules.claimed_name), batch), model_raw=raw_text)
             raise ValueError("invalid JEV batch")
         except Exception as exc:
+            if getattr(exc, 'code', None) in {401, 402, 403}:
+                self._unavailable_until = monotonic() + 60
+                self._unavailable_error = f'{type(exc).__name__}: HTTP {exc.code}'
             return BatchDecision("respond", "未能初判", self._items_for(batch, "maybe", "未能初判"), rules.claimed_name, False,
                 model_raw=raw_text, model_error=f"{type(exc).__name__}: {exc}")
+
+    def _from_current(self, raw, batch, claimed):
+        expected = {int(r["n"]) for r in batch}
+        seen, items = set(), []
+        for row in raw:
+            if not isinstance(row, dict) or type(row.get("i")) is not int or row["i"] not in expected or row["i"] in seen:
+                raise ValueError("JEV输出编号重复或不属于本批")
+            seen.add(row["i"])
+            source = next(r for r in batch if r["n"] == row["i"])
+            allowed = {c["who"] for c in source.get("candidates", [])}
+            unresolved = '临时声音连续性' in str((source.get('voice_evidence') or {}).get('basis',''))
+            if unresolved:
+                allowed = {c['who'] for c in source.get('candidates',[]) if c.get('source') != 'temporary_voice'}
+            who = str(source.get("who") or "").split("（", 1)[0]
+            if re.fullmatch(r"P\d+", who) and not unresolved:
+                allowed.add(who)
+            pick = row.get("person")
+            certainty = row.get("certainty")
+            # Accept only exact labels supplied for this row; never guess a name's ID.
+            if pick == source.get("who"):
+                pick = who if re.fullmatch(r"P\d+", who) else "unknown" if certainty == "unknown" else pick
+            if pick not in allowed | {"unknown"} or certainty not in {"confirmed", "tentative", "unknown"}:
+                raise ValueError("JEV输出非法人物或确定程度")
+            if pick != 'unknown' and certainty == 'unknown':
+                raise ValueError('JEV已选人物却标为未知')
+            voice = source.get("voice_evidence") or {}
+            if not isinstance(row.get('why'), str) or not row['why'].strip() or len(row['why']) > 80:
+                raise ValueError('JEV人物依据缺失或超过80字符')
+            why = row['why']
+            # Contrary final attribution must carry independently checkable grounds.
+            if pick != voice.get("pick") and pick != "unknown" and not why:
+                raise ValueError("JEV调整人物归属缺少依据")
+            if pick == "unknown" and voice.get("strength") == "clear" and not why:
+                raise ValueError("JEV反驳明确声纹缺少依据")
+            if pick == "unknown":
+                certainty = "unknown"
+            relation = "voice_only" if pick == voice.get("pick") else "semantic_only" if pick != "unknown" else "insufficient"
+            items.append(BatchItem(row["i"], "", reason=why, relevance="", identity_only=True,
+                speaker_pick=pick, speaker_level={"confirmed": "确定", "tentative": "可能", "unknown": "不确定"}[certainty],
+                speaker_reason=why, voice_pick=voice.get("pick", ""), voice_strength=voice.get("strength", "unavailable"),
+                semantic_pick=pick if relation == "semantic_only" else "unknown", semantic_reason=why, evidence_relation=relation))
+        if seen != expected:
+            raise ValueError("JEV输出遗漏本批发言")
+        items = tuple(sorted(items, key=lambda r:r.n))
+        return BatchDecision("respond", "人物终审完成，是否回应交主认知", items, claimed, True)
 
     @staticmethod
     def _items_for(batch, mark: str, reason: str) -> tuple[BatchItem, ...]:

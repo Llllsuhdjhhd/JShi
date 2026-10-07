@@ -50,7 +50,7 @@ class StepInputStore:
         system_text: str,
         user_text: str,
     ) -> None:
-        if purpose not in {"subject_activity", "write_zone", "voice_jev", "voice_person_review"}:
+        if purpose not in {"subject_activity", "write_zone", "voice_jev", "voice_person_review", "voice_jev_scene"}:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         digest = _hash(system_text)

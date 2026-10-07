@@ -153,6 +153,8 @@ def test_candidate_worker_does_not_block_entry_and_playback_feedback_reaches_jev
     class Capture:
         request = None
         def generate(self, request):
+            if request.purpose == 'voice_jev_scene':
+                return SimpleNamespace(text='{"scene":"匠石已经询问怎样称呼，等待回答。"}')
             self.request = request
             return SimpleNamespace(text='{"items":[{"n":1,"to_jiangshi":"yes"}]}')
     async def run():
@@ -171,13 +173,14 @@ def test_candidate_worker_does_not_block_entry_and_playback_feedback_reaches_jev
                                          sample_source=audio,input_pause_s=0,jev=VoiceJEV(model))
         try:
             conversation.interaction_feedback.played('prior',0,'怎么称呼你？',['lux-id'],['old-input'])
+            conversation.jev_scene_store.append('played:prior:0',{'p':'匠石','text':'怎么称呼你？','basis':'已播出','at':1})
             await conversation.accept(Transcript('匠石你好。','A',0,3000,True))
             await asyncio.wait_for(conversation.queue.join(),2)
             await asyncio.wait_for(conversation.turn_queue.join(),2)
             assert entered.is_set() and not release.is_set()
             data = json.loads(model.request.input_text)
-            assert data['interaction_feedback']['questions'][0]['text'] == '怎么称呼你？'
-            assert data['interaction_feedback']['questions'][0]['input_ids'] == ['old-input']
+            assert data['input']['unwritten'][0]['text'] == '怎么称呼你？'
+            assert 'interaction_feedback' not in data
         finally:
             release.set()
             await conversation.close()

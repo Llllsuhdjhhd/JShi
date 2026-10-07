@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Sequence
+from time import perf_counter
 
 from jshi.attention import ChancePort, PlaceholderChance
 from jshi.core import Provenance, SubjectState, params
@@ -54,7 +55,9 @@ class CurrentStateAssembler:
         personal_raw: list[object] = []
         errors: dict[str, str] = {}
         skipped_by_source: dict[str, list[str]] = {}
+        timings = {}
         for source in self.sources:
+            started = perf_counter()
             try:
                 result = source.load(ctx)
                 collected.extend(result.fragments)
@@ -64,6 +67,8 @@ class CurrentStateAssembler:
             except Exception as exc:  # 失败隔离：单源失败不影响组装
                 errors[source.name] = str(exc)
                 skipped_by_source.setdefault(source.name, [])
+            finally:
+                timings[source.name] = round((perf_counter() - started) * 1000, 3)
 
         deduped: dict[tuple[str, str], AssemblyFragment] = {}
         for fragment in collected:
@@ -130,6 +135,7 @@ class CurrentStateAssembler:
                 skipped_ids=tuple(skipped_by_source.get(source.name, ())),
                 budget=limit or 0,
                 error=errors.get(source.name),
+                elapsed_ms=timings.get(source.name, 0.0),
             )
             for source in self.sources
         )

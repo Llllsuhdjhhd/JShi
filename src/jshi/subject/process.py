@@ -226,6 +226,10 @@ class AssembledCurrentState:
     pending_write_ids: tuple[str, ...] = ()
     pending_write_blocks: tuple[str, ...] = ()
     pending_through_sequence: int = 0
+    prompt_level: int = 1
+    recall_memory: bool = True
+    prompt_modules: tuple[str, ...] = ()
+    interaction_scene: str = ""
 
 
 @dataclass(frozen=True)
@@ -452,12 +456,15 @@ class SubjectProcess:
         speaker: SpeakerCandidate | None = None,
         object_id: str | None = None,
         stimulus: str = STIMULUS_SPEECH,
+        prompt_profile=None,
     ) -> AssembledCurrentState:
         """单一路径组装（只读已有记录）：
         委托组装器收集各装载源，源内去重、生成快照与报告；
         不调用模型、不写长期记录、不再解析对象。
         """
         view = view or self.active_zone.load(subject_id)
+        from jshi.core.prompt_profile import PromptProfile
+        profile = prompt_profile or PromptProfile()
         assembly_speaker = self._assembly_speaker(speaker, object_id)
         strategy = self.recall_strategy.get(subject_id)
         gap = (self.effectiveness.pending_gap_query(subject_id) or "").strip()
@@ -466,7 +473,7 @@ class SubjectProcess:
             assembly_speaker.object_id if assembly_speaker is not None else ""
         )
         tool_entries: tuple[Mapping[str, object], ...] = ()
-        if speaker_oid:
+        if speaker_oid and profile.includes("tool"):
             tool_entries = self.tool_service.list_tool_related_entries(
                 subject_id, speaker_oid, query=input_text
             )
@@ -477,11 +484,13 @@ class SubjectProcess:
             context_view=view,
             recall_level=strategy.default_level,
             recall_limit=strategy.limit,
-            extra_queries=(gap,) if gap else (),
+            extra_queries=(gap,) if gap and profile.recall_memory else (),
             tool_entries=tool_entries,
+            recall_enabled=profile.recall_memory,
+            portrait_budget_chars={1:800, 2:400, 3:200}[profile.level],
         )
         working_set = self.assembler.assemble(ctx)
-        if gap:
+        if gap and profile.recall_memory and not any(r.source == 'memory' and r.error for r in working_set.report):
             self.effectiveness.consume_gap(subject_id)
         from jshi.tool.service import format_tool_related
 
@@ -502,6 +511,8 @@ class SubjectProcess:
             tool_input=tool_related,
             tool_codes=tool_codes,
             tool_hot_state="",
+            prompt_level=profile.level,
+            recall_memory=profile.recall_memory,
             stimulus=stimulus if stimulus == STIMULUS_IDLE else STIMULUS_SPEECH,
         )
 
@@ -700,8 +711,10 @@ class SubjectProcess:
         # 组装只读；清理超时策划与僵尸记挂放在组装之前，由主流程显式做。
         self._tool_reap_stale(subject_id, speaker.object_id)
         # 阶段③ 当前状态组装（单一路径，只读已有记录）
+        from jshi.core.prompt_profile import select_profile, PromptProfile
+        profile = select_profile((u.input_id for u in envelope.current_utterances), envelope.jev_calls) if envelope is not None else PromptProfile()
         current = self.assemble_current_state(
-            subject_id, text, view, speaker=speaker, stimulus=stimulus
+            subject_id, text, view, speaker=speaker, stimulus=stimulus, prompt_profile=profile
         )
         # A just-recorded input can be returned by the memory source. It is
         # already in input_items, so don't present it as an additional memory.
@@ -737,7 +750,11 @@ class SubjectProcess:
         if envelope is not None:
             # 信封只留在入口和记录里。主流程看到的是已经整理好的文字。
             current = replace(current, audio_delivery=any(p.kind == "audio" for p in envelope.parts), input_review_text='',
+                              interaction_scene=envelope.interaction_scene,
                               object_codes=tuple((object_codes or {}).items()))
+            from jshi.core.prompt_profile import select_profile
+            profile = select_profile((u.input_id for u in envelope.current_utterances), envelope.jev_calls)
+            current = replace(current, prompt_level=profile.level, prompt_modules=profile.modules, recall_memory=profile.recall_memory)
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -764,6 +781,7 @@ class SubjectProcess:
                             "ids": list(report.loaded_ids),
                             "skipped": list(report.skipped_ids),
                             "error": report.error,
+                            "elapsed_ms": report.elapsed_ms,
                         }
                         for report in current.source_report
                     ],
@@ -995,7 +1013,8 @@ class SubjectProcess:
         with self._write_lock:
             self.pending_scene.append(subject_id, activity.id, event_text, blocks=event_blocks,
                 sequence=max((segment.sequence for segment in self.activity_ledger.list_experiences(subject_id)), default=0),
-                input_ids=tuple(u.input_id for u in envelope.current_utterances) if envelope else (fact.id,))
+                input_ids=tuple(u.input_id for u in envelope.current_utterances) if envelope else (fact.id,),
+                prompt_level=self._prompt_profile(current).level)
             self._write_payloads[activity.id] = (
                 subject_id, activity, current, response, speaker, working_recalled,
                 code_restore, pack_id, registry,
@@ -1203,21 +1222,28 @@ class SubjectProcess:
         boot 标志 = 当前无片场；真正发 boot 请求只在 ``_maybe_boot``，
         且仅当片场仍为空。
         """
-        del current
         pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
         if not is_persona(pack_id, registry=registry):
             return "", None, False, 0
         zone_chars = zone_chars_for(pack_id, registry=registry)
         instruction = reply_instruction_for(
-            pack_id, registry=registry, zone_chars=zone_chars
+            pack_id, registry=registry, zone_chars=zone_chars,
+            prompt_level=self._prompt_profile(current).level if current else 1,
+            prompt_modules=self._prompt_profile(current).modules if current else (),
         )
         return (
             instruction,
-            reply_schema_for(pack_id, registry=registry),
+            reply_schema_for(pack_id, registry=registry, prompt_level=self._prompt_profile(current).level if current else 1),
             self.zone_store.empty(subject_id),
             zone_chars,
         )
+
+    @staticmethod
+    def _prompt_profile(current):
+        from jshi.core.prompt_profile import PromptProfile, valid_level
+        level = valid_level(current.prompt_level)
+        return PromptProfile(level, recall_memory=current.recall_memory)
 
     def _material_chars(self, current: AssembledCurrentState) -> int:
         """木头攒下的素材字数：账本原文(活跃区) + 回忆 + 价值。"""
@@ -1290,13 +1316,25 @@ class SubjectProcess:
         return lines
 
     def _person_portrait_lines(
-        self, fragments: Sequence[AssemblyFragment]
+        self, fragments: Sequence[AssemblyFragment], *, budget_chars: int | None = None
     ) -> list[str]:
-        return [
-            f"{self._object_display(fragment.object_id)}：{fragment.content}"
-            for fragment in fragments
-            if fragment.source == "person_portrait" and fragment.content.strip()
-        ]
+        lines = []
+        for fragment in fragments:
+            if fragment.source != "person_portrait" or not fragment.content.strip():
+                continue
+            content = fragment.content
+            choices = [s for s in fragment.alternatives if s.strip()]
+            if budget_chars is not None and choices:
+                fitting = [s for s in choices if len(s) <= budget_chars]
+                content = max(fitting, key=len) if fitting else min(choices, key=len)
+            selected = dict(fragment.portrait_levels).get({800:'L1',400:'L2',200:'L3'}.get(budget_chars,''))
+            if isinstance(selected,str) and selected.strip() and len(selected) <= budget_chars:
+                content = selected
+            if budget_chars is not None:
+                from jshi.memory.portrait_views import bounded_portrait
+                content = bounded_portrait(content, budget_chars)
+            lines.append(f"{self._object_display(fragment.object_id)}：{content}")
+        return lines
 
     def _persona_user_text(
         self,
@@ -1311,25 +1349,38 @@ class SubjectProcess:
         stamp = now or datetime.now().astimezone()
         memories = self._memory_lines(current.fragments, now=stamp)
         experiences = self._person_experience_lines(current.fragments, dict(getattr(current, 'object_codes', ())))
-        portraits = [*self._person_portrait_lines(current.fragments), *self._address_notes()]
+        from jshi.style.packs import SMITH
+        profile = self._prompt_profile(current)
+        portrait_budget = (800 if live_zone else {1: 800, 2: 400, 3: 200}[profile.level]) if self.style_packs.get(current.subject_state.subject_id) == SMITH else None
+        portraits = [*self._person_portrait_lines(current.fragments, budget_chars=portrait_budget), *self._address_notes()]
         if boot:
             return self._boot_user_text(current, label, memories, experiences=experiences,
                                         portraits=portraits, now=stamp)
         subject_id = current.subject_state.subject_id
-        scene = self._zone_text_for_turn(subject_id, stamp, live=live_zone)
+        graded = self.style_packs.get(subject_id) == SMITH and not live_zone
+        if graded:
+            if not profile.includes("memory"):
+                memories = []
+        scene = self._zone_text_for_turn(subject_id, stamp, live=live_zone,
+            max_tier=profile.scene_view if graded else 3,
+            show_tiers=self.style_packs.get(subject_id) == SMITH and live_zone)
         pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
         cap = zone_chars_for(pack_id, registry=registry)
         tool_chars = self._tool_block_chars(subject_id)
         parts = [
             f"【此时的片场】\n{scene or '（片场为空）'}",
-            format_zone_budget_note(
+        ]
+        if current.interaction_scene and not live_zone:
+            parts.append('【JEV情境参考】\n' + current.interaction_scene +
+                         '\n这是此前完成的情境及复核建议，可能滞后；本批原话优先。由你判断受话对象与是否回应，不重新裁定人物归属。')
+        if not graded:
+            parts.append(format_zone_budget_note(
                 self._zone_body_chars_now(subject_id),
                 cap,
                 tool_chars=tool_chars,
                 tool_cap=self._tool_block_cap(),
-            ),
-        ]
+            ))
         turn = (current.input_text or "").strip()
         if not current.audio_delivery:
             turn = format_turn_input(label, current.input_text, stimulus=current.stimulus)
@@ -1340,6 +1391,8 @@ class SubjectProcess:
         parts.append("【此时的输入】\n" + turn)
         if memories:
             parts.append("【你此时的回忆】\n" + "\n".join(memories))
+        if profile.recall_memory and any(r.source == 'memory' and r.error for r in current.source_report):
+            parts.append('【回忆可用性】\n本轮历史回忆未能及时取得；不能据此断言不存在过去经历，不编造缺失的往事。')
         if portraits:
             parts.append(
                 "【人物肖像·可修订】\n这是过往白描形成的描述，需以本轮信息为准。\n"
@@ -1352,10 +1405,10 @@ class SubjectProcess:
                 "以本轮明确请求为先，只在相关情境使用，不要自动套用旧偏好。\n"
                 + "\n".join(experiences)
             )
-        extra = (current.tool_input or "").strip() if include_tool else ""
+        extra = (current.tool_input or "").strip() if include_tool and profile.includes("tool") else ""
         if extra:
             parts.append(extra)
-        hot = (current.tool_hot_state or "").strip() if include_tool else ""
+        hot = (current.tool_hot_state or "").strip() if include_tool and profile.includes("tool") else ""
         if hot:
             parts.append(hot)
         return "\n\n".join(parts)
@@ -1471,19 +1524,13 @@ class SubjectProcess:
             value_cap = value_narration_chars_for(pack_id, registry=registry)
             self.zone_store.boot(subject_id, value=value, scene=scene, value_cap=value_cap)
 
-    def _apply_zone_edit(
+    def _zone_append_texts(
         self,
-        subject_id: str,
-        reply_response,
         current: AssembledCurrentState,
-        write_result,
+        reply_response,
         code_restore: Callable[[str], str] | None = None,
-    ) -> None:
-        """人格轮：应用写场的 edit，再追加本轮输入与回应。
-
-        回复（「我说：…」）取自 ``reply_response``（认知⑤ 的结果）；edit 取自
-        ``write_result``（写场② 的结果）。两次调用下二者分离，故分开传。
-        """
+    ) -> tuple[str, ...]:
+        """One append order for both writer A references and actual persistence."""
         plan = reply_response.response_plan
         reply_text = plan.verbal_text().strip()
         action_text = plan.embodied_text().strip()
@@ -1508,7 +1555,11 @@ class SubjectProcess:
         if current.pending_write_text:
             input_block = current.pending_write_text.split("\n", 1)[-1]
             reply_block = unsaid_block = ""
-        if input_block or reply_block or unsaid_block:
+        return current.pending_write_blocks or tuple(value for value in (input_block, reply_block, unsaid_block) if value)
+
+    def _apply_zone_edit(self, subject_id, reply_response, current, write_result, code_restore=None):
+        append_texts = self._zone_append_texts(current, reply_response, code_restore)
+        if append_texts or getattr(write_result, "zone_edit", ()):
             edits = tuple(getattr(write_result, "zone_edit", ()) or ())
             restore = code_restore
             if restore is not None and edits:
@@ -1527,8 +1578,7 @@ class SubjectProcess:
                     ZoneBlock(text=item, origin=(
                         "speech_plan" if item.startswith("我准备说") else
                         "delivery_fact" if item.startswith("（播放器") else ""))
-                    for item in (current.pending_write_blocks or tuple(
-                        value for value in (input_block, reply_block, unsaid_block) if value))
+                    for item in append_texts
                 ),
             )
 
@@ -1694,6 +1744,8 @@ class SubjectProcess:
             )
             pending_text = self.pending_scene.render(current.subject_state.subject_id)
         extra_context = ({"kind": "pending_scene", "content": pending_text},) if pending_text and not persona_instruction else ()
+        if current.interaction_scene and not persona_instruction:
+            extra_context += ({'kind': 'jev_scene', 'content': current.interaction_scene},)
         request = ModelRequest(
             purpose="subject_activity",
             input_text=current.input_text,
@@ -1729,10 +1781,33 @@ class SubjectProcess:
             subject_id=current.subject_state.subject_id,
             activity_id=activity_id,
         )
+        if persona_instruction and self.style_packs.get(current.subject_state.subject_id) == "smith":
+            profile = self._prompt_profile(current)
+            self.repository.add_history(HistoryRecord(
+                subject_id=current.subject_state.subject_id, kind=HistoryKind.SUBJECT,
+                event_type="main_prompt_profile", content={
+                    "activity_id": activity_id, "level": profile.level, "prompt_policy_version": 3,
+                    "suggested_level": current.prompt_level,
+                    "upgrade_reason": "",
+                    "recall_memory": profile.recall_memory,
+                    "modules": [n for n in ("tool", "memory", "person") if profile.includes(n)],
+                    "scene_view": profile.scene_view,
+                    "instruction_chars": len(persona_instruction), "user_chars": len(persona_user_text),
+                }))
         if on_reply is not None and hasattr(self.cognition, "generate_stream"):
-            # 木头 & 人格都走流式提前开口：人格由 CognitionSkill.run_stream 按 reply 触发。
-            return self.cognition.generate_stream(request, on_reply=on_reply)
-        return self.cognition.generate(request)
+            response = self.cognition.generate_stream(request, on_reply=on_reply)
+        else:
+            response = self.cognition.generate(request)
+        if persona_instruction and self.style_packs.get(current.subject_state.subject_id) == "smith" and self._prompt_profile(current).level != 1:
+            if response.tool_intent or response.tool_handling or response.tool_consumed:
+                self.repository.add_history(HistoryRecord(subject_id=current.subject_state.subject_id,
+                    kind=HistoryKind.SUBJECT, event_type="unexpected_tool_output",
+                    content={"activity_id": activity_id, "level": self._prompt_profile(current).level}))
+                intent = None
+                # The first verbal plan may already have streamed. Never replace
+                # it with a second, unplayed answer or claim its results delivered.
+                response = replace(response, tool_intent=intent, tool_handling=(), tool_consumed=())
+        return response
 
     def _wood_write_user_text(
         self, current: AssembledCurrentState, reply_text: str, unsaid_text: str = ""
@@ -1802,10 +1877,10 @@ class SubjectProcess:
         self._deferred_write = None
         return job
 
-    def _zone_text_for_turn(self, subject_id: str, now: datetime, *, live: bool) -> str:
+    def _zone_text_for_turn(self, subject_id: str, now: datetime, *, live: bool, max_tier: int = 3, show_tiers: bool = False) -> str:
         """认知读取已提交片场与未整理输入输出；写场只读已提交版本。"""
         with self._write_lock:
-            scene = self.zone_store.render(subject_id, now=now)
+            scene = self.zone_store.render(subject_id, now=now, max_tier=max_tier, show_tiers=show_tiers)
             self._reconcile_pending_scene(subject_id)
             pending = "" if live else self.pending_scene.render(subject_id)
             return "\n\n".join(part for part in (scene, pending) if part)
@@ -1832,6 +1907,7 @@ class SubjectProcess:
                     return False  # Restored records stay visible until a new turn supplies a writer.
                 sid, activity, current, response, speaker, recalled, restore, pack, registry = payload
                 current = replace(current, context_view=self.active_zone.load(subject_id), pending_write_text=self.pending_scene.render_rows(rows),
+                                  prompt_level=min(row.get("prompt_level", 1) for row in rows),
                                   pending_write_ids=tuple(row["id"] for row in rows),
                                   pending_write_blocks=tuple(block for row in rows for block in row.get("blocks", (row["text"],))),
                                   pending_through_sequence=max((row.get("sequence", 0) for row in rows), default=0))
@@ -2020,6 +2096,12 @@ class SubjectProcess:
         if current.pending_write_text:
             persona_user_text += "\n\n【本次合批整理的输入输出】\n" + current.pending_write_text.split("\n", 1)[-1]
             persona_user_text += "\n只将以上合批时间线作为本次新增事件；其他本轮原话、回应是对照材料，已包含的或此前已提交的内容不再追加。按时间顺序一起整理，计划与实际交付须区分。"
+        if persona and pack_id == "smith":
+            append_texts = self._zone_append_texts(current, response)
+            if append_texts:
+                persona_user_text += "\n\n【程序将追加的新块】\n" + "\n".join(
+                    f"A{i}：{text}" for i, text in enumerate(append_texts, 1))
+                persona_user_text += "\n只标这些新块的重要性tier，不重复输出正文；它们不计入现有B编号。"
         context = self._model_context(
             subject_id, working_recalled, current.fragments, current.context_view, record_mappings=False
         )

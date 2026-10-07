@@ -18,10 +18,10 @@ class PendingScene:
         temp.write_text(json.dumps(self.rows, ensure_ascii=False), encoding="utf-8")
         temp.replace(self.path)
 
-    def append(self, subject_id: str, event_id: str, text: str, *, blocks=(), sequence=0, input_ids=()):
+    def append(self, subject_id: str, event_id: str, text: str, *, blocks=(), sequence=0, input_ids=(), prompt_level=1):
         with self.lock:
             if not any(row["id"] == event_id for row in self.rows):
-                self.rows.append({"subject_id": subject_id, "id": event_id, "text": text, "blocks": list(blocks) or [text], "sequence": sequence, "input_ids": list(input_ids)})
+                self.rows.append({"subject_id": subject_id, "id": event_id, "text": text, "blocks": list(blocks) or [text], "sequence": sequence, "input_ids": list(input_ids), "prompt_level": prompt_level})
                 try:
                     self._save()
                 except Exception:
