@@ -59,6 +59,7 @@ class InputEnvelope:
     review_candidates: tuple = ()
     input_annotations: tuple = ()  # Entry facts for current inputs only; no review prompt.
     interaction_scene: str = ""  # Completed JEV scene, a fallible contextual reference.
+    visual_snapshot_id: str = ""  # Optional observation version; independent of speech identity.
 
     def __post_init__(self) -> None:
         if not self.speaker.object_id and self.speaker.status == "unknown":

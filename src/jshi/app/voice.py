@@ -1025,6 +1025,8 @@ class VoiceConversation:
                     "jev_scene": self.jev_scene_store.view(
                         min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=time()*1000))[0],
                     "now": time()*1000}
+        if getattr(self.process, 'vision', None):
+            delivery['environment'] = self.process.vision.store.latest(self.subject_id)
         cutoff = min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=float("inf"))
         feedback = self.interaction_feedback.snapshot(cutoff_ms=cutoff)
         for row in feedback['questions']:
@@ -1654,13 +1656,40 @@ class VoiceConversation:
 def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=None, local_tts=None, online_speakers=None, *, speaker_models=None, trial_root=None):
     from aiohttp import web, ClientSession, ClientTimeout, WSMsgType
 
-    app = web.Application(client_max_size=2 * 1024 * 1024)
+    visual = getattr(process, 'vision', None)
+    app = web.Application(client_max_size=max(2 * 1024 * 1024, visual.config.max_image_bytes if visual else 0))
     busy = False
     cleanup_stage = ""
     registry_busy = False
     text_write_task = None
     pending_text_write = None
     text_write_error = ''
+    active_conversation = None
+    environment_pending = None
+
+    async def deliver_environment(environment, decision):
+        nonlocal registry_busy, environment_pending
+        environment_pending = environment
+        while registry_busy or (busy and active_conversation is None):
+            await asyncio.sleep(.1)
+        environment, environment_pending = environment_pending, None
+        if environment is None:
+            return
+        envelope = InputEnvelope(session_id='visual-environment', source='visual_environment',
+            parts=(InputPart('text', '【环境观察变化或观察结果，不是人物发言】\n' + environment['description']),
+                   InputPart('image', reference=environment['frame'], media_type='image/jpeg')),
+            speaker=SpeakerEvidence('environment', label='环境观察', status='unknown', method='visual_scene'),
+            visual_snapshot_id=environment['id'])
+        if active_conversation is not None:
+            active_conversation.turn_queue.put_nowait((envelope, active_conversation.epoch))
+        else:
+            registry_busy = True
+            try:
+                await asyncio.to_thread(process.experience, subject_id, envelope.text, envelope=envelope,
+                    processing_modes=('environment',), defer_write=True)
+                schedule_text_scene()
+            finally:
+                registry_busy = False
 
     async def flush_text_scene():
         nonlocal pending_text_write, text_write_error
@@ -1905,7 +1934,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             registry_busy = False
 
     async def connection(request):
-        nonlocal busy, cleanup_stage
+        nonlocal busy, cleanup_stage, active_conversation
         origin = request.headers.get("Origin", "")
         if origin != f"http://{request.host}":
             raise web.HTTPForbidden(text="voice connection requires same origin")
@@ -1955,6 +1984,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 conversation = VoiceConversation(process, subject_id, local_tts or cloud, ws.send_json, jev=jev,
                     timeout_s=config.jev_timeout_s, local_speakers=speakers, input_pause_s=config.input_pause_s, sample_source=audio,
                     candidate_timeout_s=config.candidate_timeout_s, session_id=request.query.get("session") or None)
+                active_conversation = conversation
                 if use_local is not None:
                     use_local.reset_session()
                     local_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-local-asr")
@@ -2117,6 +2147,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             try:
                 await cleanup()
             finally:
+                active_conversation = None
                 busy = False
                 cleanup_stage = ""
         return ws
@@ -2132,6 +2163,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     app.router.add_get('/voice-enroll', enrollment_page)
     app.router.add_get('/voice-registry', registry)
     app.router.add_post('/voice-registry', registry)
+    if getattr(process, 'vision', None):
+        from jshi.vision.web import install_vision
+        install_vision(app, process, subject_id, jev or VoiceJEV(), deliver_environment)
     return app
 
 

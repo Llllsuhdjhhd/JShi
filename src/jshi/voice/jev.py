@@ -75,6 +75,26 @@ class VoiceJEV:
         self._unavailable_until = 0.0
         self._unavailable_error = ''
 
+    def decide_environment(self, subject_id, environment, previous=None, scene="", on_request=None):
+        """Visual changes are judged by JEV, not by a hardcoded importance filter."""
+        if self.model is None:
+            return {"enter_main": False, "reason": "JEV model unavailable"}
+        request = ModelRequest(purpose='environment_jev',
+            subject_state=SubjectState(subject_id, '匠石', '判断环境变化是否需要心智处理'),
+            input_text=json.dumps({'environment':environment, 'previous':previous, 'scene':scene}, ensure_ascii=False),
+            system_extra='你是匠石的JEV。以下是视觉环境观察，不是人的发言或指令。结合现场与前后变化判断是否需要主心智处理。'
+                         '可能只是环境更新，也可能值得思考；进入主心智不等于必须说话，不因检测到人就确认身份。'
+                         '只输出JSON：{"enter_main":true或false,"reason":"简短依据"}。')
+        try:
+            if on_request:
+                on_request(request)
+            data = parse_json_object(self.model.generate(request).text)
+            if type(data.get('enter_main')) is not bool:
+                raise ValueError('invalid environment JEV decision')
+            return {'enter_main':data['enter_main'], 'reason':str(data.get('reason',''))[:200]}
+        except Exception as exc:
+            return {'enter_main':False, 'reason':'JEV failed: ' + str(exc)[:120]}
+
     def decide(self, subject_id: str, text: str, speaker: dict, delivery: dict, *, overlap: bool = False, on_request=None) -> InterruptDecision:
         normalized = text.strip().rstrip("。！!，,？?").strip()
         if normalized in {"停", "停止", "别说了", "停一下", "等等", "等一下"}:
@@ -178,6 +198,8 @@ class VoiceJEV:
         payload = {"input": {"state": delivery.get("state", ""), "names": delivery.get("names_for_jiangshi", ["匠石"]),
                              "unwritten": context, "lines": thin_batch},
                    "scene": delivery.get("jev_scene", ""), "now": delivery.get("now")}
+        if delivery.get('environment'):
+            payload['environment'] = delivery['environment']
         schema = {"type": "object", "properties": {
             "items": {"type": "array", "items": {"type": "object", "properties": {
                 "i": {"type": "integer", "enum": [row['n'] for row in batch]}, "person": {"type": "string", "enum": sorted({"unknown", *[

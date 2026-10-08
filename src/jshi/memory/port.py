@@ -70,6 +70,7 @@ class RecalledFragment:
     source_ids: tuple[str, ...] = ()
     score: float = 0.0
     occurred_at: datetime | None = None
+    visual_observations: tuple[dict, ...] = ()
 
 
 class MemoryPort(Protocol):

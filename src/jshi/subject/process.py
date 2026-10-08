@@ -230,6 +230,7 @@ class AssembledCurrentState:
     recall_memory: bool = True
     prompt_modules: tuple[str, ...] = ()
     interaction_scene: str = ""
+    visual_snapshot: Mapping | None = None
 
 
 @dataclass(frozen=True)
@@ -330,8 +331,10 @@ class SubjectProcess:
         introspection_model: ModelPort | None = None,
         long_term_experience: LongTermExperiencePort | None = None,
         person_review_model: ModelPort | None = None,
+        vision=None,
     ) -> None:
         self.repository = repository
+        self.vision = vision
         self.identities = identities
         self.cognition = cognition
         self.person_review_model = person_review_model or (cognition if hasattr(cognition, '_skill') else None)
@@ -561,6 +564,7 @@ class SubjectProcess:
         on_conversation_review: Callable | None = None,
         object_codes: Mapping[str, str] | None = None,
         processing_modes: Sequence[str] = ("interaction",),
+        visual_snapshot=None,
     ) -> SubjectActivityResult:
         self._deferred_write = None
         self._code_restore = code_restore
@@ -654,6 +658,13 @@ class SubjectProcess:
             },
         )
         self.repository.add_history(fact)
+        observed_environment = visual_snapshot
+        if self.vision and observed_environment is None:
+            observed_environment = (self.vision.store.snapshot(envelope.visual_snapshot_id, subject_id)
+                if envelope and envelope.visual_snapshot_id else self.vision.store.latest(subject_id))
+        if observed_environment and self.vision:
+            if not self.vision.store.bind(subject_id, fact.id, observed_environment['id']):
+                self.vision.store.error(subject_id, '记忆照片预算已满或媒体不可用，本轮未新增照片关联')
         inbound = None
         if not idle:
             inbound = self.activity_ledger.append_external(
@@ -747,6 +758,10 @@ class SubjectProcess:
                     text, envelope.session_id, envelope.start_ms, envelope.end_ms)
         modes = tuple(dict.fromkeys(str(mode).strip() for mode in processing_modes if str(mode).strip()))
         current = replace(current, processing_modes=modes or ("interaction",))
+        if observed_environment and self.vision:
+            note = "以下是视觉环境材料，不是人物发言；观察时间可能早于本轮。\n" + self.vision.store.render(observed_environment)
+            current = replace(current, visual_snapshot=observed_environment,
+                              transport_context=(current.transport_context + '\n' + note).strip())
         if envelope is not None:
             # 信封只留在入口和记录里。主流程看到的是已经整理好的文字。
             current = replace(current, audio_delivery=any(p.kind == "audio" for p in envelope.parts), input_review_text='',
@@ -921,6 +936,10 @@ class SubjectProcess:
                 response_plan=plan,
             )
             action_id = action_result.action_id
+            if self.vision:
+                for item in plan.items:
+                    if item.channel == 'embodied':
+                        self.vision.request_action(subject_id, item.text)
             self.evaluation.emit(
                 EvaluationEvent(
                     event_id=f"eval-action-{activity.id}",

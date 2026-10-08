@@ -190,6 +190,7 @@ def _tool_service(data_dir: Path, store: SkillConfigStore) -> ToolService:
 
 def _runtime(
     data_dir: Path,
+    *, enable_vision: bool = False,
 ) -> tuple[SubjectProcess, IdentityRepository, SubjectRepository]:
     try:
         ensure_installed(data_dir / "param_overlay.json")
@@ -216,6 +217,13 @@ def _runtime(
     cognition, write_zone, skill_store = _model_from_environment()
     # 300：自省走自己的 skill 档位（缺省回退 env），与 05 认知分开换模型
     introspection_model = build_model_port(skill_store.profile("introspection"))
+    from jshi.vision import VisionConfig, VisionStore, VisionService
+    from jshi.vision.memory import VisualMemory
+    vision_config = VisionConfig.from_env()
+    vision = None
+    if vision_config.enabled or enable_vision:
+        vision = VisionService(VisionStore(data_dir / 'vision', vision_config), vision_config)
+        backend = VisualMemory(backend, vision.store)
     process = SubjectProcess(
         subjects,
         identities,
@@ -236,6 +244,7 @@ def _runtime(
         tool_service=_tool_service(data_dir, skill_store),
         introspection_model=introspection_model,
         person_review_model=build_model_port(skill_store.profile('person_review')),
+        vision=vision,
     )
     return process, identities, subjects
 
@@ -248,6 +257,10 @@ def _parser() -> argparse.ArgumentParser:
         default=Path(os.getenv("JSHI_DATA_DIR", ".jshi")),
     )
     commands = parser.add_subparsers(dest="command", required=True)
+
+    visual = commands.add_parser('vision', help='独立环境观察与文字交谈入口')
+    visual.add_argument('subject_id')
+    visual.add_argument('--port', type=int, default=8765)
 
     create = commands.add_parser("create", help="创建一个基础匠石")
     create.add_argument("subject_id")
@@ -626,7 +639,21 @@ def main() -> None:
         result = port.refresh_person_experience(args.subject_id, args.object_id)
         print(json.dumps(vars(result), ensure_ascii=False))
         return
-    process, identities, subjects = _runtime(args.data_dir)
+    process, identities, subjects = _runtime(args.data_dir, enable_vision=args.command == 'vision')
+    if args.command == 'vision':
+        from aiohttp import web
+        from jshi.app.voice import create_app
+        from jshi.voice.config import VoiceConfig
+        from jshi.voice.jev import VoiceJEV
+        identities.get(args.subject_id)
+        store = SkillConfigStore()
+        path = _skills_config_path()
+        if path:
+            store.load_file(path)
+        jev = VoiceJEV(build_model_port(store.profile('voice_jev')))
+        print(f'环境观察：http://127.0.0.1:{args.port}/vision')
+        web.run_app(create_app(process, args.subject_id, VoiceConfig(api_key=''), jev), host='127.0.0.1', port=args.port)
+        return
     super_permissions = SuperPermissionStore(args.data_dir / "super_permissions.json")
 
     if args.command == "create":
