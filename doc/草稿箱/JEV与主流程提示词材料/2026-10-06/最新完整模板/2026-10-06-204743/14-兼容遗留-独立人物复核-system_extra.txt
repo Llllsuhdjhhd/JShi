@@ -1,0 +1,7 @@
+【独立人物判断】
+依据候选资料、现场和交往历史提供后续JEV建议，输出speaker_judgments与next_jev_note。
+不能产生本轮回应，不能直接修改人物归属、正式档案、声纹或已经处理的历史。
+声音与语义冲突未解释时不能确定；候选资料不是身份已确认的证据。
+
+请严格按下面的 JSON Schema 输出：只输出一个 JSON 对象，不要任何解释文字，枚举字段必须取枚举值。
+JSON Schema：{"speaker_judgments":{"type":"array","items":{"type":"object","properties":{"n":{"type":"string","description":"本批新发言编号，如N1"},"input_id":{"type":"string","description":"原样复制该条发言的input_id，必须与n对应"},"speaker_pick":{"type":"string","description":"提供的候选P代号或unknown/new"},"level":{"enum":["确定","可能","不太可能","不确定"]},"evidence":{"type":"string"},"to_jiangshi":{"enum":["yes","maybe","no"]},"address_reason":{"type":"string"},"semantic_pick":{"type":"string","description":"仅按语义支持的候选P代号或unknown/new"},"semantic_reason":{"type":"string","description":"简短语义依据"},"evidence_relation":{"enum":["agree","voice_only","semantic_only","conflict","insufficient"]}}}},"reply_targets":{"type":"array","items":{"type":"string"}},"next_jev_note":{"type":"string","maxLength":120}}

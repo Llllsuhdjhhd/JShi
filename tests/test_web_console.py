@@ -127,6 +127,27 @@ def test_selected_text_joins_voice_queue_without_voice_identification(process):
     asyncio.run(run())
 
 
+def test_selected_text_completes_in_connected_voice_session(process):
+    async def run():
+        emitted = []
+        async def send(message): emitted.append(message)
+        conversation = VoiceConversation(process, 'stone', FakeCloud(), send)
+        try:
+            for text in ('哈喽', '再聊一句'):
+                await conversation.typed(text, 'lux-id')
+                await asyncio.wait_for(conversation.turn_queue.join(), 3)
+            assert len(process.cognition.requests) == 2
+            assert len(conversation.debug_history) == 2
+            for turn in conversation.debug_history:
+                assert turn['input']['source'] == 'web_text'
+                assert turn['timing']['voice']['asr_lag_ms'] is None
+                assert turn['timing']['voice']['speech_end_at_ms'] is None
+            assert not any(m['type'] == 'notice' and '主流程调用失败' in m.get('text', '') for m in emitted)
+        finally:
+            await conversation.close()
+    asyncio.run(run())
+
+
 def test_standalone_text_requests_are_serialized(process):
     from threading import Event
     entered,release=Event(),Event()

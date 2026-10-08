@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "properties": {
+    "edit": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "op": {
+            "enum": [
+              "add",
+              "del",
+              "mod",
+              "tier"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      }
+    }
+  }
+}

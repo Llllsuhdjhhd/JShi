@@ -1,0 +1,73 @@
+{
+  "entry_record": {
+    "ms": 1530,
+    "action": "respond",
+    "path": "model",
+    "timed_out": false,
+    "reason": "未能初判",
+    "items": [
+      {
+        "n": 1,
+        "to_jiangshi": "maybe",
+        "score": 0.5,
+        "reason": "未能初判",
+        "speaker_pick": "",
+        "speaker_level": "",
+        "speaker_reason": "",
+        "relevance": "uncertain",
+        "speaker_score": null,
+        "voice_pick": "",
+        "voice_strength": "unavailable",
+        "semantic_pick": "",
+        "semantic_reason": "",
+        "evidence_relation": ""
+      }
+    ],
+    "needs_main_review": false,
+    "prompt_activity_id": "jev-8d8c646074fa442991579eb79cb1d8e3",
+    "prompt_requested": true
+  },
+  "diagnostics": [
+    {
+      "sequence": 12198,
+      "id": "43f485f0-3a2f-4f59-8742-dc706918d57e",
+      "subject_id": "stone",
+      "kind": "fact",
+      "event_type": "voice_jev_diagnostics",
+      "content": {
+        "session_id": "29683401ba0242c691529e22d5a10ec7",
+        "ms": 1530,
+        "action": "respond",
+        "path": "model",
+        "timed_out": false,
+        "reason": "未能初判",
+        "items": [
+          {
+            "n": 1,
+            "to_jiangshi": "maybe",
+            "score": 0.5,
+            "reason": "未能初判",
+            "speaker_pick": "",
+            "speaker_level": "",
+            "speaker_reason": "",
+            "relevance": "uncertain",
+            "speaker_score": null,
+            "voice_pick": "",
+            "voice_strength": "unavailable",
+            "semantic_pick": "",
+            "semantic_reason": "",
+            "evidence_relation": ""
+          }
+        ],
+        "needs_main_review": false,
+        "prompt_activity_id": "jev-8d8c646074fa442991579eb79cb1d8e3",
+        "prompt_requested": true,
+        "model_raw": "{\"needs_main_review\":false,\"items\":[{\"n\":1,\"to_jiangshi\":\"no\",\"relevance\":\"uncertain\",\"score\":0.6,\"reason\":\"承接前文待定声音'垃圾丢下'的反驳，语义指向该人而非匠石；声纹清晰指向P1，\"speaker\":{\"semantic_pick\":\"unknown\",\"semantic_reason\":\"原话是反驳'垃圾丢下'的说法，指向该发言者，但语义上无区分身份的线索\",\"evidence_relation\":\"voice_only\",\"pick\":\"P1\",\"level\":\"确定\",\"score\":0.7,\"reason\":\"声纹匹配清晰指向P1(lux)，语义无身份线索，综合采信声音\"}}]}",
+        "model_error": "SkillError: non-JSON skill output: '{\"needs_main_review\":false,\"items\":[{\"n\":1,\"to_jiangshi\":\"no\",\"relevance\":\"uncertain\",\"score\":0.6,\"reason\":\"承接前文待定声音\\'垃圾丢'"
+      },
+      "source_ids": [],
+      "created_at": "2026-10-05T14:37:19.777291+00:00"
+    }
+  ],
+  "association": "external_input.envelope.jev_calls.prompt_activity_id严格关联"
+}

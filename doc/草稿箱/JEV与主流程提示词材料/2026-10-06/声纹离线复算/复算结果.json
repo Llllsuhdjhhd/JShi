@@ -1,0 +1,315 @@
+{
+  "model_id": "f682b514c05d947e",
+  "bank_sha256": "b2b2cf2d5b6e01faf7363c819d5544b2bf413a436405bb8124936d8054b4479d",
+  "generated_at": "2026-10-06T21:55:47.304273+08:00",
+  "limitation": "晚间现场PCM及特征未持久保存，不能完成中午与晚间现场录音的配对重测；登记音频复算与现场录音重测不同",
+  "audio_replay": [
+    {
+      "source": "saved_enrollment_composite_audio",
+      "person": "lux",
+      "seconds": 10.0,
+      "pcm_sha256": "564d303ce8026a7cc292bdf4ce52aa97ec0fef67f4da15e177d1aabda3c9685a",
+      "agreement_with_saved_embedding": 0.9999999999936862,
+      "ranking": [
+        {
+          "person": "lux",
+          "score": 0.763899
+        },
+        {
+          "person": "luguang",
+          "score": 0.158655
+        },
+        {
+          "person": "qf",
+          "score": 0.112329
+        }
+      ]
+    },
+    {
+      "source": "saved_enrollment_composite_audio",
+      "person": "luguang",
+      "seconds": 10.0,
+      "pcm_sha256": "84ca861eb100737bb21f682e334441b73637d1acde01f0861605a916d29911f8",
+      "agreement_with_saved_embedding": 0.9999999999892097,
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.500341
+        },
+        {
+          "person": "qf",
+          "score": 0.236045
+        },
+        {
+          "person": "lux",
+          "score": 0.158419
+        }
+      ]
+    },
+    {
+      "source": "saved_enrollment_composite_audio",
+      "person": "qf",
+      "seconds": 10.0,
+      "pcm_sha256": "f3b76138f772ae039be14926179c57532dea17902b920d5ad87906034c83c669",
+      "agreement_with_saved_embedding": 0.9999999999993981,
+      "ranking": [
+        {
+          "person": "qf",
+          "score": 0.643492
+        },
+        {
+          "person": "luguang",
+          "score": 0.158229
+        },
+        {
+          "person": "lux",
+          "score": 0.048801
+        }
+      ]
+    }
+  ],
+  "noon_saved_reference_features": [
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "lux",
+      "input_id": "994d399251834581a607153a5e3d521f",
+      "event_at": "2026-10-06T04:44:07.388999+00:00",
+      "text": "那除了这两本书，猫武士和哈利波特还有什么你觉得很好看？",
+      "ranking": [
+        {
+          "person": "lux",
+          "score": 0.559006
+        },
+        {
+          "person": "luguang",
+          "score": 0.153325
+        },
+        {
+          "person": "qf",
+          "score": 0.037401
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    },
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "luguang",
+      "input_id": "1242fe5225b74ffe9ad9766741d9e2df",
+      "event_at": "2026-10-06T04:47:25.912493+00:00",
+      "text": "妈，我上网搜一下那个怎么做，我绝对不看别的了。",
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.450872
+        },
+        {
+          "person": "qf",
+          "score": 0.206745
+        },
+        {
+          "person": "lux",
+          "score": 0.142496
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    },
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "luguang",
+      "input_id": "267248b471c44962ad5164c2b3c7e7ac",
+      "event_at": "2026-10-06T04:44:07.828589+00:00",
+      "text": "嗯，画技很难看的，你就别看了。",
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.361892
+        },
+        {
+          "person": "qf",
+          "score": 0.122592
+        },
+        {
+          "person": "lux",
+          "score": 0.113647
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    },
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "luguang",
+      "input_id": "1c02d741f7ec447ab4e2dd13cc58a7e7",
+      "event_at": "2026-10-06T04:43:17.689687+00:00",
+      "text": "他现在写到九部曲了，外国有九部曲，现在中国有八部曲。",
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.44369
+        },
+        {
+          "person": "qf",
+          "score": 0.216489
+        },
+        {
+          "person": "lux",
+          "score": 0.070791
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    },
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "luguang",
+      "input_id": "804326cc63b249e083d8945550ca19aa",
+      "event_at": "2026-10-06T04:43:17.647972+00:00",
+      "text": "啊，八步曲还没买。",
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.320758
+        },
+        {
+          "person": "qf",
+          "score": 0.096044
+        },
+        {
+          "person": "lux",
+          "score": 0.050497
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    },
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "luguang",
+      "input_id": "a3730302b090473baff99ddff9b44611",
+      "event_at": "2026-10-06T04:42:45.345590+00:00",
+      "text": "很有深度的。",
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.284679
+        },
+        {
+          "person": "qf",
+          "score": 0.110262
+        },
+        {
+          "person": "lux",
+          "score": -0.052858
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    },
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "luguang",
+      "input_id": "e528b780eb064fcebc37a0ee5c62e9f4",
+      "event_at": "2026-10-06T04:42:44.992188+00:00",
+      "text": "学校里也有，外面也有，都有。",
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.40874
+        },
+        {
+          "person": "lux",
+          "score": 0.18161
+        },
+        {
+          "person": "qf",
+          "score": 0.164246
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    },
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "luguang",
+      "input_id": "b591dcddeafd45ee9b1fd6b4dd28611d",
+      "event_at": "2026-10-06T04:42:15.326712+00:00",
+      "text": "呃，最后奇迹般逃生的故事。",
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.506145
+        },
+        {
+          "person": "lux",
+          "score": 0.145261
+        },
+        {
+          "person": "qf",
+          "score": 0.142386
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    },
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "luguang",
+      "input_id": "1cee9d292eb148c38c552226dbca3f63",
+      "event_at": "2026-10-06T04:42:15.293735+00:00",
+      "text": "最后落入阴谋，大家都",
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.456304
+        },
+        {
+          "person": "qf",
+          "score": 0.126981
+        },
+        {
+          "person": "lux",
+          "score": 0.102285
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    },
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "luguang",
+      "input_id": "34c49348058e4bfea53f502b93bc2d8f",
+      "event_at": "2026-10-06T04:42:06.232324+00:00",
+      "text": "在火焰杯赛上",
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.424191
+        },
+        {
+          "person": "qf",
+          "score": 0.168457
+        },
+        {
+          "person": "lux",
+          "score": 0.155578
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    },
+    {
+      "source": "saved_enrollment_reference_feature_not_raw_audio_replay",
+      "labeled_person": "luguang",
+      "input_id": "edecc44e3eb14b078c79c05f88cce5ca",
+      "event_at": "2026-10-06T04:42:06.207205+00:00",
+      "text": "帮我找四年级学生哈利波特。",
+      "ranking": [
+        {
+          "person": "luguang",
+          "score": 0.520776
+        },
+        {
+          "person": "qf",
+          "score": 0.196443
+        },
+        {
+          "person": "lux",
+          "score": 0.178161
+        }
+      ],
+      "note": "登记特征可能由短窗口平均，且属于当前参考集合；非独立测试"
+    }
+  ]
+}

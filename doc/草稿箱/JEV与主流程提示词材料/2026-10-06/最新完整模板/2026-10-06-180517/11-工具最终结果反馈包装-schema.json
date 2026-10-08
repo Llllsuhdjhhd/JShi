@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "properties": {
+    "visible": {
+      "type": "boolean"
+    },
+    "summary": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "visible"
+  ]
+}

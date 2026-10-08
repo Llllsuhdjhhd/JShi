@@ -1,0 +1,140 @@
+{
+  "sequence": 12200,
+  "id": "e46feb50-2602-46e5-a69e-abf722c77aca",
+  "subject_id": "stone",
+  "kind": "fact",
+  "event_type": "external_input",
+  "content": {
+    "text": "lux：搞笑，哪有垃圾，一点垃圾都没有。",
+    "envelope": {
+      "session_id": "29683401ba0242c691529e22d5a10ec7",
+      "source": "microphone",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "1. P1（lux）：搞笑，哪有垃圾，一点垃圾都没有。\nJEV 初判：未能初判。",
+          "reference": "",
+          "media_type": ""
+        },
+        {
+          "kind": "audio",
+          "text": "",
+          "reference": "session:29683401ba0242c691529e22d5a10ec7:435962-437761",
+          "media_type": "audio/pcm"
+        }
+      ],
+      "speaker": {
+        "track_id": "0",
+        "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+        "label": "lux",
+        "status": "recognized",
+        "method": "voiceprint_match",
+        "confidence": 0.6346241903029713,
+        "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+      },
+      "input_id": "13563731049548f09bc57e8acefe5e57",
+      "start_ms": 435962,
+      "end_ms": 437761,
+      "final": true,
+      "overlap": false,
+      "delivery_context": "",
+      "utterances": [
+        {
+          "text": "搞笑，哪有垃圾，一点垃圾都没有。",
+          "speaker": {
+            "track_id": "0",
+            "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+            "label": "lux",
+            "status": "recognized",
+            "method": "voiceprint_match",
+            "confidence": 0.6346241903029713,
+            "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+          },
+          "start_ms": 435962,
+          "end_ms": 437761,
+          "overlap": false,
+          "input_id": "1ca2be83c39e4ec8af7d464da3e64386",
+          "recorded_start_at_ms": 1791211017801.0957,
+          "recorded_end_at_ms": 1791211019600.0957,
+          "received_at_ms": 1791211035716.1646,
+          "identity_note": "{\"reason\": \"已匹配登记声纹\", \"best_score\": 0.635, \"runner_up\": 0.163, \"threshold\": 0.3, \"margin\": 0.08, \"single_confirmation_threshold\": 0.3, \"candidates\": [{\"score\": 0.635, \"reference_count\": 3, \"stddev\": 0.06717224829697124, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3\", \"label\": \"lux\", \"source\": \"voiceprint\"}, {\"score\": 0.163, \"reference_count\": 10, \"stddev\": 0.059722813292010214, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-84d0b8965b144a6fae986028068b4a79\", \"label\": \"luguang\", \"source\": \"voiceprint\"}, {\"score\": 0.033, \"reference_count\": 10, \"stddev\": 0.08760630786388358, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-30cbe141e94446aeb7763ccfafb99fd1\", \"label\": \"qf\", \"source\": \"voiceprint\"}], \"tentative\": false}"
+        }
+      ],
+      "current_utterances": [
+        {
+          "text": "搞笑，哪有垃圾，一点垃圾都没有。",
+          "speaker": {
+            "track_id": "0",
+            "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+            "label": "lux",
+            "status": "recognized",
+            "method": "voiceprint_match",
+            "confidence": 0.6346241903029713,
+            "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+          },
+          "start_ms": 435962,
+          "end_ms": 437761,
+          "overlap": false,
+          "input_id": "1ca2be83c39e4ec8af7d464da3e64386",
+          "recorded_start_at_ms": 1791211017801.0957,
+          "recorded_end_at_ms": 1791211019600.0957,
+          "received_at_ms": 1791211035716.1646,
+          "identity_note": "{\"reason\": \"已匹配登记声纹\", \"best_score\": 0.635, \"runner_up\": 0.163, \"threshold\": 0.3, \"margin\": 0.08, \"single_confirmation_threshold\": 0.3, \"candidates\": [{\"score\": 0.635, \"reference_count\": 3, \"stddev\": 0.06717224829697124, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3\", \"label\": \"lux\", \"source\": \"voiceprint\"}, {\"score\": 0.163, \"reference_count\": 10, \"stddev\": 0.059722813292010214, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-84d0b8965b144a6fae986028068b4a79\", \"label\": \"luguang\", \"source\": \"voiceprint\"}, {\"score\": 0.033, \"reference_count\": 10, \"stddev\": 0.08760630786388358, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-30cbe141e94446aeb7763ccfafb99fd1\", \"label\": \"qf\", \"source\": \"voiceprint\"}], \"tentative\": false}"
+        }
+      ],
+      "deferred_interrupt": false,
+      "jev_calls": [
+        {
+          "ms": 1530,
+          "action": "respond",
+          "path": "model",
+          "timed_out": false,
+          "reason": "未能初判",
+          "items": [
+            {
+              "n": 1,
+              "to_jiangshi": "maybe",
+              "score": 0.5,
+              "reason": "未能初判",
+              "speaker_pick": "",
+              "speaker_level": "",
+              "speaker_reason": "",
+              "relevance": "uncertain",
+              "speaker_score": null,
+              "voice_pick": "",
+              "voice_strength": "unavailable",
+              "semantic_pick": "",
+              "semantic_reason": "",
+              "evidence_relation": ""
+            }
+          ],
+          "needs_main_review": false,
+          "prompt_activity_id": "jev-8d8c646074fa442991579eb79cb1d8e3",
+          "prompt_requested": true
+        }
+      ],
+      "review_context": "",
+      "review_candidates": [],
+      "input_annotations": [
+        {
+          "input_id": "1ca2be83c39e4ec8af7d464da3e64386",
+          "n": "N1",
+          "direction": "maybe",
+          "relevance": "uncertain"
+        }
+      ]
+    },
+    "stimulus": "speech",
+    "objects": {
+      "lux": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3"
+    },
+    "source": "lux",
+    "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+    "object_status": "confirmed",
+    "object_confidence": 0.7,
+    "object_ref": null,
+    "channel": null
+  },
+  "source_ids": [],
+  "created_at": "2026-10-05T14:37:19.807808+00:00"
+}

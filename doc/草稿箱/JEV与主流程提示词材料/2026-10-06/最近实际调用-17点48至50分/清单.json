@@ -1,0 +1,60 @@
+{
+  "source": ".jshi/step_inputs.jsonl + subject.sqlite3 histories + jev_scenes revisions",
+  "calls": [
+    {
+      "label": "JEV第一次",
+      "file": "01-JEV第一次-174954.json",
+      "at": "2026-10-06T09:49:54.480401+00:00",
+      "activity_id": "jev-27daa20d517c4807b23d7bbd06f26eb6",
+      "system_sha256": "a811fa3bf332e8c361cc74c1342039249b2956eb5c4cec97e6f68ec11d7f8632",
+      "system_chars": 3273,
+      "user_chars": 1753
+    },
+    {
+      "label": "JEV第一次",
+      "file": "02-JEV第一次-175015.json",
+      "at": "2026-10-06T09:50:15.988369+00:00",
+      "activity_id": "jev-52014cec4cf949b08a007130beb2900c",
+      "system_sha256": "a811fa3bf332e8c361cc74c1342039249b2956eb5c4cec97e6f68ec11d7f8632",
+      "system_chars": 3273,
+      "user_chars": 2111
+    },
+    {
+      "label": "主认知",
+      "file": "03-主认知-174822.json",
+      "at": "2026-10-06T09:48:22.268707+00:00",
+      "activity_id": "2aa9d6ce-edef-45ac-ace4-71dc1af34d8c",
+      "system_sha256": "575f951b08292916974d34f75fc1edb19219c747fbe09fe02150bdb266964249",
+      "system_chars": 2975,
+      "user_chars": 3871
+    },
+    {
+      "label": "主认知",
+      "file": "04-主认知-174931.json",
+      "at": "2026-10-06T09:49:31.340636+00:00",
+      "activity_id": "8a12e8a4-6395-4a06-afd4-5eb044aafe03",
+      "system_sha256": "b1c85127c1b91146f5d181a1a732a2bdc9f34396497eef204e6faeccdc179bfa",
+      "system_chars": 2975,
+      "user_chars": 4483
+    },
+    {
+      "label": "主认知写场",
+      "file": "05-主认知写场-174941.json",
+      "at": "2026-10-06T09:49:41.884281+00:00",
+      "activity_id": "8a12e8a4-6395-4a06-afd4-5eb044aafe03",
+      "system_sha256": "172b97c97d6e5ef5c26383c73917a8c02db0d184f3c484fb67459409b1dc3f78",
+      "system_chars": 2920,
+      "user_chars": 8475
+    },
+    {
+      "label": "主认知写场",
+      "file": "06-主认知写场-175019.json",
+      "at": "2026-10-06T09:50:19.036167+00:00",
+      "activity_id": "8a12e8a4-6395-4a06-afd4-5eb044aafe03",
+      "system_sha256": "93098ab5b75fcc2fe55f53600d81dd35ea09a815a478031bcee23bd351cee07d",
+      "system_chars": 2920,
+      "user_chars": 6684
+    }
+  ],
+  "scene_request_missing": true
+}

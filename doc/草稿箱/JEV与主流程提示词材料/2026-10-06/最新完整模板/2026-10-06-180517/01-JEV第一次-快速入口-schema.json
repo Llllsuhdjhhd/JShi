@@ -1,0 +1,86 @@
+{
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "i": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "person": {
+            "type": "string",
+            "enum": [
+              "P1",
+              "unknown"
+            ]
+          },
+          "certainty": {
+            "enum": [
+              "confirmed",
+              "tentative",
+              "unknown"
+            ]
+          },
+          "to": {
+            "enum": [
+              "yes",
+              "maybe",
+              "no"
+            ]
+          },
+          "keep": {
+            "enum": [
+              "related",
+              "uncertain",
+              "unrelated"
+            ]
+          },
+          "why": {
+            "type": "string",
+            "maxLength": 80
+          }
+        },
+        "required": [
+          "i",
+          "person",
+          "certainty",
+          "to",
+          "keep"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 1
+    },
+    "level": {
+      "type": "integer",
+      "enum": [
+        1,
+        2,
+        3
+      ]
+    },
+    "recall_memory": {
+      "type": "boolean"
+    },
+    "control": {
+      "enum": [
+        "pass",
+        "stop",
+        "continue"
+      ]
+    }
+  },
+  "required": [
+    "items",
+    "level",
+    "recall_memory",
+    "control"
+  ],
+  "additionalProperties": false
+}

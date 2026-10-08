@@ -1,0 +1,202 @@
+{
+  "sequence": 12230,
+  "id": "67e0d1cb-2062-4df5-9fbf-82daa2fae086",
+  "subject_id": "stone",
+  "kind": "fact",
+  "event_type": "external_input",
+  "content": {
+    "text": "lux：我们随便说点话吧，我这边。嗯，等一下。\nlux：扔掉扔掉，不吃了。",
+    "envelope": {
+      "session_id": "29683401ba0242c691529e22d5a10ec7",
+      "source": "microphone",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "1. P1（lux）：我们随便说点话吧，我这边。嗯，等一下。\n2. P1（lux）：扔掉扔掉，不吃了。\nJEV 初判：第 1 条在对匠石说；第 2 条保留作背景，不直接对匠石说。",
+          "reference": "",
+          "media_type": ""
+        },
+        {
+          "kind": "audio",
+          "text": "",
+          "reference": "session:29683401ba0242c691529e22d5a10ec7:471962-479701",
+          "media_type": "audio/pcm"
+        }
+      ],
+      "speaker": {
+        "track_id": "5",
+        "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+        "label": "lux",
+        "status": "recognized",
+        "method": "voiceprint_match",
+        "confidence": 0.4259029299480366,
+        "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+      },
+      "input_id": "cf7b3fec2f5c45a68ed3543f5f765512",
+      "start_ms": 471962,
+      "end_ms": 479701,
+      "final": true,
+      "overlap": false,
+      "delivery_context": "",
+      "utterances": [
+        {
+          "text": "我们随便说点话吧，我这边。嗯，等一下。",
+          "speaker": {
+            "track_id": "0",
+            "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+            "label": "lux",
+            "status": "recognized",
+            "method": "voiceprint_match",
+            "confidence": 0.6396313272855044,
+            "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+          },
+          "start_ms": 471962,
+          "end_ms": 476761,
+          "overlap": false,
+          "input_id": "b33e1539c07e45e99e886c35a808e513",
+          "recorded_start_at_ms": 1791211053801.0957,
+          "recorded_end_at_ms": 1791211058600.0957,
+          "received_at_ms": 1791211080793.3154,
+          "identity_note": "{\"reason\": \"已匹配登记声纹\", \"best_score\": 0.64, \"runner_up\": 0.12, \"threshold\": 0.3, \"margin\": 0.08, \"single_confirmation_threshold\": 0.3, \"candidates\": [{\"score\": 0.64, \"reference_count\": 3, \"stddev\": 0.03134983640860195, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3\", \"label\": \"lux\", \"source\": \"voiceprint\"}, {\"score\": 0.12, \"reference_count\": 10, \"stddev\": 0.07478560770644957, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-84d0b8965b144a6fae986028068b4a79\", \"label\": \"luguang\", \"source\": \"voiceprint\"}, {\"score\": 0.069, \"reference_count\": 10, \"stddev\": 0.09336592791667278, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-30cbe141e94446aeb7763ccfafb99fd1\", \"label\": \"qf\", \"source\": \"voiceprint\"}], \"tentative\": false}"
+        },
+        {
+          "text": "扔掉扔掉，不吃了。",
+          "speaker": {
+            "track_id": "5",
+            "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+            "label": "lux",
+            "status": "recognized",
+            "method": "voiceprint_match",
+            "confidence": 0.4259029299480366,
+            "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+          },
+          "start_ms": 477302,
+          "end_ms": 479701,
+          "overlap": false,
+          "input_id": "64feca42321844bab8f2b6f43ad2d160",
+          "recorded_start_at_ms": 1791211059141.0957,
+          "recorded_end_at_ms": 1791211061540.0957,
+          "received_at_ms": 1791211083625.9036,
+          "identity_note": "{\"reason\": \"已匹配登记声纹\", \"best_score\": 0.426, \"runner_up\": 0.167, \"threshold\": 0.3, \"margin\": 0.08, \"single_confirmation_threshold\": 0.3, \"candidates\": [{\"score\": 0.426, \"reference_count\": 3, \"stddev\": 0.11128833039554334, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3\", \"label\": \"lux\", \"source\": \"voiceprint\"}, {\"score\": 0.167, \"reference_count\": 10, \"stddev\": 0.0886059019755153, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-84d0b8965b144a6fae986028068b4a79\", \"label\": \"luguang\", \"source\": \"voiceprint\"}, {\"score\": 0.091, \"reference_count\": 10, \"stddev\": 0.06253000957436528, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-30cbe141e94446aeb7763ccfafb99fd1\", \"label\": \"qf\", \"source\": \"voiceprint\"}], \"tentative\": false}"
+        }
+      ],
+      "current_utterances": [
+        {
+          "text": "我们随便说点话吧，我这边。嗯，等一下。",
+          "speaker": {
+            "track_id": "0",
+            "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+            "label": "lux",
+            "status": "recognized",
+            "method": "voiceprint_match",
+            "confidence": 0.6396313272855044,
+            "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+          },
+          "start_ms": 471962,
+          "end_ms": 476761,
+          "overlap": false,
+          "input_id": "b33e1539c07e45e99e886c35a808e513",
+          "recorded_start_at_ms": 1791211053801.0957,
+          "recorded_end_at_ms": 1791211058600.0957,
+          "received_at_ms": 1791211080793.3154,
+          "identity_note": "{\"reason\": \"已匹配登记声纹\", \"best_score\": 0.64, \"runner_up\": 0.12, \"threshold\": 0.3, \"margin\": 0.08, \"single_confirmation_threshold\": 0.3, \"candidates\": [{\"score\": 0.64, \"reference_count\": 3, \"stddev\": 0.03134983640860195, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3\", \"label\": \"lux\", \"source\": \"voiceprint\"}, {\"score\": 0.12, \"reference_count\": 10, \"stddev\": 0.07478560770644957, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-84d0b8965b144a6fae986028068b4a79\", \"label\": \"luguang\", \"source\": \"voiceprint\"}, {\"score\": 0.069, \"reference_count\": 10, \"stddev\": 0.09336592791667278, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-30cbe141e94446aeb7763ccfafb99fd1\", \"label\": \"qf\", \"source\": \"voiceprint\"}], \"tentative\": false}"
+        },
+        {
+          "text": "扔掉扔掉，不吃了。",
+          "speaker": {
+            "track_id": "5",
+            "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+            "label": "lux",
+            "status": "recognized",
+            "method": "voiceprint_match",
+            "confidence": 0.4259029299480366,
+            "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+          },
+          "start_ms": 477302,
+          "end_ms": 479701,
+          "overlap": false,
+          "input_id": "64feca42321844bab8f2b6f43ad2d160",
+          "recorded_start_at_ms": 1791211059141.0957,
+          "recorded_end_at_ms": 1791211061540.0957,
+          "received_at_ms": 1791211083625.9036,
+          "identity_note": "{\"reason\": \"已匹配登记声纹\", \"best_score\": 0.426, \"runner_up\": 0.167, \"threshold\": 0.3, \"margin\": 0.08, \"single_confirmation_threshold\": 0.3, \"candidates\": [{\"score\": 0.426, \"reference_count\": 3, \"stddev\": 0.11128833039554334, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3\", \"label\": \"lux\", \"source\": \"voiceprint\"}, {\"score\": 0.167, \"reference_count\": 10, \"stddev\": 0.0886059019755153, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-84d0b8965b144a6fae986028068b4a79\", \"label\": \"luguang\", \"source\": \"voiceprint\"}, {\"score\": 0.091, \"reference_count\": 10, \"stddev\": 0.06253000957436528, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-30cbe141e94446aeb7763ccfafb99fd1\", \"label\": \"qf\", \"source\": \"voiceprint\"}], \"tentative\": false}"
+        }
+      ],
+      "deferred_interrupt": false,
+      "jev_calls": [
+        {
+          "ms": 2155,
+          "action": "respond",
+          "path": "model",
+          "timed_out": false,
+          "reason": "至少一条可能在对匠石说",
+          "items": [
+            {
+              "n": 1,
+              "to_jiangshi": "yes",
+              "score": 0.65,
+              "reason": "承接前文对谈，表示随便说点话，明显在对匠石说话；声纹clear指向P1(lux)，但参考分偏低，语义仅为承接语境。",
+              "speaker_pick": "P1",
+              "speaker_level": "可能",
+              "speaker_reason": "声纹clear支持P1(lux)，语义无身份线索；参考分数与stddev一般，综合偏向P1但不作确定。",
+              "relevance": "related",
+              "speaker_score": 0.65,
+              "voice_pick": "P1",
+              "voice_strength": "clear",
+              "semantic_pick": "unknown",
+              "semantic_reason": "原话无自报姓名，也无其他可区分说话人的语义线索，只知在承接对话方向。",
+              "evidence_relation": "voice_only"
+            },
+            {
+              "n": 2,
+              "to_jiangshi": "no",
+              "score": 0.5,
+              "reason": "“扔掉扔掉，不吃了”语义上更像对话语境的自我处置或回应现场，未点名匠石，也无明确指向；声纹clear支持P1(lux)，但语义无法确认说话人。",
+              "speaker_pick": "P1",
+              "speaker_level": "可能",
+              "speaker_reason": "声纹clear指向P1(lux)，但分数0.426、stddev 0.111偏高且参考仅3段，可信度一般，综合取可能。",
+              "relevance": "uncertain",
+              "speaker_score": 0.5,
+              "voice_pick": "P1",
+              "voice_strength": "clear",
+              "semantic_pick": "unknown",
+              "semantic_reason": "无自报、无称呼、无对象指向，无法从语义区分是谁。",
+              "evidence_relation": "voice_only"
+            }
+          ],
+          "needs_main_review": false,
+          "prompt_activity_id": "jev-b69b6ec500a14118858c1e8ade25d431",
+          "prompt_requested": true
+        }
+      ],
+      "review_context": "",
+      "review_candidates": [],
+      "input_annotations": [
+        {
+          "input_id": "b33e1539c07e45e99e886c35a808e513",
+          "n": "N1",
+          "direction": "yes",
+          "relevance": "related"
+        },
+        {
+          "input_id": "64feca42321844bab8f2b6f43ad2d160",
+          "n": "N2",
+          "direction": "no",
+          "relevance": "uncertain"
+        }
+      ]
+    },
+    "stimulus": "speech",
+    "objects": {
+      "lux": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3"
+    },
+    "source": "lux",
+    "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+    "object_status": "confirmed",
+    "object_confidence": 0.7,
+    "object_ref": null,
+    "channel": null
+  },
+  "source_ids": [],
+  "created_at": "2026-10-05T14:38:08.414543+00:00"
+}

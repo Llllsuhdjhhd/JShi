@@ -1,0 +1,31 @@
+{
+  "status": "已实施固定模板；不是某轮实际请求",
+  "prompt_policy_version": 3,
+  "files": [
+    {
+      "file": "主认知-1档-system.txt",
+      "chars": 6312,
+      "sha256": "c936a8924b1abfb239d17867cb985b5ff054b8f51c037d0450f2c733f6311b28"
+    },
+    {
+      "file": "主认知-2档-system.txt",
+      "chars": 4461,
+      "sha256": "c5ceb00f63fd7ce62aa64cb676823a38226ee37889c264e788d99c194fbf9422"
+    },
+    {
+      "file": "主认知-3档-system.txt",
+      "chars": 2597,
+      "sha256": "e61530e573d959bcd8ef5c4a48113f0d7fae98f4547e3bc8a2a06e07427bc601"
+    },
+    {
+      "file": "JEV-第一次-system.txt",
+      "chars": 812,
+      "sha256": "44295a15c9174d6617d1bf0c6817f8a78c161e29ee1de06f1ff19ce59b2c394f"
+    },
+    {
+      "file": "JEV-第二次-system.txt",
+      "chars": 804,
+      "sha256": "6dc413aafc3e2e3021c49fe7d33e3cb0504234f88a4fb92faf29e50dc67a28f2"
+    }
+  ]
+}

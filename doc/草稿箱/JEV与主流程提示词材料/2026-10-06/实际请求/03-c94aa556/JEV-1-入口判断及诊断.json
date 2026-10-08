@@ -1,0 +1,73 @@
+{
+  "entry_record": {
+    "ms": 1879,
+    "action": "respond",
+    "path": "model",
+    "timed_out": false,
+    "reason": "至少一条可能在对匠石说",
+    "items": [
+      {
+        "n": 1,
+        "to_jiangshi": "yes",
+        "score": 0.85,
+        "reason": "P1（lux）再现并打招呼，承接匠石此前'我还在'的等待；声纹匹配清晰，语义也与lux先前互动习惯一致。",
+        "speaker_pick": "P1",
+        "speaker_level": "确定",
+        "speaker_reason": "声纹清晰匹配P1，且'我又来了'自认先前来过，与P1/lux此前的出现相印证，两边一致。",
+        "relevance": "related",
+        "speaker_score": 0.86,
+        "voice_pick": "P1",
+        "voice_strength": "clear",
+        "semantic_pick": "P1",
+        "semantic_reason": "自称'我又来了'，表明是先前已出现过的同一人再次到访，与P1/lux的身份线索一致；无其他人物名称出现。",
+        "evidence_relation": "agree"
+      }
+    ],
+    "needs_main_review": false,
+    "prompt_activity_id": "jev-a2fc2c66ec504db3be68505b01393a6d",
+    "prompt_requested": true
+  },
+  "diagnostics": [
+    {
+      "sequence": 12251,
+      "id": "28db69dc-3448-4109-9b68-27cc22937b0e",
+      "subject_id": "stone",
+      "kind": "fact",
+      "event_type": "voice_jev_diagnostics",
+      "content": {
+        "session_id": "4dd241c3e7294519afbf3b0c28372b3b",
+        "ms": 1879,
+        "action": "respond",
+        "path": "model",
+        "timed_out": false,
+        "reason": "至少一条可能在对匠石说",
+        "items": [
+          {
+            "n": 1,
+            "to_jiangshi": "yes",
+            "score": 0.85,
+            "reason": "P1（lux）再现并打招呼，承接匠石此前'我还在'的等待；声纹匹配清晰，语义也与lux先前互动习惯一致。",
+            "speaker_pick": "P1",
+            "speaker_level": "确定",
+            "speaker_reason": "声纹清晰匹配P1，且'我又来了'自认先前来过，与P1/lux此前的出现相印证，两边一致。",
+            "relevance": "related",
+            "speaker_score": 0.86,
+            "voice_pick": "P1",
+            "voice_strength": "clear",
+            "semantic_pick": "P1",
+            "semantic_reason": "自称'我又来了'，表明是先前已出现过的同一人再次到访，与P1/lux的身份线索一致；无其他人物名称出现。",
+            "evidence_relation": "agree"
+          }
+        ],
+        "needs_main_review": false,
+        "prompt_activity_id": "jev-a2fc2c66ec504db3be68505b01393a6d",
+        "prompt_requested": true,
+        "model_raw": "{\n  \"needs_main_review\": false,\n  \"items\": [\n    {\n      \"n\": 1,\n      \"to_jiangshi\": \"yes\",\n      \"relevance\": \"related\",\n      \"score\": 0.85,\n      \"reason\": \"P1（lux）再现并打招呼，承接匠石此前'我还在'的等待；声纹匹配清晰，语义也与lux先前互动习惯一致。\",\n      \"speaker\": {\n        \"semantic_pick\": \"P1\",\n        \"semantic_reason\": \"自称'我又来了'，表明是先前已出现过的同一人再次到访，与P1/lux的身份线索一致；无其他人物名称出现。\",\n        \"evidence_relation\": \"agree\",\n        \"pick\": \"P1\",\n        \"level\": \"确定\",\n        \"score\": 0.86,\n        \"reason\": \"声纹清晰匹配P1，且'我又来了'自认先前来过，与P1/lux此前的出现相印证，两边一致。\"\n      }\n    }\n  ]\n}",
+        "model_error": ""
+      },
+      "source_ids": [],
+      "created_at": "2026-10-05T14:40:36.239955+00:00"
+    }
+  ],
+  "association": "external_input.envelope.jev_calls.prompt_activity_id严格关联"
+}

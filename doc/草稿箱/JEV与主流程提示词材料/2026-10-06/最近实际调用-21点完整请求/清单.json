@@ -1,0 +1,92 @@
+[
+  {
+    "section": 1,
+    "purpose": "voice_jev",
+    "activity_id": "jev-18e31684bb3d42328bcfc7e49b63aea9",
+    "local_time": "2026-10-06 21:03:18",
+    "system_chars": 2254,
+    "user_chars": 4514,
+    "file": "01-voice_jev-210318.json",
+    "output_recorded": true
+  },
+  {
+    "section": 1,
+    "purpose": "voice_jev",
+    "activity_id": "jev-e9178e3c6c7547b785b3cc8c471b04e4",
+    "local_time": "2026-10-06 21:03:31",
+    "system_chars": 2256,
+    "user_chars": 1978,
+    "file": "02-voice_jev-210331.json",
+    "output_recorded": true
+  },
+  {
+    "section": 2,
+    "purpose": "voice_jev_scene",
+    "activity_id": "jev-scene-82f13835140c49b4bc18fa302ea6ba9b",
+    "local_time": "2026-10-06 21:03:13",
+    "system_chars": 1346,
+    "user_chars": 5430,
+    "file": "03-voice_jev_scene-210313.json",
+    "output_recorded": true
+  },
+  {
+    "section": 2,
+    "purpose": "voice_jev_scene",
+    "activity_id": "jev-scene-a8c2429eb9754b3d929f59245d78cdf6",
+    "local_time": "2026-10-06 21:03:19",
+    "system_chars": 1346,
+    "user_chars": 5560,
+    "file": "04-voice_jev_scene-210319.json",
+    "output_recorded": true
+  },
+  {
+    "section": 3,
+    "purpose": "subject_activity",
+    "activity_id": "4116299e-4c86-467d-88ff-8c9f781fb23e",
+    "local_time": "2026-10-06 21:03:19",
+    "system_chars": 7422,
+    "user_chars": 5243,
+    "file": "05-subject_activity-210319.json",
+    "output_recorded": true
+  },
+  {
+    "section": 4,
+    "purpose": "subject_activity",
+    "activity_id": "dd0de205-e621-4e22-a6c2-418d2fab3dc7",
+    "local_time": "2026-10-06 21:02:57",
+    "system_chars": 5106,
+    "user_chars": 5181,
+    "file": "06-subject_activity-210257.json",
+    "output_recorded": true
+  },
+  {
+    "section": 5,
+    "purpose": "subject_activity",
+    "activity_id": "5cedf83d-c213-440a-a3c9-0e22f12b4378",
+    "local_time": "2026-10-06 21:02:33",
+    "system_chars": 3246,
+    "user_chars": 4645,
+    "file": "07-subject_activity-210233.json",
+    "output_recorded": true
+  },
+  {
+    "section": 6,
+    "purpose": "write_zone",
+    "activity_id": "4d710a6b-4a7e-41db-a591-f4dbe4091383",
+    "local_time": "2026-10-06 21:03:22",
+    "system_chars": 2920,
+    "user_chars": 5093,
+    "file": "08-write_zone-210322.json",
+    "output_recorded": false
+  },
+  {
+    "section": 6,
+    "purpose": "write_zone",
+    "activity_id": "28d24af5-8a88-4c4f-9bc0-d4527646b76a",
+    "local_time": "2026-10-06 21:03:51",
+    "system_chars": 2920,
+    "user_chars": 5222,
+    "file": "09-write_zone-210351.json",
+    "output_recorded": false
+  }
+]

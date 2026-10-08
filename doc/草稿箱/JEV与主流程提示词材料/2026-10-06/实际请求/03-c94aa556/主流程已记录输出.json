@@ -1,0 +1,87 @@
+{
+  "status": "程序记录的结构化/语言输出，不冒充模型原始JSON",
+  "model_raw_status": "当前保留日志未找到主认知原始模型JSON",
+  "records": [
+    {
+      "sequence": 12259,
+      "id": "2c86f11c-dce7-4eea-8f40-07e642f381bc",
+      "subject_id": "stone",
+      "kind": "subject",
+      "event_type": "activity_response_state",
+      "content": {
+        "activity_id": "c94aa556-7e9e-4c4d-8625-af547e27c187",
+        "recommended": [
+          "respond",
+          "verbal",
+          "embodied"
+        ],
+        "final": [
+          "respond",
+          "verbal",
+          "embodied"
+        ],
+        "unknown_statuses": [],
+        "illegal_channels": [],
+        "missing_reason": false,
+        "missing_items": false,
+        "reason": "",
+        "items": [
+          {
+            "channel": "verbal",
+            "text": "哈喽，我在。这会儿想聊点什么？"
+          },
+          {
+            "channel": "embodied",
+            "text": "转向声音来处，应一声"
+          }
+        ],
+        "source": "model_recommended"
+      },
+      "source_ids": [
+        "c94aa556-7e9e-4c4d-8625-af547e27c187"
+      ],
+      "created_at": "2026-10-05T14:40:53.027228+00:00"
+    },
+    {
+      "sequence": 12260,
+      "id": "19cc6a17-70b0-4385-998f-79197545c129",
+      "subject_id": "stone",
+      "kind": "fact",
+      "event_type": "language_action",
+      "content": {
+        "activity_id": "c94aa556-7e9e-4c4d-8625-af547e27c187",
+        "text": "哈喽，我在。这会儿想聊点什么？",
+        "model": "deepseek-v4-flash@v13",
+        "response_statuses": [
+          "respond"
+        ],
+        "reason": ""
+      },
+      "source_ids": [
+        "c94aa556-7e9e-4c4d-8625-af547e27c187"
+      ],
+      "created_at": "2026-10-05T14:40:53.042192+00:00"
+    },
+    {
+      "sequence": 12261,
+      "id": "124791b5-9546-42b8-a599-35ea0c92ee68",
+      "subject_id": "stone",
+      "kind": "subject",
+      "event_type": "activity_completed",
+      "content": {
+        "activity_id": "c94aa556-7e9e-4c4d-8625-af547e27c187",
+        "to": "completed",
+        "reason": "external_activity_finished_after_action",
+        "response_statuses": [
+          "respond",
+          "verbal",
+          "embodied"
+        ]
+      },
+      "source_ids": [
+        "19cc6a17-70b0-4385-998f-79197545c129"
+      ],
+      "created_at": "2026-10-05T14:40:53.166575+00:00"
+    }
+  ]
+}

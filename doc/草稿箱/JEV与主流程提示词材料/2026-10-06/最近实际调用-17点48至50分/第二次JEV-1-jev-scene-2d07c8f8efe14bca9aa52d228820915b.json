@@ -1,0 +1,183 @@
+{
+  "history": {
+    "sequence": 18067,
+    "event_type": "voice_jev_scene",
+    "content": {
+      "session_id": "42fd2edd9c184f02ba37ff60193a7d5d",
+      "review_id": "jev-scene-2d07c8f8efe14bca9aa52d228820915b",
+      "accepted": true,
+      "trigger": "main",
+      "model_raw": "{\"scene\":\"JEV片场（供第一次）：Minecraft现场延续，luguang(P2)与lux(P1)约玩，luguang持续讲解/演示，我这边为已播出或待播回应。已确认归luguang：出生点致敬地图问句、32K武器、放土豆（0.363）。新增本段多句延续32K武器/土豆/PVP演示话题，声纹领先P2但未过门槛，暂归luguang待核：「然后呢为啥更离谱？」「妈妈，那个」「啊，没声了」「不对不对，这里就没啥，我就给你看一眼，等会玩一下，我找一个pvp的，很好玩」「对，这是我自己练的」；短叹词无有效声纹，随track暂归。旧存疑未见新线索：P106「他没事吧？」、P102声纹弱且与P103冲突、送别「我走了拜拜」、P3「我不会。」、床疑游戏资源。\\n\\n现场可能正转向告别：P5「啊？他退出游戏了」、luguang「他退游了，要不你也」（未完），或为一人退游；是否与旧送别句同一事尚不清。\\n\\n接续：P2「那你为啥这么上」未触发；匠石已问「你是说哪件事？」并播「把『这』指的东西说清楚」，所指仍不清。随身听线已播完。远程加好友只播前半「得看有没有入口」，后半未播。lux问出行已答。qf问「你咋跟他说？」未见回应。入口B38「等一下喂哦行那拜拜下次再约好拜拜」归属待定未触发；B39即本段开头致敬地图问句。B33「挖一下」后半未播。\\n\\n来源界定：P104自动拨号与「暂时无法接通」属远端系统，unknown，不当现场人物。地址暂归luguang弱依据，不主动复述。对账/技术线未变：lux质疑人工费出处未回；qf要弄完邮箱；3000多没修留下次；速腾制动液报警未回；B25等lux拍板。\\n\\n与旧片场比较：Minecraft现场仍在，luguang与lux约玩，偏luguang演示讲解并似向收束/告别移动，属局部；其余待定项无新变化。\"}",
+      "scene": "JEV片场（供第一次）：Minecraft现场延续，luguang(P2)与lux(P1)约玩，luguang持续讲解/演示，我这边为已播出或待播回应。已确认归luguang：出生点致敬地图问句、32K武器、放土豆（0.363）。新增本段多句延续32K武器/土豆/PVP演示话题，声纹领先P2但未过门槛，暂归luguang待核：「然后呢为啥更离谱？」「妈妈，那个」「啊，没声了」「不对不对，这里就没啥，我就给你看一眼，等会玩一下，我找一个pvp的，很好玩」「对，这是我自己练的」；短叹词无有效声纹，随track暂归。旧存疑未见新线索：P106「他没事吧？」、P102声纹弱且与P103冲突、送别「我走了拜拜」、P3「我不会。」、床疑游戏资源。\n\n现场可能正转向告别：P5「啊？他退出游戏了」、luguang「他退游了，要不你也」（未完），或为一人退游；是否与旧送别句同一事尚不清。\n\n接续：P2「那你为啥这么上」未触发；匠石已问「你是说哪件事？」并播「把『这』指的东西说清楚」，所指仍不清。随身听线已播完。远程加好友只播前半「得看有没有入口」，后半未播。lux问出行已答。qf问「你咋跟他说？」未见回应。入口B38「等一下喂哦行那拜拜下次再约好拜拜」归属待定未触发；B39即本段开头致敬地图问句。B33「挖一下」后半未播。\n\n来源界定：P104自动拨号与「暂时无法接通」属远端系统，unknown，不当现场人物。地址暂归luguang弱依据，不主动复述。对账/技术线未变：lux质疑人工费出处未回；qf要弄完邮箱；3000多没修留下次；速腾制动液报警未回；B25等lux拍板。\n\n与旧片场比较：Minecraft现场仍在，luguang与lux约玩，偏luguang演示讲解并似向收束/告别移动，属局部；其余待定项无新变化。",
+      "chars": 762,
+      "version": 206,
+      "covered_input_ids": [
+        "c4126db3f8de46e2a0c11059806657db",
+        "a84a0bb7d2e04e6581b7e4ae30e6d3a3",
+        "2fa3acc4417848878fd4953e58185e82",
+        "c41708a5dff741528440ce4f9059cfe9",
+        "28e2cb94143848abae9fe57502a20f6d"
+      ],
+      "material_window": {
+        "cap_chars": 3000,
+        "chars": 2977,
+        "model_input_ids": [
+          "c4126db3f8de46e2a0c11059806657db",
+          "a84a0bb7d2e04e6581b7e4ae30e6d3a3",
+          "2fa3acc4417848878fd4953e58185e82",
+          "c41708a5dff741528440ce4f9059cfe9",
+          "28e2cb94143848abae9fe57502a20f6d"
+        ],
+        "archived_input_ids": [],
+        "main_scene_chars": 1406,
+        "omitted_main_scene_blocks": 27
+      },
+      "elapsed_ms": 2777
+    },
+    "created_at": "2026-10-06T09:49:33.937564+00:00",
+    "source_ids": "[]"
+  },
+  "saved_revision": {
+    "scene": "JEV片场（供第一次）：Minecraft现场延续，luguang(P2)与lux(P1)约玩，luguang持续讲解/演示，我这边为已播出或待播回应。已确认归luguang：出生点致敬地图问句、32K武器、放土豆（0.363）。新增本段多句延续32K武器/土豆/PVP演示话题，声纹领先P2但未过门槛，暂归luguang待核：「然后呢为啥更离谱？」「妈妈，那个」「啊，没声了」「不对不对，这里就没啥，我就给你看一眼，等会玩一下，我找一个pvp的，很好玩」「对，这是我自己练的」；短叹词无有效声纹，随track暂归。旧存疑未见新线索：P106「他没事吧？」、P102声纹弱且与P103冲突、送别「我走了拜拜」、P3「我不会。」、床疑游戏资源。\n\n现场可能正转向告别：P5「啊？他退出游戏了」、luguang「他退游了，要不你也」（未完），或为一人退游；是否与旧送别句同一事尚不清。\n\n接续：P2「那你为啥这么上」未触发；匠石已问「你是说哪件事？」并播「把『这』指的东西说清楚」，所指仍不清。随身听线已播完。远程加好友只播前半「得看有没有入口」，后半未播。lux问出行已答。qf问「你咋跟他说？」未见回应。入口B38「等一下喂哦行那拜拜下次再约好拜拜」归属待定未触发；B39即本段开头致敬地图问句。B33「挖一下」后半未播。\n\n来源界定：P104自动拨号与「暂时无法接通」属远端系统，unknown，不当现场人物。地址暂归luguang弱依据，不主动复述。对账/技术线未变：lux质疑人工费出处未回；qf要弄完邮箱；3000多没修留下次；速腾制动液报警未回；B25等lux拍板。\n\n与旧片场比较：Minecraft现场仍在，luguang与lux约玩，偏luguang演示讲解并似向收束/告别移动，属局部；其余待定项无新变化。",
+    "at": 1791280173932.932,
+    "events": [
+      {
+        "id": "c4126db3f8de46e2a0c11059806657db",
+        "seq": 994,
+        "queued_at": 1791280149114.9658,
+        "payload": {
+          "p": "P2",
+          "text": "然后呢为啥更离谱？",
+          "at": 1791280146579.3298,
+          "basis": "jev_attribution",
+          "status": "provisional",
+          "track": "6",
+          "voice_initial": {
+            "p": "P95",
+            "basis": "voice_continuity",
+            "similarity": null
+          },
+          "judgment": {
+            "person": "P2",
+            "certainty": "可能",
+            "to": "no",
+            "why": "声纹领先P2（0.276），与luguang在片场讲解接续；语音弱，暂归luguang"
+          }
+        }
+      },
+      {
+        "id": "a84a0bb7d2e04e6581b7e4ae30e6d3a3",
+        "seq": 995,
+        "queued_at": 1791280169245.2078,
+        "payload": {
+          "p": "P2",
+          "text": "妈妈，那个。",
+          "at": 1791280164368.7253,
+          "basis": "jev_attribution",
+          "status": "provisional",
+          "track": "3",
+          "voice_initial": {
+            "p": "unknown",
+            "basis": "unassigned_audio",
+            "similarity": null
+          },
+          "judgment": {
+            "person": "P2",
+            "certainty": "可能",
+            "to": "no",
+            "why": "短句重复比较领先P2且同track接续P110/前段luguang讲解，暂归luguang"
+          }
+        }
+      },
+      {
+        "id": "2fa3acc4417848878fd4953e58185e82",
+        "seq": 996,
+        "queued_at": 1791280169249.7559,
+        "payload": {
+          "p": "P2",
+          "text": "啊，没声了。",
+          "at": 1791280164369.6702,
+          "basis": "jev_attribution",
+          "status": "provisional",
+          "track": "0",
+          "voice_initial": {
+            "p": "unknown",
+            "basis": "unassigned_audio",
+            "similarity": null
+          },
+          "judgment": {
+            "person": "P2",
+            "certainty": "可能",
+            "to": "yes",
+            "why": "声纹相对领先P2，接在讲解后说没声，最可能luguang；未完全确认"
+          }
+        }
+      },
+      {
+        "id": "c41708a5dff741528440ce4f9059cfe9",
+        "seq": 997,
+        "queued_at": 1791280169253.3037,
+        "payload": {
+          "p": "P2",
+          "text": "不对不对，这里就没啥，我就我就给你看一眼，等会玩一下，我找一个 pvp 的，很好玩。",
+          "at": 1791280164592.0176,
+          "basis": "jev_attribution",
+          "status": "provisional",
+          "track": "3",
+          "voice_initial": {
+            "p": "P110",
+            "basis": "voice_continuity",
+            "similarity": null
+          },
+          "judgment": {
+            "person": "P2",
+            "certainty": "可能",
+            "to": "no",
+            "why": "声纹领先P2，与现场演示/约玩接续，虽为未识别连续声音仍倾向luguang"
+          }
+        }
+      },
+      {
+        "id": "28e2cb94143848abae9fe57502a20f6d",
+        "seq": 998,
+        "queued_at": 1791280169256.7002,
+        "payload": {
+          "p": "P2",
+          "text": "对，这是我自己练的。",
+          "at": 1791280166275.254,
+          "basis": "jev_attribution",
+          "status": "provisional",
+          "track": "3",
+          "voice_initial": {
+            "p": "unknown",
+            "basis": "unassigned_audio",
+            "similarity": null
+          },
+          "judgment": {
+            "person": "P2",
+            "certainty": "可能",
+            "to": "yes",
+            "why": "短句比较领先P2，紧接P110演示话题回应练习，最可能luguang"
+          }
+        }
+      }
+    ],
+    "material_window": {
+      "cap_chars": 3000,
+      "chars": 2977,
+      "model_input_ids": [
+        "c4126db3f8de46e2a0c11059806657db",
+        "a84a0bb7d2e04e6581b7e4ae30e6d3a3",
+        "2fa3acc4417848878fd4953e58185e82",
+        "c41708a5dff741528440ce4f9059cfe9",
+        "28e2cb94143848abae9fe57502a20f6d"
+      ],
+      "archived_input_ids": [],
+      "main_scene_chars": 1406,
+      "omitted_main_scene_blocks": 27
+    }
+  },
+  "actual_system": null,
+  "actual_user": null,
+  "missing_reason": "StepInputStore purpose whitelist excludes voice_jev_scene; saved events are not actual user."
+}

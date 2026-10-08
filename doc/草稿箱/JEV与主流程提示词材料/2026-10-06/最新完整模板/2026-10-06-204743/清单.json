@@ -1,0 +1,165 @@
+{
+  "generated_at": "2026-10-06-204743",
+  "zone_chars": 5000,
+  "count_method": "Python len; Unicode characters including whitespace; schema compact JSON",
+  "entries": [
+    {
+      "name": "JEV第一次·快速入口",
+      "body_chars": 1702,
+      "schema_chars": 529,
+      "system_extra_chars": 2244,
+      "source": "src/jshi/voice/jev_prompts.py",
+      "source_sha256": "f0ab03b4cc833fee33f9f6a9c92e76d5f35bf5f83a5d76312971c29490c86783",
+      "body_sha256": "337da6221619717e1d061959bf90d35502a769ff56415baa160e4ae03748955f",
+      "filename": "01-JEV第一次-快速入口"
+    },
+    {
+      "name": "JEV第二次·JEV片场整理",
+      "body_chars": 1197,
+      "schema_chars": 125,
+      "system_extra_chars": 1346,
+      "source": "src/jshi/voice/jev_prompts.py",
+      "source_sha256": "f0ab03b4cc833fee33f9f6a9c92e76d5f35bf5f83a5d76312971c29490c86783",
+      "body_sha256": "c326c460edddb96d9d8bea76bb68b6c3a407db53b91b2fe0e4a74eac60937d6b",
+      "filename": "02-JEV第二次-JEV片场整理"
+    },
+    {
+      "name": "斯密斯主认知1档",
+      "body_chars": 6579,
+      "schema_chars": 744,
+      "system_extra_chars": 7394,
+      "source": "src/jshi/style/packs.py",
+      "source_sha256": "18caeb7cbbcbf3886b9e1dae147bf7109d12db8fcad93574d5d0c0158e0379c4",
+      "body_sha256": "ea882af3bd98a88e8be1a2b877e7fa00aee9a8cba46ad77987f61b8020c091b0",
+      "filename": "03-斯密斯主认知1档"
+    },
+    {
+      "name": "斯密斯主认知2档",
+      "body_chars": 4728,
+      "schema_chars": 279,
+      "system_extra_chars": 5078,
+      "source": "src/jshi/style/packs.py",
+      "source_sha256": "18caeb7cbbcbf3886b9e1dae147bf7109d12db8fcad93574d5d0c0158e0379c4",
+      "body_sha256": "61d02cb3370df073b162bc263db37314ba083ef3362f77719e4b07a9cc47ded8",
+      "filename": "04-斯密斯主认知2档"
+    },
+    {
+      "name": "斯密斯主认知3档",
+      "body_chars": 2868,
+      "schema_chars": 279,
+      "system_extra_chars": 3218,
+      "source": "src/jshi/style/packs.py",
+      "source_sha256": "18caeb7cbbcbf3886b9e1dae147bf7109d12db8fcad93574d5d0c0158e0379c4",
+      "body_sha256": "442bdecc48e30c1bb485a2bd15a0b1fc1427d318b5d2cd6735a0710c0a73c5f4",
+      "filename": "05-斯密斯主认知3档"
+    },
+    {
+      "name": "斯密斯写场·单份指令",
+      "body_chars": 2594,
+      "schema_chars": 227,
+      "system_extra_chars": 2892,
+      "source": "src/jshi/style/packs.py",
+      "source_sha256": "18caeb7cbbcbf3886b9e1dae147bf7109d12db8fcad93574d5d0c0158e0379c4",
+      "body_sha256": "d69a1425c242e1cade73792d3c4a3ed2469ef8fe49baaeaf21d87566f356ec9f",
+      "filename": "06-斯密斯写场-单份指令"
+    },
+    {
+      "name": "斯密斯初始写场",
+      "body_chars": 427,
+      "schema_chars": 83,
+      "system_extra_chars": 581,
+      "source": "src/jshi/style/packs.py",
+      "source_sha256": "18caeb7cbbcbf3886b9e1dae147bf7109d12db8fcad93574d5d0c0158e0379c4",
+      "body_sha256": "1fd9ab4696c8fb3017f0bf85f8657b57d37ae5c49aaab0777d9673c06fa23648",
+      "filename": "07-斯密斯初始写场"
+    },
+    {
+      "name": "工具策划",
+      "body_chars": 3070,
+      "schema_chars": 1829,
+      "system_extra_chars": 4970,
+      "source": "src/jshi/skill/tool_plan.py",
+      "source_sha256": "6360cd0ad71d556b21db70ef8b7b545163dd5af47816f0c3c146b77d439cf6be",
+      "body_sha256": "504b14796c40a092c9195d87768be4c073c425a9ced7f3984ae8bc5da64fba95",
+      "filename": "08-工具策划"
+    },
+    {
+      "name": "工具策划反馈包装",
+      "body_chars": 802,
+      "schema_chars": 112,
+      "system_extra_chars": 974,
+      "source": "src/jshi/skill/tool_wrap.py",
+      "source_sha256": "b835423844dd67c92771a8cd5ca36080b7982ff329572998eda355f6079434ea",
+      "body_sha256": "f4d99f0ebc1163d98ed48d448b583642784ae8e5f9ac7f8449b13a23a91d67ef",
+      "filename": "09-工具策划反馈包装"
+    },
+    {
+      "name": "工具进展反馈包装",
+      "body_chars": 933,
+      "schema_chars": 112,
+      "system_extra_chars": 1105,
+      "source": "src/jshi/skill/tool_wrap.py",
+      "source_sha256": "b835423844dd67c92771a8cd5ca36080b7982ff329572998eda355f6079434ea",
+      "body_sha256": "28a7c57e05971e5c8514fea1b41b18934a591ead8d86ccb7dbc4405622e4f64f",
+      "filename": "10-工具进展反馈包装"
+    },
+    {
+      "name": "工具最终结果反馈包装",
+      "body_chars": 1353,
+      "schema_chars": 112,
+      "system_extra_chars": 1525,
+      "source": "src/jshi/skill/tool_wrap.py",
+      "source_sha256": "b835423844dd67c92771a8cd5ca36080b7982ff329572998eda355f6079434ea",
+      "body_sha256": "a63fde360ce598b2ce2aa5de4cdb64fc7205d60667089331904ed892d6767110",
+      "filename": "11-工具最终结果反馈包装"
+    },
+    {
+      "name": "人物肖像三档浓缩",
+      "body_chars": 215,
+      "schema_chars": 0,
+      "system_extra_chars": 215,
+      "source": "src/jshi/memory/portrait_views.py",
+      "source_sha256": "ff9feaad3151cf8172f6c287eea92a30479a039ff8bb58d4cef941ccf7158d2a",
+      "body_sha256": "f287e8db9bdce9350a5be45efdedd99a264aa5054e83b5f06897d92848bcb54d",
+      "filename": "12-人物肖像三档浓缩"
+    },
+    {
+      "name": "兼容入口·旧单条JEV",
+      "body_chars": 838,
+      "schema_chars": 0,
+      "system_extra_chars": 838,
+      "source": "src/jshi/voice/jev.py",
+      "source_sha256": "2d2c70bcbb6c7956df1f0515e6c2c15420fd27cb8531b41f636e2eccb590053c",
+      "body_sha256": "094bfbc466816d163501a32e8bd4f0fe54bd3909afdaa26a92123df939436bf8",
+      "filename": "13-兼容入口-旧单条JEV"
+    },
+    {
+      "name": "兼容遗留·独立人物复核",
+      "body_chars": 137,
+      "schema_chars": 756,
+      "system_extra_chars": 964,
+      "source": "src/jshi/core/conversation_review.py",
+      "source_sha256": "252bdec7ea97e3de4fe7cfe6ee4e9895485a3522962baa6ce839082e4dc76360",
+      "body_sha256": "2e457a64fb0ae7d279975d152e1b3479535f6ea28d124f33fff582bfa22fa8f4",
+      "filename": "14-兼容遗留-独立人物复核"
+    },
+    {
+      "name": "兼容遗留·斯密斯旧整份指令",
+      "body_chars": 5999,
+      "schema_chars": 832,
+      "system_extra_chars": 6902,
+      "source": "src/jshi/style/packs.py",
+      "source_sha256": "18caeb7cbbcbf3886b9e1dae147bf7109d12db8fcad93574d5d0c0158e0379c4",
+      "body_sha256": "13321d83c8dede8ec228d24b0a47c374c376d1f40d1149f87281f37e2fe75f62",
+      "filename": "15-兼容遗留-斯密斯旧整份指令"
+    }
+  ],
+  "other_assembly_sources": {
+    "src/jshi/style/prompt_levels.py": "300502e02ea2116c0d4dd1e3fb08d88650a4a1536793f1d9694976453030532c",
+    "src/jshi/skill/base.py": "1ff3808c15ca1591c52a3e5b98a78f611cb62e8587b0d8163ac3b25ea833a602",
+    "src/jshi/models/prompt.py": "e094ee7527003f21e1f4733e01ef075362a3f8b60b5a7c262e132e2cbbe6c45a",
+    "src/jshi/subject/process.py": "bb87b9b90e13344ad409b4ba4999be7a4c2c206db86e34851b9a580fe6e6716e",
+    "src/jshi/voice/jev.py": "2d2c70bcbb6c7956df1f0515e6c2c15420fd27cb8531b41f636e2eccb590053c",
+    "src/jshi/voice/jev_scene.py": "350e4e93813fe65f9a5f26d7a6cb3be4d8a0f80d6e8849528a5f058a24e9d8bb"
+  }
+}

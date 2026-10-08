@@ -1,0 +1,100 @@
+{
+  "status": "讨论草案，未写入程序；不替代历史真实请求",
+  "baseline": "当前源码reply_instruction_for(smith,prompt_level=5)",
+  "levels": [
+    {
+      "level": 1,
+      "prompt_chars": 6312,
+      "schema_pretty_chars": 1424,
+      "schema_compact_chars": 744,
+      "prompt_sha256": "c936a8924b1abfb239d17867cb985b5ff054b8f51c037d0450f2c733f6311b28"
+    },
+    {
+      "level": 2,
+      "prompt_chars": 4461,
+      "schema_pretty_chars": 477,
+      "schema_compact_chars": 279,
+      "prompt_sha256": "c5ceb00f63fd7ce62aa64cb676823a38226ee37889c264e788d99c194fbf9422"
+    },
+    {
+      "level": 3,
+      "prompt_chars": 2597,
+      "schema_pretty_chars": 477,
+      "schema_compact_chars": 279,
+      "prompt_sha256": "e61530e573d959bcd8ef5c4a48113f0d7fae98f4547e3bc8a2a06e07427bc601"
+    }
+  ],
+  "removed_tool_schema_fields": [
+    "use_tool",
+    "need",
+    "tool_consumed",
+    "tool_handling",
+    "refresh_reason",
+    "work_id",
+    "step_id"
+  ],
+  "scene_views": {
+    "1": [
+      1,
+      2,
+      3
+    ],
+    "2": [
+      1,
+      2
+    ],
+    "3": [
+      1
+    ]
+  },
+  "jev_routing_rule_chars": 98,
+  "jev_draft_chars": 2858,
+  "changes_in_level3": [
+    "任务1·回应",
+    "现场发言与交往对象",
+    "来源谁优先"
+  ],
+  "key_definitions": {
+    "status": "压缩时保留关键概念，不用概念名称代替定义",
+    "chars": 178,
+    "concepts": [
+      "交往",
+      "当前输入",
+      "入口标注",
+      "片场",
+      "回忆",
+      "人物参考（肖像、相处经验）",
+      "未开口事项"
+    ],
+    "other_definitions_already_in_prompt": [
+      "respond/wait/ignore/think",
+      "reply/action/unsaid/reason/reply_targets",
+      "P/S代号与确定程度",
+      "片场记录时间/回忆事件时间",
+      "准备说/实际交付"
+    ]
+  },
+  "short_level_budget": {
+    "min_chars": 2000,
+    "max_chars": 3000,
+    "priority": "关键定义、时空关系、证据与交付边界先于压缩字数"
+  },
+  "critical_rules_review": {
+    "time_rule_chars": 431,
+    "restored_or_expanded": [
+      "本轮当前时间基准",
+      "写入时间与事件时间",
+      "回忆召回时间与原事件时间",
+      "跨日时序、地点与信息时效",
+      "计划、实际播出、部分播放和打断",
+      "未开口事项状态与后续告知",
+      "半句或朗读时不抢答",
+      "think与自省或推理过程的区别",
+      "已有个人世界与人格表达",
+      "reason用途及动作独立",
+      "会话代号与已发生匿名交往",
+      "部分材料视图不代表全部记录"
+    ],
+    "verification_status": "静态草稿核对，未实施、未运行模型测试"
+  }
+}

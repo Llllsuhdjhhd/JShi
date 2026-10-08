@@ -1395,7 +1395,7 @@ class VoiceConversation:
         calls = [*self.unreported_jev, *envelope.jev_calls]
         self.unreported_jev.clear()
         metrics = {'queue_wait_ms': round((began - min(r['at'] for r in rows)) * 1000) if rows else None,
-                   'asr_lag_ms': max((r['asr_lag_ms'] for r in rows if r['asr_lag_ms'] is not None), default=None),
+                   'asr_lag_ms': max((r['asr_lag_ms'] for r in rows if r.get('asr_lag_ms') is not None), default=None),
                    'jev_ms': sum(call['ms'] for call in calls), 'jev_calls': calls}
         current_ids = {u.input_id for u in envelope.current_utterances}
         metrics['current_jev_ms'] = sum(call['ms'] for call in calls if current_ids.intersection(call.get('input_ids', ())))

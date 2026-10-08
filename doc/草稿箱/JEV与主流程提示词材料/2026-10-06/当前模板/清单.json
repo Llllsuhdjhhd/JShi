@@ -1,0 +1,69 @@
+{
+  "snapshot_date": "2026-10-06",
+  "count_method": "Python len including punctuation, whitespace and LF newlines; not tokens",
+  "jev": {
+    "chars": 3072,
+    "sha256": "b9b67b8759b325b4c7e15b8902bbfe16fd5b4840764cdd4e3b42ed30a776feab",
+    "source": "src/jshi/voice/jev.py",
+    "line": 123
+  },
+  "main": [
+    {
+      "level": 1,
+      "chars": 1769,
+      "sha256": "390dc5c633fb6c2fcb7df34e47c2bf034b4001cb8ac73d861a6d5f5484ccd2f9",
+      "path": "doc/草稿箱/JEV与主流程提示词材料/2026-10-06/当前模板/主认知-1档-system.txt"
+    },
+    {
+      "level": 2,
+      "chars": 2267,
+      "sha256": "ab3c3bdf221f6cb5faa7e17ad0f7ce5c69437ae7ea593dff3187519278e58647",
+      "path": "doc/草稿箱/JEV与主流程提示词材料/2026-10-06/当前模板/主认知-2档-system.txt"
+    },
+    {
+      "level": 3,
+      "chars": 4515,
+      "sha256": "9cb1348f4667701d26dbe8ab509663b72671371b4eef7750a2c9b2200d119b26",
+      "path": "doc/草稿箱/JEV与主流程提示词材料/2026-10-06/当前模板/主认知-3档-system.txt"
+    },
+    {
+      "level": 4,
+      "chars": 4788,
+      "sha256": "83fccd312afb8445c9224fb655fff1e87e4bf0d35833a8ce669145bc4b813b2d",
+      "path": "doc/草稿箱/JEV与主流程提示词材料/2026-10-06/当前模板/主认知-4档-system.txt"
+    },
+    {
+      "level": 5,
+      "chars": 6312,
+      "sha256": "c936a8924b1abfb239d17867cb985b5ff054b8f51c037d0450f2c733f6311b28",
+      "path": "doc/草稿箱/JEV与主流程提示词材料/2026-10-06/当前模板/主认知-5档-system.txt"
+    }
+  ],
+  "writer": {
+    "chars": 2602,
+    "sha256": "ac7a457afed3eda18c4a4908f76eecf5b331ba4b819d9669c4941e6d22ac968c",
+    "zone_budget_config": 5000
+  },
+  "source_files": [
+    {
+      "path": "src/jshi/voice/jev.py",
+      "sha256": "662de41812df1060f824af42caa94ed654257ec1e56aa7c22d74ad6ed38dbcf0"
+    },
+    {
+      "path": "src/jshi/style/packs.py",
+      "sha256": "14229777edad23af5801cc4bb124846ff627b4713fdea686b48656240971f155"
+    },
+    {
+      "path": "src/jshi/style/prompt_levels.py",
+      "sha256": "7572ef1f73dcb61462ef038a5c2690aa54d4cdbbc5215e8b4f728daabe5c59af"
+    },
+    {
+      "path": "src/jshi/subject/process.py",
+      "sha256": "17e8914aed224245ccce3d9adb61442ba929e1724062cd54580fd151c39b685d"
+    },
+    {
+      "path": "src/jshi/style/zone.py",
+      "sha256": "eae93cdc07bb57d0fe25811ad87335ef2e42934ab6b927753c88623c3cda2f1c"
+    }
+  ]
+}

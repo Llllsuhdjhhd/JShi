@@ -1,0 +1,83 @@
+{
+  "type": "object",
+  "properties": {
+    "mode": {
+      "enum": [
+        "respond",
+        "think",
+        "ignore",
+        "wait"
+      ]
+    },
+    "reply": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string"
+    },
+    "unsaid": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "use_tool": {
+      "type": "boolean"
+    },
+    "need": {
+      "type": "string"
+    },
+    "tool_consumed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tool_handling": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "disposition": {
+            "enum": [
+              "answered",
+              "deferred",
+              "dismissed"
+            ]
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "work_complete": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "task_id",
+          "disposition"
+        ]
+      }
+    },
+    "refresh_reason": {
+      "type": "string"
+    },
+    "work_id": {
+      "type": "string"
+    },
+    "step_id": {
+      "type": "string"
+    },
+    "reply_targets": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

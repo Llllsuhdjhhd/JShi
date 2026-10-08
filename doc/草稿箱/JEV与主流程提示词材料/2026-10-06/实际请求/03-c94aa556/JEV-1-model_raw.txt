@@ -1,0 +1,21 @@
+{
+  "needs_main_review": false,
+  "items": [
+    {
+      "n": 1,
+      "to_jiangshi": "yes",
+      "relevance": "related",
+      "score": 0.85,
+      "reason": "P1（lux）再现并打招呼，承接匠石此前'我还在'的等待；声纹匹配清晰，语义也与lux先前互动习惯一致。",
+      "speaker": {
+        "semantic_pick": "P1",
+        "semantic_reason": "自称'我又来了'，表明是先前已出现过的同一人再次到访，与P1/lux的身份线索一致；无其他人物名称出现。",
+        "evidence_relation": "agree",
+        "pick": "P1",
+        "level": "确定",
+        "score": 0.86,
+        "reason": "声纹清晰匹配P1，且'我又来了'自认先前来过，与P1/lux此前的出现相印证，两边一致。"
+      }
+    }
+  ]
+}

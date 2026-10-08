@@ -1,0 +1,1 @@
+{"needs_main_review":false,"items":[{"n":1,"to_jiangshi":"no","relevance":"uncertain","score":0.6,"reason":"承接前文待定声音'垃圾丢下'的反驳，语义指向该人而非匠石；声纹清晰指向P1，"speaker":{"semantic_pick":"unknown","semantic_reason":"原话是反驳'垃圾丢下'的说法，指向该发言者，但语义上无区分身份的线索","evidence_relation":"voice_only","pick":"P1","level":"确定","score":0.7,"reason":"声纹匹配清晰指向P1(lux)，语义无身份线索，综合采信声音"}}]}

@@ -1,0 +1,93 @@
+[
+  {
+    "number": 1,
+    "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+    "input": "1. P1（lux）：搞笑，哪有垃圾，一点垃圾都没有。",
+    "input_ids": [
+      "1ca2be83c39e4ec8af7d464da3e64386"
+    ],
+    "main": {
+      "at": "2026-10-05T14:37:22.206448+00:00",
+      "local_at": "2026-10-05 22:37:22",
+      "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+      "system_chars": 7155,
+      "user_chars": 9388,
+      "total_chars": 16543,
+      "system_hash": "faf6914420113967fd6c4a19dfdcb4ca94cc1c2ad43af345a985d824e80f8c81"
+    },
+    "jev": [
+      {
+        "at": "2026-10-05T14:37:18.262853+00:00",
+        "local_at": "2026-10-05 22:37:18",
+        "activity_id": "jev-8d8c646074fa442991579eb79cb1d8e3",
+        "system_chars": 2729,
+        "user_chars": 2423,
+        "total_chars": 5152,
+        "system_hash": "03c8119ac201b11fb63ddd5fb14e6a56461f0425e32aa21122b9b17c619f443e"
+      }
+    ],
+    "write_request_count": 2,
+    "folder": "doc/草稿箱/JEV与主流程提示词材料/2026-10-06/实际请求/01-9ad372aa"
+  },
+  {
+    "number": 2,
+    "activity_id": "523a9f89-81d1-4ea4-86c9-33b901ff3476",
+    "input": "1. P1（lux）：我们随便说点话吧，我这边。嗯，等一下。",
+    "input_ids": [
+      "b33e1539c07e45e99e886c35a808e513",
+      "64feca42321844bab8f2b6f43ad2d160"
+    ],
+    "main": {
+      "at": "2026-10-05T14:38:10.865056+00:00",
+      "local_at": "2026-10-05 22:38:10",
+      "activity_id": "523a9f89-81d1-4ea4-86c9-33b901ff3476",
+      "system_chars": 7155,
+      "user_chars": 10803,
+      "total_chars": 17958,
+      "system_hash": "20af72a40dd1e93bcb61571c123731841f433d647e76a5b0d8c9dfcbdc86ec5e"
+    },
+    "jev": [
+      {
+        "at": "2026-10-05T14:38:06.223550+00:00",
+        "local_at": "2026-10-05 22:38:06",
+        "activity_id": "jev-b69b6ec500a14118858c1e8ade25d431",
+        "system_chars": 2729,
+        "user_chars": 4239,
+        "total_chars": 6968,
+        "system_hash": "03c8119ac201b11fb63ddd5fb14e6a56461f0425e32aa21122b9b17c619f443e"
+      }
+    ],
+    "write_request_count": 0,
+    "folder": "doc/草稿箱/JEV与主流程提示词材料/2026-10-06/实际请求/02-523a9f89"
+  },
+  {
+    "number": 3,
+    "activity_id": "c94aa556-7e9e-4c4d-8625-af547e27c187",
+    "input": "1. P1（lux）：我又来了，哈喽哈喽。",
+    "input_ids": [
+      "3a2f920c1e644d8d90eeb8cd44346843"
+    ],
+    "main": {
+      "at": "2026-10-05T14:40:50.426632+00:00",
+      "local_at": "2026-10-05 22:40:50",
+      "activity_id": "c94aa556-7e9e-4c4d-8625-af547e27c187",
+      "system_chars": 7155,
+      "user_chars": 10054,
+      "total_chars": 17209,
+      "system_hash": "6da07500a8dfb9a1cc3c069c9e999134b4b9c9bc016dce85bca670d0f404983d"
+    },
+    "jev": [
+      {
+        "at": "2026-10-05T14:40:34.373016+00:00",
+        "local_at": "2026-10-05 22:40:34",
+        "activity_id": "jev-a2fc2c66ec504db3be68505b01393a6d",
+        "system_chars": 2729,
+        "user_chars": 959,
+        "total_chars": 3688,
+        "system_hash": "03c8119ac201b11fb63ddd5fb14e6a56461f0425e32aa21122b9b17c619f443e"
+      }
+    ],
+    "write_request_count": 2,
+    "folder": "doc/草稿箱/JEV与主流程提示词材料/2026-10-06/实际请求/03-c94aa556"
+  }
+]

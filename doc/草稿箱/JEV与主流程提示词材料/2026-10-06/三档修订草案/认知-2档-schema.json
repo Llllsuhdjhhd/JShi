@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "properties": {
+    "mode": {
+      "enum": [
+        "respond",
+        "think",
+        "ignore",
+        "wait"
+      ]
+    },
+    "reply": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string"
+    },
+    "unsaid": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "reply_targets": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,70 @@
+{
+  "speaker_judgments": {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {
+        "n": {
+          "type": "string",
+          "description": "本批新发言编号，如N1"
+        },
+        "input_id": {
+          "type": "string",
+          "description": "原样复制该条发言的input_id，必须与n对应"
+        },
+        "speaker_pick": {
+          "type": "string",
+          "description": "提供的候选P代号或unknown/new"
+        },
+        "level": {
+          "enum": [
+            "确定",
+            "可能",
+            "不太可能",
+            "不确定"
+          ]
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "to_jiangshi": {
+          "enum": [
+            "yes",
+            "maybe",
+            "no"
+          ]
+        },
+        "address_reason": {
+          "type": "string"
+        },
+        "semantic_pick": {
+          "type": "string",
+          "description": "仅按语义支持的候选P代号或unknown/new"
+        },
+        "semantic_reason": {
+          "type": "string",
+          "description": "简短语义依据"
+        },
+        "evidence_relation": {
+          "enum": [
+            "agree",
+            "voice_only",
+            "semantic_only",
+            "conflict",
+            "insufficient"
+          ]
+        }
+      }
+    }
+  },
+  "reply_targets": {
+    "type": "array",
+    "items": {
+      "type": "string"
+    }
+  },
+  "next_jev_note": {
+    "type": "string",
+    "maxLength": 120
+  }
+}

@@ -1,0 +1,105 @@
+[
+  {
+    "subject_id": "stone",
+    "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+    "started_at": "2026-10-05T14:37:19.804612+00:00",
+    "total_ms": 11607.7,
+    "steps": [
+      [
+        "①落位",
+        153.1
+      ],
+      [
+        "②活跃区",
+        184.3
+      ],
+      [
+        "③组装",
+        1988.8
+      ],
+      [
+        "④建活动",
+        17.0
+      ],
+      [
+        "⑤认知",
+        9103.0
+      ],
+      [
+        "06标记",
+        41.8
+      ],
+      [
+        "⑥行动",
+        92.3
+      ],
+      [
+        "⑦收尾",
+        27.1
+      ],
+      [
+        "30投递",
+        0.3
+      ]
+    ],
+    "_source_file": "activity_timings.jsonl"
+  },
+  {
+    "subject_id": "stone",
+    "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+    "phase": "write",
+    "status": "started",
+    "started_at": "2026-10-05T22:37:31.534106+08:00",
+    "_source_file": "write_timings.jsonl"
+  },
+  {
+    "subject_id": "stone",
+    "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+    "phase": "model",
+    "status": "started",
+    "started_at": "2026-10-05T22:37:31.616920+08:00",
+    "attempt": 1,
+    "model": "deepseek-v4-flash@v1",
+    "_source_file": "write_timings.jsonl"
+  },
+  {
+    "subject_id": "stone",
+    "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+    "phase": "model",
+    "status": "succeeded",
+    "started_at": "2026-10-05T22:37:31.616920+08:00",
+    "attempt": 1,
+    "model": "deepseek-v4-flash@v1",
+    "finished_at": "2026-10-05T22:37:40.897436+08:00",
+    "total_ms": 9280.529,
+    "_source_file": "write_timings.jsonl"
+  },
+  {
+    "subject_id": "stone",
+    "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+    "phase": "write",
+    "status": "succeeded",
+    "started_at": "2026-10-05T22:37:31.534106+08:00",
+    "finished_at": "2026-10-05T22:37:40.903403+08:00",
+    "total_ms": 9369.283,
+    "_source_file": "write_timings.jsonl"
+  },
+  {
+    "subject_id": "stone",
+    "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+    "phase": "write",
+    "status": "started",
+    "started_at": "2026-10-05T22:37:40.905577+08:00",
+    "_source_file": "write_timings.jsonl"
+  },
+  {
+    "subject_id": "stone",
+    "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+    "phase": "model",
+    "status": "started",
+    "started_at": "2026-10-05T22:37:41.003452+08:00",
+    "attempt": 1,
+    "model": "deepseek-v4-flash@v1",
+    "_source_file": "write_timings.jsonl"
+  }
+]

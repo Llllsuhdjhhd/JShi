@@ -1,0 +1,140 @@
+{
+  "sequence": 12254,
+  "id": "5521db43-6661-4478-ae6f-3781a640a6da",
+  "subject_id": "stone",
+  "kind": "fact",
+  "event_type": "external_input",
+  "content": {
+    "text": "lux：我又来了，哈喽哈喽。",
+    "envelope": {
+      "session_id": "4dd241c3e7294519afbf3b0c28372b3b",
+      "source": "microphone",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "1. P1（lux）：我又来了，哈喽哈喽。\nJEV 初判：第 1 条在对匠石说。",
+          "reference": "",
+          "media_type": ""
+        },
+        {
+          "kind": "audio",
+          "text": "",
+          "reference": "session:4dd241c3e7294519afbf3b0c28372b3b:18732-21152",
+          "media_type": "audio/pcm"
+        }
+      ],
+      "speaker": {
+        "track_id": "0",
+        "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+        "label": "lux",
+        "status": "recognized",
+        "method": "voiceprint_match",
+        "confidence": 0.5224099049531402,
+        "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+      },
+      "input_id": "b54f5baae9fe41a4a3e57d1d6302641f",
+      "start_ms": 18732,
+      "end_ms": 21152,
+      "final": true,
+      "overlap": false,
+      "delivery_context": "",
+      "utterances": [
+        {
+          "text": "我又来了，哈喽哈喽。",
+          "speaker": {
+            "track_id": "0",
+            "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+            "label": "lux",
+            "status": "recognized",
+            "method": "voiceprint_match",
+            "confidence": 0.5224099049531402,
+            "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+          },
+          "start_ms": 18732,
+          "end_ms": 21152,
+          "overlap": false,
+          "input_id": "3a2f920c1e644d8d90eeb8cd44346843",
+          "recorded_start_at_ms": 1791211228770.7954,
+          "recorded_end_at_ms": 1791211231190.7954,
+          "received_at_ms": 1791211231807.359,
+          "identity_note": "{\"reason\": \"已匹配登记声纹\", \"best_score\": 0.522, \"runner_up\": 0.12, \"threshold\": 0.3, \"margin\": 0.08, \"single_confirmation_threshold\": 0.3, \"candidates\": [{\"score\": 0.522, \"reference_count\": 3, \"stddev\": 0.06211345163698488, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3\", \"label\": \"lux\", \"source\": \"voiceprint\"}, {\"score\": 0.12, \"reference_count\": 10, \"stddev\": 0.0643943761226769, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-84d0b8965b144a6fae986028068b4a79\", \"label\": \"luguang\", \"source\": \"voiceprint\"}, {\"score\": 0.075, \"reference_count\": 10, \"stddev\": 0.07192919460716415, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-30cbe141e94446aeb7763ccfafb99fd1\", \"label\": \"qf\", \"source\": \"voiceprint\"}], \"tentative\": false}"
+        }
+      ],
+      "current_utterances": [
+        {
+          "text": "我又来了，哈喽哈喽。",
+          "speaker": {
+            "track_id": "0",
+            "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+            "label": "lux",
+            "status": "recognized",
+            "method": "voiceprint_match",
+            "confidence": 0.5224099049531402,
+            "voiceprint_id": "local:f682b514c05d947e:57b733bb95dd4cb3857d106039de9bed"
+          },
+          "start_ms": 18732,
+          "end_ms": 21152,
+          "overlap": false,
+          "input_id": "3a2f920c1e644d8d90eeb8cd44346843",
+          "recorded_start_at_ms": 1791211228770.7954,
+          "recorded_end_at_ms": 1791211231190.7954,
+          "received_at_ms": 1791211231807.359,
+          "identity_note": "{\"reason\": \"已匹配登记声纹\", \"best_score\": 0.522, \"runner_up\": 0.12, \"threshold\": 0.3, \"margin\": 0.08, \"single_confirmation_threshold\": 0.3, \"candidates\": [{\"score\": 0.522, \"reference_count\": 3, \"stddev\": 0.06211345163698488, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3\", \"label\": \"lux\", \"source\": \"voiceprint\"}, {\"score\": 0.12, \"reference_count\": 10, \"stddev\": 0.0643943761226769, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-84d0b8965b144a6fae986028068b4a79\", \"label\": \"luguang\", \"source\": \"voiceprint\"}, {\"score\": 0.075, \"reference_count\": 10, \"stddev\": 0.07192919460716415, \"sample_limited\": false, \"score_basis\": \"quality_weighted_mean\", \"calibrated_probability\": false, \"object_id\": \"OBJ-30cbe141e94446aeb7763ccfafb99fd1\", \"label\": \"qf\", \"source\": \"voiceprint\"}], \"tentative\": false}"
+        }
+      ],
+      "deferred_interrupt": false,
+      "jev_calls": [
+        {
+          "ms": 1879,
+          "action": "respond",
+          "path": "model",
+          "timed_out": false,
+          "reason": "至少一条可能在对匠石说",
+          "items": [
+            {
+              "n": 1,
+              "to_jiangshi": "yes",
+              "score": 0.85,
+              "reason": "P1（lux）再现并打招呼，承接匠石此前'我还在'的等待；声纹匹配清晰，语义也与lux先前互动习惯一致。",
+              "speaker_pick": "P1",
+              "speaker_level": "确定",
+              "speaker_reason": "声纹清晰匹配P1，且'我又来了'自认先前来过，与P1/lux此前的出现相印证，两边一致。",
+              "relevance": "related",
+              "speaker_score": 0.86,
+              "voice_pick": "P1",
+              "voice_strength": "clear",
+              "semantic_pick": "P1",
+              "semantic_reason": "自称'我又来了'，表明是先前已出现过的同一人再次到访，与P1/lux的身份线索一致；无其他人物名称出现。",
+              "evidence_relation": "agree"
+            }
+          ],
+          "needs_main_review": false,
+          "prompt_activity_id": "jev-a2fc2c66ec504db3be68505b01393a6d",
+          "prompt_requested": true
+        }
+      ],
+      "review_context": "",
+      "review_candidates": [],
+      "input_annotations": [
+        {
+          "input_id": "3a2f920c1e644d8d90eeb8cd44346843",
+          "n": "N1",
+          "direction": "yes",
+          "relevance": "related"
+        }
+      ]
+    },
+    "stimulus": "speech",
+    "objects": {
+      "lux": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3"
+    },
+    "source": "lux",
+    "object_id": "OBJ-d4ea8a48d0164caa8a17dda4b6fa31e3",
+    "object_status": "confirmed",
+    "object_confidence": 0.7,
+    "object_ref": null,
+    "channel": null
+  },
+  "source_ids": [],
+  "created_at": "2026-10-05T14:40:36.275694+00:00"
+}

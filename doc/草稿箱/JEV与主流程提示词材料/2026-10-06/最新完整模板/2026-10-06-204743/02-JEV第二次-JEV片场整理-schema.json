@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "properties": {
+    "scene": {
+      "type": "string",
+      "maxLength": 1000
+    }
+  },
+  "required": [
+    "scene"
+  ],
+  "additionalProperties": false
+}

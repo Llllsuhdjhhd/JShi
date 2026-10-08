@@ -1,0 +1,87 @@
+{
+  "status": "程序记录的结构化/语言输出，不冒充模型原始JSON",
+  "model_raw_status": "当前保留日志未找到主认知原始模型JSON",
+  "records": [
+    {
+      "sequence": 12210,
+      "id": "d4c2b6cc-af48-4918-83f0-a121f8ba299e",
+      "subject_id": "stone",
+      "kind": "subject",
+      "event_type": "activity_response_state",
+      "content": {
+        "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+        "recommended": [
+          "respond",
+          "verbal",
+          "embodied"
+        ],
+        "final": [
+          "respond",
+          "verbal",
+          "embodied"
+        ],
+        "unknown_statuses": [],
+        "illegal_channels": [],
+        "missing_reason": false,
+        "missing_items": false,
+        "reason": "",
+        "items": [
+          {
+            "channel": "verbal",
+            "text": "那就更说明那句“我下去丢垃圾”不是你说的了，多半是别人的声音被贴到你这边。陆广那边没录过样本，比对时少一边参照，分数就容易往相近的人身上靠。"
+          },
+          {
+            "channel": "embodied",
+            "text": "转向声音来处，点头"
+          }
+        ],
+        "source": "model_recommended"
+      },
+      "source_ids": [
+        "9ad372aa-d01f-4e10-b5dd-62b79ccd717e"
+      ],
+      "created_at": "2026-10-05T14:37:31.284146+00:00"
+    },
+    {
+      "sequence": 12211,
+      "id": "6aaf99b0-797b-4191-b1a3-c8676422313e",
+      "subject_id": "stone",
+      "kind": "fact",
+      "event_type": "language_action",
+      "content": {
+        "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+        "text": "那就更说明那句“我下去丢垃圾”不是你说的了，多半是别人的声音被贴到你这边。陆广那边没录过样本，比对时少一边参照，分数就容易往相近的人身上靠。",
+        "model": "deepseek-v4-flash@v13",
+        "response_statuses": [
+          "respond"
+        ],
+        "reason": ""
+      },
+      "source_ids": [
+        "9ad372aa-d01f-4e10-b5dd-62b79ccd717e"
+      ],
+      "created_at": "2026-10-05T14:37:31.292708+00:00"
+    },
+    {
+      "sequence": 12212,
+      "id": "d6049ce1-b725-49be-8966-f9ab24e81da0",
+      "subject_id": "stone",
+      "kind": "subject",
+      "event_type": "activity_completed",
+      "content": {
+        "activity_id": "9ad372aa-d01f-4e10-b5dd-62b79ccd717e",
+        "to": "completed",
+        "reason": "external_activity_finished_after_action",
+        "response_statuses": [
+          "respond",
+          "verbal",
+          "embodied"
+        ]
+      },
+      "source_ids": [
+        "6aaf99b0-797b-4191-b1a3-c8676422313e"
+      ],
+      "created_at": "2026-10-05T14:37:31.404976+00:00"
+    }
+  ]
+}

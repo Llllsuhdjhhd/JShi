@@ -1,0 +1,205 @@
+{
+  "type": "object",
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "command": {
+      "type": "string"
+    },
+    "params": {
+      "type": "object"
+    },
+    "estimate": {
+      "type": "object",
+      "properties": {
+        "time_est_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cost_est": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "benefit": {
+          "type": "string"
+        },
+        "downside": {
+          "type": "string"
+        },
+        "need_confirm": {
+          "type": "boolean"
+        }
+      }
+    },
+    "expected_result": {
+      "type": "string"
+    },
+    "ask": {
+      "enum": [
+        "execute",
+        "propose_only",
+        "create_tool"
+      ]
+    },
+    "error": {
+      "type": "string"
+    },
+    "create_tool": {
+      "type": "object",
+      "properties": {
+        "tool_name": {
+          "type": "string"
+        },
+        "tool_intent": {
+          "type": "string"
+        },
+        "params_schema": {
+          "type": "object"
+        },
+        "expected_output": {
+          "type": "string"
+        },
+        "cost_estimate": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "fulfill_after_create": {
+          "type": "boolean"
+        },
+        "feedback_plan": {
+          "type": "object",
+          "properties": {
+            "stages": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "result_fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "sequential",
+            "parallel",
+            "mixed",
+            "agent_loop"
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "params": {
+                "type": "object"
+              },
+              "expected_result": {
+                "type": "string"
+              },
+              "ask": {
+                "enum": [
+                  "execute",
+                  "create_tool"
+                ]
+              },
+              "create_tool": {
+                "type": "object",
+                "properties": {
+                  "tool_name": {
+                    "type": "string"
+                  },
+                  "tool_intent": {
+                    "type": "string"
+                  },
+                  "params_schema": {
+                    "type": "object"
+                  },
+                  "expected_output": {
+                    "type": "string"
+                  },
+                  "cost_estimate": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "fulfill_after_create": {
+                    "type": "boolean"
+                  },
+                  "feedback_plan": {
+                    "type": "object"
+                  }
+                }
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "lookup": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "enum": [
+            "search",
+            "describe"
+          ]
+        },
+        "query": {
+          "type": "string"
+        },
+        "queries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  "required": [
+    "ok"
+  ]
+}

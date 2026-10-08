@@ -1,0 +1,83 @@
+{
+  "note": "原始运行记录；修订后的模型判断尚未实测。",
+  "diagnostics": {
+    "session_id": "42fd2edd9c184f02ba37ff60193a7d5d",
+    "ms": 962,
+    "action": "respond",
+    "path": "model",
+    "timed_out": false,
+    "reason": "未能初判",
+    "items": [
+      {
+        "n": 1,
+        "to_jiangshi": "maybe",
+        "score": 0.5,
+        "reason": "未能初判",
+        "speaker_pick": "",
+        "speaker_level": "",
+        "speaker_reason": "",
+        "relevance": "uncertain",
+        "speaker_score": null,
+        "voice_pick": "",
+        "voice_strength": "unavailable",
+        "semantic_pick": "",
+        "semantic_reason": "",
+        "evidence_relation": ""
+      },
+      {
+        "n": 2,
+        "to_jiangshi": "maybe",
+        "score": 0.5,
+        "reason": "未能初判",
+        "speaker_pick": "",
+        "speaker_level": "",
+        "speaker_reason": "",
+        "relevance": "uncertain",
+        "speaker_score": null,
+        "voice_pick": "",
+        "voice_strength": "unavailable",
+        "semantic_pick": "",
+        "semantic_reason": "",
+        "evidence_relation": ""
+      },
+      {
+        "n": 3,
+        "to_jiangshi": "maybe",
+        "score": 0.5,
+        "reason": "未能初判",
+        "speaker_pick": "",
+        "speaker_level": "",
+        "speaker_reason": "",
+        "relevance": "uncertain",
+        "speaker_score": null,
+        "voice_pick": "",
+        "voice_strength": "unavailable",
+        "semantic_pick": "",
+        "semantic_reason": "",
+        "evidence_relation": ""
+      }
+    ],
+    "needs_main_review": false,
+    "input_ids": [
+      "2baa2ddb66f74132af1391b5a4677698",
+      "dc7229c05da643a082d60ffa9b5ad9db",
+      "2e9fe29677da4df08472d7709b4052c4"
+    ],
+    "main_prompt_hint": null,
+    "prompt_policy_version": 3,
+    "prompt_activity_id": "jev-78e3c60ea3724ce4ab059b2650e1dc5e",
+    "prompt_requested": true,
+    "model_raw": "{\n  \"items\": [\n    {\n      \"i\": 1,\n      \"person\": \"P1（lux）\",\n      \"certainty\": \"confirmed\",\n      \"to\": \"yes\",\n      \"keep\": \"related\",\n      \"why\": \"声纹清晰匹配，回应匠石问候，向匠石说话\"\n    },\n    {\n      \"i\": 2,\n      \"person\": \"P1（lux）\",\n      \"certainty\": \"confirmed\",\n      \"to\": \"yes\",\n      \"keep\": \"related\",\n      \"why\": \"声纹清晰匹配，向匠石分享假期感受\"\n    },\n    {\n      \"i\": 3,\n      \"person\": \"待定声音\",\n      \"certainty\": \"unknown\",\n      \"to\": \"maybe\",\n      \"keep\": \"uncertain\",\n      \"why\": \"短句重复拼接，声纹不可用，归属待定\"\n    }\n  ],\n  \"level\": 3,\n  \"control\": \"continue\"\n}",
+    "model_error": "ValueError: JEV输出非法人物或确定程度"
+  },
+  "request": {
+    "kind": "call",
+    "subject_id": "stone",
+    "activity_id": "jev-78e3c60ea3724ce4ab059b2650e1dc5e",
+    "purpose": "voice_jev",
+    "model": "deepseek-v4-flash",
+    "system_hash": "687675317ded15ba600e6f4b08e3ceb85ab16a40fad88aa9e939a9694c3ada0c",
+    "user_text": "【说话人】对方\n【本轮】\n对方：{\"input\":{\"state\":\"completed\",\"names\":[\"匠石\",\"将士\"],\"unwritten\":[{\"p\":\"匠石\",\"text\":\"哈喽，我在呢。\",\"basis\":\"已播出\",\"at\":1791261383362.1296,\"targets\":[\"P1\"]},{\"p\":\"匠石\",\"text\":\"你说讲讲，是想听我讲点什么，还是你来说，我听着。\",\"basis\":\"已播出\",\"at\":1791261389128.9373,\"targets\":[\"P1\"]}],\"lines\":[{\"i\":1,\"p\":\"P1（lux）\",\"at\":1791261397251.7346,\"text\":\"啊哈，没有没有，我就跟你打个招呼。\",\"voice\":{\"pick\":\"P1\",\"strength\":\"clear\",\"basis\":\"声纹已匹配\"},\"candidates\":[{\"p\":\"P1\",\"similarity\":0.545,\"source\":\"voiceprint_match\",\"names\":[\"lux\"]}]},{\"i\":2,\"p\":\"P1（lux）\",\"at\":1791261405138.906,\"text\":\"今天是国庆的第六天，明天还有一天，后天又要去上班了。\",\"voice\":{\"pick\":\"P1\",\"strength\":\"clear\",\"basis\":\"声纹已匹配\"},\"candidates\":[{\"p\":\"P1\",\"similarity\":0.589,\"source\":\"voiceprint_match\",\"names\":[\"lux\"]}]},{\"i\":3,\"p\":\"待定声音\",\"at\":1791261406057.1184,\"text\":\"好不开心啊。\",\"voice\":{\"pick\":\"\",\"strength\":\"unavailable\",\"basis\":\"没有本句有效的声纹比较；近期人物和自我介绍另作语义参考\"},\"candidates\":[{\"p\":\"P1\",\"similarity\":0.555,\"source\":\"repeated_short_audio\",\"names\":[\"lux\"]},{\"p\":\"P2\",\"similarity\":0.091,\"source\":\"repeated_short_audio\",\"names\":[\"luguang\"]},{\"p\":\"P3\",\"similarity\":0.023,\"source\":\"repeated_short_audio\",\"names\":[\"qf\"]}],\"short_voice_hint\":\"同一短句重复拼接，辅助比较，不是新增证据\"}]},\"scene\":\"[旧JEV片场，本次供第一次JEV使用]\\nP1声纹初判非确定（0.439），第一次判为lux（确定）并确认问候，未点名义务。\\n交往：lux是创建者，匠石承诺认真做朋友。近日lux叫“姜”，匠石应；正式名匠石。待定声2等把“僵尸/降石/庄世英/湛江/酱酱”当转写或顺口叫法。待定声3（dda791a9）与登记lux分开记。未命名访客41声纹后与登记lux清晰匹配，确认归lux。\\n接话规矩（待定声13定，已应）：喊名才应，未点不打岔；陆信说话时理。\\n进行中：月饼取名与包装（待定声16）；游戏课程已准备说、未排出；待定声5关于“钟诗音”的话未开口、待其重说；名字与肖像互加等lux说完名字事；重名由lux拍板。\\n待确认：秦凤疑即小琴；一句“他嫌你吵”归属待定；“我下去丢垃圾”非lux，多半别人声音被贴。\\n设备：14问苹果电脑+摄像头/麦克风，23提直播；lu广未录样本致比对偏。lu广用英文叮嘱：下次他叫匠石远离某处，要听。\\n已播出：匠石答查事记聊、豆包查得快、丢垃圾句归属。电视英文《西游记》声音只当背景，不回应、不归人。\\n待承：lux说“随便说点话”“我又来了”，匠石已应，等下句。\",\"now\":1791261408790.905}",
+    "at": "2026-10-06T04:36:48.855739+00:00"
+  }
+}
