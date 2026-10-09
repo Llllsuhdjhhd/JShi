@@ -83,6 +83,34 @@ def test_unfinished_sentence_waits_for_continuation(process):
     asyncio.run(run())
 
 
+def test_local_diarization_audio_windows_are_contiguous_but_decode_separately():
+    import numpy as np
+    from types import SimpleNamespace
+    from jshi.voice.local import LocalASR
+    class Recognizer:
+        resets = 0
+        def create_stream(self):
+            return SimpleNamespace(accept_waveform=lambda *args:None)
+        def is_ready(self, stream): return False
+        def get_result(self, stream): return '流式预览'
+        def is_endpoint(self, stream): return False
+        def reset(self, stream): self.resets += 1
+    class Diarizer:
+        def __init__(self): self.calls=[]
+        def transcribe(self, samples, start):
+            self.calls.append((len(samples),start))
+            return (Transcript('一段已识别文字','A',start,start+len(samples)//16,True),)
+    recognizer, diarizer = Recognizer(), Diarizer()
+    asr = LocalASR(recognizer, diarizer=diarizer)
+    audio = np.zeros(6*16000, dtype='<i2').tobytes()
+    first = asr.feed(audio)
+    second = asr.feed(audio)
+    assert diarizer.calls == [(96000,0),(96000,6000)]
+    assert recognizer.resets == 2
+    assert first[0].end_ms == second[0].start_ms == 6000
+    assert first[0].final and second[0].final
+
+
 @pytest.mark.parametrize('state', ['completed', 'playing'])
 def test_jev_background_gate_records_scene_without_main_call(process, state):
     from jshi.voice.jev import VoiceJEV

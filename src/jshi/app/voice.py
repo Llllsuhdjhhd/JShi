@@ -56,6 +56,7 @@ class VoiceConversation:
         self._last_jev_notice = 0.0
         self.input_pause_s = input_pause_s
         self.last_input_at = 0.0
+        self.speech_input_at = {}
         self.input_idle = asyncio.Event()
         self.input_idle.set()
         self.queue = asyncio.Queue(maxsize=64)
@@ -371,6 +372,11 @@ class VoiceConversation:
 
     async def accept(self, transcript) -> None:
         self.last_input_at = asyncio.get_running_loop().time()
+        speech_key = self.speech_group_key(transcript)
+        self.speech_input_at.pop(speech_key, None)
+        self.speech_input_at[speech_key] = self.last_input_at
+        while len(self.speech_input_at) > 128:
+            self.speech_input_at.pop(next(iter(self.speech_input_at)))
         await self.emit("transcript", **asdict(transcript))
         if not transcript.final:
             if not transcript.track_id.startswith("pending-"):
@@ -407,6 +413,18 @@ class VoiceConversation:
         self.record("voice_emergency_interrupt", {"reason": str(reason), "epoch": self.epoch})
         await self.stop("explicit stop")
         return True
+
+    @staticmethod
+    def speech_group_key(transcript):
+        # Only supplied acoustic continuity is used; this does not assign a name.
+        if not transcript.overlap and not transcript.identity_uncertain:
+            if transcript.voiceprint_id:
+                return ('voiceprint', transcript.voiceprint_id)
+            if transcript.speaker_cluster_id:
+                return ('cluster', transcript.speaker_cluster_id)
+            if transcript.track_id and not transcript.track_id.startswith(('pending-', 'unidentified-', 'overlap-')):
+                return ('track', transcript.track_id)
+        return None
 
     @staticmethod
     def unfinished(text):
@@ -1146,17 +1164,30 @@ class VoiceConversation:
             batch = [transcript]
             try:
                 loop = asyncio.get_running_loop()
-                deadline = loop.time() + self.input_max_batch_s
+                anchor = transcript
+                anchor_key = self.speech_group_key(anchor)
+                expression_complete = False
                 while len(batch) < 64:
                     # Explicit stop is not delayed by conversational batching.
                     if not batch[-1].overlap and VoiceJEV().decide(self.subject_id, batch[-1].text, {}, {}).action == 'stop':
                         break
-                    pause_s = max(self.input_pause_s, 4.0) if self.unfinished(batch[-1].text) else self.input_pause_s
-                    remaining = min(deadline - loop.time(), pause_s - (loop.time() - self.last_input_at))
+                    incomplete = self.unfinished(anchor.text)
+                    pause_s = max(self.input_pause_s, 4.0) if incomplete else self.input_pause_s
+                    deadline = worker_started + max(self.input_max_batch_s, 4.0 if incomplete else 0)
+                    # Track continuity controls batching, not named-person identity.
+                    # Unassigned provisional tracks retain the conservative global clock.
+                    last_at = (self.speech_input_at.get(anchor_key, self.last_input_at)
+                        if anchor_key is not None else self.last_input_at)
+                    remaining = min(deadline - loop.time(), pause_s - (loop.time() - last_at))
                     if remaining <= 0:
+                        expression_complete = loop.time() - last_at >= pause_s
                         break
                     try:
-                        batch.append(await asyncio.wait_for(self.queue.get(), remaining))
+                        incoming = await asyncio.wait_for(self.queue.get(), remaining)
+                        batch.append(incoming)
+                        if (anchor_key is not None and self.speech_group_key(incoming) == anchor_key) or (
+                                anchor_key is None and incoming.track_id == anchor.track_id):
+                            anchor = incoming
                     except asyncio.TimeoutError:
                         continue
                 batch.sort(key=lambda t: (t.start_ms, t.end_ms))
@@ -1265,6 +1296,7 @@ class VoiceConversation:
                     decision = InterruptDecision('stop', 'explicit stop')
                 else:
                     decision, record, items = await self._judge(current, evidence, any(u.overlap for u in current))
+                    record['collection_complete'] = expression_complete
                     current = self._apply_attribution(current, items)
                     await self._publish_attribution(current, items, record)
                     jev_calls = (record,)
@@ -1370,6 +1402,8 @@ class VoiceConversation:
                 elif envelope.jev_calls and envelope.jev_calls[-1].get('items'):
                     items = self.envelope_items(envelope)
                 facts = []
+                if envelope.jev_calls and envelope.jev_calls[-1].get('collection_complete') is False:
+                    facts.append('本轮只是分批处理；尚未观察到发言人的足够停顿，不能据此认为表达已经结束。')
                 delivery = self.delivery.snapshot()
                 previous = self.voice_timings.get(self.reply_epochs.get(delivery.get('reply_id')))
                 if previous and previous[1].get('reply_ready_at_ms') and any(
@@ -2060,7 +2094,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         speakers.reset_session()
                 conversation = VoiceConversation(process, subject_id, local_tts or cloud, ws.send_json, jev=jev,
                     timeout_s=config.jev_timeout_s, local_speakers=speakers, input_pause_s=config.input_pause_s, sample_source=audio,
-                    candidate_timeout_s=config.candidate_timeout_s, session_id=request.query.get("session") or None)
+                    candidate_timeout_s=config.candidate_timeout_s, input_max_batch_s=config.input_max_batch_s,
+                    session_id=request.query.get("session") or None)
                 active_conversation = conversation
                 if use_local is not None:
                     use_local.reset_session()

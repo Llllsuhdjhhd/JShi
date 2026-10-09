@@ -31,6 +31,7 @@ class VoiceConfig:
     tts_transport: str = 'websocket'
     input_pause_s: float = 2.5
     candidate_timeout_s: float = 1.2
+    input_max_batch_s: float = 6.0
 
     def __post_init__(self) -> None:
         if self.asr_backend not in {"online", "local"}:
@@ -47,6 +48,8 @@ class VoiceConfig:
             raise ValueError('voice TTS transport must be websocket or sse')
         if not .3 <= self.input_pause_s <= 15:
             raise ValueError('JSHI_VOICE_INPUT_PAUSE_MS must be between 300 and 15000')
+        if not .3 <= self.input_max_batch_s <= 15:
+            raise ValueError('JSHI_VOICE_INPUT_MAX_BATCH_MS must be between 300 and 15000')
         if not .1 <= self.candidate_timeout_s <= 5:
             raise ValueError("JSHI_VOICE_CANDIDATE_TIMEOUT_MS must be between 100 and 5000")
 
@@ -68,6 +71,7 @@ class VoiceConfig:
             end_window_ms=int(os.getenv("JSHI_VOICE_END_WINDOW_MS", "500")),
             tts_transport=os.getenv('JSHI_VOICE_TTS_TRANSPORT', 'websocket'),
             input_pause_s=int(os.getenv('JSHI_VOICE_INPUT_PAUSE_MS', '2500')) / 1000,
+            input_max_batch_s=int(os.getenv('JSHI_VOICE_INPUT_MAX_BATCH_MS', '6000')) / 1000,
             candidate_timeout_s=int(os.getenv('JSHI_VOICE_CANDIDATE_TIMEOUT_MS', '1200')) / 1000,
             template=VoiceTemplate(
                 speaker=os.getenv("JSHI_VOICE_SPEAKER", "zh_female_vv_uranus_bigtts"),

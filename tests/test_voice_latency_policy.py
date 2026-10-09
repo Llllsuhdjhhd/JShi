@@ -129,6 +129,113 @@ def test_ready_speech_group_can_start_main_while_more_speech_keeps_arriving(proc
     asyncio.run(run())
 
 
+def test_other_track_partial_speech_does_not_extend_completed_speaker_wait(process):
+    entered = Event()
+    class Main(Model):
+        def generate(self, request):
+            if '匠石，你听得到吗' in request.input_text:
+                entered.set()
+            return super().generate(request)
+    process.cognition = Main()
+    async def run():
+        async def send(message): pass
+        c = VoiceConversation(process, 'stone', FakeCloud(), send,
+            input_pause_s=.08, input_max_batch_s=.8)
+        stop = asyncio.Event()
+        async def background():
+            await asyncio.sleep(.01)
+            await c.accept(Transcript('旁人正在聊天', 'B', 2100, 2900, True))
+            while not stop.is_set():
+                await c.accept(Transcript('还在说', 'B', 3000, 4000, False))
+                await asyncio.sleep(.01)
+        try:
+            await c.accept(Transcript('匠石，你听得到吗', 'A', 0, 2000, True))
+            task = asyncio.create_task(background())
+            assert await asyncio.to_thread(entered.wait, .5)
+            assert not task.done()
+            assert any(u.text == '旁人正在聊天' for u in c.scene)
+        finally:
+            stop.set()
+            if 'task' in locals(): await task
+            await asyncio.wait_for(c.queue.join(), 2)
+            await asyncio.wait_for(c.turn_queue.join(), 2)
+            await c.close()
+    asyncio.run(run())
+
+
+def test_unfinished_anchor_still_waits_despite_other_completed_speech(process):
+    async def run():
+        async def send(message): pass
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, input_pause_s=.04)
+        try:
+            await c.accept(Transcript('还有一种问题是', 'A', 0, 2000, True))
+            await asyncio.sleep(.02)
+            await c.accept(Transcript('旁人说一句完整的话', 'B', 2100, 2900, True))
+            await asyncio.sleep(.2)
+            assert not process.cognition.requests
+            await c.accept(Transcript('怎么把声音接上名字', 'A', 3000, 4500, True))
+            await asyncio.wait_for(c.queue.join(), 1)
+            await asyncio.wait_for(c.turn_queue.join(), 2)
+            assert len(process.cognition.requests) == 1
+            assert all(text in process.cognition.requests[0].input_text for text in (
+                '还有一种问题是', '旁人说一句完整的话', '怎么把声音接上名字'))
+        finally:
+            await c.close()
+    asyncio.run(run())
+
+
+def test_voice_collection_limit_can_be_configured_without_api_key(monkeypatch):
+    from jshi.voice.config import VoiceConfig
+    monkeypatch.delenv('JSHI_VOICE_INPUT_MAX_BATCH_MS', raising=False)
+    assert VoiceConfig.from_env(asr='local', tts='local').input_max_batch_s == 6
+    monkeypatch.setenv('JSHI_VOICE_INPUT_MAX_BATCH_MS', '1800')
+    assert VoiceConfig.from_env(asr='local', tts='local').input_max_batch_s == 1.8
+    monkeypatch.setenv('JSHI_VOICE_INPUT_MAX_BATCH_MS', '0')
+    with pytest.raises(ValueError):
+        VoiceConfig.from_env(asr='local', tts='local')
+
+
+def test_unresolved_segment_labels_are_not_assumed_to_identify_one_voice():
+    for track in ('pending-0', 'unidentified-1000', 'overlap-2000-0'):
+        assert VoiceConversation.speech_group_key(Transcript('测试',track,0,1000,True)) is None
+
+
+def test_same_acoustic_identity_partial_continuation_survives_track_change(process):
+    async def run():
+        async def send(message): pass
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, input_pause_s=.12)
+        try:
+            await c.accept(Transcript('你好', 'A', 0, 1000, True, voiceprint_id='same-voice'))
+            await asyncio.sleep(.08)
+            await c.accept(Transcript('我想', 'B', 1100, 1800, False, voiceprint_id='same-voice'))
+            await asyncio.sleep(.08)
+            assert not process.cognition.requests
+            await c.accept(Transcript('我想问一件事', 'B', 1100, 2500, True, voiceprint_id='same-voice'))
+            await asyncio.wait_for(c.queue.join(), 1)
+            await asyncio.wait_for(c.turn_queue.join(), 2)
+            assert len(process.cognition.requests) == 1
+            assert '我想问一件事' in process.cognition.requests[0].input_text
+        finally:
+            await c.close()
+    asyncio.run(run())
+
+
+def test_safety_batch_boundary_is_not_reported_as_end_of_expression(process):
+    async def run():
+        async def send(message): pass
+        c = VoiceConversation(process, 'stone', FakeCloud(), send,
+            input_pause_s=.3, input_max_batch_s=.04)
+        try:
+            await c.accept(Transcript('说到这里', 'A', 0, 2000, True))
+            await asyncio.wait_for(c.queue.join(), 1)
+            await asyncio.wait_for(c.turn_queue.join(), 2)
+            assert c.last_debug['timing']['voice']['jev_calls'][-1]['collection_complete'] is False
+            assert '不能据此认为表达已经结束' in process.cognition.requests[0].input_text
+        finally:
+            await c.close()
+    asyncio.run(run())
+
+
 def test_coalesced_judgments_follow_input_ids_not_last_batch_positions():
     who = SpeakerEvidence('A')
     a = SceneUtterance('前一句', who, 0, 1000, input_id='a')
