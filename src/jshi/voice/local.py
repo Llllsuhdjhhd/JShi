@@ -13,6 +13,7 @@ from threading import RLock
 from time import monotonic, time
 
 from .volc import Transcript
+from .asr_text import clean_asr_text
 from .references import VoiceCandidates, references, score as reference_score, MAX_REFERENCES
 
 
@@ -679,7 +680,7 @@ class LocalASR:
             self.stream.input_finished()
         while self.recognizer.is_ready(self.stream):
             self.recognizer.decode_stream(self.stream)
-        text = self.recognizer.get_result(self.stream).strip()
+        text = clean_asr_text(self.recognizer.get_result(self.stream))
         endpoint = final or self.recognizer.is_endpoint(self.stream) or self.segment_samples >= 16000 * (6 if self.diarizer else 25)
         start, end = self.offset_samples // 16, (self.offset_samples+self.segment_samples) // 16
         output = []
@@ -693,11 +694,11 @@ class LocalASR:
                 refined.accept_waveform(16000, audio)
                 self.refiner.decode_stream(refined)
                 text = refined.result.text.strip()
-            text = re.sub(r"<\|.*?\|>|<unk>", "", text).strip()
+            text = clean_asr_text(text)
             if text:
                 track, vpid, confidence = self.speakers.identify_timed(audio, start_ms=start, end_ms=end) if self.speakers else (f"unidentified-{start}", "", None)
                 output.append(Transcript(text, track, start, end, True, voiceprint_id=vpid, confidence=confidence, speaker_cluster_id=track if self.speakers and not track.startswith('unidentified-') else '', identity_tentative=bool(self.speakers and not vpid and not track.startswith('unidentified-') and getattr(self.speakers, 'last_match', {}).get('tentative', True))))
-        elif text and text != self.last_text:
+        elif (text or self.last_text) and text != self.last_text:
             if self.speakers and self.diarizer is None and self.segment_samples >= 24000 and self.early_speaker is None:
                 self.early_speaker = self.speakers.identify(np.concatenate(self.samples))
             track, vpid, score = self.early_speaker or (f"pending-{start}", "", None)

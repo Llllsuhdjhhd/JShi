@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .volc import Transcript
+from .asr_text import clean_asr_text
 
 
 class LocalDiarizer:
@@ -31,7 +32,7 @@ class LocalDiarizer:
             stream = self.recognizer.create_stream()
             stream.accept_waveform(16000, audio)
             self.recognizer.decode_stream(stream)
-            text = stream.result.text.strip()
+            text = clean_asr_text(stream.result.text)
             if not text:
                 continue
             if overlap:

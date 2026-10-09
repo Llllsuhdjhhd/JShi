@@ -375,7 +375,8 @@ function message(m) {
   else if(m.type==='write_failed') $('retry-write').hidden=false;
   else if(m.type==='write_completed') $('retry-write').hidden=true;
   else if(m.type==='transcript') {
-    $('live').textContent=m.final ? '' : m.text;
+    const preview=(m.text||'').replace(/<\|.*?\|>|<unk>/g,'').trim();
+    $('live').textContent=m.final||!preview?'':'识别中：'+preview;
     // Final utterances appear once, with speaker and timestamps, in timeline.
   }
   else if(m.type==='thinking') {mainBusy=true;refreshStatus();}

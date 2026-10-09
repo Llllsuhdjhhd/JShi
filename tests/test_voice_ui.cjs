@@ -118,3 +118,7 @@ assert.match(html, /id="media-view"/);
 assert.doesNotMatch(html, /id="vision-panel"/);
 assert.equal((html.match(/id="composer"/g)||[]).length,1);
 console.log('Conversation layout: inline debugging, maximize, restore and hide passed');
+
+vm.runInContext(`message({type:'transcript',text:'<unk> <unk>',final:false})`,ctx);assert.equal(node('live').textContent,'');
+vm.runInContext(`message({type:'transcript',text:'<|zh|>你好<unk>',final:false})`,ctx);assert.equal(node('live').textContent,'识别中：你好');
+vm.runInContext(`message({type:'transcript',text:'你好',final:true})`,ctx);assert.equal(node('live').textContent,'');
