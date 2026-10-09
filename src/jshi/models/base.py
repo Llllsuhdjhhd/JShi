@@ -570,6 +570,10 @@ def _chat_payload(
         ],
         **model_thinking_fields(thinking, reasoning_effort),
     }
+    images = [p['image_url'] for p in request.input_parts if p.get('kind') == 'image' and p.get('image_url')]
+    if images:
+        body['messages'][1]['content'] = [{'type':'text', 'text':build_user(request)},
+            *({'type':'image_url', 'image_url':{'url':url}} for url in images)]
     if max_tokens:
         body["max_tokens"] = max_tokens
     if response_format:

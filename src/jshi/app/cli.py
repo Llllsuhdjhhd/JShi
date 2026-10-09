@@ -260,6 +260,8 @@ def _parser() -> argparse.ArgumentParser:
 
     visual = commands.add_parser('vision', help='独立环境观察与文字交谈入口')
     visual.add_argument('subject_id')
+    visual.add_argument('--asr', choices=['local','online'], default='local')
+    visual.add_argument('--tts', choices=['local','online'], default='online')
     visual.add_argument('--port', type=int, default=8765)
 
     create = commands.add_parser("create", help="创建一个基础匠石")
@@ -641,18 +643,8 @@ def main() -> None:
         return
     process, identities, subjects = _runtime(args.data_dir, enable_vision=args.command == 'vision')
     if args.command == 'vision':
-        from aiohttp import web
-        from jshi.app.voice import create_app
-        from jshi.voice.config import VoiceConfig
-        from jshi.voice.jev import VoiceJEV
-        identities.get(args.subject_id)
-        store = SkillConfigStore()
-        path = _skills_config_path()
-        if path:
-            store.load_file(path)
-        jev = VoiceJEV(build_model_port(store.profile('voice_jev')))
-        print(f'环境观察：http://127.0.0.1:{args.port}/vision')
-        web.run_app(create_app(process, args.subject_id, VoiceConfig(api_key=''), jev), host='127.0.0.1', port=args.port)
+        from jshi.app.voice import run_voice
+        run_voice(process, identities, args)
         return
     super_permissions = SuperPermissionStore(args.data_dir / "super_permissions.json")
 

@@ -20,8 +20,10 @@ class VisionService:
         self.closed = False
         self.last_online = {}
         self.last_archive = {}
+        self.last_frame = {}
         self.previous = {}
         self.on_update = None
+        self.scene_context = None
         self.action_future = None
         self.dirty = {}
         self.online_future = None
@@ -55,6 +57,10 @@ class VisionService:
 
     def process(self, subject, data, captured, source='visual', clock=None, *, background=False):
         frame = self.store.add_frame(subject, data, captured, source, **(clock or {}))
+        old_frame = self.last_frame.get(subject)
+        self.last_frame[subject] = frame
+        if old_frame:
+            self.store.discard_frame(subject, old_frame)
         normalized = self.store.image(frame, subject)
         # Detector state must not cross subjects or physical input sources.
         key = (subject, source)
@@ -73,11 +79,12 @@ class VisionService:
         online = time() - self.last_online.get(key, 0) >= self.config.cooldown_seconds and (
             not current or key in self.dirty or time() - self.last_online.get(key, 0) >= self.config.refresh_seconds)
         archive = time() - self.last_archive.get(key, 0) >= self.config.archive_seconds
-        if not online and not archive and detections == self.previous.get(key):
+        if not online and not archive and not changed:
             self.store.discard_frame(subject, frame)
             return None
         if archive:
             self.last_archive[key] = time()
+            self.store.archive(frame)
         self.previous[key] = detections
         if online:
             self.last_online[key] = time()  # Also limits repeated API failures.
@@ -89,10 +96,11 @@ class VisionService:
                 self.store.cleanup()
                 self.store.error(subject, '视觉模型达到每小时调用上限，保留已有环境信息')
                 return None
-            description = self.model.describe(self.store.image(frame, subject), previous=current['description'] if current else '')
+            description = self.model.describe(self.store.image(frame, subject), previous=current['description'] if current else '',
+                **({'scene':self.scene_context()} if self.scene_context else {}))
             result = self.store.publish(subject, frame, description, detections, 'initial' if not current else 'change_or_refresh', self.config.model)
             self._clear_dirty(key, captured)
-        elif current and detections != current['detections']:
+        elif current and changed:
             result = self.store.publish(subject, frame, current['description'], detections, 'local_detection', 'local',
                                         described_at=current['described_at'])
         else:
@@ -126,7 +134,8 @@ class VisionService:
             if not self.store.claim_call(subject):
                 raise RuntimeError('视觉模型达到每小时调用上限')
             current = self.store.latest(subject)
-            description = self.model.describe(self.store.image(frame, subject), previous=current['description'] if current else '')
+            description = self.model.describe(self.store.image(frame, subject), previous=current['description'] if current else '',
+                **({'scene':self.scene_context()} if self.scene_context else {}))
             result = self.store.publish(subject, frame, description, detections, 'initial' if not current else 'change_or_refresh', self.config.model)
             self._clear_dirty(key, self.store.frame(frame, subject)['captured'])
             if result and self.on_update:
@@ -149,7 +158,7 @@ class VisionService:
         image = self.store.image(frame, subject)
         if not self.store.claim_call(subject):
             raise RuntimeError('视觉模型达到每小时调用上限')
-        return self.model.describe(image, question=question)
+        return self.model.describe(image, question=question, **({'scene':self.scene_context()} if self.scene_context else {}))
 
     def request_action(self, subject, action):
         import re
@@ -160,7 +169,7 @@ class VisionService:
             if self.closed or (self.action_future is not None and not self.action_future.done()):
                 return False
             match = re.search(r'回看照片\s+([0-9a-f]{32})[：:]?\s*(.*)', action)
-            current = self.store.latest(subject)
+            current = self.store.latest_sample(subject)
             frame = match[1] if match else (current['frame'] if current else '')
             if not frame:
                 return False

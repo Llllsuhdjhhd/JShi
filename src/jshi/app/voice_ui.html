@@ -102,9 +102,9 @@
   <p id="layout-empty" class="layout-empty" hidden>对话与检查面板已隐藏，点击右上角图标恢复。</p>
   <div class="workspace" id="workspace"><section class="conversation" id="conversation" aria-label="对话">
   <div class="message-scroll"><div id="live"></div><section id="log" aria-live="polite"><div class="empty" id="empty"><strong>在这里，和匠石聊聊</strong><span>开启语音，或在下方切换文字输入</span></div></section><p id="rename-ask" hidden></p></div>
-  <div class="input-dock"><div class="input-modes" aria-label="输入方式"><button id="mode-voice" aria-pressed="true">语音</button><button id="mode-text" aria-pressed="false">文字</button><span class="dock-help">登记、记忆与调试在右上角</span></div>
+  <div class="input-dock"><div class="input-modes" aria-label="输入方式"><button id="mode-voice" aria-pressed="true">语音</button><button id="mode-text" aria-pressed="false">文字</button><button id="mode-vision" aria-pressed="false" hidden>视觉</button><span class="dock-help">登记、记忆与调试在右上角</span></div>
   <div class="voice-dock" id="voice-dock"><span class="voice-dot"></span><span id="voice-hint">点击右上角「开始对话」，开启语音输入</span></div>
-  <div id="text-dock" hidden><form id="composer" aria-label="文字对话"><div class="composer-top"><label for="text-person">发言人物</label><select id="text-person" aria-label="选择文字输入人物"><option value="">请选择人物</option></select><button id="text-people-refresh" type="button" class="secondary">刷新</button></div><textarea id="typed" maxlength="2000" placeholder="写点什么…  Ctrl / ⌘ + Enter 发送"></textarea><button id="send-text">发送</button></form>
+  <iframe id="vision-panel" title="环境观察" allow="camera" hidden style="width:100%;height:620px;border:0"></iframe><div id="text-dock" hidden><form id="composer" aria-label="文字对话"><div class="composer-top"><label for="text-person">发言人物</label><select id="text-person" aria-label="选择文字输入人物"><option value="">请选择人物</option></select><button id="text-people-refresh" type="button" class="secondary">刷新</button></div><textarea id="typed" maxlength="2000" placeholder="写点什么…  Ctrl / ⌘ + Enter 发送"></textarea><button id="send-text">发送</button></form>
   <p id="text-status" class="tip" role="status" aria-live="polite">选择发言人物后即可发送。Enter 换行。</p>
   </div></div></section>
   <section id="debug-workspace" class="debug-workspace" aria-labelledby="inspector-heading" hidden><header class="dialog-header"><div><h2 id="inspector-heading">设置与调试</h2><p>声音、数据与运行记录</p></div><div class="debug-toolbar"><button id="maximize-debug" class="secondary" aria-pressed="false">铺满</button><button id="close-inspector" class="secondary" aria-label="隐藏设置与调试">隐藏</button></div></header><nav class="debug-nav" aria-label="调试工作区"><button id="debug-settings-tab" aria-pressed="true">设置与实时调试</button><button id="debug-data-tab" aria-pressed="false">保存数据</button></nav><div id="settings-pane"><aside class="inspector" id="inspector" aria-label="声音登记与检查">
@@ -189,9 +189,19 @@ function openData(source=''){$('data-frame').src='/data?embedded=1'+(source?'&so
 for(const [id,source] of [['open-memory','memory:events'],['open-work','tool_work'],['open-prompts','prompts'],['open-timing','timing'],['open-all-data','']])$(id).onclick=()=>openData(source);
 $('debug-settings-tab').onclick=()=>{debugTab('settings');refreshDebugTurns();};$('debug-data-tab').onclick=()=>{if(!$('data-frame').src)openData();else debugTab('data');};
 $('open-enrollment').onclick=()=>{$('data-frame').src='/voice-enroll';debugTab('data');};
-function inputMode(mode){$('text-dock').hidden=mode!=='text';$('voice-dock').hidden=mode!=='voice';$('mode-text').ariaPressed=String(mode==='text');$('mode-voice').ariaPressed=String(mode==='voice');if(mode==='text')$('typed').focus();}
-$('mode-text').onclick=()=>inputMode('text');$('mode-voice').onclick=()=>inputMode('voice');
-inputMode('voice');
+let selectedMode='text';
+function stopVision(){const panel=$('vision-panel');panel.contentWindow?.postMessage({type:'stop-vision'},location.origin);panel.hidden=true;}
+function inputMode(mode){
+ selectedMode=mode; $('text-dock').hidden=false; $('voice-dock').hidden=mode==='text';
+ $('mode-text').ariaPressed=String(mode==='text');$('mode-voice').ariaPressed=String(mode==='voice');$('mode-vision').ariaPressed=String(mode==='vision');
+ if(mode!=='vision')stopVision();
+ if(mode==='text')$('typed').focus();
+}
+$('mode-text').onclick=async()=>{stopVision();await end();inputMode('text')};
+$('mode-voice').onclick=async()=>{inputMode('voice');if(!ready)await $('start').onclick()};
+$('mode-vision').onclick=async()=>{inputMode('vision');if(!ready)await $('start').onclick();if(ready){$('vision-panel').src='/vision';$('vision-panel').hidden=false}else log('语音连接就绪后再次选择视觉模式。')};
+fetch('/status').then(r=>r.json()).then(s=>{$('mode-vision').hidden=!s.vision_available});
+inputMode('text');
 refreshPanels();
 let ws, mic, captureContext, outputContext, capture, ready = false;
 let replyId = '', paused = false, queue = [], playing = null, source = null;
@@ -331,7 +341,7 @@ function message(m) {
     for(const id of m.input_ids){const row=inputRows.get(id);if(row){row.p.style.outline='';row.meta.textContent=m.label+' · 手动关联';row.p.classList.remove('selected');row.button.textContent='选择声音';}}
     selectedInputs.clear();selectionChanged();$('enroll-status').textContent='已关联 '+m.label+'：本次选择 '+m.clips+' 段，累计已保存 '+(m.reference_count ?? 1)+' 段（最多10段）；比对采用平均匹配分。兼容录音保留 '+m.seconds+' 秒。'+(m.min_similarity!=null ? '样本最低相似度 '+m.min_similarity+'（仅供参考）。' : '')+(m.warning || '');return;
   }
-  if (m.type==='ready') { try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true; $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '');
+  if (m.type==='ready') { try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true;if(selectedMode==='vision'){$('vision-panel').src='/vision';$('vision-panel').hidden=false;} $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '');
     $('match-threshold').disabled=m.match_threshold==null;
     if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);$('match-status').textContent='单句确认至少 '+Number(m.single_confirmation_threshold ?? Math.max(.65,m.match_threshold)).toFixed(2)+'，与第二候选须相差 '+m.match_margin+'；较弱声音先收集多段核对，待定声音不参与姓名竞争。';}
     voiceprintAvailable=m.voiceprint_available!==false;selectionChanged();
@@ -430,6 +440,7 @@ function message(m) {
   else if(m.type==='stop' && (!m.reply_id || m.reply_id===replyId)) { clearPlayback(); $('status').textContent='已停止播放'; }
 }
 async function end() {
+  stopVision();inputMode('text');
   if(pendingTyped){pendingTyped.badge.textContent='连接已关闭，接收状态待确认';if(!$('typed').value)$('typed').value=pendingTyped.text;pendingTyped=null;textSending=false;$('send-text').disabled=false;}
   $('voice-dock').classList.remove('active');$('voice-hint').textContent='语音已停止，点击「开始对话」重新连接';
   ready=false; mainBusy=false;clearTimeout(silenceTimer); clearPlayback();
@@ -551,7 +562,7 @@ $('test').onclick=async()=>{
   finally {if(stream) stream.getTracks().forEach(t=>t.stop()); if(testContext) await testContext.close(); $('test').textContent='录制 5 秒试听'; $('test').disabled=false; $('start').disabled=false;}
 };
 $('start').onclick=async()=>{
-  inputMode('voice');
+  if(selectedMode!=='vision')inputMode('voice');
   $('start').disabled=true;
   $('test').disabled=true; $('preview').pause();
   try {

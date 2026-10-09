@@ -661,7 +661,7 @@ class SubjectProcess:
         observed_environment = visual_snapshot
         if self.vision and observed_environment is None:
             observed_environment = (self.vision.store.snapshot(envelope.visual_snapshot_id, subject_id)
-                if envelope and envelope.visual_snapshot_id else self.vision.store.latest(subject_id))
+                if envelope and envelope.visual_snapshot_id else self.vision.store.latest_sample(subject_id))
         if observed_environment and self.vision:
             if not self.vision.store.bind(subject_id, fact.id, observed_environment['id']):
                 self.vision.store.error(subject_id, '记忆照片预算已满或媒体不可用，本轮未新增照片关联')

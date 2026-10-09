@@ -14,6 +14,7 @@ from uuid import uuid4
 from collections import deque
 
 from jshi.core.envelope import InputEnvelope, InputPart, SceneUtterance, SpeakerEvidence
+from jshi.core.inputpack import pack_input, packet
 from jshi.models import ResponseItem, ResponsePlan
 from jshi.recognition import ObjectProfile, new_object_id
 from jshi.subject.domain import HistoryKind, HistoryRecord
@@ -287,7 +288,7 @@ class VoiceConversation:
             self.enqueue_turn(InputEnvelope(session_id=self.session_id, source='web_text',
                 parts=(InputPart('text', text),), speaker=evidence, input_id=iid,
                 start_ms=start, end_ms=start,
-                utterances=tuple(self.scene), current_utterances=(utterance,)))
+                utterances=tuple(self.scene), current_utterances=(utterance,), deferred_interrupt=True))
             return
         speaker = self.current_speaker()
         if speaker is None:
@@ -510,7 +511,7 @@ class VoiceConversation:
         marks = {r.n: r for r in items}
         evidence_rows = self._jev_batch(current)
         for n, u in enumerate(current, 1):
-            code = self.assign_code(u.speaker.object_id, u.speaker.label) if u.speaker.method != "unassigned_audio" else "unknown"
+            code = self.assign_code(u.speaker.object_id, u.speaker.label) if u.speaker.method not in {"unassigned_audio", "visual_scene"} else "unknown"
             row = {"p": code, "text": u.text, "at": u.received_at_ms, "basis": u.speaker.method,
                    "status": u.speaker.status, "track": u.speaker.track_id, "input_id": u.input_id,
                    "entry_status": entry_status or ('completed' if n in marks and marks[n].speaker_pick else 'failed'),
@@ -519,7 +520,7 @@ class VoiceConversation:
                                    "names": c.get('names', [])} for c in evidence_rows[n-1]['candidates']],
                    "short_voice_hint": evidence_rows[n-1]['short_voice_hint']}
             initial = self.source_speakers.get(u.input_id, u.speaker)
-            row["voice_initial"] = {"p": self.assign_code(initial.object_id, initial.label) if initial.method != "unassigned_audio" else "unknown",
+            row["voice_initial"] = {"p": self.assign_code(initial.object_id, initial.label) if initial.method not in {"unassigned_audio", "visual_scene"} else "unknown",
                 "basis": initial.method, "similarity": initial.confidence}
             if n in marks:
                 item = marks[n]
@@ -832,7 +833,9 @@ class VoiceConversation:
         envelope = envelopes[-1]
         pending = [u for previous in envelopes[:-1] for u in previous.current_utterances]
         if pending:
-            current = tuple(sorted((*pending, *envelope.current_utterances), key=lambda u: (u.start_ms, u.end_ms)))
+            current = tuple(sorted((*pending, *envelope.current_utterances), key=lambda u:
+                (u.recorded_start_at_ms if u.recorded_start_at_ms is not None else
+                 u.received_at_ms if u.received_at_ms is not None else u.start_ms, u.end_ms)))
             speakers = {u.speaker.object_id for u in current}
             evidence = envelope.speaker
             if len(speakers) > 1 or any(u.speaker.status == 'unknown' for u in current):
@@ -844,8 +847,9 @@ class VoiceConversation:
                 current_utterances=current, overlap=any(u.overlap for u in current),
                 deferred_interrupt=any(e.deferred_interrupt for e in envelopes),
                 jev_calls=tuple(call for item in envelopes for call in item.jev_calls),
-                parts=(InputPart('text', self.batch_text(current)), InputPart('audio',
-                    reference=f'session:{self.session_id}:{start}-{end}', media_type='audio/pcm')))
+                source=envelope.source if len({e.source for e in envelopes}) == 1 else 'mixed',
+                parts=(InputPart('text', '\n'.join(e.text for e in envelopes)),
+                       *tuple({(p.kind,p.reference):p for e in envelopes for p in e.parts if p.kind != 'text'}.values())))
         return envelope
 
     @staticmethod
@@ -906,6 +910,13 @@ class VoiceConversation:
     def _jev_batch(self, utterances):
         batch = []
         for index, utterance in enumerate(utterances, start=1):
+            if utterance.speaker.method == 'visual_scene':
+                batch.append({'n':index,'input_id':utterance.input_id,'track':'','sound':'',
+                              'who':'unknown','text':utterance.text,'seconds':0,'basis':'visual_scene',
+                              'at':utterance.received_at_ms,'at_ms':utterance.start_ms,'candidates':[],
+                              'short_voice_hint':{},'source':'visual_environment',
+                              'voice_evidence':{'strength':'unavailable','basis':'视觉观察，无声音身份'}})
+                continue
             candidates = []
             for item in self.candidate_cache.get(utterance.input_id, []):
                 code = self.assign_code(item["object_id"], item.get("label") or "")
@@ -935,6 +946,10 @@ class VoiceConversation:
         for index, utterance in enumerate(utterances, start=1):
             item = next((it for it in items if it.n == index), None)
             speaker = utterance.speaker
+            if speaker.method == 'visual_scene':
+                updated.append(utterance)
+                self.annotations[utterance.input_id] = speaker
+                continue
             if self.local_speakers is not None and hasattr(self.local_speakers, 'review_candidate'):
                 code = self.assign_code(speaker.object_id, speaker.label)
                 agreement = bool(item and speaker.status == 'recognized' and speaker.method == 'voiceprint_match'
@@ -1007,7 +1022,7 @@ class VoiceConversation:
         future.add_done_callback(completed)
         return 'queued'
 
-    async def _judge(self, utterances, speaker, overlap) -> tuple[InterruptDecision, dict, tuple]:
+    async def _judge(self, utterances, speaker, overlap, envelope=None) -> tuple[InterruptDecision, dict, tuple]:
         from jshi.voice.jev import BatchItem
         snapshot = self.delivery.snapshot()
         if self.active_turn and (not snapshot or snapshot.get("state") in {"completed", "stopped", "failed"}):
@@ -1025,8 +1040,14 @@ class VoiceConversation:
                     "jev_scene": self.jev_scene_store.view(
                         min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=time()*1000))[0],
                     "now": time()*1000}
-        if getattr(self.process, 'vision', None):
-            delivery['environment'] = self.process.vision.store.latest(self.subject_id)
+        if envelope is None:
+            source = 'web_text' if utterances and all(u.speaker.method == 'user_selected' for u in utterances) else 'voice'
+            parts = (InputPart('text', self.batch_text(utterances)),)
+            if source == 'voice' and utterances:
+                parts += (InputPart('audio', reference=f'session:{self.session_id}:{utterances[0].start_ms}-{utterances[-1].end_ms}', media_type='audio/pcm'),)
+            envelope = InputEnvelope(self.session_id, source, parts, speaker, current_utterances=tuple(utterances))
+        envelope = pack_input(envelope, getattr(self.process, 'vision', None), self.subject_id)
+        delivery['envelope'] = packet(envelope, getattr(self.process, 'vision', None), self.subject_id)
         cutoff = min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=float("inf"))
         feedback = self.interaction_feedback.snapshot(cutoff_ms=cutoff)
         for row in feedback['questions']:
@@ -1036,6 +1057,13 @@ class VoiceConversation:
         if metrics.get("reply_ready_at_ms", 0) > cutoff:
             delivery["pending"] = ""
         batch = self._jev_batch(utterances)
+        for row, u in zip(batch, utterances):
+            row['source'] = ('visual_environment' if u.speaker.method == 'visual_scene' else
+                             'web_text' if u.speaker.method == 'user_selected' else 'voice')
+            if row['source'] == 'visual_environment':
+                row.update(who='unknown', candidates=[], voice_evidence={'strength':'unavailable','basis':'视觉观察，无声音身份'})
+        if not batch:
+            batch = [{'n': 1, 'text': envelope.text, 'who': 'unknown', 'at': time()*1000, 'source': envelope.source, 'voice_evidence': {'strength':'unavailable','basis':'非声音观察'}}]
         started = monotonic()
         for u in utterances:
             if u.input_id in self.input_records:
@@ -1086,6 +1114,8 @@ class VoiceConversation:
                   "prompt_requested": bool(sent_requests) if type(self.jev) is VoiceJEV else None,
                   "judged": result.judged, "model_error": result.model_error}
         record['routing_error'] = result.routing_error
+        record['visual_snapshot_id'] = envelope.visual_snapshot_id
+        record['input_parts'] = [asdict(p) for p in envelope.parts]
         self.record('voice_jev_diagnostics', {**record, 'model_raw': result.model_raw,
             'model_error': result.model_error})
         for u in utterances:
@@ -1305,11 +1335,13 @@ class VoiceConversation:
                 current = tuple(annotated(u) for u in envelope.current_utterances)
                 from jshi.voice.jev import BatchItem
                 items = ()
-                if envelope.deferred_interrupt and current:
-                    decision, record, items = await self._judge(current, envelope.speaker, envelope.overlap)
+                if envelope.deferred_interrupt:
+                    decision, record, items = await self._judge(current, envelope.speaker, envelope.overlap, envelope)
                     current = tuple(self._apply_attribution(list(current), items))
                     await self._publish_attribution(current, items, record)
-                    envelope = replace(envelope, jev_calls=(*envelope.jev_calls, record))
+                    envelope = replace(envelope, jev_calls=(*envelope.jev_calls, record),
+                        visual_snapshot_id=record.get('visual_snapshot_id', ''),
+                        parts=tuple(InputPart(**p) for p in record.get('input_parts', ())))
                     await self.emit('jev', **asdict(decision))
                     self.last_jev = asdict(decision)
                     self.record('voice_jev', {'input': self.render_input(current, items), **asdict(decision)})
@@ -1339,6 +1371,8 @@ class VoiceConversation:
                     facts.append(f'匠石上一轮回应播到“{heard[:40]}”时还没说完。')
                 self._capture_jev_inputs(current, items)
                 text = self.render_input(current, items, facts)
+                if any(p.kind == 'image' for p in envelope.parts) and envelope.source == 'visual_environment':
+                    text = envelope.text
                 marks = {item.n: item for item in items}
                 annotations = tuple({'input_id': u.input_id, 'n': f'N{n}',
                     'direction': marks[n].to_jiangshi if n in marks else '',
@@ -1373,6 +1407,11 @@ class VoiceConversation:
                         utterances=current, speaker=speaker,
                         delivery_context='',
                         parts=(InputPart('text', text), *envelope.parts[1:]))
+                if envelope.jev_calls and not envelope.visual_snapshot_id:
+                    call = envelope.jev_calls[-1]
+                    envelope = replace(envelope, visual_snapshot_id=call.get('visual_snapshot_id', ''))
+                    images = tuple(InputPart(**p) for p in call.get('input_parts', ()) if p['kind'] == 'image')
+                    envelope = replace(envelope, parts=tuple(p for p in envelope.parts if p.kind != 'image') + images)
                 self.active_turn = {"state": "thinking", "object_id": envelope.speaker.object_id,
                                     "input": envelope.text, "pending_text": "尚未生成回应"}
                 self.schedule_person_review(current, items)
@@ -1679,17 +1718,42 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             parts=(InputPart('text', '【环境观察变化或观察结果，不是人物发言】\n' + environment['description']),
                    InputPart('image', reference=environment['frame'], media_type='image/jpeg')),
             speaker=SpeakerEvidence('environment', label='环境观察', status='unknown', method='visual_scene'),
-            visual_snapshot_id=environment['id'])
+            visual_snapshot_id=environment['id'], deferred_interrupt=True)
+        observation = SceneUtterance(envelope.text, envelope.speaker, 0, 0, input_id=envelope.input_id,
+                                      received_at_ms=time()*1000, recorded_start_at_ms=environment['captured']*1000,
+                                      recorded_end_at_ms=environment['captured']*1000, identity_note='视觉观察，不是人物发言')
+        envelope = replace(envelope, current_utterances=(observation,))
         if active_conversation is not None:
-            active_conversation.turn_queue.put_nowait((envelope, active_conversation.epoch))
+            active_conversation.enqueue_turn(envelope)
         else:
             registry_busy = True
             try:
+                envelope = await judge_standalone(envelope)
                 await asyncio.to_thread(process.experience, subject_id, envelope.text, envelope=envelope,
                     processing_modes=('environment',), defer_write=True)
                 schedule_text_scene()
             finally:
                 registry_busy = False
+
+    async def judge_standalone(envelope):
+        from jshi.voice.jev_scene import JEVSceneStore
+        import hashlib
+        scene_store = JEVSceneStore(process.repository.path.parent / 'jev_scenes' / hashlib.sha256(subject_id.encode()).hexdigest()[:16] / 'text-entry.json')
+        scene, unwritten = scene_store.view(time()*1000)
+        envelope = pack_input(envelope, visual, subject_id)
+        judge = jev or VoiceJEV()
+        def capture(request):
+            process._record_step_input(request, judge.model, subject_id=subject_id, activity_id='jev-'+envelope.input_id)
+        result = await asyncio.to_thread(judge.decide_envelope, subject_id, envelope,
+            {'state':'completed', 'jev_scene':scene, 'unwritten':unwritten, 'now':time()*1000}, vision=visual, on_request=capture)
+        record = {'main_prompt_hint':result.main_prompt_hint, 'judged':result.judged,
+                  'model_error':result.model_error, 'items':[asdict(i) for i in result.items],
+                  'input_ids':[envelope.input_id]}
+        scene_store.append(envelope.input_id, {'text':envelope.text, 'at':time()*1000,
+                                              'source':envelope.source, 'basis':'统一输入信封'})
+        utterance = SceneUtterance(envelope.text, envelope.speaker, 0, 0, input_id=envelope.input_id,
+                                    received_at_ms=time()*1000, identity_note='统一信封来源：'+envelope.source)
+        return replace(envelope, jev_calls=(record,), current_utterances=(utterance,))
 
     async def flush_text_scene():
         nonlocal pending_text_write, text_write_error
@@ -1844,7 +1908,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             'text_scene_writing': text_write_task is not None and not text_write_task.done(),
             'text_scene_write_error': text_write_error,
             'speaker_models': list(speaker_models or {}),
-            "local_available": local is not None, "online_available": bool(config.api_key)},
+            "local_available": local is not None, "online_available": bool(config.api_key), "vision_available": visual is not None, "voice_active": active_conversation is not None},
             headers={"Cache-Control": "no-store"})
 
     async def text_people(request):
@@ -1890,7 +1954,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 await response.write((json.dumps({'type':'accepted','label':profile.label},ensure_ascii=False)+'\n').encode())
             async def run_turn():
                 try:
-                    return await asyncio.to_thread(process.experience, subject_id, text, envelope=envelope,
+                    judged_envelope = await judge_standalone(envelope)
+                    return await asyncio.to_thread(process.experience, subject_id, text, envelope=judged_envelope,
                         objects={profile.label:profile.object_id}, on_voice_plan=plan_ready if streaming else None,
                         defer_write=True)
                 finally:
@@ -2165,7 +2230,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     app.router.add_post('/voice-registry', registry)
     if getattr(process, 'vision', None):
         from jshi.vision.web import install_vision
-        install_vision(app, process, subject_id, jev or VoiceJEV(), deliver_environment)
+        install_vision(app, process, subject_id, deliver_environment, voice_active=lambda: active_conversation is not None)
+        visual.scene_context = lambda: active_conversation.jev_scene_store.view(time()*1000)[0] if active_conversation else ''
     return app
 
 

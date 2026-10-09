@@ -13,6 +13,7 @@ from jshi.vision.memory import VisualMemory
 from jshi.memory.contracts import MemoryBatch, MemoryExperience, BackendIngestResult
 from jshi.memory.port import RecalledFragment
 from jshi.voice.jev import VoiceJEV
+from tests.test_voice import process
 
 
 def image(color='red'):
@@ -195,14 +196,23 @@ def test_memory_batch_associations_and_recall(store):
     assert all('客厅里' not in e.text for e in b.batch.experiences)
 
 
-def test_jev_judges_environment_and_invalid_output_is_not_auto_wakeup():
+def test_visual_packet_uses_existing_jev_schema():
+    import json
     from jshi.models import ModelResponse
+    from jshi.core.envelope import InputEnvelope, InputPart, SpeakerEvidence
     class Judge:
-        def generate(self, r): self.request=r; return ModelResponse(text='{"enter_main":true,"reason":"有人示意"}', model='fake')
-    model=Judge(); jev=VoiceJEV(model)
-    assert jev.decide_environment('stone',{'description':'有人'})['enter_main']
-    assert model.request.purpose=='environment_jev'
-    assert not VoiceJEV().decide_environment('stone',{})['enter_main']
+        def generate(self, r):
+            self.request=r
+            return ModelResponse(text=json.dumps({'items':[{'i':1,'person':'unknown','certainty':'unknown','why':'observation'}],'level':2,'recall_memory':False}), model='fake')
+    model=Judge()
+    envelope=InputEnvelope('test','visual_environment',(InputPart('text','有人进入'),),SpeakerEvidence('visual',method='visual_scene'))
+    result=VoiceJEV(model).decide_envelope('stone',envelope,{'state':'completed','jev_scene':'recent scene'})
+    assert model.request.purpose=='voice_jev'
+    data=json.loads(model.request.input_text)
+    assert data['input']['envelope']['source']=='visual_environment'
+    assert data['scene']=='recent scene'
+    assert result.main_prompt_hint['level']==2
+    assert not hasattr(VoiceJEV,'decide_environment')
 
 
 def test_main_uses_environment_and_keeps_raw_speech_separate(store, tmp_path):
@@ -243,12 +253,9 @@ def test_visual_web_input_security_and_asynchronous_delivery(store, tmp_path):
     p=SimpleNamespace(vision=vision,repository=Repository(),person_review_scene=lambda s:'现场')
     seen=[]
     async def deliver(s,d): seen.append(s)
-    class Judge:
-        model=None
-        def decide_environment(self,*args): return {'enter_main':True,'reason':'变化'}
     async def run():
         app=web.Application(client_max_size=10*1024*1024)
-        install_vision(app,p,'stone',Judge(),deliver)
+        install_vision(app,p,'stone',deliver)
         async with TestClient(TestServer(app)) as client:
             r=await client.post('/api/vision/frame',data=image())
             assert r.status==403
@@ -400,3 +407,130 @@ def test_blank_visual_key_falls_back_to_provider_key(monkeypatch):
     monkeypatch.setenv('JSHI_VISION_API_KEY', '')
     monkeypatch.setenv('JSHI_API_DEEPSEEK_API_KEY', 'test-only-key')
     assert VisionConfig.from_env().api_key == 'test-only-key'
+
+
+def test_pack_freezes_latest_photo_before_cloud_understanding(store):
+    from jshi.core.inputpack import pack_input, packet
+    from jshi.core.envelope import InputEnvelope, InputPart, SpeakerEvidence
+    first=snapshot(store,at=time()-20)
+    new=store.add_frame('stone',image('blue'),time())
+    service=VisionService(store,store.config,Model(),Detector())
+    try:
+        for source in ['web_text','voice','video','photo']:
+            raw=InputEnvelope('test',source,(InputPart('text','当前文字'),),SpeakerEvidence('person'))
+            packed=pack_input(raw,service,'stone')
+            data=packet(packed,service,'stone')
+            assert packed.text==raw.text
+            assert data['environment']['frame']==new
+            assert data['environment']['description_frame']==first['frame']
+            assert data['environment']['described_at']<data['environment']['captured']
+            assert any(p.reference==new for p in packed.parts)
+            store.add_frame('stone',image('green'),time())
+            assert pack_input(packed,service,'stone')==packed
+            # Reset the newest sample for the next source without pretending a cloud update occurred.
+            new=store.add_frame('stone',image('blue'),time())
+    finally: service.close()
+
+
+def test_optional_image_reaches_shared_jev_as_image_block(store):
+    import json
+    from jshi.core.inputpack import pack_input
+    from jshi.core.envelope import InputEnvelope, InputPart, SpeakerEvidence
+    from jshi.models import ModelResponse
+    from jshi.models.base import _chat_payload
+    store.config=replace(store.config,jev_images=True)
+    s=snapshot(store)
+    service=VisionService(store,store.config,Model(),Detector())
+    class Judge:
+        def generate(self,r):
+            self.request=r
+            return ModelResponse(text=json.dumps({'items':[{'i':1,'person':'unknown','certainty':'unknown','why':'图像材料'}],'level':2,'recall_memory':False}),model='test')
+    model=Judge()
+    try:
+        e=pack_input(InputEnvelope('test','photo',(InputPart('text','观察'),),SpeakerEvidence('photo',method='visual_scene')),service,'stone')
+        VoiceJEV(model).decide_envelope('stone',e,{'state':'completed'},vision=service)
+        assert 'base64' not in model.request.input_text
+        body=json.loads(_chat_payload('test',model.request))
+        content=body['messages'][1]['content']
+        assert content[0]['type']=='text'
+        assert content[1]['image_url']['url'].startswith('data:image/jpeg;base64,')
+        assert model.request.purpose=='voice_jev'
+    finally: service.close()
+
+
+def test_sampling_without_description_and_late_frame(store):
+    latest=store.add_frame('stone',image(),time())
+    store.add_frame('stone',image('blue'),time()-10)
+    sample=store.latest_sample('stone')
+    assert sample['frame']==latest and sample['described_at']==0
+    store.config=replace(store.config,rolling_bytes=1,retention_seconds=.001)
+    store.cleanup()
+    assert store.image(latest,'stone')
+
+
+def test_visual_capture_requires_active_voice(store):
+    from aiohttp.test_utils import TestClient, TestServer
+    from aiohttp import web
+    from types import SimpleNamespace
+    from jshi.vision.web import install_vision
+    service=VisionService(store,store.config,Model(),Detector())
+    async def deliver(*a): pass
+    async def run():
+        app=web.Application()
+        install_vision(app,SimpleNamespace(vision=service),'stone',deliver,voice_active=lambda:False)
+        async with TestClient(TestServer(app)) as c:
+            origin=str(c.make_url('')).rstrip('/')
+            r=await c.post('/api/vision/frame',data=image(),headers={'Origin':origin})
+            assert r.status==409
+    asyncio.run(run())
+
+
+def test_cloud_request_includes_recent_scene_without_using_it_as_image_evidence(store):
+    seen=[]
+    def transport(payload):
+        seen.append(payload)
+        return {'choices':[{'message':{'content':'观察结果'}}]}
+    model=VisionModel(store.config,transport)
+    model.describe(image(),scene='有人刚提到门口的桌子',previous='先前环境')
+    text=seen[0]['messages'][0]['content'][0]['text']
+    assert '有人刚提到门口的桌子' in text
+    assert '不证明画面中的人物身份' in text
+
+
+def test_stable_sampling_keeps_latest_and_archives_without_filling_every_frame(store):
+    class Stable:
+        def detect(self,data): return [], False
+    service=VisionService(store,store.config,Model(),Stable())
+    try:
+        initial=service.process('stone',image(),time())
+        service.process('stone',image('blue'),time())
+        service.process('stone',image('green'),time())
+        last=store.latest_sample('stone')
+        assert last['frame'] != initial['frame']
+        with store.db() as c:
+            assert c.execute('select count(*) from frames').fetchone()[0] == 2
+    finally: service.close()
+
+
+def test_mixed_inputs_preserve_text_and_media(process):
+    from tests.test_voice import FakeCloud
+    from jshi.app.voice import VoiceConversation
+    from jshi.core.envelope import InputEnvelope, InputPart, SceneUtterance, SpeakerEvidence
+    async def run():
+        async def send(m): pass
+        c=VoiceConversation(process,'stone',FakeCloud(),send)
+        try:
+            voice=SpeakerEvidence('person','lux-id','lux','recognized','voiceprint_match')
+            visual=SpeakerEvidence('visual',method='visual_scene')
+            u=SceneUtterance('语音内容',voice,1,2,input_id='speech',received_at_ms=10)
+            v=SceneUtterance('视觉观察',visual,0,0,input_id='visual',received_at_ms=20)
+            a=InputEnvelope('test','microphone',(InputPart('text','语音内容'),InputPart('audio',reference='audio')),voice,current_utterances=(u,))
+            b=InputEnvelope('test','visual_environment',(InputPart('text','视觉观察'),InputPart('image',reference='photo')),visual,current_utterances=(v,),deferred_interrupt=True)
+            merged=c.merge_envelopes([a,b])
+            assert '语音内容' in merged.text and '视觉观察' in merged.text
+            assert {p.kind for p in merged.parts}=={'text','audio','image'}
+            assert merged.source=='mixed'
+            assert c._jev_batch((v,))[0]['who']=='unknown'
+            assert c._jev_batch((v,))[0]['voice_evidence']['strength']=='unavailable'
+        finally: await c.close()
+    asyncio.run(run())

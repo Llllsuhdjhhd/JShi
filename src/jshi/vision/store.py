@@ -26,6 +26,8 @@ class VisionStore:
                     detections text not null, reason text not null, model text not null, described_at real not null,
                     description_frame text not null);
                 create table if not exists current(subject text primary key, snapshot text not null);
+                create table if not exists sample_current(subject text primary key, frame text not null);
+                create table if not exists archives(frame text primary key);
                 create table if not exists bindings(subject text not null, source_id text not null,
                     snapshot text not null, retain_photo integer not null, primary key(subject,source_id));
                 create table if not exists events(subject text not null, event_id text not null,
@@ -72,6 +74,9 @@ class VisionStore:
             c.execute("insert or ignore into assets values(?,?,?)", (asset, encoded, len(encoded)))
             c.execute("insert into frames values(?,?,?,?,?,?)", (frame, subject, source, captured, time(), asset))
             c.execute('insert into envelopes values(?,?)', (frame,json.dumps(asdict(envelope))))
+            c.execute('''insert into sample_current values(?,?) on conflict(subject) do update set frame=excluded.frame
+                where (select captured from frames where id=excluded.frame) >=
+                      (select captured from frames where id=sample_current.frame)''', (subject, frame))
         return frame
 
     def image(self, frame, subject):
@@ -136,6 +141,25 @@ class VisionStore:
             row = c.execute("select snapshot from current where subject=?", (subject,)).fetchone()
         return self.snapshot(row[0], subject) if row else None
 
+    def latest_sample(self, subject):
+        """Latest captured photo with separately dated completed understanding."""
+        current = self.latest(subject)
+        with self.db() as c:
+            row = c.execute('select frame from sample_current where subject=?', (subject,)).fetchone()
+        if not row:
+            return current
+        frame = row[0]
+        if current and current['frame'] == frame:
+            return current
+        description = current['description'] if current else '尚未完成线上环境描述。'
+        with self.db() as c:
+            existing = c.execute('select id from snapshots where subject=? and frame=? and description=? and reason=? order by completed desc limit 1',
+                                 (subject, frame, description, 'sample')).fetchone()
+        if existing:
+            return self.snapshot(existing[0], subject)
+        return self.publish(subject, frame, description, reason='sample', model='local',
+                            described_at=current['described_at'] if current else 0, make_current=False)
+
     def memories(self, subject, limit=30):
         with self.db() as c:
             ids = [r[0] for r in c.execute('''select distinct s.id from snapshots s
@@ -199,9 +223,13 @@ class VisionStore:
 
     def discard_frame(self, subject, frame):
         with self.db() as c:
-            c.execute("delete from frames where subject=? and id=? and id not in (select frame from snapshots)", (subject, frame))
+            c.execute("delete from frames where subject=? and id=? and id not in (select frame from snapshots union select frame from sample_current union select frame from archives union select frame from inflight)", (subject, frame))
             c.execute("delete from assets where id not in (select asset from frames)")
             c.execute('delete from envelopes where frame not in (select id from frames)')
+
+    def archive(self, frame):
+        with self.db() as c:
+            c.execute('insert or ignore into archives values(?)', (frame,))
 
     def error(self, subject, message):
         with self.db() as c:
@@ -215,6 +243,7 @@ class VisionStore:
             protected.update(r[0] for r in c.execute('''select description_frame from snapshots where id in
                 (select snapshot from current union select snapshot from bindings where retain_photo=1 union select snapshot from events where retain_photo=1)'''))
             protected.update(r[0] for r in c.execute('select frame from inflight'))
+            protected.update(r[0] for r in c.execute('select frame from sample_current'))
             rows = list(c.execute("select f.id,f.captured,a.size from frames f join assets a on a.id=f.asset order by f.captured desc"))
             used = 0
             keep = set(protected)
@@ -229,6 +258,7 @@ class VisionStore:
                     c.execute("delete from frames where id=?", (r['id'],))
             c.execute("delete from assets where id not in (select asset from frames)")
             c.execute('delete from envelopes where frame not in (select id from frames)')
+            c.execute('delete from archives where frame not in (select id from frames)')
             c.execute('''delete from snapshots where frame not in (select id from frames) and
                 id not in (select snapshot from current union select snapshot from bindings union select snapshot from events)''')
 
@@ -243,6 +273,6 @@ class VisionStore:
     def render(s):
         from datetime import datetime, timezone
         at = datetime.fromtimestamp(s['captured'], timezone.utc).isoformat()
-        described = datetime.fromtimestamp(s['described_at'], timezone.utc).isoformat()
+        described = datetime.fromtimestamp(s['described_at'], timezone.utc).isoformat() if s['described_at'] else '尚未完成'
         return f"【环境观察 {at}；版本 {s['id']}；描述依据 {described}】\n{s['description']}\n" + (
             "【本地检测变化】" + json.dumps(s['detections'], ensure_ascii=False) if s['detections'] else "")

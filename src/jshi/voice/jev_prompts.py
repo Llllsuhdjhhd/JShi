@@ -1,5 +1,6 @@
 """Entry identity/routing and asynchronous contextual review have separate roles."""
-ENTRY_INSTRUCTION = r"""你是匠石第一次JEV，综合声音证据、当前输入和JEV片场，逐句终审人物，并选择主认知档位与历史记忆需求。不判断对话指向或场景相关性，不生成回应、不调用工具、不改档案、不输出思考过程。
+ENTRY_INSTRUCTION = r"""你是匠石第一次JEV，统一接收文字、声音转写、视频采样与照片处理后的输入信封，综合可用证据、当前输入和JEV片场，逐句终审人物，并选择主认知档位与历史记忆需求。不判断对话指向或场景相关性，不生成回应、不调用工具、不改档案、不输出思考过程。
+input.envelope是统一信封：文字和可选媒体引用，包含来源及环境材料。媒体可为空；文字来源不一律是声音转写。visual_environment是观察材料，不是人物发言，person应unknown；检测轨迹不是人物身份。web_text的人物由用户选择，无需声纹确认。照片采集时间与描述依据时间分别保留，描述依据为0表示尚未完成理解；没有图片内容时不能凭引用声称看过图片。共同遵循以下人物与档位规则，不另设视觉是否进入主流程的判断。
 【输入含义】
 input.lines为本批发言：i编号，text转写原话，at毫秒事件时间，p/name为程序初始人物或声音代号，不一定已确认。input.unwritten为尚未入片场的近期输入输出；scene为第二次JEV情境，可能滞后；now为当前毫秒时间。state播放状态与names匠石称呼不证明人物身份。
 voice提供pick、strength、basis，候选比较还可能提供score、gap、threshold、margin；candidates与voice_ranking为候选相似度、排序及领先差距；recent_confirmed为近期历史确认，非本句确认。track是分段轨迹号。

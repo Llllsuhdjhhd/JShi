@@ -77,8 +77,10 @@ class InputEnvelope:
         return asdict(self)
 
     def context_note(self) -> str:
-        notes = ["【输入信封】语音转写；设备来源不等于说话人身份。"]
-        if self.speaker.method == "voice_scene":
+        notes = ["【输入信封】来源：" + self.source + "；文字与可选媒体已统一封装。设备来源不等于说话人身份。"]
+        if self.speaker.method == 'visual_scene':
+            notes.append('这是视觉观察材料，不是人物发言；没有已确认的说话人，不根据检测框推断姓名。')
+        elif self.speaker.method == "voice_scene":
             notes.append("当前输入是现场观察，没有唯一的已确认对象。不要把现场当成一个来客；"
                          "可等待、更新片场或面向全场说话，不要求每段先报姓名。")
         elif self.speaker.status == "unknown":
@@ -88,6 +90,10 @@ class InputEnvelope:
             notes.append("存在重叠发言，说话人或内容可能不清楚；必要时请一位先说。")
         if self.delivery_context:
             notes.append(self.delivery_context)
+        if self.utterances and all(u.speaker.method == 'visual_scene' for u in self.utterances):
+            import json
+            notes.append('【视觉观察条目】不是人物发言。\n' + json.dumps([asdict(u) for u in self.utterances], ensure_ascii=False))
+            return '\n'.join(notes)
         if self.utterances:
             import json
             if self.current_utterances:

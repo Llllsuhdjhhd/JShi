@@ -1,11 +1,10 @@
-"""Browser is one interchangeable frame producer; environmental JEV is independent."""
+"""Independent frame producer; completed observations join the shared input entry."""
 import asyncio
 from pathlib import Path
 from time import time
-from uuid import uuid4
 
 
-def install_vision(app, process, subject_id, jev, deliver):
+def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: True):
     from aiohttp import web
     vision = process.vision
     queue = asyncio.Queue(maxsize=1)
@@ -20,12 +19,14 @@ def install_vision(app, process, subject_id, jev, deliver):
         return web.FileResponse(Path(__file__).with_name('vision_ui.html'))
 
     async def state(request):
-        return web.json_response({'environment':vision.store.latest(subject_id),
+        return web.json_response({'environment':vision.store.latest_sample(subject_id),
             'sample_seconds':vision.config.sample_seconds, 'model':vision.config.model,
-            'errors':vision.store.errors(subject_id), 'server_time':time()}, headers={'Cache-Control':'no-store'})
+            'errors':vision.store.errors(subject_id), 'server_time':time(), 'voice_active':voice_active()}, headers={'Cache-Control':'no-store'})
 
     async def submit(request):
         same_origin(request)
+        if not voice_active():
+            raise web.HTTPConflict(text='视觉模式需要先开启语音，请在交谈页面选择视觉模式')
         source = request.headers.get('X-Visual-Source', 'browser')[:80]
         if not source:
             raise web.HTTPBadRequest(text='缺少画面来源')
@@ -72,22 +73,10 @@ def install_vision(app, process, subject_id, jev, deliver):
         return web.json_response({'accepted':True}, status=202)
 
     async def watch():
-        previous = None
         while True:
             environment = await queue.get()
             try:
-                decision = {'enter_main':True, 'reason':'观察动作结果'} if environment['reason'] in {'recall_image','observation_result'} else None
-                if decision is None:
-                    scene = process.person_review_scene(subject_id)
-                    def capture(request):
-                        process._record_step_input(request, jev.model, subject_id=subject_id, activity_id='env-jev-'+uuid4().hex)
-                    decision = await asyncio.to_thread(jev.decide_environment, subject_id, environment, previous, scene, capture)
-                from jshi.subject.domain import HistoryKind, HistoryRecord
-                process.repository.add_history(HistoryRecord(subject_id=subject_id, kind=HistoryKind.SUBJECT,
-                    event_type='environment_jev', content={'snapshot_id':environment['id'], **decision}))
-                if decision['enter_main']:
-                    await deliver(environment, decision)
-                previous = environment
+                await deliver(environment, {})
             except Exception as exc:
                 vision.store.error(subject_id, exc)
             finally:

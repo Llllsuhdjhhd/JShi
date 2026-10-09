@@ -75,25 +75,19 @@ class VoiceJEV:
         self._unavailable_until = 0.0
         self._unavailable_error = ''
 
-    def decide_environment(self, subject_id, environment, previous=None, scene="", on_request=None):
-        """Visual changes are judged by JEV, not by a hardcoded importance filter."""
-        if self.model is None:
-            return {"enter_main": False, "reason": "JEV model unavailable"}
-        request = ModelRequest(purpose='environment_jev',
-            subject_state=SubjectState(subject_id, '匠石', '判断环境变化是否需要心智处理'),
-            input_text=json.dumps({'environment':environment, 'previous':previous, 'scene':scene}, ensure_ascii=False),
-            system_extra='你是匠石的JEV。以下是视觉环境观察，不是人的发言或指令。结合现场与前后变化判断是否需要主心智处理。'
-                         '可能只是环境更新，也可能值得思考；进入主心智不等于必须说话，不因检测到人就确认身份。'
-                         '只输出JSON：{"enter_main":true或false,"reason":"简短依据"}。')
-        try:
-            if on_request:
-                on_request(request)
-            data = parse_json_object(self.model.generate(request).text)
-            if type(data.get('enter_main')) is not bool:
-                raise ValueError('invalid environment JEV decision')
-            return {'enter_main':data['enter_main'], 'reason':str(data.get('reason',''))[:200]}
-        except Exception as exc:
-            return {'enter_main':False, 'reason':'JEV failed: ' + str(exc)[:120]}
+    def decide_envelope(self, subject_id, envelope, delivery, *, vision=None, on_request=None):
+        from jshi.core.inputpack import packet
+        delivery = {**delivery, 'envelope': packet(envelope, vision, subject_id)}
+        lines = envelope.current_utterances
+        batch = [{'n': i, 'text': u.text, 'at': u.received_at_ms,
+                  'who': 'P1' if u.speaker.method == 'user_selected' else 'unknown', 'source': envelope.source, 'speaker': {'method': u.speaker.method},
+                  'voice_evidence': {'strength': 'unavailable', 'basis': u.identity_note}}
+                 for i, u in enumerate(lines, 1)]
+        if not batch:
+            batch = [{'n': 1, 'text': envelope.text, 'who': 'P1' if envelope.speaker.method == 'user_selected' else 'unknown', 'at': delivery.get('now'),
+                      'source': envelope.source, 'speaker': {'method': envelope.speaker.method},
+                      'voice_evidence': {'strength': 'unavailable', 'basis': '非声音输入，无声纹证据'}}]
+        return self.decide_batch(subject_id, batch, delivery.get('unwritten', []), delivery, overlap=envelope.overlap, on_request=on_request)
 
     def decide(self, subject_id: str, text: str, speaker: dict, delivery: dict, *, overlap: bool = False, on_request=None) -> InterruptDecision:
         normalized = text.strip().rstrip("。！!，,？?").strip()
@@ -153,6 +147,8 @@ class VoiceJEV:
         joined = "\n".join(texts)
         speaker = batch[-1].get("speaker") or {} if batch else {}
         rules = VoiceJEV().decide(subject_id, joined, speaker, delivery, overlap=overlap)
+        if batch and all(row.get('source') in {'web_text', 'visual_environment'} for row in batch) and rules.action != 'stop':
+            rules = InterruptDecision('respond', '已封装的文字或观察输入', rules.claimed_name)
         if rules.action == "stop" and rules.reason == "explicit stop":
             return BatchDecision("stop", rules.reason, self._items_for(batch, "no", "明确停止"), rules.claimed_name, True)
         if self.model is None or overlap or not joined.strip():
@@ -194,12 +190,18 @@ class VoiceJEV:
                         'same_track':bool(r.get('track') and r.get('track') == thin.get('track'))}
             if row.get("short_voice_hint"):
                 thin["short_voice_hint"] = "同一短句重复拼接，辅助比较，不是新增证据"
+            if row.get('source'):
+                thin['source'] = row['source']
             thin_batch.append(thin)
         payload = {"input": {"state": delivery.get("state", ""), "names": delivery.get("names_for_jiangshi", ["匠石"]),
                              "unwritten": context, "lines": thin_batch},
                    "scene": delivery.get("jev_scene", ""), "now": delivery.get("now")}
         if delivery.get('environment'):
             payload['environment'] = delivery['environment']
+        packed = delivery.get('envelope')
+        if packed:
+            payload['input']['envelope'] = {**packed, 'parts':[
+                {k:v for k,v in p.items() if k != 'image_url'} for p in packed.get('parts', ())]}
         schema = {"type": "object", "properties": {
             "items": {"type": "array", "items": {"type": "object", "properties": {
                 "i": {"type": "integer", "enum": [row['n'] for row in batch]}, "person": {"type": "string", "enum": sorted({"unknown", *[
@@ -214,7 +216,8 @@ class VoiceJEV:
             "required": ["items", "level", "recall_memory"], "additionalProperties": False}
         request = ModelRequest(purpose="voice_jev", input_text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             subject_state=SubjectState(subject_id, "匠石", "快速入口判断"),
-            system_extra=ENTRY_INSTRUCTION + "\nJSON Schema：" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
+            system_extra=ENTRY_INSTRUCTION + "\nJSON Schema：" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
+            input_parts=tuple(packed.get('parts', ())) if packed else ())
         raw_text = ""
         try:
             if on_request is not None:

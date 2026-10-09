@@ -9,6 +9,7 @@ class VisionConfig:
     api_key: str = ""
     model: str = "deepseek-flash"
     detector: str = "change"
+    jev_images: bool = False
     weights: str = "yolo11n.pt"
     sample_seconds: float = 2
     archive_seconds: float = 10
