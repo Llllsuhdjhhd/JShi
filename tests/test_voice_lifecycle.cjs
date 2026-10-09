@@ -40,7 +40,9 @@ async function main(){
   await call('end()');assert.equal(stops,2);
   const pending=call('startVoice()');await flush();releaseMic({getTracks:()=>[{stop:()=>stops++}]});await flush();
   await call('end()');assert.equal(await pending,false);assert.equal(stops,3);
-  assert.equal(node('text-dock').hidden,false);
+  assert.equal(node('text-dock').hidden,true);
+  node('mode-text').onclick();assert.equal(node('text-dock').hidden,false);node('mode-text').onclick();assert.equal(node('text-dock').hidden,true);
+  assert.equal(node('start').textContent,'开始对话');assert.equal(node('start').ariaPressed,'false');
   console.log('Voice lifecycle: deduplicated startup, late microphone cancellation and handshake cancellation passed');
 }
 main().catch(error=>{console.error(error);process.exitCode=1});

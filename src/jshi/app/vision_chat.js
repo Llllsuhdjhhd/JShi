@@ -52,7 +52,7 @@ class JShiVisionChat {
     }catch(e){if(token===this.epoch){this.stop();this.options.notice('摄像头未能开启：'+e.message);}return false;}
   }
   stop() {
-    ++this.epoch;clearInterval(this.timer);clearInterval(this.pollTimer);this.timer=this.pollTimer=null;
+    ++this.epoch;this.starting=null;clearInterval(this.timer);clearInterval(this.pollTimer);this.timer=this.pollTimer=null;
     const wasActive=!!this.stream;
     if(this.stream)this.stream.getTracks().forEach(t=>t.stop());this.stream=null;
     if(this.card&&wasActive){this.card.video.srcObject=null;this.card.video.hidden=true;this.card.label.textContent='画面已停止';
@@ -130,10 +130,10 @@ else {
     pin:card=>{$('vision-dock').replaceChildren(card);$('vision-dock').hidden=false},
     ensureVoice:async()=>{inputMode('vision');return startVoice()},notice:log,
     insert:card=>{if($('empty'))$('empty').remove();$('log').prepend(card);while($('log').children.length>100)$('log').lastChild.remove()},
-    state:active=>{$('camera-toggle').textContent=active?'停止画面':'摄像头'}});
+    state:active=>{$('camera-toggle').textContent=active?'观察中':'开始视频';$('camera-toggle').ariaPressed=String(active)}});
   $('attach-photo').onclick=()=>$('photo-file').click();
   $('photo-file').onchange=()=>{const file=$('photo-file').files[0];if(file)visualChat.attachPhoto(file);$('photo-file').value='';};
-  $('camera-toggle').onclick=()=>visualChat.stream?visualChat.stop():visualChat.start();
+  $('camera-toggle').onclick=()=>visualChat.stream||visualChat.starting?visualChat.stop():visualChat.start();
   $('close-media').onclick=()=>$('media-view').close();
   $('media-view').onclose=()=>{$('media-video').srcObject=null;};
   $('typed').addEventListener('paste',e=>{const file=[...(e.clipboardData?.files||[])].find(f=>f.type.startsWith('image/'));if(file){e.preventDefault();visualChat.attachPhoto(file);}});

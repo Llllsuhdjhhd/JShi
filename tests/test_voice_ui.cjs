@@ -72,10 +72,10 @@ console.log('Voice UI: multi-select, enrollment confirmation, prompt sections an
 vm.runInContext(`message({type:'timeline',input_id:'ranked',start_ms:0,end_ms:3000,text:'比较这句话',
   identity_note:JSON.stringify({candidates:[{object_id:'qf-id',label:'qf',score:.55},{object_id:'lux-id',label:'lux',score:.81},{object_id:'lg-id',label:'luguang',score:.7}]}),
   speaker:{object_id:'pending-id',label:'待定声音 1',track_id:'A'}});`,ctx);
-const ranking=vm.runInContext(`inputRows.get('ranked').p.children.find(x=>x.className==='voice-ranking').textContent`,ctx);
+const ranking=vm.runInContext(`inputRows.get('ranked').ranking.textContent`,ctx);
 assert.match(ranking,/第一名：lux 0\.810 · 第二名：luguang 0\.700/);
 assert.doesNotMatch(ranking,/qf-id|lux-id|lg-id/);
-assert.match(vm.runInContext(`inputRows.get('mixed').p.children.find(x=>x.className==='voice-ranking').textContent`,ctx),/没有有效声纹排名/);
+assert.match(vm.runInContext(`inputRows.get('mixed').ranking.textContent`,ctx),/没有有效声纹排名/);
 vm.runInContext(`message({type:'identity_final',input_id:'ranked',jev_status:'completed',certainty:'确定',reason:'声音辅助与相邻对话共同支持',
   speaker:{object_id:'lux-id',label:'lux',track_id:'A'},voice_initial:{label:'待定声音 1'}});`,ctx);
 assert.match(vm.runInContext(`inputRows.get('ranked').meta.textContent`,ctx),/lux.*JEV 最终判断：确定/);
@@ -87,10 +87,15 @@ vm.runInContext(`message({type:'identity_final',input_id:'ranked',jev_status:'fa
 assert.match(node('speaker').textContent,/JEV 判断失败，保留声纹初判/);
 // Text remains available in every input mode.
 vm.runInContext(`startVoice=async()=>true`,ctx);
-assert.equal(node('text-dock').hidden,false);
+assert.equal(node('text-dock').hidden,true);
 node('mode-text').onclick();
 assert.equal(node('text-dock').hidden,false);
 assert.equal(node('voice-dock').hidden,true);
+const hiddenBefore=vm.runInContext(`inputRows.get('ranked').extra.hidden`,ctx);assert.equal(hiddenBefore,true);
+vm.runInContext(`inputRows.get('ranked').toggle.onclick()`,ctx);assert.equal(vm.runInContext(`inputRows.get('ranked').extra.hidden`,ctx),false);
+assert.equal(vm.runInContext(`inputRows.get('one').extra.hidden`,ctx),true);
+vm.runInContext(`message({type:'input_route',input_id:'ranked',kept:false})`,ctx);assert.equal(vm.runInContext(`inputRows.get('ranked').extra.hidden`,ctx),false);
+vm.runInContext(`inputRows.get('ranked').toggle.onclick()`,ctx);assert.equal(vm.runInContext(`inputRows.get('ranked').extra.hidden`,ctx),true);
 node('mode-voice').onclick();
 assert.equal(node('text-dock').hidden,false);
 node('toggle-inspector').onclick();
