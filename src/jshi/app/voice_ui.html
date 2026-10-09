@@ -89,6 +89,17 @@
   #media-view{border:0;border-radius:14px;max-width:94vw;padding:12px;background:#fff}#media-view::backdrop{background:#18243a99}#media-view img{display:block;max-width:88vw;max-height:78vh;border-radius:8px}#media-view button{display:block;margin:0 0 8px auto}
   @media(max-width:700px){.media-preview{width:104px;height:72px}.media-photos img{width:88px;height:64px}.composer-top{gap:5px}#composer select{min-width:95px;flex:1}}
 #start,#camera-toggle{background:#f0f2f6;color:#738095}#start[aria-pressed=true],#camera-toggle[aria-pressed=true]{background:#3275f5;color:#fff}#log p.input .message-body{display:inline}#log p.input .input-person{font-size:16px}#log p.input{position:relative;padding-right:65px}#log .input-toggle{position:absolute;right:14px;top:16px;font-size:11px;padding:3px 6px;background:#fff;color:#718099}#log .input-extra{margin-top:10px;padding-top:8px;border-top:1px solid #dfe7f3}#log .input-extra[hidden]{display:none}#log .jev-detail{display:block;white-space:pre-wrap;margin:6px 0}#log .jev-detail[hidden]{display:none}#log .input-extra .select-input{float:none;margin-top:8px}
+  /* The live picture is the main stage; chat stays below it. */
+  #vision-dock{display:flex;flex:8 1 0;min-height:140px;max-width:none;width:100%;margin-bottom:10px}
+  #vision-dock .media-message{display:flex;flex-direction:column;width:100%;min-height:0;padding:10px 12px;border-radius:14px;overflow:hidden}
+  #vision-dock .media-header{gap:6px;font-size:12px;flex:none}#vision-dock .media-title{font-size:12px}#vision-dock .media-header button{font-size:11px;padding:3px 7px}
+  #vision-dock .media-body{display:flex;flex-direction:column;align-items:stretch;flex:1;min-height:0;margin-top:8px;gap:8px}
+  #vision-dock .media-preview{display:block;flex:1;min-height:0;width:100%;height:100%;object-fit:contain;background:#19212d;border-radius:9px}
+  #vision-dock .media-copy{flex:none;width:100%}#vision-dock .media-description{font-size:12px;-webkit-line-clamp:1}#vision-dock .media-meta{font-size:11px;margin-top:2px}
+  .conversation:has(#vision-dock:not([hidden])) .message-scroll{flex:3 1 0;min-height:100px;border-top:1px solid #e5e9f1;padding-top:10px}
+  #vision-dock:has([data-display=hidden]){flex:0 0 auto;min-height:0}#vision-dock .media-message[data-display=hidden] .media-body{display:none}
+  .conversation:has(#vision-dock [data-display=hidden]) .message-scroll{flex:1}
+  @media(max-width:700px){#vision-dock{min-height:110px}#vision-dock .media-message{padding:8px}#vision-dock .media-header{gap:4px}}
 </style>
 <main>
   <header class="page-header"><h1><span class="brand-mark" aria-hidden="true">匠</span>和匠石说话</h1>
@@ -111,8 +122,9 @@
   </div>
   <p id="layout-empty" class="layout-empty" hidden>对话与检查面板已隐藏，点击右上角图标恢复。</p>
   <div class="workspace" id="workspace"><section class="conversation" id="conversation" aria-label="对话">
+  <div id="vision-dock" hidden aria-label="实时画面"></div>
   <div class="message-scroll"><div id="live"></div><section id="log" aria-live="polite"><div class="empty" id="empty"><strong>在这里，和匠石聊聊</strong><span>开启语音，或在下方切换文字输入</span></div></section><p id="rename-ask" hidden></p></div>
-  <div class="input-dock"><div class="input-modes" aria-label="输入方式"><button id="mode-voice" hidden aria-pressed="false">语音</button><button id="mode-text" aria-pressed="false">文字</button><button id="mode-vision" aria-pressed="false" hidden>视觉</button><div id="vision-dock" hidden aria-label="实时画面"></div><span class="dock-help">登记、记忆与调试在右上角</span></div>
+  <div class="input-dock"><div class="input-modes" aria-label="输入方式"><button id="mode-voice" hidden aria-pressed="false">语音</button><button id="mode-text" aria-pressed="false">文字</button><button id="mode-vision" aria-pressed="false" hidden>视觉</button><span class="dock-help">登记、记忆与调试在右上角</span></div>
   <div class="voice-dock" id="voice-dock" hidden><span class="voice-dot"></span><span id="voice-hint">点击右上角「开始对话」，开启语音输入</span></div>
   <div id="text-dock" hidden><form id="composer" aria-label="文字对话"><div class="composer-top"><label for="text-person">发言人物</label><select id="text-person" aria-label="选择文字输入人物"><option value="">请选择人物</option></select><button id="text-people-refresh" type="button" class="secondary">刷新</button><button id="attach-photo" type="button" class="secondary" hidden>图片</button><input id="photo-file" type="file" accept="image/*" hidden></div><textarea id="typed" maxlength="2000" placeholder="写点什么…  Ctrl / ⌘ + Enter 发送"></textarea><button id="send-text">发送</button></form>
   <p id="text-status" class="tip" role="status" aria-live="polite">选择发言人物后即可发送。Enter 换行。</p>

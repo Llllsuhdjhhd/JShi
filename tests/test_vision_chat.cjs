@@ -24,7 +24,7 @@ async function main(){
   chat.viewCamera();assert.equal(nodes.get('media-video').srcObject,chat.stream);assert.equal(nodes.get('media-view').open,true);assert.equal(calls,1);
   for(let n=0;n<25;n++){data.environment.frame=String(n);await chat.poll();}
   assert.equal(cards.length,0);assert.equal(pinned.length,1);assert.equal(pinned[0].dataset.display,'compact');
-  pinned[0].children[0].children.find(x=>x.textContent==='隐藏').onclick();
+  pinned[0].children[0].children.find(x=>x.textContent==='隐藏画面').onclick();
   assert.equal(pinned[0].dataset.display,'hidden');
   data.errors=[{at:1,message:'JSHI_VISION_API_KEY'}];await chat.poll();
   assert.equal(chat.card.description.textContent,'有人在门边');

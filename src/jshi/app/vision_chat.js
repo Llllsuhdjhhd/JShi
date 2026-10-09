@@ -12,7 +12,8 @@ class JShiVisionChat {
     const card=this.element('article','media-message');card.dataset.display=pinned?'compact':this.display;
     const header=this.element('div','media-header'),label=this.element('span','media-title',title);
     header.appendChild(label);
-    for(const [mode,text] of [['compact','缩略'],['normal','展开'],['hidden','隐藏']]) {
+    const controls=pinned ? [['compact','显示画面'],['normal','放大'],['hidden','隐藏画面']] : [['compact','缩略'],['normal','展开'],['hidden','隐藏']];
+    for(const [mode,text] of controls) {
       const button=this.element('button','',text);button.type='button';
       button.onclick=()=>{if(pinned&&mode==='normal'){this.viewCamera();return;}card.dataset.display=mode;this.display=mode;try{localStorage.setItem('jshi.media.display',mode)}catch{}};
       header.appendChild(button);
