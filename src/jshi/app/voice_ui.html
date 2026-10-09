@@ -422,7 +422,6 @@ function message(m) {
     const extra=document.createElement('div');extra.className='input-extra';extra.hidden=true;extra.appendChild(meta);p.appendChild(extra);
     const jevNote=document.createElement('small');jevNote.className='jev-detail';jevNote.hidden=true;extra.appendChild(jevNote);
     const toggle=document.createElement('button');toggle.className='input-toggle';toggle.textContent='详情';toggle.ariaExpanded='false';toggle.onclick=()=>{extra.hidden=!extra.hidden;toggle.textContent=extra.hidden?'详情':'隐藏';toggle.ariaExpanded=String(!extra.hidden);};p.appendChild(toggle);
-    if(p.children[0]?.tagName==='TIME')extra.prepend(p.children[0]);
     const ranking=document.createElement('small');ranking.className='voice-ranking';
     try{
       const d=JSON.parse(m.identity_note || '{}');
