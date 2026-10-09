@@ -7,7 +7,7 @@ const html = fs.readFileSync(path.join(__dirname,'../src/jshi/app/voice_ui.html'
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const nodes = new Map();
 function node(id) {
-  if (!nodes.has(id)) nodes.set(id,{textContent:'',children:[],value:0,classList:{add(){},remove(){}},appendChild(){},prepend(p){this.children.unshift(p);},replaceChildren(){},add(){}});
+  if (!nodes.has(id)) nodes.set(id,{textContent:'',children:[],value:0,focus(){},classList:{add(){},remove(){}},appendChild(){},prepend(p){this.children.unshift(p);},replaceChildren(){},add(){}});
   return nodes.get(id);
 }
 const sent = [], sources = [];

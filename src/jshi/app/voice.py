@@ -1794,6 +1794,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     async def worklet(request):
         return web.FileResponse(Path(__file__).with_name("voice_capture.js"))
 
+    async def vision_chat_script(request):
+        return web.FileResponse(Path(__file__).with_name('vision_chat.js'))
+
     async def enrollment_page(request):
         return web.FileResponse(Path(__file__).with_name('voice_enroll.html'))
 
@@ -2220,6 +2223,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     app.router.add_get("/", page)
     app.router.add_get("/voice_capture.js", worklet)
     app.router.add_get("/status", status)
+    app.router.add_get('/vision_chat.js', vision_chat_script)
     app.router.add_get('/text-people', text_people)
     app.router.add_post('/text-input', text_input)
     from jshi.app.web_data import register_data_routes

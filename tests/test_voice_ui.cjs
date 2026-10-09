@@ -10,6 +10,7 @@ class Element {
   get options(){return this.children;}
   get lastChild(){return this.children.at(-1);}
   focus(){}
+  pause(){}
   showModal(){this.open=true;}
   close(){this.open=false;if(this.onclose)this.onclose();}
 }
@@ -19,7 +20,7 @@ const ctx=vm.createContext({document:{getElementById:node,createElement:()=>new 
   Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},WebSocket:{OPEN:1},sent,
 });
 vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1],ctx);
-vm.runInContext(`ws={readyState:1,send:x=>sent.push(JSON.parse(x))};
+vm.runInContext(`ws={readyState:1,close(){},send:x=>sent.push(JSON.parse(x))};
 message({type:'timeline',input_id:'one',start_ms:1000,end_ms:3000,text:'第一句',speaker:{object_id:'unknown-A',label:'未知',track_id:'7'}});
 message({type:'timeline',input_id:'two',start_ms:3100,end_ms:5000,text:'第二句',speaker:{object_id:'unknown-B',label:'未知',track_id:'9'}});
 inputRows.get('one').button.onclick();inputRows.get('two').button.onclick();`,ctx);
@@ -84,13 +85,14 @@ vm.runInContext(`message({type:'identity_final',input_id:'one',jev_status:'faile
 assert.match(node('speaker').textContent,/lux/); // Older batches must not replace the latest speaker.
 vm.runInContext(`message({type:'identity_final',input_id:'ranked',jev_status:'failed',reason:'输出无效',speaker:{label:'待定声音',object_id:'unknown',track_id:'A'},voice_initial:{label:'待定声音'}});`,ctx);
 assert.match(node('speaker').textContent,/JEV 判断失败，保留声纹初判/);
-// Ordinary conversations should not expose debugging or a permanent text box.
-assert.equal(node('text-dock').hidden,true);
+// Text remains available in every input mode.
+vm.runInContext(`startVoice=async()=>true`,ctx);
+assert.equal(node('text-dock').hidden,false);
 node('mode-text').onclick();
 assert.equal(node('text-dock').hidden,false);
 assert.equal(node('voice-dock').hidden,true);
 node('mode-voice').onclick();
-assert.equal(node('text-dock').hidden,true);
+assert.equal(node('text-dock').hidden,false);
 node('toggle-inspector').onclick();
 assert.equal(node('debug-workspace').hidden,false);
 assert.equal(node('conversation').hidden,false);
@@ -107,5 +109,7 @@ node('close-inspector').onclick();
 assert.equal(node('debug-workspace').hidden,true);
 assert.equal(node('conversation').hidden,false);
 assert.equal(node('toggle-inspector').ariaExpanded,'false');
-assert.doesNotMatch(html,/<dialog\b/);
+assert.match(html, /id="media-view"/);
+assert.doesNotMatch(html, /id="vision-panel"/);
+assert.equal((html.match(/id="composer"/g)||[]).length,1);
 console.log('Conversation layout: inline debugging, maximize, restore and hide passed');
