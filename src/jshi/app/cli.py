@@ -612,6 +612,20 @@ def _run_overlay(args: argparse.Namespace) -> None:
     print(json.dumps(snapshot.values, ensure_ascii=False))
 
 
+def _interactive_subject_id(data_dir: Path, requested: str | None, identities=None) -> str:
+    """Validate before constructing memory clients or loading device models."""
+    from jshi.app.talk_session import load_session
+    identities = identities if identities is not None else IdentityRepository(data_dir / 'identities.json')
+    subject_id = (requested or load_session(data_dir).get('subject_id') or '').strip()
+    available = identities.subject_ids()
+    if subject_id in available:
+        return subject_id
+    choices = '、'.join(f'{sid}（{identities.get(sid).name}）' for sid in available)
+    reason = f'找不到主体ID：{subject_id}。' if subject_id else '请指定主体ID。'
+    raise SystemExit(reason + '主体是匠石实例，不是发言人物。' +
+                     (f'可用主体：{choices}。' if choices else '当前目录没有主体，请先创建主体。'))
+
+
 def main() -> None:
     _load_local_env()
     args = _parser().parse_args()
@@ -641,6 +655,8 @@ def main() -> None:
         result = port.refresh_person_experience(args.subject_id, args.object_id)
         print(json.dumps(vars(result), ensure_ascii=False))
         return
+    if args.command in {'voice', 'vision'}:
+        args.subject_id = _interactive_subject_id(args.data_dir, args.subject_id)
     process, identities, subjects = _runtime(args.data_dir, enable_vision=args.command == 'vision')
     if args.command == 'vision':
         from jshi.app.voice import run_voice

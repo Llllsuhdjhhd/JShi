@@ -2236,16 +2236,13 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
 
 
 def run_voice(process, identities, args) -> None:
-    from jshi.app.talk_session import load_session
+    from jshi.app.cli import _interactive_subject_id
+    subject_id = _interactive_subject_id(args.data_dir, args.subject_id, identities)
     try:
         from aiohttp import web
     except ImportError:
         raise SystemExit('语音入口需要安装：python -m pip install -e ".[voice]"')
     config = VoiceConfig.from_env(asr=args.asr, tts=args.tts)
-    subject_id = args.subject_id or load_session(args.data_dir).get("subject_id")
-    if not subject_id:
-        raise SystemExit("请指定主体 id，或先用 talk 建立一次会话。")
-    identities.get(subject_id)
     from jshi.core.skillconfig import SkillConfigStore, build_model_port
     from jshi.app.cli import _skills_config_path
     store = SkillConfigStore()
