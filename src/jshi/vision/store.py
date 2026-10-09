@@ -128,11 +128,14 @@ class VisionStore:
             row = c.execute("select * from snapshots where id=? and subject=?", (sid, subject)).fetchone()
             if row is None:
                 return None
-            result = dict(row)
-            result['image_available'] = bool(c.execute("select 1 from frames where id=? and subject=?", (row['frame'], subject)).fetchone())
+            return self._snapshot_row(c, row)
+
+    @staticmethod
+    def _snapshot_row(c, row):
+        result = dict(row)
+        result['image_available'] = bool(c.execute("select 1 from frames where id=? and subject=?", (row['frame'], row['subject'])).fetchone())
         result['detections'] = json.loads(result['detections'])
-        with self.db() as c:
-            envelope = c.execute('select metadata from envelopes where frame=?', (result['frame'],)).fetchone()
+        envelope = c.execute('select metadata from envelopes where frame=?', (result['frame'],)).fetchone()
         result['envelope'] = json.loads(envelope[0]) if envelope else None
         return result
 
@@ -143,22 +146,26 @@ class VisionStore:
 
     def latest_sample(self, subject):
         """Latest captured photo with separately dated completed understanding."""
-        current = self.latest(subject)
         with self.db() as c:
-            row = c.execute('select frame from sample_current where subject=?', (subject,)).fetchone()
-        if not row:
-            return current
-        frame = row[0]
-        if current and current['frame'] == frame:
-            return current
-        description = current['description'] if current else '尚未完成线上环境描述。'
-        with self.db() as c:
-            existing = c.execute('select id from snapshots where subject=? and frame=? and description=? and reason=? order by completed desc limit 1',
+            # Selection and snapshot creation must share a transaction. Otherwise
+            # the sampler can replace/delete this frame before publish reads it.
+            c.execute('begin immediate')
+            current = c.execute('select s.* from current u join snapshots s on s.id=u.snapshot where u.subject=?', (subject,)).fetchone()
+            sample = c.execute('select f.id,f.captured from sample_current u join frames f on f.id=u.frame where u.subject=?', (subject,)).fetchone()
+            if not sample or (current and current['frame'] == sample['id']):
+                return self._snapshot_row(c, current) if current else None
+            frame = sample['id']
+            description = current['description'] if current else '尚未完成线上环境描述。'
+            existing = c.execute('select * from snapshots where subject=? and frame=? and description=? and reason=? order by completed desc limit 1',
                                  (subject, frame, description, 'sample')).fetchone()
-        if existing:
-            return self.snapshot(existing[0], subject)
-        return self.publish(subject, frame, description, reason='sample', model='local',
-                            described_at=current['described_at'] if current else 0, make_current=False)
+            if existing:
+                return self._snapshot_row(c, existing)
+            sid = uuid4().hex
+            c.execute('insert into snapshots values(?,?,?,?,?,?,?,?,?,?,?)', (
+                sid, subject, frame, sample['captured'], time(), description, '[]', 'sample', 'local',
+                current['described_at'] if current else 0,
+                current['description_frame'] if current else frame))
+            return self._snapshot_row(c, c.execute('select * from snapshots where id=?', (sid,)).fetchone())
 
     def memories(self, subject, limit=30):
         with self.db() as c:
@@ -238,6 +245,7 @@ class VisionStore:
 
     def cleanup(self):
         with self.db() as c:
+            c.execute('begin immediate')
             protected = {r[0] for r in c.execute('''select frame from snapshots where id in
                 (select snapshot from current union select snapshot from bindings where retain_photo=1 union select snapshot from events where retain_photo=1)''')}
             protected.update(r[0] for r in c.execute('''select description_frame from snapshots where id in

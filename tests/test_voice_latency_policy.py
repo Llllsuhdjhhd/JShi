@@ -38,6 +38,34 @@ def test_overlapping_batch_is_not_dropped_or_used_to_confirm_identity():
     assert fallback.action=='respond' and all(i.keep for i in fallback.items)
 
 
+def test_visual_snapshot_wait_keeps_voice_event_loop_responsive(process):
+    from types import SimpleNamespace
+    from jshi.core.envelope import InputPart
+    entered, release = Event(), Event()
+    def delayed(subject):
+        entered.set()
+        assert release.wait(3)
+        return None
+    process.vision = SimpleNamespace(store=SimpleNamespace(latest_sample=delayed))
+    async def run():
+        async def send(message): pass
+        c = VoiceConversation(process, 'stone', FakeCloud(), send)
+        speaker = SpeakerEvidence('A')
+        u = SceneUtterance('匠石，你听得到吗', speaker, 0, 2000, input_id='direct')
+        e = InputEnvelope('test', 'voice', (InputPart('text', u.text),), speaker, current_utterances=(u,))
+        task = asyncio.create_task(c._judge((u,), speaker, False, e))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            # An event-loop timer must fire while SQLite still waits in a worker.
+            await asyncio.wait_for(asyncio.sleep(.01), .5)
+            assert not task.done()
+        finally:
+            release.set()
+            await task
+            await c.close()
+    asyncio.run(run())
+
+
 def test_failed_jev_keeps_tools_without_speculative_history_search():
     for failure in ({'timed_out': True}, {'model_error': 'HTTP 402'}, {'model_error': 'invalid JSON'}):
         assert select_profile(['a'], [{'input_ids': ['a'], **failure}]) == PromptProfile(1, recall_memory=False)

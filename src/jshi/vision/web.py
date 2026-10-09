@@ -46,7 +46,8 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
             data = await request.read()
             if len(data) > vision.config.max_image_bytes:
                 raise ValueError('图片过大')
-            vision.submit(subject_id, data, captured, source, clock={'source_time':source_time,'clock_offset':offset,'clock_uncertainty':uncertainty})
+            await asyncio.to_thread(vision.submit, subject_id, data, captured, source,
+                clock={'source_time':source_time,'clock_offset':offset,'clock_uncertainty':uncertainty})
             last_sample[source] = time()
         except (ValueError, RuntimeError) as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -68,7 +69,7 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
             payload = await request.json()
             frame = str(payload['frame'])
             question = str(payload.get('question', '重新描述照片里的环境'))[:1000]
-            if not vision.request_action(subject_id, f'回看照片 {frame}：{question}'):
+            if not await asyncio.to_thread(vision.request_action, subject_id, f'回看照片 {frame}：{question}'):
                 raise ValueError('照片不可用或观察任务正忙')
         except (ValueError, KeyError, TypeError) as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -80,7 +81,7 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
             try:
                 await deliver(environment, {})
             except Exception as exc:
-                vision.store.error(subject_id, exc)
+                await asyncio.to_thread(vision.store.error, subject_id, exc)
             finally:
                 queue.task_done()
 

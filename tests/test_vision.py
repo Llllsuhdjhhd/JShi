@@ -167,6 +167,63 @@ def test_recall_action_uses_photo_without_replacing_current(store):
     finally: service.close()
 
 
+def test_failed_observation_can_retry_same_photo_and_question(store):
+    snapshot(store)
+    class Recovering(Model):
+        def describe(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError('temporary network failure')
+            return '恢复后的观察结果'
+    service = VisionService(store, store.config, Recovering(), Detector())
+    try:
+        assert service.request_action('stone', '仔细看画面里的人')
+        assert service.action_future.result(timeout=3) is None
+        assert service.request_action('stone', '仔细看画面里的人')
+        assert service.action_future.result(timeout=3)['description'] == '恢复后的观察结果'
+        assert not service.request_action('stone', '仔细看画面里的人')
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize('route', ['interpret', 'frame'])
+def test_visual_operations_wait_without_blocking_http_loop(store, monkeypatch, route):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+    from threading import Event
+    from types import SimpleNamespace
+    from jshi.vision.web import install_vision
+    entered, release = Event(), Event()
+    service = VisionService(store, store.config, Model(), Detector())
+    def delayed(*args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        return True
+    monkeypatch.setattr(service, 'request_action' if route == 'interpret' else 'submit', delayed)
+    async def deliver(*args): pass
+    async def ping(request): return web.Response(text='ready')
+    async def run():
+        app = web.Application()
+        install_vision(app, SimpleNamespace(vision=service), 'stone', deliver)
+        app.router.add_get('/ping', ping)
+        async with TestClient(TestServer(app)) as client:
+            headers = {'Origin':str(client.make_url('')).rstrip('/')}
+            kwargs = {'json':{'frame':'test'}} if route == 'interpret' else {'data':image()}
+            pending = asyncio.create_task(client.post('/api/vision/'+route, headers=headers, **kwargs))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                response = await asyncio.wait_for(client.get('/ping'), .5)
+                assert await response.text() == 'ready'
+            finally:
+                release.set()
+                assert (await pending).status == 202
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+        service.close()
+
+
 def test_image_adapter_sends_real_image_parts():
     payloads = []
     def send(p):
@@ -365,6 +422,71 @@ def test_slow_cloud_does_not_block_local_sampling_or_photo_archive(store):
         release.set()
     finally:
         release.set(); service.close()
+
+
+@pytest.mark.parametrize('arrival_seconds', [.005, .01, .02])
+def test_background_speech_and_slow_vision_do_not_starve_direct_question(store, process, arrival_seconds):
+    from threading import Event
+    from tests.test_voice import FakeCloud, Model as Cognition
+    from jshi.app.voice import VoiceConversation
+    from jshi.voice.volc import Transcript
+    entered, release, main_entered = Event(), Event(), Event()
+    class SlowVision:
+        def describe(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            return '测试现场'
+    class Main(Cognition):
+        def generate(self, request):
+            if '匠石，你听得到吗' in request.input_text:
+                main_entered.set()
+            return super().generate(request)
+    class Judge:
+        name = 'test-entry'
+        def generate(self, request):
+            from jshi.models import ModelResponse
+            lines = json.loads(request.input_text)['input']['lines']
+            return ModelResponse(text=json.dumps({'items':[
+                {'i':row['i'],'person':'unknown','certainty':'unknown','why':'测试声音，无身份依据'}
+                for row in lines], 'level':3, 'recall_memory':False}),model=self.name)
+    service = VisionService(store, store.config, SlowVision(), Detector())
+    process.vision, process.cognition = service, Main()
+    noise = ['我已经', 'J', 'T THE WEST', '作业做好了吗', '嗯']
+    async def run():
+        messages = []
+        async def send(message): messages.append(message)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send,
+            jev=VoiceJEV(Judge()), input_pause_s=.02, input_max_batch_s=.05)
+        stop = asyncio.Event()
+        async def produce():
+            i = 0
+            while not stop.is_set():
+                text = '匠石，你听得到吗' if i == 6 else noise[i % len(noise)]
+                await c.accept(Transcript(text, 'A', i*1000, i*1000+900, True))
+                service.submit('stone', image('blue'), time())
+                i += 1
+                await asyncio.sleep(arrival_seconds)
+        task = asyncio.create_task(produce())
+        try:
+            assert await asyncio.to_thread(main_entered.wait, 3), {
+                'notices':[m for m in messages if m.get('type') == 'notice'],
+                'requests':[r.input_text for r in process.cognition.requests]}
+            assert not release.is_set() and not task.done()
+            assert not any('photo unavailable' in str(m) for m in messages)
+        finally:
+            stop.set()
+            await task
+            release.set()
+            await asyncio.wait_for(c.queue.join(), 3)
+            await asyncio.wait_for(c.turn_queue.join(), 3)
+            await c.close()
+    try:
+        service.submit('stone', image(), time())
+        assert entered.wait(2)
+        asyncio.run(run())
+    finally:
+        release.set()
+        service.close()
 
 
 def test_cloud_description_merges_with_newer_local_positions(store):

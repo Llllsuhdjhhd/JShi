@@ -7,7 +7,7 @@ from .model import VisionModel
 
 
 class VisionService:
-    """One independent worker, at most one pending frame; consumers never wait."""
+    """Separate sampling and cloud workers, each with one pending frame."""
     def __init__(self, store, config, model=None, detector=None):
         self.store, self.config = store, config
         self.model = model or VisionModel(config)
@@ -185,10 +185,10 @@ class VisionService:
             if len(self.completed_actions) > 256:
                 self.completed_actions = {action_key}
             self.action_future = self.model_executor.submit(self._action, subject, frame, match[2] if match else action,
-                                                      'recall_image' if match else 'observation_result')
+                                                      'recall_image' if match else 'observation_result', action_key)
         return True
 
-    def _action(self, subject, frame, question, reason):
+    def _action(self, subject, frame, question, reason, action_key=None):
         try:
             description = self.recall_image(subject, frame, question)
             if reason == 'recall_image':
@@ -199,6 +199,9 @@ class VisionService:
             return result
         except Exception as exc:
             self.store.error(subject, exc)
+            # Deduplicate successful observations, not failed attempts.
+            with self.lock:
+                self.completed_actions.discard(action_key)
             return None
         finally:
             self.store.protect(frame, False)

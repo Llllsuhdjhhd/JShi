@@ -1046,8 +1046,14 @@ class VoiceConversation:
             if source == 'voice' and utterances:
                 parts += (InputPart('audio', reference=f'session:{self.session_id}:{utterances[0].start_ms}-{utterances[-1].end_ms}', media_type='audio/pcm'),)
             envelope = InputEnvelope(self.session_id, source, parts, speaker, current_utterances=tuple(utterances))
-        envelope = pack_input(envelope, getattr(self.process, 'vision', None), self.subject_id)
-        delivery['envelope'] = packet(envelope, getattr(self.process, 'vision', None), self.subject_id)
+        visual = getattr(self.process, 'vision', None)
+        input_prepare_started = monotonic()
+        def prepare_input():
+            packed = pack_input(envelope, visual, self.subject_id)
+            return packed, packet(packed, visual, self.subject_id)
+        # Snapshot reads can wait behind a photo write; keep audio/socket handling live.
+        envelope, delivery['envelope'] = await asyncio.to_thread(prepare_input)
+        input_prepare_ms = round((monotonic() - input_prepare_started) * 1000)
         cutoff = min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=float("inf"))
         feedback = self.interaction_feedback.snapshot(cutoff_ms=cutoff)
         for row in feedback['questions']:
@@ -1107,6 +1113,7 @@ class VoiceConversation:
                 result = open_batch("未能初判")
         decision = InterruptDecision(result.action, result.reason, result.claimed_name)
         record = {"ms": round((monotonic() - started) * 1000), "action": decision.action,
+                  "input_prepare_ms": input_prepare_ms,
                   "path": path, "timed_out": timed_out, "reason": decision.reason[:80],
                   "items": [asdict(item) for item in result.items], "needs_main_review": result.needs_main_review,
                   "input_ids": [u.input_id for u in utterances],
@@ -1742,7 +1749,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         import hashlib
         scene_store = JEVSceneStore(process.repository.path.parent / 'jev_scenes' / hashlib.sha256(subject_id.encode()).hexdigest()[:16] / 'text-entry.json')
         scene, unwritten = scene_store.view(time()*1000)
-        envelope = pack_input(envelope, visual, subject_id)
+        envelope = await asyncio.to_thread(pack_input, envelope, visual, subject_id)
         judge = jev or VoiceJEV()
         def capture(request):
             process._record_step_input(request, judge.model, subject_id=subject_id, activity_id='jev-'+envelope.input_id)
