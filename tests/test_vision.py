@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import replace
 from io import BytesIO
 from time import time
@@ -204,6 +205,29 @@ def test_memory_batch_associations_and_recall(store):
     assert '回看照片' in recalled.content
     memory.ingest_batch(batch)
     assert all('客厅里' not in e.text for e in b.batch.experiences)
+    rows = [json.loads(line) for line in (store.root.parent / 'memory_phase_timings.jsonl').read_text(encoding='utf-8').splitlines()]
+    recall = next(row for row in rows if row['operation'] == 'recall')
+    assert recall['returned_count'] == 1
+    assert recall['backend_ms'] >= 0 and recall['visual_associations_ms'] >= 0
+    assert recall['status'] == 'succeeded'
+    assert '客厅' not in json.dumps(rows, ensure_ascii=False)
+    ingest = next(row for row in rows if row['operation'] == 'ingest')
+    assert all(ingest[name] >= 0 for name in ('lock_wait_ms', 'backend_ms', 'visual_prepare_ms', 'visual_delivery_ms'))
+
+
+def test_visual_diagnostic_write_failure_does_not_break_recall(store, monkeypatch):
+    from pathlib import Path
+    original = Path.open
+    def fail_diagnostics(path, *args, **kwargs):
+        if path.name == 'memory_phase_timings.jsonl':
+            raise OSError('diagnostic file unavailable')
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', fail_diagnostics)
+    class Backend:
+        def recall(self, *args, **kwargs):
+            return (RecalledFragment('event-test', 'event', '有效记忆'),)
+    memory = VisualMemory(Backend(), store)
+    assert memory.recall('stone', '测试')[0].text == '有效记忆'
 
 
 def test_visual_packet_uses_existing_jev_schema():
