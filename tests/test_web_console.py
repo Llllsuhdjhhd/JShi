@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,31 @@ from jshi.app.voice import VoiceConversation, create_app
 from jshi.app.web_data import WebData
 from jshi.voice.config import VoiceConfig
 from tests.test_voice import FakeCloud, process
+
+
+def test_person_photo_binding_requires_existing_person_and_same_origin(process):
+    from PIL import Image
+    from jshi.recognition.photos import PersonPhotos
+    out = BytesIO()
+    Image.new('RGB', (48, 64), 'blue').save(out, 'PNG')
+    async def run():
+        async with TestClient(TestServer(create_app(process,'stone',VoiceConfig(api_key='')))) as client:
+            url = str(client.make_url('')).rstrip('/')
+            assert (await client.get('/api/person-photo/lux-id')).status == 404
+            assert (await client.post('/api/person-photo/lux-id', data=out.getvalue())).status == 403
+            assert (await client.post('/api/person-photo/missing', headers={'Origin':url}, data=out.getvalue())).status == 404
+            assert (await client.post('/api/person-photo/lux-id', headers={'Origin':url}, data=b'bad')).status == 400
+            response = await client.post('/api/person-photo/lux-id', headers={'Origin':url}, data=out.getvalue())
+            assert response.status == 200
+            response = await client.get('/api/person-photo/lux-id')
+            assert response.status == 200 and response.content_type == 'image/jpeg'
+            with Image.open(BytesIO(await response.read())) as image:
+                assert image.size == (48,64)
+            assert (await client.get('/api/person-photo/lux-id',headers={'Sec-Fetch-Site':'cross-site'})).status == 403
+    asyncio.run(run())
+    store = PersonPhotos(process.repository.path.parent)
+    assert store.get('other','lux-id') is None
+    assert store.get('stone','lux-id') is not None
 
 
 def test_data_search_is_scoped_paginated_and_read_only(tmp_path):

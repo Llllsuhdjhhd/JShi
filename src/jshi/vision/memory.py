@@ -1,10 +1,12 @@
 """Sidecar media associations work with both in-process and REMS backends."""
 from dataclasses import replace
-from threading import Lock
+from threading import Lock, Timer, get_ident
 from time import perf_counter
 from datetime import datetime, timezone
 import json
 import logging
+import sys
+import traceback
 
 
 class VisualMemory:
@@ -60,10 +62,27 @@ class VisualMemory:
         timings = {'started_at': datetime.now(timezone.utc).isoformat(), 'operation': 'recall', 'subject_id': subject_id,
                    'query_chars': len(query), 'limit': kwargs.get('limit')}
         started = perf_counter()
+        watcher = self._watch_slow_call(timings, started)
         try:
             return self._recall(subject_id, query, timings, **kwargs)
         finally:
+            watcher.cancel()
             self._record_timings(timings, started)
+
+    def _watch_slow_call(self, timings, started):
+        thread_id = get_ident()
+        def sample():
+            frame = sys._current_frames().get(thread_id)
+            if frame is None:
+                return
+            # Stack locations only: no query, image, credentials or frame locals.
+            stack = [{'file': f.filename, 'line': f.lineno, 'function': f.name}
+                     for f in traceback.extract_stack(frame)[-24:]]
+            self._record_timings({**timings, 'status': 'running_slow', 'stack': stack}, started)
+        watcher = Timer(5.0, sample)
+        watcher.daemon = True
+        watcher.start()
+        return watcher
 
     def _recall(self, subject_id, query, timings, **kwargs):
         backend_started = perf_counter()

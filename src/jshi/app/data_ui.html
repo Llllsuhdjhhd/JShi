@@ -31,6 +31,7 @@ function memoryLinks(box,ids,label='查看记忆'){
  for(const id of ids)relatedButton(group,label+' '+id.slice(0,14),'memory:events',id);box.appendChild(group);
 }
 function memoryView(box,data,source){
+ if(['memory:object_portraits','memory:portrait_summaries','memory:person_experience_portraits'].includes(source))personPhoto(box,data);
  if(source==='memory:events'){
   addSection(box,'原始记忆正文',data.content_raw||'未保存正文');
   addSection(box,'模型已整理的分档摘要',data.summaries||'暂无摘要');
@@ -94,6 +95,7 @@ function organizedView(box,data,source){
   addSection(box,'状态变化',{对象类型:data.target_type,从:data.from_state,变为:data.to_state,依据:data.reason});return true;
  }
  if(source==='subject:object_profiles'){
+  personPhoto(box,data);
   addSection(box,'人物基本资料',{姓名:data.label,别名:data.aliases||[],状态:data.status,来源:data.source,声音参考数量:(data.carriers||[]).filter(c=>c.kind==='voiceprint').length});
   for(const [label,target] of [['肖像','memory:object_portraits'],['经历','memory:person_experience_portraits'],['记忆','memory:events']])relatedButton(box,'查看人物'+label,target,data.object_id);return true;
  }
@@ -105,6 +107,19 @@ function organizedView(box,data,source){
   addSection(box,'查看说明','这是当前保存材料；待写内容、准备回应和实际已播出须按记录状态区分。');return true;
  }
  return false;
+}
+function personPhoto(box,data){
+ if(!data.object_id)return;
+ const group=document.createElement('section');group.className='value-section';
+ const title=document.createElement('div');title.className='value-label';title.textContent='人物照片';
+ const image=document.createElement('img');image.alt=(people[data.object_id]||data.label||'人物')+'的照片';image.style.cssText='display:block;max-width:260px;max-height:220px;object-fit:contain;border-radius:10px;margin:8px 0';
+ const url='/api/person-photo/'+encodeURIComponent(data.object_id);image.src=url;
+ const note=document.createElement('div');note.className='muted';note.textContent='由明确选定的照片绑定人物；不会根据说话声音自动认定画面中的人。';
+ image.onerror=()=>{image.hidden=true;note.textContent='尚未设置人物照片。请选择这个人的照片。'};
+ const choose=document.createElement('label');choose.className='copy-record';choose.textContent='设置 / 更换人物照片 ';
+ const file=document.createElement('input');file.type='file';file.accept='image/*';file.style.maxWidth='100%';
+ file.onchange=async()=>{if(!file.files?.[0])return;file.disabled=true;try{const r=await fetch(url,{method:'POST',body:file.files[0]});if(!r.ok)throw new Error(await r.text());image.hidden=false;image.src=url+'?v='+Date.now();note.textContent='人物照片已保存。';}catch(e){note.textContent='照片未保存：'+e.message;}finally{file.disabled=false;}};
+ choose.appendChild(file);group.append(title,image,note,choose);box.appendChild(group);
 }
 function recordTitle(data,source){
  const person=people[data.object_id]||data.name||data.label||(data.object_id?'人物 '+String(data.object_id).slice(0,16):'');

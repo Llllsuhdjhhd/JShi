@@ -1696,7 +1696,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     from aiohttp import web, ClientSession, ClientTimeout, WSMsgType
 
     visual = getattr(process, 'vision', None)
-    app = web.Application(client_max_size=max(2 * 1024 * 1024, visual.config.max_image_bytes if visual else 0))
+    app = web.Application(client_max_size=max(8 * 1024 * 1024, visual.config.max_image_bytes if visual else 0))
     busy = False
     cleanup_stage = ""
     registry_busy = False

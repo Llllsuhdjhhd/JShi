@@ -19,9 +19,11 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
         return web.FileResponse(Path(__file__).with_name('vision_ui.html'))
 
     async def state(request):
-        return web.json_response({'environment':vision.store.latest_sample(subject_id),
+        environment = await asyncio.to_thread(vision.store.latest_sample, subject_id)
+        errors = await asyncio.to_thread(vision.store.errors, subject_id)
+        return web.json_response({'environment':environment,
             'sample_seconds':vision.config.sample_seconds, 'model':vision.config.model,
-            'errors':vision.store.errors(subject_id), 'server_time':time(), 'voice_active':voice_active()}, headers={'Cache-Control':'no-store'})
+            'errors':errors, 'server_time':time(), 'voice_active':voice_active()}, headers={'Cache-Control':'no-store'})
 
     async def submit(request):
         same_origin(request)
@@ -52,13 +54,13 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
 
     async def photo(request):
         try:
-            data = vision.store.image(request.match_info['frame'], subject_id)
+            data = await asyncio.to_thread(vision.store.image, request.match_info['frame'], subject_id)
         except KeyError:
             raise web.HTTPNotFound(text='照片不可用')
         return web.Response(body=data, content_type='image/jpeg', headers={'Cache-Control':'no-store'})
 
     async def memories(request):
-        return web.json_response({'observations':vision.store.memories(subject_id)}, headers={'Cache-Control':'no-store'})
+        return web.json_response({'observations':await asyncio.to_thread(vision.store.memories, subject_id)}, headers={'Cache-Control':'no-store'})
 
     async def interpret(request):
         same_origin(request)

@@ -2,7 +2,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 class Element {
- constructor(){this.children=[];this.textContent='';this.value='';this.classList={add(){},toggle(){}};}
+ constructor(){this.children=[];this.textContent='';this.value='';this.style={};this.classList={add(){},toggle(){}};}
  appendChild(x){this.children.push(x);return x;}
  append(...xs){xs.forEach(x=>this.appendChild(x));}
  replaceChildren(...xs){this.children=xs;}
@@ -23,6 +23,7 @@ evaluate("$('sources').value='memory:person_experience_portraits';$('presentatio
 function text(element){return String(element.textContent||'')+element.children.map(text).join(' ');}
 const rendered=text(elements.rows);
 assert.match(rendered,/完整正文/);assert.match(rendered,/精要/);assert.match(rendered,/待核/);assert.match(rendered,/原始 JSON/);
+assert.match(rendered,/人物照片/);assert.match(rendered,/设置 \/ 更换人物照片/);
 evaluate("$('presentation').value='original';render()");
 assert.match(text(elements.rows),/完整正文/);
 console.log('Data UI: readable titles, organized memory/recall/placement/activity, original fields passed');

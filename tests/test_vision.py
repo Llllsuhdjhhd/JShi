@@ -306,6 +306,41 @@ def test_visual_web_input_security_and_asynchronous_delivery(store, tmp_path):
     asyncio.run(run())
 
 
+def test_visual_database_wait_does_not_block_http_loop(store, monkeypatch):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+    from threading import Event
+    from types import SimpleNamespace
+    from jshi.vision.web import install_vision
+    entered, release = Event(), Event()
+    def delayed(subject):
+        entered.set()
+        assert release.wait(3)
+        return None
+    monkeypatch.setattr(store, 'latest_sample', delayed)
+    vision = VisionService(store, store.config, Model(), Detector())
+    async def deliver(*args): pass
+    async def ping(request): return web.Response(text='ready')
+    async def run():
+        app = web.Application()
+        install_vision(app, SimpleNamespace(vision=vision), 'stone', deliver)
+        app.router.add_get('/ping', ping)
+        async with TestClient(TestServer(app)) as client:
+            pending = asyncio.create_task(client.get('/api/vision'))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                response = await asyncio.wait_for(client.get('/ping'), .5)
+                assert await response.text() == 'ready'
+            finally:
+                release.set()
+                await pending
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+        vision.close()
+
+
 def test_slow_cloud_does_not_block_local_sampling_or_photo_archive(store):
     from threading import Event
     entered, release = Event(), Event()

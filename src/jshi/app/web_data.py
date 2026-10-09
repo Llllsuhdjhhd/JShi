@@ -22,6 +22,7 @@ FILES = {'tool_work': ('tool_work.jsonl', '工具', '工件 / 工作事项'),
     'prompts': ('step_inputs.jsonl', '调试', '实际提示词与模型调用'),
     'timing': ('activity_timings.jsonl', '调试', '主流程耗时'),
     'write_timing': ('write_timings.jsonl', '调试', '写场耗时'),
+    'memory_phase_timing': ('memory_phase_timings.jsonl', '调试', '记忆与视觉关联耗时'),
     'recall': ('recall_traces.jsonl', '记忆', '回忆召回 · 主流程装入'),
     'zone': ('zone.json', '片场', '主认知片场'),
     'pending': ('pending_scene.json', '片场', '待写片场'),
@@ -191,7 +192,10 @@ class WebData:
 
 def register_data_routes(app, process, subject_id):
     from aiohttp import web
+    from jshi.recognition.photos import PersonPhotos
+    from urllib.parse import quote
     browser = WebData(process.repository.path.parent, subject_id, process.repository.path)
+    photos = PersonPhotos(browser.root)
 
     async def page(request):
         return web.FileResponse(Path(__file__).with_name('data_ui.html'))
@@ -205,6 +209,9 @@ def register_data_routes(app, process, subject_id):
                 return web.json_response({'sources': value}, headers={'Cache-Control': 'no-store'})
             value = await asyncio.to_thread(browser.read, request.query['source'],
                 query=request.query.get('q',''), page=int(request.query.get('page',0)))
+            for row in value['rows']:
+                if isinstance(row, dict) and row.get('object_id'):
+                    row['person_photo_url'] = '/api/person-photo/' + quote(row['object_id'], safe='')
             return web.json_response(value, headers={'Cache-Control': 'no-store'}, dumps=lambda x: json.dumps(x, ensure_ascii=False, default=str))
         except (ValueError, sqlite3.Error, OSError) as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -220,6 +227,27 @@ def register_data_routes(app, process, subject_id):
         except (ValueError, sqlite3.Error, OSError) as exc:
             raise web.HTTPBadRequest(text=str(exc))
 
+    async def person_photo(request):
+        if request.headers.get('Sec-Fetch-Site') == 'cross-site':
+            raise web.HTTPForbidden()
+        object_id = request.match_info['object_id']
+        if process.profiles.get(object_id) is None:
+            raise web.HTTPNotFound(text='人物不存在')
+        if request.method == 'POST':
+            if request.headers.get('Origin') != f'{request.scheme}://{request.host}':
+                raise web.HTTPForbidden(text='人物照片需要同源请求')
+            try:
+                await asyncio.to_thread(photos.put, subject_id, object_id, await request.read())
+            except (ValueError, OSError) as exc:
+                raise web.HTTPBadRequest(text=str(exc))
+            return web.json_response({'saved': True})
+        image = await asyncio.to_thread(photos.get, subject_id, object_id)
+        if image is None:
+            raise web.HTTPNotFound(text='尚未设置人物照片')
+        return web.Response(body=image, content_type='image/jpeg', headers={'Cache-Control': 'no-store'})
+
+    app.router.add_get('/api/person-photo/{object_id}', person_photo)
+    app.router.add_post('/api/person-photo/{object_id}', person_photo)
     app.router.add_get('/data', page)
     app.router.add_get('/api/data', data)
     app.router.add_get('/api/debug', diagnostics)
