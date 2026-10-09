@@ -34,8 +34,13 @@ class VisionModel:
                        {"type": "text", "text": instruction},
                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode()}}
                    ]}]}
+        if self.config.model.startswith('deepseek'):
+            payload['thinking'] = {'type': 'disabled'}
         result = self.transport(payload)
-        text = result['choices'][0]['message']['content']
+        choice = result['choices'][0]
+        text = choice['message']['content']
         if not isinstance(text, str) or not text.strip():
-            raise ValueError("视觉模型未返回有效描述")
+            raise ValueError('视觉模型未返回有效描述（finish_reason='+str(choice.get('finish_reason', 'unknown'))+'）')
+        if choice.get('finish_reason') == 'length':
+            raise ValueError('视觉描述被输出长度限制截断，保留已有环境信息')
         return text.strip()[:6000]

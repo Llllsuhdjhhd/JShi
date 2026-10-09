@@ -29,7 +29,9 @@ async function main(){
   data.errors=[{at:1,message:'JSHI_VISION_API_KEY'}];await chat.poll();
   assert.equal(chat.card.description.textContent,'有人在门边');
   data.errors=[{at:30,message:'JSHI_VISION_API_KEY'}];await chat.poll();
-  assert.match(chat.card.description.textContent,/未配置/);
+  assert.equal(chat.card.description.textContent,'有人在门边');assert.match(chat.card.status.textContent,/沿用已有描述/);
+  data.errors=[];await chat.poll();assert.equal(chat.card.status.hidden,true);
+  data.errors=[{at:30,message:'视觉模型未返回有效描述'}];await chat.poll();assert.equal(chat.card.description.textContent,'有人在门边');assert.match(chat.card.status.textContent,/模型未返回描述/);
   chat.stop();const size=chat.card.body.children.length;chat.stop();
   assert.equal(stops,1);assert.equal(chat.card.body.children.length,size);
   const canceled=chat.start();await Promise.resolve();chat.stop();

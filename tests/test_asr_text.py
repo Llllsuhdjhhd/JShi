@@ -41,6 +41,7 @@ def test_streaming_tokens_never_become_speech_and_clear_previous_preview():
 
 def test_cleaning_preserves_real_repetitions():
     assert clean_asr_text('<|zh|>你好<|NEUTRAL|>') == '你好'
+    assert clean_asr_text('<UNK> <unknown> < UNK >') == ''
     assert clean_asr_text('HELLO HELLO HELLO') == 'HELLO HELLO HELLO'
 
 

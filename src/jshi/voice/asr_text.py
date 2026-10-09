@@ -3,4 +3,4 @@ import re
 
 
 def clean_asr_text(text: str) -> str:
-    return re.sub(r"<\|.*?\|>|<unk>", "", text).strip()
+    return re.sub(r"<\|.*?\|>|<\s*unk(?:nown)?\s*>", "", text, flags=re.IGNORECASE).strip()

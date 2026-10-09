@@ -20,10 +20,10 @@ class JShiVisionChat {
     const body=this.element('div','media-body'),video=this.element('video','media-preview');
     video.muted=true;video.playsInline=true;
     const copy=this.element('div','media-copy'),description=this.element('div','media-description','画面独立采样，不会逐帧刷屏。');
-    const meta=this.element('div','media-meta');copy.appendChild(description);copy.appendChild(meta);
+    const meta=this.element('div','media-meta'),status=this.element('div','media-meta');status.hidden=true;copy.appendChild(description);copy.appendChild(meta);copy.appendChild(status);
     body.appendChild(video);body.appendChild(copy);card.appendChild(header);card.appendChild(body);
     if(pinned&&this.options.pin)this.options.pin(card);else this.options.insert(card);
-    return {node:card,label,body,video,description,meta,pinned};
+    return {node:card,label,body,video,description,meta,status,pinned};
   }
   start() {
     if(this.stream)return Promise.resolve(true);
@@ -95,8 +95,10 @@ class JShiVisionChat {
         if(card.pinned)card.meta.textContent=this.sampleLabel(card.lastCaptured||s.captured);else if(s.described_at)card.meta.textContent='描述依据 '+new Date(s.described_at*1000).toLocaleTimeString('zh-CN',{hour12:false});}
       const latestError=data.errors?.[0];
       const error=(!s?.described_at||Number(latestError?.at||0)>s.described_at)?latestError?.message||'':'';
-      if(error.includes('API_KEY'))card.description.textContent='摄像头已开启，视觉模型未配置，暂时无法描述环境';
-      else if(error)card.description.textContent='画面采样中，环境描述暂时不可用';
+      card.status.hidden=!error;card.status.textContent='';
+      if(error){const reason=error.includes('API_KEY')?'视觉模型未配置':error.includes('未返回有效描述')?'模型未返回描述':'环境更新失败';
+        card.status.textContent=s?.described_at?'最近更新失败，沿用已有描述（'+reason+'）':reason+'，尚无成功的环境描述';card.status.title=error;}
+      if(card.pinned&&s?.described_at){card.description.title=s.description+'\n描述依据 '+new Date(s.described_at*1000).toLocaleTimeString('zh-CN',{hour12:false});}
     }catch{}
   }
   async attachPhoto(file) {

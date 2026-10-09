@@ -175,6 +175,16 @@ def test_image_adapter_sends_real_image_parts():
     assert model.describe(b'jpeg') == '两个人在桌旁。'
     block = payloads[0]['messages'][0]['content'][1]
     assert block['type']=='image_url' and block['image_url']['url'].startswith('data:image/jpeg;base64,')
+    assert payloads[0]['thinking'] == {'type': 'disabled'}
+
+
+def test_image_adapter_rejects_empty_or_truncated_descriptions():
+    import pytest
+    for content, reason in [('', 'length'), ('只描述了一半', 'length')]:
+        model = VisionModel(VisionConfig(), lambda p: {
+            'choices': [{'message': {'content': content}, 'finish_reason': reason}]})
+        with pytest.raises(ValueError):
+            model.describe(b'jpeg')
 
 
 def test_memory_batch_associations_and_recall(store):
