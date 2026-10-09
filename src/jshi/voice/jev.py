@@ -151,7 +151,15 @@ class VoiceJEV:
             rules = InterruptDecision('respond', '已封装的文字或观察输入', rules.claimed_name)
         if rules.action == "stop" and rules.reason == "explicit stop":
             return BatchDecision("stop", rules.reason, self._items_for(batch, "no", "明确停止"), rules.claimed_name, True)
-        if self.model is None or overlap or not joined.strip():
+        if overlap:
+            # Overlap weakens identity evidence; it does not make speech unrelated.
+            batch = [{**row, 'who': 'unknown', 'candidates': [], 'overlap': True,
+                      'voice_evidence': {'strength': 'unavailable', 'basis': '重叠音频，不能确认人物'}}
+                     if row.get('overlap', True) else row for row in batch]
+            if self.model is None:
+                return BatchDecision('respond', '重叠发言保留给主认知',
+                    tuple(BatchItem(row['n'], 'maybe', reason='重叠音频，身份未明', identity_only=True) for row in batch))
+        if self.model is None or not joined.strip():
             return self._from_legacy(rules, batch)
         if monotonic() < self._unavailable_until:
             return BatchDecision('respond', 'JEV接口暂不可用', self._items_for(batch, 'maybe', '入口判断失败'),
@@ -192,6 +200,8 @@ class VoiceJEV:
                 thin["short_voice_hint"] = "同一短句重复拼接，辅助比较，不是新增证据"
             if row.get('source'):
                 thin['source'] = row['source']
+            if row.get('overlap'):
+                thin['overlap'] = True
             thin_batch.append(thin)
         payload = {"input": {"state": delivery.get("state", ""), "names": delivery.get("names_for_jiangshi", ["匠石"]),
                              "unwritten": context, "lines": thin_batch},

@@ -1,5 +1,6 @@
 """Time-stamped speaker segmentation. This does not extract clean audio sources."""
 from __future__ import annotations
+from types import SimpleNamespace
 
 from .volc import Transcript
 from .asr_text import clean_asr_text
@@ -19,7 +20,16 @@ class LocalDiarizer:
         self.speakers = speakers
 
     def transcribe(self, samples, offset_ms):
-        spans = self.engine.process(samples).sort_by_start_time()
+        original = self.engine.process(samples).sort_by_start_time()
+        spans = []
+        for span in original:
+            mixed = any(other.speaker != span.speaker and min(span.end,other.end)-max(span.start,other.start)>.05 for other in original)
+            # Keep continuous speech intact. Independent decoding of every small
+            # same-speaker span loses words and leaves too little voice evidence.
+            if spans and not mixed and not spans[-1].mixed and spans[-1].speaker == span.speaker and 0 <= span.start - spans[-1].end <= .3:
+                spans[-1].end = max(spans[-1].end, span.end)
+            else:
+                spans.append(SimpleNamespace(start=span.start, end=span.end, speaker=span.speaker, mixed=mixed))
         output = []
         for i, span in enumerate(spans):
             start = max(0, int(span.start * 16000))

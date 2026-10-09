@@ -19,6 +19,25 @@ from jshi.voice.volc import Transcript
 from tests.test_voice import process, FakeCloud, Model
 
 
+def test_overlapping_batch_is_not_dropped_or_used_to_confirm_identity():
+    class Judge:
+        calls=0
+        def generate(self,r):
+            self.calls+=1
+            payload=json.loads(r.input_text)
+            assert payload['input']['lines'][0]['overlap'] is True
+            assert payload['input']['lines'][0]['p']=='unknown'
+            assert 'candidates' not in payload['input']['lines'][0]
+            return ModelResponse(text=json.dumps({'items':[{'i':1,'person':'unknown','certainty':'unknown','why':'重叠声音身份不能确认'}],'level':1,'recall_memory':False}),model='fake')
+    judge=Judge()
+    batch=[{'n':1,'text':'匠石为什么没有回应','who':'P1','candidates':[{'who':'P1','score':.9}]}]
+    result=VoiceJEV(judge).decide_batch('stone',batch,[],{'state':'playing'},overlap=True)
+    assert judge.calls==1 and result.action=='respond' and all(i.keep and i.identity_only for i in result.items)
+    assert result.items[0].speaker_pick=='unknown'
+    fallback=VoiceJEV().decide_batch('stone',batch,[],{'state':'idle'},overlap=True)
+    assert fallback.action=='respond' and all(i.keep for i in fallback.items)
+
+
 def test_failed_jev_keeps_tools_without_speculative_history_search():
     for failure in ({'timed_out': True}, {'model_error': 'HTTP 402'}, {'model_error': 'invalid JSON'}):
         assert select_profile(['a'], [{'input_ids': ['a'], **failure}]) == PromptProfile(1, recall_memory=False)

@@ -1068,6 +1068,8 @@ class VoiceConversation:
         for u in utterances:
             if u.input_id in self.input_records:
                 self.input_records[u.input_id]['jev_started_at'] = started
+        for row, utterance in zip(batch, utterances):
+            row['overlap'] = utterance.overlap
         path, timed_out = "model", False
         prompt_activity_id = "jev-" + uuid4().hex
         sent_requests = []
@@ -2278,6 +2280,11 @@ def run_voice(process, identities, args) -> None:
             return model_cache[name]
         return load
     models = {name: speaker_factory(name) for name in ('cam++', 'eres2netv2')}
+    backend = getattr(process.memory, '_backend', process.memory)
+    prepare = getattr(backend, 'prepare_local_recall', None)
+    if prepare:
+        print('正在准备本地记忆检索模型，准备完成后开放对话入口…')
+        prepare()
     print(f"语音入口：http://127.0.0.1:{args.port}（选择 LARK A2，输出为电脑默认扬声器）")
     web.run_app(create_app(process, subject_id, config, jev, local, local_tts, online_speakers,
         speaker_models=models, trial_root=args.data_dir/'voice_trials'/'current'), host="127.0.0.1", port=args.port)

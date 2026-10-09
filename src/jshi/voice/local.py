@@ -768,7 +768,7 @@ def build_local(data_dir: Path, profiles) -> LocalASR:
     if refine_mode != "off" and refine_models:
         refiner = sherpa_onnx.OfflineRecognizer.from_sense_voice(
             model=str(refine_models[0]), tokens=str(refine_root / "tokens.txt"),
-            num_threads=threads, provider="cpu", language="zh", use_itn=True,
+            num_threads=threads, provider="cpu", language="auto", use_itn=True,
         )
     print("本地识别：流式预览 + SenseVoice 整句复核" if refiner else "本地识别：小模型流式识别（可运行 voice-setup --refine 升级整句识别）")
     diarizer = None

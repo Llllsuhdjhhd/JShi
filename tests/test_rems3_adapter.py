@@ -29,6 +29,32 @@ from jshi.memory.rems3 import (
 from jshi.subject import SubjectRepository
 
 
+def test_prepare_local_recall_loads_cached_weights_once_without_network(monkeypatch):
+    from threading import Lock
+    provider_type = type('SentenceTransformerEmbedding', (), {})
+    provider = provider_type()
+    provider._model = None
+    provider._model_name = 'cached-test-model'
+    provider._lock = Lock()
+    calls = []
+    model = object()
+    def load(name, **kwargs):
+        calls.append((name, kwargs))
+        return model
+    monkeypatch.setitem(sys.modules, 'sentence_transformers', SimpleNamespace(SentenceTransformer=load))
+    backend = object.__new__(Rems3MemoryBackend)
+    backend._semantic_disabled = False
+    backend._pipeline = SimpleNamespace(recall_pipeline=SimpleNamespace(_embedding=provider))
+    backend.prepare_local_recall()
+    backend.prepare_local_recall()
+    assert calls == [('cached-test-model', {'local_files_only':True})]
+    assert provider._model is model
+    provider._model = None
+    backend._semantic_disabled = True
+    backend.prepare_local_recall()
+    assert len(calls) == 1
+
+
 class FakePipeline:
     def __init__(self) -> None:
         self.ingested = []

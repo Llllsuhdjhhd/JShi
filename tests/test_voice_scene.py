@@ -314,6 +314,24 @@ def test_targeted_segments_play_in_order_and_enter_actual_delivery(process):
     asyncio.run(run())
 
 
+def test_diarization_joins_short_continuous_spans_before_asr_and_identity():
+    np=pytest.importorskip('numpy')
+    spans=[SimpleNamespace(start=0.,end=.8,speaker=0),SimpleNamespace(start=.9,end=1.7,speaker=0),SimpleNamespace(start=1.8,end=2.8,speaker=0)]
+    class Engine:
+        def process(self,a):return SimpleNamespace(sort_by_start_time=lambda:spans)
+    class Speakers:
+        lengths=[]
+        def identify(self,a):self.lengths.append(len(a));return 'known-A','local:test:A',.9
+    class Recognizer:
+        calls=0
+        def create_stream(self):return SimpleNamespace(accept_waveform=lambda *a:None,result=SimpleNamespace(text='完整的一句话'))
+        def decode_stream(self,s):self.calls+=1
+    speakers,recognizer=Speakers(),Recognizer()
+    out=LocalDiarizer(Engine(),speakers,recognizer).transcribe(np.zeros(48000,dtype='float32'),1000)
+    assert len(out)==1 and out[0].start_ms==1000 and out[0].end_ms==3800
+    assert speakers.lengths==[44800] and recognizer.calls==1
+
+
 def test_diarization_preserves_offsets_and_never_identifies_overlapping_mix():
     np=pytest.importorskip('numpy')
     spans=[SimpleNamespace(start=0.,end=2.,speaker=0),SimpleNamespace(start=1.,end=3.,speaker=1),

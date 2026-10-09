@@ -347,7 +347,7 @@ class Rems3MemoryBackend:
                 pipeline_cls,
                 config_cls,
             )
-        disable_local_embedding_if_needed(self._pipeline)
+        self._semantic_disabled = disable_local_embedding_if_needed(self._pipeline)
         self.long_term_experience = None
         self._portrait_refresh = None
         from .portrait_views import PortraitViews
@@ -378,6 +378,22 @@ class Rems3MemoryBackend:
         self._experience_refresh_stopping = False
         self._experience_exit_hook = False
         self._experience_exit_wait_s = _env_float("JSHI_EXPERIENCE_EXIT_WAIT_S", 30.0)
+
+    def prepare_local_recall(self):
+        """Load cached embedding weights before opening the interactive voice UI."""
+        if self._semantic_disabled:
+            return
+        recall = getattr(self._pipeline, 'recall_pipeline', None)
+        provider = getattr(recall, '_embedding', None)
+        if provider is None or type(provider).__name__ != 'SentenceTransformerEmbedding':
+            return
+        if getattr(provider, '_model', None) is not None:
+            return
+        # Keep startup offline; importing and loading are the observed cold wait.
+        from sentence_transformers import SentenceTransformer
+        with provider._lock:
+            if provider._model is None:
+                provider._model = SentenceTransformer(provider._model_name, local_files_only=True)
 
     def _to_engine_batch(self, payload: Mapping[str, Any]) -> Any:
         experiences_raw = payload["experiences"]
