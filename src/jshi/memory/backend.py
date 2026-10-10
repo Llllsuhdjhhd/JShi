@@ -55,6 +55,12 @@ class InProcessMemoryBackend:
         del subject_id, object_id
         return None
 
+    def memory_bytes(self, subject_id: str) -> int:
+        import json
+        from jshi.subject.domain import HistoryKind
+        return sum(len(json.dumps(row.content, ensure_ascii=False).encode())
+                   for row in self._repository.list_history(subject_id, HistoryKind.FACT, limit=1000000))
+
     def remember_fact(
         self,
         subject_id: str,

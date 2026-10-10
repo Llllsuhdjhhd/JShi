@@ -419,6 +419,40 @@ ZONE_FLUSH_CONSTRAINT = ParamConstraint(
     ratio=ZONE_FLUSH_RATIO,
 )
 
+# 回忆自省：容量按 UTF-8 正文字节计，不含 SQLite 索引/页开销。
+REFLECTION_DEFAULTS = {
+    "REFLECTION_INTERVAL_SECONDS": (600, 1, 86400, "int"),
+    "REFLECTION_IDLE_SECONDS": (30, 0, 3600, "int"),
+    "REFLECTION_POLL_SECONDS": (2, 0.1, 60, "float"),
+    "REFLECTION_PRESSURE_BYTES": (1048576, 256, 20971520, "int"),
+    "REFLECTION_RENEW_RATIO": (1 / 3, 0.01, 1, "float"),
+    "REFLECTION_COMPARE_ITEMS": (24, 4, 100, "int"),
+    "REFLECTION_ITEM_CHARS": (2000, 100, 10000, "int"),
+    "REFLECTION_CONTEXT_CHARS": (24000, 1000, 100000, "int"),
+    "REFLECTION_MEMORY_BYTES": (20971520, 256, 209715200, "int"),
+    "REFLECTION_MEMORY_RATIO": (0.1, 0.01, 0.5, "float"),
+    "REFLECTION_MEMORY_BOOTSTRAP_BYTES": (65536, 256, 1048576, "int"),
+    "REFLECTION_RECALL_RATIO": (0.2, 0.01, 0.5, "float"),
+    "REFLECTION_FEEDBACK_WEIGHT": (0.35, 0, 0.5, "float"),
+    "REFLECTION_FEEDBACK_SIMILARITY": (0.3, 0.01, 1, "float"),
+    "REFLECTION_FEEDBACK_DAYS": (30, 1, 365, "int"),
+    "REFLECTION_FEEDBACK_ROWS": (500, 1, 10000, "int"),
+    "REFLECTION_CANDIDATE_MULTIPLIER": (4, 1, 10, "int"),
+    "REFLECTION_OBSERVATIONS": (100, 1, 1000, "int"),
+    "REFLECTION_DB_TIMEOUT_SECONDS": (0.1, 0.01, 1, "float"),
+    "REFLECTION_INSIGHT_CANDIDATES": (100, 1, 1000, "int"),
+    "REFLECTION_MEMORY_HALF_LIFE_DAYS": (60, 1, 3650, "int"),
+    "REFLECTION_STANDARD_CHARS": (2000, 100, 10000, "int"),
+}
+for _name, (_default, _low, _high, _kind) in REFLECTION_DEFAULTS.items():
+    REGISTRY[_name] = ParamSpec(_name, _default, _low, _high, "review",
+                              ("回忆质量", "自省", "费用"), kind=_kind)
+
+
+def reflection_param(name: str) -> int | float:
+    """新自省模块仍使用魔法书及同一覆盖快照。"""
+    return _current(name, REFLECTION_DEFAULTS[name][0])
+
 
 def lookup(name: str) -> ParamSpec:
     try:

@@ -558,6 +558,17 @@ class Rems3MemoryBackend:
             return result.sealed_event_ids[0]
         return ""
 
+    def memory_bytes(self, subject_id: str) -> int:
+        from sqlalchemy import text
+        database = getattr(self._pipeline, 'db', None)
+        if database is None:
+            return 0
+        with database.engine.connect() as conn:
+            return int(conn.execute(text(
+                'SELECT COALESCE(SUM(length(CAST(content_raw AS BLOB)) + '
+                'length(CAST(summaries AS BLOB))),0) FROM events WHERE subject_id=:subject'
+            ), {'subject': subject_id}).scalar() or 0)
+
     def portrait(self, subject_id: str, object_id: str) -> dict | None:
         """对象人物肖像(REMS 特性)。同进程 REMSPipeline 已实现 ``portrait``。"""
         raw = self._pipeline.portrait(subject_id, object_id)

@@ -445,6 +445,13 @@ class SubjectProcess:
         self.reflection: ReflectionPort = reflection or InProcessReflection(
             self, model=introspection_model or cognition
         )
+        from jshi.reflection.memory_store import ReflectionMemoryStore
+        from jshi.reflection.executor import ReflectionExecutor
+        self.reflection_memory = ReflectionMemoryStore(data_dir / 'reflection_memory.sqlite3')
+        if isinstance(self.memory, MemoryShell):
+            self.memory.reflection_store = self.reflection_memory
+        self.reflection_executor = ReflectionExecutor(
+            self, self.reflection, self.reflection_memory, introspection_model or cognition)
 
     # ------------------------------------------------------------------
     # 阶段②/③ 前置：活跃区装载与单一路径组装
@@ -566,6 +573,7 @@ class SubjectProcess:
         processing_modes: Sequence[str] = ("interaction",),
         visual_snapshot=None,
     ) -> SubjectActivityResult:
+        self.reflection_executor.note_input()
         self._deferred_write = None
         self._code_restore = code_restore
         if envelope is not None and (not envelope.final or envelope.text != text.strip()):
@@ -2288,6 +2296,12 @@ class SubjectProcess:
         response = self._cognize_once(
             current, working_recalled, activity_id=activity.id, on_reply=on_reply
         )
+        try:
+            self.reflection_memory.link_outcome(subject_id, activity.created_at.timestamp(),
+                [fragment.id.removeprefix('memory:') for fragment in current.fragments if fragment.source == 'memory'],
+                activity.id, [{'channel': item.channel, 'text': item.text} for item in response.response_plan.items])
+        except Exception:
+            logger.exception('reflection outcome association failed')
         if clock is not None:
             clock.mark("⑤认知")
         if getattr(response, "recall_requests", ()):

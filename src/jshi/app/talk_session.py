@@ -362,12 +362,17 @@ class TalkSession:
         self._turn_lock = threading.Lock()
         self._reply_streamed = False
         self.idle_trial = IdleTrial()
+        executor = getattr(process, 'reflection_executor', None)
+        self._reflection_token = executor.start(subject_id, lambda: self.busy) if executor else None
 
     @property
     def busy(self) -> bool:
         return self._turn_lock.locked()
 
     def handle(self, line: str) -> TalkOutcome:
+        executor = getattr(self.process, 'reflection_executor', None)
+        if executor:
+            executor.note_input()
         line = line.strip()
         if not line:
             return TalkOutcome()
@@ -377,6 +382,8 @@ class TalkSession:
                 return TalkOutcome(
                     (TalkEvent("notice", "上一轮尚未结束，请稍候。"),)
                 )
+            if executor and self._reflection_token:
+                executor.detach(self._reflection_token)
             return TalkOutcome(quit=True)
         if line in {"/help", "/?"}:
             return TalkOutcome((TalkEvent("overlay", HELP_TEXT),))
@@ -668,7 +675,7 @@ class TalkSession:
             except Exception as exc:
                 return TalkOutcome((TalkEvent("notice", f"调用失败：{exc}"),))
             # 300：两拍之间跑一次已入队的自省（不挡本轮，失败不影响对话）
-            self._drain_introspection()
+            # 自省由独立执行器处理，主对话线程不等待模型自省。
             self.last_line = line
             self.last_plan = result.response_plan
             self.last_assembled = result.current_state

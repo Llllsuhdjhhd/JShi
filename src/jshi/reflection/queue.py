@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import wraps
+from threading import RLock
 from datetime import datetime, timedelta
 from typing import Callable
 
@@ -36,6 +38,14 @@ class EnqueueResult:
     evicted: IntrospectionRequest | None = None
 
 
+def synchronized(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return call
+
+
 class IntrospectionQueue:
     def __init__(
         self,
@@ -54,9 +64,11 @@ class IntrospectionQueue:
         self._pending: list[IntrospectionRequest] = []
         self._cooling: dict[str, datetime] = {}
         self._seen: dict[str, tuple[int, int]] = {}
+        self._lock = RLock()
 
     # -- 入口 ---------------------------------------------------------------
 
+    @synchronized
     def enqueue(self, request: IntrospectionRequest) -> EnqueueResult:
         theme = request.theme
         if self._cooling_until(theme) is not None:
@@ -81,6 +93,7 @@ class IntrospectionQueue:
 
     # -- 排程 ---------------------------------------------------------------
 
+    @synchronized
     def pop_next(self, subject_id: str | None = None) -> IntrospectionRequest | None:
         pool = [
             item
@@ -93,6 +106,7 @@ class IntrospectionQueue:
         self._pending.remove(chosen)
         return chosen
 
+    @synchronized
     def finish(self, request: IntrospectionRequest) -> None:
         """跑完（或被丢）后写冷却。"""
         if self._cooldown_seconds <= 0:
@@ -103,9 +117,16 @@ class IntrospectionQueue:
 
     # -- 观测 ---------------------------------------------------------------
 
+    @synchronized
+    def defer(self, request: IntrospectionRequest) -> None:
+        if len(self._pending) < self._max_size:
+            self._pending.append(request)
+
+    @synchronized
     def pending(self) -> tuple[IntrospectionRequest, ...]:
         return tuple(self._pending)
 
+    @synchronized
     def __len__(self) -> int:
         return len(self._pending)
 

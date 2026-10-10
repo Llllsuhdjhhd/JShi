@@ -123,6 +123,12 @@ class VoiceConversation:
         self.unreported_jev = []
         self.worker = asyncio.create_task(self._work())
         self.turn_worker = asyncio.create_task(self._turns())
+        executor = getattr(process, 'reflection_executor', None)
+        self._reflection_token = executor.start(subject_id, lambda: (
+            self.closed or self.pending_voice or self.active_turn is not None
+            or not self.turn_queue.empty() or not self.queue.empty()
+            or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}
+        )) if executor else None
 
     async def emit(self, kind: str, **payload) -> None:
         if not self.closed and not self.output_disconnected:
@@ -1701,6 +1707,9 @@ class VoiceConversation:
         progress('停止播放与入口')
         await self.stop("connection closed")
         self.closed = True
+        executor = getattr(self.process, 'reflection_executor', None)
+        if executor and self._reflection_token:
+            executor.detach(self._reflection_token)
         if self.background_tasks:
             progress('等待登记或诊断任务结束')
             await asyncio.gather(*self.background_tasks, return_exceptions=True)

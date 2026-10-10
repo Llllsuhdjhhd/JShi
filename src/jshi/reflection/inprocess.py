@@ -87,6 +87,7 @@ class InProcessReflection(IntrospectionPort):
         self._subject_state_factory = subject_state_factory
         # 判定层气口：为 None 时用触发源默认值（设计 §11-C15）
         self.assess: AssessFn | None = None
+        self.should_yield = lambda: False
 
     # ------------------------------------------------------------------
     # 入队（主流程钩子只走这里，不跑模型）
@@ -219,7 +220,11 @@ class InProcessReflection(IntrospectionPort):
         if scene is None:
             scene = _empty_scene(request)
 
+        if self.should_yield():
+            return self._defer(request, scene)
         answer = self._answer(request, scene)
+        if self.should_yield():
+            return self._defer(request, scene)
         try:
             run = run_introspection(
                 request=request,
@@ -243,6 +248,12 @@ class InProcessReflection(IntrospectionPort):
             )
         self.queue.finish(request)
         return run
+
+    def _defer(self, request, scene):
+        self.queue.defer(request)
+        return IntrospectionRun(request=request, scene_source_ids=scene.source_ids,
+            answer=IntrospectionAnswer(mode='deferred'), activity_id='', cognitive_content_id='',
+            status=IntrospectionStatus.QUEUED, reason='conversation_priority')
 
     def _answer(
         self, request: IntrospectionRequest, scene: IntrospectionScene
