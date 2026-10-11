@@ -212,7 +212,12 @@ HELP_TEXT = format_help_text()
 
 
 def format_activity_timing(timing: ActivityTiming, *, heading: str = "上一轮") -> str:
-    lines = [f"{heading} 合计 {timing.total_ms:g}ms"]
+    lines = [f"{heading} 主流程 {timing.total_ms:g}ms"]
+    if timing.end_to_end:
+        entry = timing.end_to_end
+        lines.extend([f"  收到输入至回复就绪 {entry['reply_ready_ms']:g}ms",
+                      f"  收到输入至主流程完成 {entry['complete_ms']:g}ms",
+                      f"  入口 {entry['entry_total_ms']:g}ms（输入准备 {entry.get('input_prepare_ms', '未记录')}ms；JEV {entry.get('jev_ms', '未记录')}ms）"])
     for name, milliseconds in timing.steps:
         lines.append(f"  {name} {milliseconds:g}ms")
     return "\n".join(lines)

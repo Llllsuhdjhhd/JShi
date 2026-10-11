@@ -120,11 +120,49 @@ def test_text_without_microphone_preserves_selected_identity(process):
             assert invalid.status == 400
             response = await client.post('/text-input',headers={'Origin':url},json={'text':'你好\n帮我看看','object_id':'lux-id'})
             assert response.status == 200, await response.text()
-            assert (await response.json())['label']=='lux'
+            body = await response.json()
+            assert body['label']=='lux'
+            timing = body['timing']
+            entry = timing['end_to_end']
+            assert entry['complete_ms'] >= entry['reply_ready_ms'] >= entry['entry_total_ms']
+            assert entry['entry_total_ms'] >= entry['jev_ms'] + entry['input_prepare_ms']
+            assert entry['main_process_ms'] == timing['total_ms']
+            assert entry['background_write_included'] is False
+            saved = process._timings_path.read_text(encoding='utf-8').splitlines()
+            assert json.loads(saved[-1])['end_to_end'] == entry
             assert process.last_model_response is not None
             browser = await client.get('/api/data?source=subject:histories&q=web_text')
             assert browser.status == 200 and (await browser.json())['total'] > 0
             assert (await client.get('/data')).status == 200
+    asyncio.run(run())
+
+
+def test_text_timing_includes_delayed_jev_and_streams_before_completion(process):
+    import time
+    from jshi.voice.jev import VoiceJEV
+
+    class SlowJEV(VoiceJEV):
+        def decide_envelope(self, *args, **kwargs):
+            time.sleep(0.05)
+            return super().decide_envelope(*args, **kwargs)
+
+    async def run():
+        app = create_app(process, 'stone', VoiceConfig(api_key=''), jev=SlowJEV())
+        async with TestClient(TestServer(app)) as client:
+            origin = str(client.make_url('')).rstrip('/')
+            response = await client.post('/text-input', headers={
+                'Origin': origin, 'Accept': 'application/x-ndjson'},
+                json={'text': '你好', 'object_id': 'lux-id'})
+            events = [json.loads(line) for line in (await response.text()).splitlines()]
+            assert [event['type'] for event in events if event['type']!='flow_phase'] == ['accepted', 'reply', 'complete']
+            assert [e['stage'] for e in events if e['type']=='flow_phase'] == ['jev','resolve','assemble','cognition','action']
+            timing = events[-1]['timing']
+            entry = timing['end_to_end']
+            assert entry['jev_ms'] >= 45
+            assert entry['entry_total_ms'] >= entry['jev_ms']
+            assert entry['complete_ms'] >= timing['total_ms'] + 45
+            assert entry['complete_ms'] >= entry['reply_ready_ms']
+            assert entry['browser_display_included'] is False
     asyncio.run(run())
 
 
@@ -146,7 +184,8 @@ def test_selected_text_joins_voice_queue_without_voice_identification(process):
             assert all(p.kind!='audio' for p in envelope.parts)
             assert emitted[-1]['type']=='typed_input'
             snap=c.jev_scene_store.snapshot()
-            assert '来自文字的发言' in json.dumps(snap,ensure_ascii=False)
+            assert not snap['events']  # JEV chooses the exit before durable scene capture.
+            assert c.scene[-1].text == '来自文字的发言'
             await c.typed('wrong','missing')
             assert emitted[-1]['type']=='typed_error' and c.turn_queue.empty()
         finally: await c.close()
@@ -212,7 +251,7 @@ def test_text_reply_and_next_turn_do_not_wait_for_scene_write(process):
                 first = await asyncio.wait_for(client.post('/text-input',headers={'Origin':origin,
                     'Accept':'application/x-ndjson'},json={'text':'你好','object_id':'lux-id'}),3)
                 events = [json.loads(line) for line in (await asyncio.wait_for(first.text(),3)).splitlines()]
-                assert [e['type'] for e in events] == ['accepted','reply','complete']
+                assert [e['type'] for e in events if e['type']!='flow_phase'] == ['accepted','reply','complete']
                 assert events[-1]['scene_write'] == 'background'
                 while not entered.is_set(): await asyncio.sleep(.01)
                 assert (await (await client.get('/status')).json())['text_scene_writing']

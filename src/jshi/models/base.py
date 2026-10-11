@@ -570,10 +570,14 @@ def _chat_payload(
         ],
         **model_thinking_fields(thinking, reasoning_effort),
     }
-    images = [p['image_url'] for p in request.input_parts if p.get('kind') == 'image' and p.get('image_url')]
+    images = [p for p in request.input_parts if p.get('kind') == 'image' and p.get('image_url')]
     if images:
-        body['messages'][1]['content'] = [{'type':'text', 'text':build_user(request)},
-            *({'type':'image_url', 'image_url':{'url':url}} for url in images)]
+        content = [{'type':'text', 'text':build_user(request)}]
+        for image in images:
+            if image.get('label'):
+                content.append({'type':'text', 'text':image['label']+'（关联历史事件的照片，以照片时间为准）'})
+            content.append({'type':'image_url', 'image_url':{'url':image['image_url']}})
+        body['messages'][1]['content'] = content
     if max_tokens:
         body["max_tokens"] = max_tokens
     if response_format:

@@ -3,6 +3,7 @@ const VisionChat=require('../src/jshi/app/vision_chat.js');
 class Element {
   constructor(){this.children=[];this.dataset={};this.classList={add(){}};this.videoWidth=640;this.videoHeight=480;}
   appendChild(child){this.children.push(child);return child;}
+  setAttribute(name,value){this[name]=value;}
   insertBefore(child,before){this.children.splice(this.children.indexOf(before),0,child);}
   async play(){}
   showModal(){this.open=true;}
@@ -21,8 +22,16 @@ async function main(){
   assert.equal(first,second);await Promise.resolve();
   assert.equal(calls,1);
   release({getTracks:()=>[{stop:()=>stops++}]});assert.equal(await first,true);
-  chat.viewCamera();assert.equal(nodes.get('media-video').srcObject,chat.stream);assert.equal(nodes.get('media-view').open,true);assert.equal(calls,1);
+  chat.viewCamera();assert.equal(chat.card.node.dataset.display,'normal');assert.equal(nodes.has('media-view'),false);assert.equal(calls,1);
+  const expand=chat.card.node.children[0].children.find(x=>x.textContent==='收起');
+  assert.equal(expand['aria-pressed'],'true');expand.onclick();assert.equal(chat.card.node.dataset.display,'compact');
   for(let n=0;n<25;n++){data.environment.frame=String(n);await chat.poll();}
+  data.environment.description_frame='first';await chat.poll();
+  assert.match(chat.card.copyLabel.textContent,/新画面待更新/);
+  assert.match(chat.card.meta.textContent,/描述依据/);
+  assert.match(chat.card.meta.textContent,/暂用上次描述/);
+  data.environment.description_frame=data.environment.frame;await chat.poll();
+  assert.equal(chat.card.copyLabel.textContent,'画面描述');
   assert.equal(cards.length,0);assert.equal(pinned.length,1);assert.equal(pinned[0].dataset.display,'compact');
   pinned[0].children[0].children.find(x=>x.textContent==='隐藏画面').onclick();
   assert.equal(pinned[0].dataset.display,'hidden');

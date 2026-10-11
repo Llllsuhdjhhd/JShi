@@ -76,7 +76,20 @@ function memoryView(box,data,source){
 function organizedView(box,data,source){
  if(memoryView(box,data,source))return true;
  if(source==='timing'||source==='write_timing'){
-  addSection(box,'耗时概览',{总耗时毫秒:data.total_ms,各阶段:data.steps||[],语音入口:data.voice||{}});
+  const e=data.end_to_end;
+  addSection(box,'耗时概览',source==='timing'?{
+   '本轮出口':e?.route==='self_reply'?'JEV 我回答（短时聊天，未写记忆）':'主流程',
+   '收到输入至回复就绪（毫秒）':e?.reply_ready_ms??'未记录',
+   [e?.route==='self_reply'?'收到输入至直接回复完成（毫秒）':'收到输入至主流程完成（毫秒）']:e?.complete_ms??'未记录',
+   '入口全部耗时（毫秒）':e?.entry_total_ms??'未记录',
+   '其中输入准备（毫秒）':e?.input_prepare_ms??'未记录',
+   '其中本轮JEV（毫秒）':e?.jev_ms??'未记录',
+   '主流程耗时（毫秒）':data.total_ms,
+   '其中主认知（毫秒）':e?.main_cognition_ms??'见各阶段',
+   '主流程各阶段':data.steps||[],
+   '计时边界':'服务端收到输入开始；后台写场、浏览器显示及语音播放另计',
+   '入口说明':!e?'历史记录未保存入口计时':e.batch_origin==='first_current_input_received'?'合批以本批第一条输入到达为起点；语音此前的采集和识别另计':'网页文字以服务端收到请求为起点',
+  }:{'写场耗时（毫秒）':data.total_ms,各阶段:data.steps||[]});
   if(data.activity_id){relatedButton(box,'对照实际提示词','prompts',data.activity_id);relatedButton(box,'对照主流程记录','subject:histories',data.activity_id);}return true;
  }
  if(source==='tool'||source==='tool_work'){
@@ -127,7 +140,8 @@ function recordTitle(data,source){
  if(source==='memory:object_portraits')return (person||'未关联人物')+' · 分档肖像';
  if(source==='subject:activities')return '主流程活动 · '+(data.status||'状态未记录')+' · '+String(data.id||'').slice(0,8);
  if(source==='subject:transitions')return (data.from_state||'?')+' → '+(data.to_state||'?')+' · '+(data.reason||'');
- if(source==='timing'||source==='write_timing')return (source==='timing'?'主流程':'写场')+'耗时 · '+(data.total_ms===undefined?'未记录':(data.total_ms/1000).toFixed(2)+' 秒');
+ if(source==='timing')return data.end_to_end?(data.end_to_end.route==='self_reply'?'JEV 我回答 · ':'')+'输入至回复 '+(data.end_to_end.reply_ready_ms==null?'未记录':(data.end_to_end.reply_ready_ms/1000).toFixed(2)+' 秒')+(data.end_to_end.route==='self_reply'?' · 未走主流程、未写记忆':' · 主流程完成 '+(data.end_to_end.complete_ms/1000).toFixed(2)+' 秒'):'主流程 '+(data.total_ms/1000).toFixed(2)+' 秒 · 入口耗时未记录';
+ if(source==='write_timing')return '写场耗时 · '+(data.total_ms===undefined?'未记录':(data.total_ms/1000).toFixed(2)+' 秒');
  return data.need||data.query||data.brief||data.text||data.label||data.name||(data.content&&data.content.text)||data.content_raw||(typeof data.content==='string'&&data.content)||data.event_type||data.purpose||data.key||data.kind||data.file||data.event_id||data.object_id||data.id||'记录';
 }
 const pretty=v=>typeof v==='string'?v:JSON.stringify(v,null,2);

@@ -13,18 +13,29 @@ class JShiVisionChat {
     const header=this.element('div','media-header'),label=this.element('span','media-title',title);
     header.appendChild(label);
     const controls=pinned ? [['compact','显示画面'],['normal','放大'],['hidden','隐藏画面']] : [['compact','缩略'],['normal','展开'],['hidden','隐藏']];
+    const buttons=new Map();
+    const display=mode=>{
+      card.dataset.display=mode;this.display=mode;
+      for(const [value,button] of buttons)button.setAttribute('aria-pressed',String(value===mode));
+      if(pinned)buttons.get('normal').textContent=mode==='normal'?'收起':'放大';
+      try{localStorage.setItem('jshi.media.display',mode)}catch{}
+    };
+    card.setDisplay=display;
     for(const [mode,text] of controls) {
       const button=this.element('button','',text);button.type='button';
-      button.onclick=()=>{if(pinned&&mode==='normal'){this.viewCamera();return;}card.dataset.display=mode;this.display=mode;try{localStorage.setItem('jshi.media.display',mode)}catch{}};
+      button.setAttribute('aria-pressed',String(mode===card.dataset.display));buttons.set(mode,button);
+      button.onclick=()=>display(pinned&&mode==='normal'&&card.dataset.display==='normal'?'compact':mode);
       header.appendChild(button);
     }
     const body=this.element('div','media-body'),video=this.element('video','media-preview');
     video.muted=true;video.playsInline=true;
-    const copy=this.element('div','media-copy'),description=this.element('div','media-description','画面独立采样，不会逐帧刷屏。');
+    const copy=this.element('div','media-copy'),description=this.element('div','media-description','正在等待画面描述…');
+    const copyLabel=pinned?this.element('div','media-copy-label','画面描述'):null;
+    if(copyLabel)copy.appendChild(copyLabel);
     const meta=this.element('div','media-meta'),status=this.element('div','media-meta');status.hidden=true;copy.appendChild(description);copy.appendChild(meta);copy.appendChild(status);
     body.appendChild(video);body.appendChild(copy);card.appendChild(header);card.appendChild(body);
     if(pinned&&this.options.pin)this.options.pin(card);else this.options.insert(card);
-    return {node:card,label,body,video,description,meta,status,pinned};
+    return {node:card,label,body,video,description,meta,status,pinned,copyLabel};
   }
   start() {
     if(this.stream)return Promise.resolve(true);
@@ -57,7 +68,7 @@ class JShiVisionChat {
     const wasActive=!!this.stream;
     if(this.stream)this.stream.getTracks().forEach(t=>t.stop());this.stream=null;
     if(this.card&&wasActive){this.card.video.srcObject=null;this.card.video.hidden=true;this.card.label.textContent='画面已停止';
-      if(this.latestURL){const img=this.element('img','media-preview');img.src=this.latestURL;img.alt='最后一次采样画面';img.onclick=()=>this.view(img.src);this.card.body.insertBefore(img,this.card.video);}}
+      if(this.latestURL){const img=this.element('img','media-preview');img.src=this.latestURL;img.alt='最后一次采样画面';img.onclick=()=>this.viewCamera();this.card.body.insertBefore(img,this.card.video);}}
     const enlarged=this.doc.getElementById?.('media-video');if(enlarged){enlarged.srcObject=null;enlarged.hidden=true;}
     this.options.state(false);
   }
@@ -93,7 +104,10 @@ class JShiVisionChat {
       if(s){this.latestURL=s.image_available?'/api/vision/photo/'+s.frame:'';
         card.description.textContent=s.described_at?s.description:'正在采样，环境描述尚未完成';
         card.description.title=s.described_at?s.description:'';
-        if(card.pinned)card.meta.textContent=this.sampleLabel(card.lastCaptured||s.captured);else if(s.described_at)card.meta.textContent='描述依据 '+new Date(s.described_at*1000).toLocaleTimeString('zh-CN',{hour12:false});}
+        const stale=!!s.description_frame&&s.description_frame!==s.frame;
+        if(card.copyLabel)card.copyLabel.textContent=stale?'画面描述 · 新画面待更新':'画面描述';
+        const basis=s.described_at?' · 描述依据 '+new Date(s.described_at*1000).toLocaleTimeString('zh-CN',{hour12:false}):' · 尚无描述';
+        if(card.pinned)card.meta.textContent=this.sampleLabel(card.lastCaptured||s.captured)+basis+(stale?' · 暂用上次描述':'');else if(s.described_at)card.meta.textContent='描述依据 '+new Date(s.described_at*1000).toLocaleTimeString('zh-CN',{hour12:false});}
       const latestError=data.errors?.[0];
       const error=(!s?.described_at||Number(latestError?.at||0)>s.described_at)?latestError?.message||'':'';
       card.status.hidden=!error;card.status.textContent='';
@@ -118,11 +132,7 @@ class JShiVisionChat {
   }
   sampleLabel(at) {return '每 '+this.interval/1000+' 秒采样'+(at?' · 最近 '+new Date(at*1000).toLocaleTimeString('zh-CN',{hour12:false}):'');}
   viewCamera() {
-    if(!this.stream){this.view(this.latestURL);return;}
-    const video=this.doc.getElementById('media-video');this.doc.getElementById('media-large').hidden=true;
-    video.hidden=false;video.srcObject=this.stream;video.play().catch(()=>{});
-    this.doc.getElementById('media-caption').textContent=this.card.description.textContent+' · '+this.card.meta.textContent;
-    this.doc.getElementById('media-view').showModal();
+    if(this.card)this.card.node.setDisplay(this.card.node.dataset.display==='normal'?'compact':'normal');
   }
   view(url) {if(!url)return;const video=this.doc.getElementById('media-video');video.hidden=true;video.srcObject=null;this.doc.getElementById('media-large').hidden=false;this.doc.getElementById('media-caption').textContent='';this.doc.getElementById('media-large').src=url;this.doc.getElementById('media-view').showModal();}
   dispose(){this.stop();this.urls.forEach(url=>URL.revokeObjectURL(url));this.urls=[];}
@@ -132,7 +142,7 @@ else {
   visualChat=new JShiVisionChat({document,mediaDevices:navigator.mediaDevices,request:(...a)=>fetch(...a),
     pin:card=>{$('vision-dock').replaceChildren(card);$('vision-dock').hidden=false},
     ensureVoice:async()=>{inputMode('vision');return startVoice()},notice:log,
-    insert:card=>{if($('empty'))$('empty').remove();$('log').prepend(card);while($('log').children.length>100)$('log').lastChild.remove()},
+    insert:card=>{if($('empty'))$('empty').remove();$('log').appendChild(card);while($('log').children.length>100)$('log').firstChild.remove()},
     state:active=>{$('camera-toggle').textContent=active?'观察中':'开始视频';$('camera-toggle').ariaPressed=String(active)}});
   $('attach-photo').onclick=()=>$('photo-file').click();
   $('photo-file').onchange=()=>{const file=$('photo-file').files[0];if(file)visualChat.attachPhoto(file);$('photo-file').value='';};

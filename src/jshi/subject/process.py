@@ -250,12 +250,15 @@ class ActivityTiming:
     started_at: str
     steps: tuple[tuple[str, float], ...]
     total_ms: float
+    end_to_end: dict = field(default_factory=dict)
 
 
 class StepClock:
     def __init__(self) -> None:
         self.started_at = utc_now()
+        self.monotonic_started = time.monotonic()
         self._last = time.perf_counter()
+        self._started = self._last
         self.steps: list[tuple[str, float]] = []
 
     def mark(self, name: str) -> None:
@@ -268,7 +271,7 @@ class StepClock:
             activity_id=activity_id,
             started_at=self.started_at.isoformat(),
             steps=tuple(self.steps),
-            total_ms=round(sum(ms for _name, ms in self.steps), 1),
+            total_ms=round((time.perf_counter() - self._started) * 1000, 1),
         )
 
 
@@ -565,6 +568,7 @@ class SubjectProcess:
         resolved_speaker: SpeakerCandidate | None = None,
         on_verbal: Callable[[str], None] | None = None,
         on_voice_plan: Callable[[ResponsePlan], None] | None = None,
+        on_phase: Callable[[str], None] | None = None,
         defer_write: bool = False,
         code_restore: Callable[[str], str] | None = None,
         action_allowed: Callable[[], bool] | None = None,
@@ -573,6 +577,10 @@ class SubjectProcess:
         processing_modes: Sequence[str] = ("interaction",),
         visual_snapshot=None,
     ) -> SubjectActivityResult:
+        def phase(stage):
+            if on_phase is not None:
+                on_phase(stage)
+        phase('resolve')
         self.reflection_executor.note_input()
         self._deferred_write = None
         self._code_restore = code_restore
@@ -671,7 +679,8 @@ class SubjectProcess:
             observed_environment = (self.vision.store.snapshot(envelope.visual_snapshot_id, subject_id)
                 if envelope and envelope.visual_snapshot_id else self.vision.store.latest_sample(subject_id))
         if observed_environment and self.vision:
-            if not self.vision.store.bind(subject_id, fact.id, observed_environment['id']):
+            retained = self.vision.store.bind(subject_id, fact.id, observed_environment['id'])
+            if not retained and observed_environment.get('change_degree') in ('medium', 'high'):
                 self.vision.store.error(subject_id, '记忆照片预算已满或媒体不可用，本轮未新增照片关联')
         inbound = None
         if not idle:
@@ -727,6 +736,7 @@ class SubjectProcess:
         )
 
         clock.mark("②活跃区")
+        phase('assemble')
         # 组装只读；清理超时策划与僵尸记挂放在组装之前，由主流程显式做。
         self._tool_reap_stale(subject_id, speaker.object_id)
         # 阶段③ 当前状态组装（单一路径，只读已有记录）
@@ -883,6 +893,7 @@ class SubjectProcess:
                 verbal_delivered = True
                 on_verbal(value)
 
+        phase('cognition')
         response, working_recalled = self._cognize(
             subject_id, activity, current, perception, clock=clock,
             on_reply=deliver_verbal if on_verbal is not None else None,
@@ -900,7 +911,9 @@ class SubjectProcess:
                 objects = _speaker_object_mapping(speaker, objects, speaker.aliases)
             current = replace(current, input_text=envelope.text, input_review_text='',
                               speaker=self._assembly_speaker(speaker=speaker, object_id=None))
+        phase('action')
         deliver_verbal(verbal_text(response.response_plan))
+        reply_ready_mono = time.monotonic()
         if on_voice_plan is not None:
             on_voice_plan(response.response_plan)
         self.last_model_response = response
@@ -1148,6 +1161,21 @@ class SubjectProcess:
                 )
             )
         timing = clock.finish(completed.id)
+        entry = envelope.entry_timing if envelope is not None else {}
+        if entry.get('received_mono') is not None:
+            start = entry['received_mono']
+            end_to_end = {k: v for k, v in entry.items() if not k.endswith('_mono')}
+            end_to_end.update(
+                scope='server_received_to_main_complete',
+                entry_total_ms=round((clock.monotonic_started - start) * 1000, 1),
+                reply_ready_ms=round((reply_ready_mono - start) * 1000, 1),
+                complete_ms=round((time.monotonic() - start) * 1000, 1),
+                main_process_ms=timing.total_ms,
+                main_cognition_ms=next((ms for name, ms in timing.steps if name == '⑤认知'), None),
+                background_write_included=False,
+                browser_display_included=False,
+            )
+            timing = replace(timing, end_to_end=end_to_end)
         self.last_activity_timing = timing
         try:
             append_timing(
@@ -1157,6 +1185,7 @@ class SubjectProcess:
                 started_at=timing.started_at,
                 total_ms=timing.total_ms,
                 steps=timing.steps,
+                end_to_end=timing.end_to_end,
             )
         except Exception:
             logger.exception("activity timing persist failed")
@@ -1733,6 +1762,40 @@ class SubjectProcess:
         except Exception:
             logger.exception("step input persist failed")
 
+    def _recall_media(self, current):
+        if not self.vision:
+            return current
+        import base64
+        memory = [f for f in current.fragments if f.source == 'memory']
+        if not memory:
+            return current
+        subject = current.subject_state.subject_id
+        store = self.vision.store
+        associations = store.associated_many(subject, [(f.source_ids, f.id.removeprefix('memory:')) for f in memory], images_only=True)
+        numbers, images, enriched = {}, [], {}
+        enabled = getattr(getattr(self.vision, 'config', store.config), 'cognition_images', False)
+        for fragment, snapshots in zip(memory, associations):
+            notes = []
+            for snapshot in snapshots:
+                frame = snapshot['frame']
+                if frame not in numbers:
+                    number = len(numbers) + 1
+                    try:
+                        data = store.image(frame, subject) if enabled else None
+                    except KeyError:
+                        continue
+                    numbers[frame] = number
+                    if data is not None:
+                        images.append({'kind':'image', 'reference':frame, 'label':f'图片{number}',
+                            'image_url':'data:image/jpeg;base64,'+base64.b64encode(data).decode()})
+                number = numbers[frame]
+                notes.append(f"关联历史图片{number}；拍摄时间 {snapshot['captured']}；" +
+                    ('原图随本轮提供。' if enabled else f'本轮未提供原图；可用动作“回看照片 {frame}：观察问题”查看。'))
+            if notes:
+                enriched[fragment.id] = replace(fragment, content=fragment.content+'\n'+'\n'.join(notes))
+        return replace(current, fragments=tuple(enriched.get(f.id, f) for f in current.fragments),
+                       input_parts=(*current.input_parts, *images))
+
     def _cognize_once(
         self,
         current: AssembledCurrentState,
@@ -1747,6 +1810,7 @@ class SubjectProcess:
         ``response_plan`` 一旦完整且 mode=respond 就先回调 ``on_reply``(提前开口),
         其余段(活跃区/打分)继续收、最终返回完整 ``ModelResponse``。
         """
+        current = self._recall_media(current)
         speaker = None
         if current.speaker is not None:
             speaker = ModelSpeaker(

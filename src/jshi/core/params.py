@@ -34,6 +34,11 @@ ACTIVE_ZONE_RATIO: float = 1 / 30
 # 身份 / 对象 / 既往视图正文 / 08 常驻不占此预算。固定字数，不随窗口放大。
 WORKING_SET_LIMIT_CHARS: int = 1500
 
+# Voice collection balances reaction time with incomplete utterance protection.
+VOICE_INPUT_PAUSE_MS: int = 1000
+# Autonomous environment cognition waits until conversation and playback are idle.
+VISUAL_TURN_IDLE_SECONDS: float = 5.0
+
 # 普通价值装载占活跃区字符预算的比例。按字截断；binding 边界不占此预算。
 VALUE_LOAD_RATIO: float = 1 / 5
 

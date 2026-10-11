@@ -57,6 +57,7 @@ class BatchDecision:
     model_error: str = ""
     main_prompt_hint: dict | None = None
     routing_error: str = ""  # Valid identity judgments survive invalid routing fields.
+    direct_reply: str = ""
 
 
 def explicit_name(text: str) -> str:
@@ -208,6 +209,7 @@ class VoiceJEV:
                    "scene": delivery.get("jev_scene", ""), "now": delivery.get("now")}
         if delivery.get('environment'):
             payload['environment'] = delivery['environment']
+        payload['short_chat'] = delivery.get('short_chat', {'allowed':False})
         packed = delivery.get('envelope')
         if packed:
             payload['input']['envelope'] = {**packed, 'parts':[
@@ -222,8 +224,10 @@ class VoiceJEV:
                 "required": ["i", "person", "certainty", "why"], "additionalProperties": False},
                 "minItems": len(batch), "maxItems": len(batch)},
             "level": {"type": "integer", "enum": [1, 2, 3]},
-            "recall_memory": {"type":"boolean"}},
-            "required": ["items", "level", "recall_memory"], "additionalProperties": False}
+            "recall_memory": {"type":"boolean"},
+            "route": {"enum":["main", "self_reply"]},
+            "reply": {"type":"string", "maxLength":160}},
+            "required": ["items", "level", "recall_memory", "route", "reply"], "additionalProperties": False}
         request = ModelRequest(purpose="voice_jev", input_text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             subject_state=SubjectState(subject_id, "匠石", "快速入口判断"),
             system_extra=ENTRY_INSTRUCTION + "\nJSON Schema：" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
@@ -253,6 +257,16 @@ class VoiceJEV:
                         result = replace(result, action="stop", reason="明确停止要求")
                 elif not modern and control == "continue" and active and all(r.to_jiangshi == "no" for r in result.items):
                     result = replace(result, action="resume")
+                direct = data.get('reply', '')
+                if (modern and data.get('route') == 'self_reply' and delivery.get('short_chat', {}).get('allowed') is True
+                        and not overlap and not any(row.get('source') == 'visual_environment' for row in batch)
+                        and hint.get('level') == 3 and hint.get('recall_memory') is False
+                        and result.judged and not result.routing_error
+                        and isinstance(direct, str) and 0 < len(direct.strip()) <= 160
+                        and all(row.speaker_pick == delivery['short_chat'].get('person_code', row.speaker_pick)
+                                for row in result.items)
+                        and all(row.speaker_level == '确定' for row in result.items)):
+                    result = replace(result, direct_reply=direct.strip(), reason='短时聊天，由JEV我回答')
                 return replace(result, model_raw=raw_text,
                     main_prompt_hint=hint if modern else normalize_hint(data.get("main_prompt_hint")) or None)
             action = data.get("action")

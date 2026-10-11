@@ -24,6 +24,7 @@ def append_timing(
     started_at: str,
     total_ms: float,
     steps: tuple[tuple[str, float], ...],
+    end_to_end: dict | None = None,
 ) -> None:
     file = Path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
@@ -34,5 +35,7 @@ def append_timing(
         "total_ms": total_ms,
         "steps": [[name, ms] for name, ms in steps],
     }
+    if end_to_end:
+        payload['end_to_end'] = end_to_end
     with file.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")

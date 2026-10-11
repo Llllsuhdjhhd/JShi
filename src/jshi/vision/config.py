@@ -10,6 +10,7 @@ class VisionConfig:
     model: str = "deepseek-flash"
     detector: str = "change"
     jev_images: bool = False
+    cognition_images: bool = False  # Enable only for a main model accepting image input.
     weights: str = "yolo11n.pt"
     sample_seconds: float = 2
     archive_seconds: float = 10

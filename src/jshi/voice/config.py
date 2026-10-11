@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from jshi.core.params import VOICE_INPUT_PAUSE_MS, VISUAL_TURN_IDLE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,8 @@ class VoiceConfig:
     jev_timeout_s: float = 3.0
     end_window_ms: int = 500
     tts_transport: str = 'websocket'
-    input_pause_s: float = 2.5
+    input_pause_s: float = VOICE_INPUT_PAUSE_MS / 1000
+    environment_idle_s: float = VISUAL_TURN_IDLE_SECONDS
     candidate_timeout_s: float = 1.2
     input_max_batch_s: float = 6.0
 
@@ -48,6 +50,8 @@ class VoiceConfig:
             raise ValueError('voice TTS transport must be websocket or sse')
         if not .3 <= self.input_pause_s <= 15:
             raise ValueError('JSHI_VOICE_INPUT_PAUSE_MS must be between 300 and 15000')
+        if not 0 <= self.environment_idle_s <= 60:
+            raise ValueError('JSHI_VOICE_ENVIRONMENT_IDLE_MS must be between 0 and 60000')
         if not .3 <= self.input_max_batch_s <= 15:
             raise ValueError('JSHI_VOICE_INPUT_MAX_BATCH_MS must be between 300 and 15000')
         if not .1 <= self.candidate_timeout_s <= 5:
@@ -70,7 +74,8 @@ class VoiceConfig:
             identity_mode=os.getenv("JSHI_VOICE_IDENTITY_MODE", "diarization"),
             end_window_ms=int(os.getenv("JSHI_VOICE_END_WINDOW_MS", "500")),
             tts_transport=os.getenv('JSHI_VOICE_TTS_TRANSPORT', 'websocket'),
-            input_pause_s=int(os.getenv('JSHI_VOICE_INPUT_PAUSE_MS', '2500')) / 1000,
+            input_pause_s=int(os.getenv('JSHI_VOICE_INPUT_PAUSE_MS', str(VOICE_INPUT_PAUSE_MS))) / 1000,
+            environment_idle_s=int(os.getenv('JSHI_VOICE_ENVIRONMENT_IDLE_MS', str(int(VISUAL_TURN_IDLE_SECONDS*1000)))) / 1000,
             input_max_batch_s=int(os.getenv('JSHI_VOICE_INPUT_MAX_BATCH_MS', '6000')) / 1000,
             candidate_timeout_s=int(os.getenv('JSHI_VOICE_CANDIDATE_TIMEOUT_MS', '1200')) / 1000,
             template=VoiceTemplate(

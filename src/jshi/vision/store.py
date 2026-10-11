@@ -40,6 +40,10 @@ class VisionStore:
                 create table if not exists envelopes(frame text primary key, metadata text not null);
                 create index if not exists frames_subject_time on frames(subject,captured);
             ''')
+            columns = {r[1] for r in c.execute('pragma table_info(snapshots)')}
+            if 'change_degree' not in columns:
+                c.execute("alter table snapshots add column change_degree text not null default 'unknown'")
+                c.execute("alter table snapshots add column change_reason text not null default ''")
 
     @contextmanager
     def db(self):
@@ -47,13 +51,8 @@ class VisionStore:
             c.row_factory = sqlite3.Row
             yield c
 
-    def add_frame(self, subject, data, captured, source="visual", *, source_time=None, clock_offset=0, clock_uncertainty=0):
+    def prepare_image(self, data):
         from PIL import Image, ImageOps
-        if not subject or not source or not isinstance(captured, (int, float)):
-            raise ValueError("invalid visual envelope")
-        import math
-        if not math.isfinite(captured) or captured <= 0 or captured > time() + 60:
-            raise ValueError("invalid capture time")
         if not data or len(data) > self.config.max_image_bytes:
             raise ValueError("image exceeds upload limit")
         with Image.open(BytesIO(data)) as original:
@@ -63,7 +62,15 @@ class VisionStore:
             image.thumbnail((1600, 1600))
             out = BytesIO()
             image.save(out, "JPEG", quality=82)
-        encoded = out.getvalue()
+        return out.getvalue()
+
+    def add_frame(self, subject, data, captured, source="visual", *, source_time=None, clock_offset=0, clock_uncertainty=0):
+        if not subject or not source or not isinstance(captured, (int, float)):
+            raise ValueError("invalid visual envelope")
+        import math
+        if not math.isfinite(captured) or captured <= 0 or captured > time() + 60:
+            raise ValueError("invalid capture time")
+        encoded = self.prepare_image(data)
         asset = sha256(encoded).hexdigest()
         frame = uuid4().hex
         from dataclasses import asdict
@@ -94,9 +101,11 @@ class VisionStore:
             raise KeyError("photo unavailable")
         return dict(row)
 
-    def publish(self, subject, frame, description, detections=(), reason="", model="", *, described_at=None, make_current=True):
+    def publish(self, subject, frame, description, detections=(), reason="", model="", *, described_at=None, make_current=True, change_degree='unknown', change_reason=''):
         if not description.strip():
             raise ValueError("empty environment description")
+        if change_degree not in ('unknown', 'none', 'low', 'medium', 'high'):
+            raise ValueError('invalid environment change degree')
         sid = uuid4().hex
         with self.db() as c:
             f = c.execute("select captured from frames where id=? and subject=?", (frame, subject)).fetchone()
@@ -116,9 +125,10 @@ class VisionStore:
                     return None
             if model == 'local' and latest:
                 description_frame = latest['description_frame']
-            c.execute("insert into snapshots values(?,?,?,?,?,?,?,?,?,?,?)",
+            c.execute("insert into snapshots(id,subject,frame,captured,completed,description,detections,reason,model,described_at,description_frame) values(?,?,?,?,?,?,?,?,?,?,?)",
                       (sid, subject, frame, f[0], time(), description.strip(), json.dumps(detections, ensure_ascii=False), reason, model,
                        described_at, description_frame))
+            c.execute('update snapshots set change_degree=?,change_reason=? where id=?', (change_degree, change_reason, sid))
             if make_current:
                 c.execute("insert or replace into current values(?,?)", (subject, sid))
         return self.snapshot(sid, subject)
@@ -161,10 +171,12 @@ class VisionStore:
             if existing:
                 return self._snapshot_row(c, existing)
             sid = uuid4().hex
-            c.execute('insert into snapshots values(?,?,?,?,?,?,?,?,?,?,?)', (
+            c.execute('insert into snapshots(id,subject,frame,captured,completed,description,detections,reason,model,described_at,description_frame) values(?,?,?,?,?,?,?,?,?,?,?)', (
                 sid, subject, frame, sample['captured'], time(), description, '[]', 'sample', 'local',
                 current['described_at'] if current else 0,
                 current['description_frame'] if current else frame))
+            if current:
+                c.execute('update snapshots set change_degree=?,change_reason=? where id=?', (current['change_degree'], current['change_reason'], sid))
             return self._snapshot_row(c, c.execute('select * from snapshots where id=?', (sid,)).fetchone())
 
     def memories(self, subject, limit=30):
@@ -177,24 +189,49 @@ class VisionStore:
     def bind(self, subject, source_id, sid):
         with self.db() as c:
             c.execute('begin immediate')
-            s = c.execute("select frame,description_frame from snapshots where id=? and subject=?", (sid, subject)).fetchone()
+            s = c.execute("select frame,description_frame,change_degree from snapshots where id=? and subject=?", (sid, subject)).fetchone()
             if s is None:
                 return False
             pinned = {r[0] for r in c.execute('''select distinct f.asset from frames f join snapshots s
-                on s.frame=f.id or s.description_frame=f.id where s.id in
+                on s.description_frame=f.id where s.id in
                 (select snapshot from bindings where retain_photo=1 union select snapshot from events where retain_photo=1)''')}
-            wanted = {r[0] for r in c.execute('select asset from frames where id in (?,?)', (s[0],s[1]))}
+            wanted = {r[0] for r in c.execute('select asset from frames where id=?', (s[1],))}
             sizes = {r[0]:r[1] for r in c.execute('select id,size from assets')}
-            retained = bool(wanted) and (wanted <= pinned or sum(sizes[a] for a in pinned | wanted) <= self.config.memory_bytes)
+            retained = s[2] in ('medium', 'high') and bool(wanted) and (wanted <= pinned or sum(sizes[a] for a in pinned | wanted) <= self.config.memory_bytes)
             c.execute("insert or ignore into bindings values(?,?,?,?)", (subject, source_id, sid, int(retained)))
         return retained
 
     def associated(self, subject, source_ids=(), event_id=""):
+        return self.associated_many(subject, [(source_ids, event_id)])[0]
+
+    def associated_many(self, subject, requests, *, images_only=False):
+        """Resolve only explicit associations, using one connection for the batch."""
+        results = []
         with self.db() as c:
-            ids = {r[0] for r in c.execute("select snapshot from events where subject=? and event_id=?", (subject, event_id))}
-            for source in source_ids:
-                ids.update(r[0] for r in c.execute("select snapshot from bindings where subject=? and source_id=?", (subject, source)))
-        return [s for sid in sorted(ids) if (s := self.snapshot(sid, subject))]
+            cache = {}
+            for source_ids, event_id in requests:
+                photo_filter = ' and retain_photo=1' if images_only else ''
+                ids = {r[0] for r in c.execute("select snapshot from events where subject=? and event_id=?"+photo_filter, (subject, event_id))} if event_id else set()
+                for source in source_ids:
+                    ids.update(r[0] for r in c.execute("select snapshot from bindings where subject=? and source_id=?"+photo_filter, (subject, source)))
+                snapshots = []
+                for sid in ids:
+                    if sid not in cache:
+                        row = c.execute('select * from snapshots where id=? and subject=?', (sid, subject)).fetchone()
+                        cache[sid] = self._snapshot_row(c, row) if row else None
+                    s = cache[sid]
+                    if s and images_only:
+                        photo = c.execute('select captured from frames where id=? and subject=?', (s['description_frame'], subject)).fetchone()
+                        s = {**s, 'frame':s['description_frame'], 'captured':photo[0], 'image_available':True} if photo else None
+                    if s:
+                        snapshots.append(s)
+                # Repeated samples sharing one completed scene description need
+                # one representative photo, rather than repeated scene paragraphs.
+                unique = {}
+                for s in sorted(snapshots, key=lambda s: (s['captured'], s['completed'])):
+                    unique[(s['description_frame'], s['description'])] = s
+                results.append(list(unique.values()))
+        return results
 
     def record_delivery(self, subject, snapshots, stored_marks):
         with self.db() as c:
@@ -247,7 +284,7 @@ class VisionStore:
         with self.db() as c:
             c.execute('begin immediate')
             protected = {r[0] for r in c.execute('''select frame from snapshots where id in
-                (select snapshot from current union select snapshot from bindings where retain_photo=1 union select snapshot from events where retain_photo=1)''')}
+                (select snapshot from current)''')}
             protected.update(r[0] for r in c.execute('''select description_frame from snapshots where id in
                 (select snapshot from current union select snapshot from bindings where retain_photo=1 union select snapshot from events where retain_photo=1)'''))
             protected.update(r[0] for r in c.execute('select frame from inflight'))
@@ -282,5 +319,5 @@ class VisionStore:
         from datetime import datetime, timezone
         at = datetime.fromtimestamp(s['captured'], timezone.utc).isoformat()
         described = datetime.fromtimestamp(s['described_at'], timezone.utc).isoformat() if s['described_at'] else '尚未完成'
-        return f"【环境观察 {at}；版本 {s['id']}；描述依据 {described}】\n{s['description']}\n" + (
+        return f"【环境观察 {at}；版本 {s['id']}；描述依据 {described}；环境变化 {s.get('change_degree', 'unknown')}】\n{s['description']}\n" + (
             "【本地检测变化】" + json.dumps(s['detections'], ensure_ascii=False) if s['detections'] else "")

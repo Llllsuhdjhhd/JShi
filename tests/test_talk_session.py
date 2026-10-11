@@ -336,7 +336,7 @@ def test_timing_command_reads_last_round_without_experience(tmp_path):
     assert counted.experience_calls == 1
     assert outcome.events[0].kind == "overlay"
     text = outcome.events[0].text
-    assert "上一轮 合计" in text
+    assert "上一轮 主流程" in text
     assert "①落位" in text
     assert "⑤认知" in text
 

@@ -30,7 +30,7 @@ def store(tmp_path):
 
 def snapshot(store, color='red', at=None, description='客厅里有一个人。'):
     frame = store.add_frame('stone', image(color), at or time())
-    return store.publish('stone', frame, description)
+    return store.publish('stone', frame, description, change_degree='high')
 
 
 def test_media_roundtrip_and_subject_isolation(store):
@@ -126,17 +126,52 @@ def test_initial_cloud_then_local_movement_and_special_change(store):
     finally: service.close()
 
 
-def test_sampling_photos_can_be_saved_without_cloud(store):
+def test_unchanged_scene_does_not_save_periodic_photos(store):
     model = Model()
     service = VisionService(store, store.config, model, Detector())
     try:
         service.process('stone', image(), time())
         service.last_archive.clear()
+        service.last_online.clear()
         service.process('stone', image('blue'), time())
         assert model.calls == 1
         with store.db() as c:
-            assert c.execute('select count(*) from frames').fetchone()[0] == 2
+            assert c.execute('select count(*) from frames').fetchone()[0] == 1
+            assert c.execute('select count(*) from snapshots').fetchone()[0] == 1
+            assert c.execute('select count(*) from assets').fetchone()[0] == 1
     finally: service.close()
+
+
+def test_recall_images_are_explicit_available_and_scene_deduplicated(store, monkeypatch):
+    from contextlib import contextmanager
+    first = snapshot(store, at=time()-20)
+    frame = store.add_frame('stone', image('blue'), time()-10)
+    second = store.publish('stone', frame, first['description'], reason='local_detection',
+                           model='local', described_at=first['described_at'], change_degree='high')
+    store.bind('stone', 's1', first['id'])
+    store.bind('stone', 's2', second['id'])
+    store.record_delivery('stone', {'segment':[first, second]}, {'segment':['with-image']})
+    class Backend:
+        def recall(self, *args, **kwargs):
+            return (RecalledFragment('with-image', 'event', '有图的事件'),
+                    RecalledFragment('no-image', 'event', '无图的事件'))
+    calls = []
+    original = store.db
+    @contextmanager
+    def counted():
+        calls.append(1)
+        with original() as c:
+            yield c
+    monkeypatch.setattr(store, 'db', counted)
+    rows = store.associated_many('stone', [((), 'with-image'), ((), 'no-image')], images_only=True)
+    assert len(calls) == 1
+    assert len(rows[0]) == 1
+    assert rows[0][0]['id'] == second['id']
+    assert rows[0][0]['frame'] == first['frame']
+    assert rows[1] == []
+    with original() as c:
+        c.execute('delete from frames where id in (?,?)', (first['frame'], second['frame']))
+    assert store.associated_many('stone', [((), 'with-image')], images_only=True) == [[]]
 
 
 def test_bad_model_result_does_not_replace_state(store):
@@ -258,8 +293,9 @@ def test_memory_batch_associations_and_recall(store):
     memory.ingest_batch(batch)
     assert sum(e.text.count('客厅里') for e in b.batch.experiences)==1
     recalled = memory.recall('stone','客厅')[0]
-    assert recalled.visual_observations[0]['frame']==s['frame']
-    assert '回看照片' in recalled.content
+    assert recalled.visual_observations == ()
+    assert '回看照片' not in recalled.content
+    assert store.associated_many('stone', [((), recalled.event_id)], images_only=True)[0][0]['frame'] == s['frame']
     memory.ingest_batch(batch)
     assert all('客厅里' not in e.text for e in b.batch.experiences)
     rows = [json.loads(line) for line in (store.root.parent / 'memory_phase_timings.jsonl').read_text(encoding='utf-8').splitlines()]
@@ -270,6 +306,47 @@ def test_memory_batch_associations_and_recall(store):
     assert '客厅' not in json.dumps(rows, ensure_ascii=False)
     ingest = next(row for row in rows if row['operation'] == 'ingest')
     assert all(ingest[name] >= 0 for name in ('lock_wait_ms', 'backend_ms', 'visual_prepare_ms', 'visual_delivery_ms'))
+
+
+def test_change_grade_controls_photo_retention_and_selected_recall_numbering(store, process):
+    from jshi.assembly.port import AssemblyFragment
+    from types import SimpleNamespace
+    first = snapshot(store)
+    for degree, retained in [('none', False), ('low', False), ('medium', True), ('high', True)]:
+        s = store.publish('stone', first['frame'], '环境描述 '+degree, change_degree=degree)
+        assert store.bind('stone', 'source-'+degree, s['id']) == retained
+    process.vision = SimpleNamespace(store=store, config=replace(store.config, cognition_images=True))
+    state = process.assemble_current_state('stone', '测试')
+    fragments = tuple(AssemblyFragment(source='memory', id='memory:'+degree, kind='fact', content='文字 '+degree,
+                        source_ids=('source-'+degree,)) for degree in ['low', 'medium', 'high'])
+    result = process._recall_media(replace(state, fragments=fragments))
+    assert len(result.input_parts) == 1
+    assert result.input_parts[0]['label'] == '图片1'
+    assert result.input_parts[0]['image_url'].startswith('data:image/jpeg;base64,')
+    assert '图片' not in result.fragments[0].content
+    assert all('图片1' in f.content for f in result.fragments[1:])
+    from jshi.models.base import ModelRequest, _chat_payload
+    request = ModelRequest('subject_activity', '文字回忆中引用图片1', state.subject_state,
+                           input_parts=result.input_parts)
+    content = json.loads(_chat_payload('test', request))['messages'][1]['content']
+    assert '图片1' in content[-2]['text']
+    assert content[-1]['type'] == 'image_url'
+    process.vision.config = replace(store.config, cognition_images=False)
+    result = process._recall_media(replace(state, fragments=fragments))
+    assert result.input_parts == ()
+    assert '本轮未提供原图' in result.fragments[1].content
+
+
+def test_environment_model_returns_validated_change_grade(store):
+    payloads = []
+    def transport(payload):
+        payloads.append(payload)
+        return {'choices':[{'message':{'content':json.dumps({'description':'有人走到门旁',
+            'change_degree':'medium', 'change_reason':'主要位置改变'})}, 'finish_reason':'stop'}]}
+    model = VisionModel(store.config, transport)
+    result = model.observe(image(), previous='人在桌旁')
+    assert result['change_degree'] == 'medium'
+    assert payloads[0]['response_format'] == {'type':'json_object'}
 
 
 def test_visual_diagnostic_write_failure_does_not_break_recall(store, monkeypatch):
@@ -688,7 +765,7 @@ def test_cloud_request_includes_recent_scene_without_using_it_as_image_evidence(
     assert '不证明画面中的人物身份' in text
 
 
-def test_stable_sampling_keeps_latest_and_archives_without_filling_every_frame(store):
+def test_stable_sampling_reuses_saved_scene_without_new_frames(store):
     class Stable:
         def detect(self,data): return [], False
     service=VisionService(store,store.config,Model(),Stable())
@@ -697,9 +774,39 @@ def test_stable_sampling_keeps_latest_and_archives_without_filling_every_frame(s
         service.process('stone',image('blue'),time())
         service.process('stone',image('green'),time())
         last=store.latest_sample('stone')
-        assert last['frame'] != initial['frame']
+        assert last['frame'] == initial['frame']
         with store.db() as c:
-            assert c.execute('select count(*) from frames').fetchone()[0] == 2
+            assert c.execute('select count(*) from frames').fetchone()[0] == 1
+    finally: service.close()
+
+
+def test_gradual_pixel_change_is_compared_with_last_saved_scene():
+    from jshi.vision.local import ChangeDetector
+    detector = ChangeDetector()
+    assert detector.detect(image((0, 0, 0)))[1]
+    assert not detector.detect(image((10, 10, 10)))[1]
+    assert not detector.detect(image((20, 20, 20)))[1]
+    assert detector.detect(image((40, 40, 40)))[1]
+
+
+def test_changed_scene_is_described_after_cooldown_even_when_now_stable(store, monkeypatch):
+    class Frames:
+        def __init__(self): self.changes=iter((True, True, False))
+        def detect(self, data): return [], next(self.changes)
+    now=[time()]
+    monkeypatch.setattr('jshi.vision.service.time', lambda:now[0])
+    model=Model()
+    service=VisionService(store, store.config, model, Frames())
+    try:
+        service.process('stone', image(), now[0])
+        now[0]+=1
+        service.process('stone', image('blue'), now[0])
+        assert model.calls==1
+        now[0]+=store.config.cooldown_seconds
+        result=service.process('stone', image('blue'), now[0])
+        assert model.calls==2
+        assert result['described_at']==now[0]
+        assert ('stone','visual') not in service.dirty
     finally: service.close()
 
 

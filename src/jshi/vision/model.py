@@ -20,7 +20,17 @@ class VisionModel:
         with urlopen(request, timeout=self.config.timeout_seconds) as response:
             return json.load(response)
 
-    def describe(self, image, *, question="", previous="", scene=""):
+    def observe(self, image, *, previous="", scene=""):
+        text = self.describe(image, previous=previous, scene=scene, structured=True)
+        try:
+            value = json.loads(text)
+        except ValueError as exc:
+            raise ValueError('环境观察须返回描述和变化程度') from exc
+        if not isinstance(value, dict) or not isinstance(value.get('description'), str) or not value['description'].strip() or value.get('change_degree') not in ('none', 'low', 'medium', 'high'):
+            raise ValueError('环境观察的描述或变化程度无效')
+        return value
+
+    def describe(self, image, *, question="", previous="", scene="", structured=False):
         instruction = (
             "描述此刻画面中可见的环境，重点是人、所在区域、主要物体位置与布局，"
             "以及显著活动、变化和特殊细节。使用简洁中文，不猜姓名，不凭二维画面编造距离、"
@@ -34,6 +44,11 @@ class VisionModel:
                        {"type": "text", "text": instruction},
                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode()}}
                    ]}]}
+        if structured:
+            payload['messages'][0]['content'][0]['text'] += (
+                '\n只输出JSON：{"description":"环境描述","change_degree":"none|low|medium|high","change_reason":"比较依据"}。'
+                '比较此前环境描述与当前环境：none无变化，low细微姿态或措辞变化，medium主要活动、人物或物体布局明显变化，high换环境或整体场景改变。首次观察为high。不要把时间流逝或描述措辞不同当作环境变化。')
+            payload['response_format'] = {'type': 'json_object'}
         if self.config.model.startswith('deepseek'):
             payload['thinking'] = {'type': 'disabled'}
         result = self.transport(payload)

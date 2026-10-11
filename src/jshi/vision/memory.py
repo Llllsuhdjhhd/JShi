@@ -89,16 +89,10 @@ class VisualMemory:
         fragments = self.backend.recall(subject_id, query, **kwargs)
         timings['backend_ms'] = round((perf_counter() - backend_started) * 1000, 3)
         timings['returned_count'] = len(fragments)
-        visual_started = perf_counter()
-        result = []
-        for f in fragments:
-            ss = self.store.associated(subject_id, f.source_ids, f.event_id)
-            photo_notes = '\n'.join(self.store.render(s) + '\n' + (
-                f"关联照片：{s['frame']}；描述来源照片：{s['description_frame']}；可用动作‘回看照片 {s['frame']}：观察问题’按需解读。" if s['image_available'] else '关联照片已不可用。') for s in ss)
-            result.append(replace(f, visual_observations=tuple(ss), content=(f.content or f.text) + ('\n' + photo_notes if photo_notes else '')))
-        timings['visual_associations_ms'] = round((perf_counter() - visual_started) * 1000, 3)
+        # RAG returns only text. Media is attached after the working-set selection.
+        timings['visual_associations_ms'] = 0
         timings['status'] = 'succeeded'
-        return tuple(result)
+        return tuple(fragments)
 
     def _record_timings(self, timings, started):
         timings.setdefault('status', 'failed')

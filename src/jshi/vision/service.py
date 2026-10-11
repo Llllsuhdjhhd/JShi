@@ -56,12 +56,7 @@ class VisionService:
                 self.store.cleanup()
 
     def process(self, subject, data, captured, source='visual', clock=None, *, background=False):
-        frame = self.store.add_frame(subject, data, captured, source, **(clock or {}))
-        old_frame = self.last_frame.get(subject)
-        self.last_frame[subject] = frame
-        if old_frame:
-            self.store.discard_frame(subject, old_frame)
-        normalized = self.store.image(frame, subject)
+        normalized = self.store.prepare_image(data)
         # Detector state must not cross subjects or physical input sources.
         key = (subject, source)
         if self.detector is None or self.previous.get('_detector_key') != key:
@@ -71,6 +66,20 @@ class VisionService:
         detections, changed = self.detector.detect(normalized)
         current = self.store.latest(subject)
         source_changed = current and current.get('envelope', {}).get('source') != source
+        if changed or source_changed:
+            with self.lock:
+                self.dirty[key] = captured
+        refresh_due = time()-self.last_online.get(key, 0) >= self.config.cooldown_seconds and (
+            not current or key in self.dirty)
+        if current and not source_changed and not changed and not refresh_due:
+            # Sampling continues, but an unchanged scene creates no saved image,
+            # archive or snapshot, even when the periodic archive timer expires.
+            return None
+        frame = self.store.add_frame(subject, data, captured, source, **(clock or {}))
+        old_frame = self.last_frame.get(subject)
+        self.last_frame[subject] = frame
+        if old_frame:
+            self.store.discard_frame(subject, old_frame)
         identity = lambda rows: sorted((d.get('class', ''), d.get('track') or 0) for d in rows)
         if source_changed or (changed and (not detections or any(d.get('confidence', 0) < .5 for d in detections)
                         or not current or identity(detections) != identity(current['detections']))):
@@ -78,7 +87,7 @@ class VisionService:
                 self.dirty[key] = captured
         online = time() - self.last_online.get(key, 0) >= self.config.cooldown_seconds and (
             not current or key in self.dirty or time() - self.last_online.get(key, 0) >= self.config.refresh_seconds)
-        archive = time() - self.last_archive.get(key, 0) >= self.config.archive_seconds
+        archive = (changed or source_changed or not current) and time() - self.last_archive.get(key, 0) >= self.config.archive_seconds
         if not online and not archive and not changed:
             self.store.discard_frame(subject, frame)
             return None
@@ -96,13 +105,13 @@ class VisionService:
                 self.store.cleanup()
                 self.store.error(subject, '视觉模型达到每小时调用上限，保留已有环境信息')
                 return None
-            description = self.model.describe(self.store.image(frame, subject), previous=current['description'] if current else '',
-                **({'scene':self.scene_context()} if self.scene_context else {}))
-            result = self.store.publish(subject, frame, description, detections, 'initial' if not current else 'change_or_refresh', self.config.model)
+            description, degree, change_reason = self._observe(subject, frame, current)
+            result = self.store.publish(subject, frame, description, detections, 'initial' if not current else 'change_or_refresh', self.config.model,
+                                        change_degree=degree, change_reason=change_reason)
             self._clear_dirty(key, captured)
         elif current and changed:
             result = self.store.publish(subject, frame, current['description'], detections, 'local_detection', 'local',
-                                        described_at=current['described_at'])
+                                        described_at=current['described_at'], change_degree='low', change_reason='本地位置变化，环境描述未更新')
         else:
             result = None
         if not archive and not result:
@@ -114,6 +123,16 @@ class VisionService:
         with self.lock:
             if self.dirty.get(key, 0) <= captured:
                 self.dirty.pop(key, None)
+
+    def _observe(self, subject, frame, current):
+        kwargs = {'previous':current['description'] if current else ''}
+        if self.scene_context:
+            kwargs['scene'] = self.scene_context()
+        if hasattr(self.model, 'observe'):
+            value = self.model.observe(self.store.image(frame, subject), **kwargs)
+            return value['description'], value['change_degree'], value.get('change_reason', '')
+        # Older/custom providers may supply text only: no inferred retention grade.
+        return self.model.describe(self.store.image(frame, subject), **kwargs), 'unknown', ''
 
     def _schedule_online(self, subject, frame, detections, key):
         with self.lock:
@@ -134,9 +153,9 @@ class VisionService:
             if not self.store.claim_call(subject):
                 raise RuntimeError('视觉模型达到每小时调用上限')
             current = self.store.latest(subject)
-            description = self.model.describe(self.store.image(frame, subject), previous=current['description'] if current else '',
-                **({'scene':self.scene_context()} if self.scene_context else {}))
-            result = self.store.publish(subject, frame, description, detections, 'initial' if not current else 'change_or_refresh', self.config.model)
+            description, degree, change_reason = self._observe(subject, frame, current)
+            result = self.store.publish(subject, frame, description, detections, 'initial' if not current else 'change_or_refresh', self.config.model,
+                                        change_degree=degree, change_reason=change_reason)
             self._clear_dirty(key, self.store.frame(frame, subject)['captured'])
             if result and self.on_update:
                 self.on_update(result)

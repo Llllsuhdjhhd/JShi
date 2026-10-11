@@ -11,8 +11,10 @@ class ChangeDetector:
         with Image.open(BytesIO(data)) as im:
             small = im.convert('L').resize((64, 64))
         change = 1.0 if self.previous is None else ImageStat.Stat(ImageChops.difference(small, self.previous)).mean[0] / 255
-        self.previous = small
-        return [], change > .10
+        changed = change > .10
+        if self.previous is None or changed:
+            self.previous = small
+        return [], changed
 
 
 class YoloDetector:
