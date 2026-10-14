@@ -34,7 +34,7 @@ DEGRADED_TIMEOUT_S = 25.0
 
 
 class ModelSettings:
-    def __init__(self, root, process, jev, on_paid=None):
+    def __init__(self, root, process, jev, on_paid=None, on_status=None):
         self.path = Path(root)/'model_settings.local.json'
         self.lock = RLock()
         self.routes = {}
@@ -73,6 +73,7 @@ class ModelSettings:
             visual.model.transport=send
         self.originals = {name:route.chain for name,route in self.routes.items()}
         for name, route in self.routes.items():
+            route.on_status = lambda event, name=name: on_status(dict(event, purpose=LABELS[name])) if on_status else None
             route.on_paid = lambda model, name=name: on_paid(LABELS[name],model) if on_paid else None
         self.services = {'deepseek':{'label':'DeepSeek（付费兜底）','paid':True,'protocol':'chat','thinking_supported':True,
             'endpoint':os.getenv('JSHI_API_DEEPSEEK_ENDPOINT') or os.getenv('JSHI_MODEL_ENDPOINT',''),
@@ -196,9 +197,9 @@ class ModelSettings:
         return {'model':reply.model,'seconds':round(monotonic()-started,2),'text':reply.text[:160]}
 
 
-def install_model_settings(app, process, jev, on_paid=None):
+def install_model_settings(app, process, jev, on_paid=None, on_status=None):
     from aiohttp import web
-    settings=ModelSettings(process.repository.path.parent,process,jev,on_paid)
+    settings=ModelSettings(process.repository.path.parent,process,jev,on_paid,on_status)
     def same_origin(request):
         origin=request.headers.get('Origin')
         return origin==f'{request.scheme}://{request.host}' and request.headers.get('Sec-Fetch-Site')!='cross-site'

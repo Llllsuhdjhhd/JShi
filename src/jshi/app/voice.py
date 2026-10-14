@@ -2060,6 +2060,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     text_write_error = ''
     active_conversation = None
     model_notice_sink = None
+    model_status_sink = None
     environment_pending = None
 
     async def deliver_environment(environment, decision):
@@ -2295,7 +2296,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             headers={'Cache-Control': 'no-store'})
 
     async def text_input(request):
-        nonlocal registry_busy, model_notice_sink
+        nonlocal registry_busy, model_notice_sink, model_status_sink
         received_mono, received_at_ms = monotonic(), time()*1000
         if request.headers.get('Origin', '') != f'http://{request.host}':
             raise web.HTTPForbidden(text='文字输入需要同源请求')
@@ -2324,6 +2325,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             streaming = 'application/x-ndjson' in request.headers.get('Accept', '')
             events = asyncio.Queue()
             loop = asyncio.get_running_loop()
+            model_status_sink = lambda event: loop.call_soon_threadsafe(events.put_nowait, dict(event, type='model_status'))
             model_notice_sink = lambda text: loop.call_soon_threadsafe(events.put_nowait, {'type':'model_notice','text':text})
             main_started = None
             main_measured = False
@@ -2440,6 +2442,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 headers={'Cache-Control': 'no-store'})
         finally:
             model_notice_sink = None
+            model_status_sink = None
             registry_busy = False
 
     async def connection(request):
@@ -2708,7 +2711,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             model_notice_sink(text)
         if active_conversation is not None:
             asyncio.run_coroutine_threadsafe(active_conversation.emit('model_notice', text=text), active_conversation.worker.get_loop())
-    install_model_settings(app, process, jev, paid_notice)
+    def model_status(event):
+        if model_status_sink is not None:
+            model_status_sink(event)
+        if active_conversation is not None:
+            asyncio.run_coroutine_threadsafe(active_conversation.emit('model_status', **event), active_conversation.worker.get_loop())
+    install_model_settings(app, process, jev, paid_notice, model_status)
     app.router.add_post('/text-input', text_input)
     from jshi.app.web_data import register_data_routes
     register_data_routes(app, process, subject_id)

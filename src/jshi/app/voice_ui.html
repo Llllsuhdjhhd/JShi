@@ -38,10 +38,15 @@
   .panel-icon{width:26px;height:26px;padding:5px;border-radius:7px;background:#f2f3f5;color:#737b89;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
   .inspector>.panel[open]>summary .panel-icon{background:#edf4ff;color:var(--accent)}
   .inspector>.panel>summary:hover .panel-icon{color:var(--accent)}
+  #log .model-toggle{position:absolute;left:-82px;top:16px;width:74px;padding:5px 3px;font-size:11px;background:#edf3fb;color:#536d91}
+  #log .model-live{font-size:12px;color:#65758b;background:#f1f5fb;border:1px solid #e0e8f3;border-radius:10px;padding:10px 12px;white-space:pre-wrap;max-height:calc(100vh - 32px);overflow-y:auto;overflow-wrap:anywhere;line-height:1.65;z-index:2;box-sizing:border-box}
+  #log .model-live[hidden]{display:none}#log .model-live-title{display:block;font-weight:500;margin-bottom:6px}#log .model-live-body{display:block;font-size:11px}
+  #log .model-toggle[hidden]{display:none}#log .model-records{font-size:11px;color:var(--muted);white-space:pre-wrap}
+  @media(max-width:800px){#log .model-toggle{position:static;width:auto;margin:6px 8px 0 0}}
   #log{display:flex;flex-direction:column;gap:9px}#log p{margin:0;padding:9px 12px;border-radius:10px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line)}
   #log p.input{background:var(--input);margin-left:8%;border:1px solid transparent}#log p.reply{margin-right:6%;background:#fff;border:1px solid transparent;padding-left:0}
   #log p.notice{padding:8px 12px;font-size:12px;color:#6e737e;background:var(--surface);border:0;border-left:2px solid #edbc69;border-radius:0 8px 8px 0}
-  #log .model-info[hidden]{display:none!important}
+  #log .model-info details{display:inline-block;margin:0;vertical-align:top}
   #log time{display:inline-block;color:var(--muted);font-size:11px;margin:0 8px 3px 0}#log .message-meta{font-size:11px;color:var(--muted)}#log .message-body{display:block;clear:both}
   #log details{margin-top:4px}#log details>summary{font-size:11px;font-weight:400;color:var(--muted)}
   #log p.selected{outline:2px solid var(--accent);background:#e7f0ff}.select-input{display:block;float:right;margin:0 0 3px 8px;padding:3px 8px;background:#ffffffb3;color:#5c677e;border:1px solid #dce4f2;font-size:11px}
@@ -323,19 +328,94 @@ let voiceprintAvailable=true;
 function personLabel(label){return /^未命名访客 \d+$/.test(label || '') ? label+' · 内部名，还不知道姓名' : (label || '待确认');}
 function selectionChanged(){ $('enroll-count').textContent=selectedInputs.size ? '已选 '+selectedInputs.size+' 段声音' : '尚未选择声音'; $('enroll').disabled=!selectedInputs.size || !voiceprintAvailable || !ws || ws.readyState!==WebSocket.OPEN; }
 function send(message) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); }
+let latestModelInput=null;
+const modelCallOwners=new Map();
+function modelInput(p){
+  const {extra,toggle}=inputDetails(p),button=document.createElement('button'),records=document.createElement('div'),panel=document.createElement('div'),panelTitle=document.createElement('span'),panelBody=document.createElement('span'),elapsed=document.createElement('small');
+  button.className='model-toggle';button.textContent='模型 · 待调用';button.ariaExpanded='false';button.title='点击查看本条输入的模型调用';
+  records.className='model-records';records.textContent='本条尚无模型调用记录。';extra.appendChild(records);p.appendChild(button);
+  button.onclick=()=>{toggle.onclick();button.ariaExpanded=String(!extra.hidden);};
+  panel.className='model-live';panelTitle.className='model-live-title';panelTitle.textContent='本条处理 · 准备中';panelBody.className='model-live-body';panelBody.textContent='等待模型调用信息';elapsed.className='jev-detail';panel.appendChild(panelTitle);panel.appendChild(elapsed);panel.appendChild(panelBody);p.appendChild(panel);
+  if(latestModelInput){clearInterval(latestModelInput.modelUi.timer);latestModelInput.modelUi.panel.hidden=true;latestModelInput.modelUi.button.hidden=true;latestModelInput.modelUi.extra.hidden=true;latestModelInput.inputDetails.toggle.textContent='详情';latestModelInput.inputDetails.toggle.ariaExpanded='false';latestModelInput.modelUi.button.ariaExpanded='false';}
+  p.modelUi={button,records,extra,panel,panelTitle,panelBody,calls:new Map(),outcome:'',history:[],follow:true,elapsed,started:Date.now(),ended:null};latestModelInput=p;
+  p.modelUi.timer=setInterval(()=>{updateModelPanel(p);},1000);p.modelUi.timer?.unref?.();
+  panel.addEventListener('wheel',event=>{if(event.deltaY<0)p.modelUi.follow=false;},{passive:true});
+  panel.addEventListener('scroll',()=>{if(panel.scrollHeight-panel.clientHeight-panel.scrollTop<=32)p.modelUi.follow=true;},{passive:true});
+  modelHistory(p,'准备处理本条输入');updateModelPanel(p);
+}
+function modelCallStatus(event,row=null){
+  if(!event.call_id)return;
+  const owner=modelCallOwners.get(event.call_id)||row||latestModelInput;
+  if(!owner?.modelUi)return;
+  modelCallOwners.set(event.call_id,owner);
+  while(modelCallOwners.size>256)modelCallOwners.delete(modelCallOwners.keys().next().value);
+  const ui=owner.modelUi;ui.calls.set(event.call_id,event);
+  const states={calling:'调用中',completed:'完成',failed:'失败',cancelled:'已取消'};
+  modelHistory(owner,(event.purpose||'模型')+' · '+event.model+' · '+(states[event.state]||event.state)+(event.state!=='calling'&&Number.isFinite(event.elapsed_ms)?' · '+(event.elapsed_ms/1000).toFixed(2)+'秒':''));
+  const active=[...ui.calls.values()].filter(call=>call.state==='calling');
+  ui.button.textContent='模型 · '+(ui.outcome==='处理失败'?ui.outcome:active.length?'调用中':states[event.state]||event.state);
+  ui.button.title=ui.records.textContent;
+  updateModelPanel(owner);
+  refreshMessageScroll();
+}
+function modelProgress(row,stage,terminal=false){
+  if(!row?.modelUi)return;
+  const ui=row.modelUi;
+  if(!ui.progress){ui.progress=document.createElement('small');ui.progress.className='jev-detail';ui.extra.appendChild(ui.progress);}
+  ui.progress.textContent='处理状态：'+stage;
+  modelHistory(row,stage);
+  if(terminal){ui.outcome=stage;ui.ended=Date.now();clearInterval(ui.timer);}
+  if(terminal||!ui.calls.size)ui.button.textContent='模型 · '+stage;
+  updateModelPanel(row);
+  refreshMessageScroll();
+}
+function modelHistory(row,text){
+  const ui=row.modelUi;
+  if(ui.history.at(-1)?.text===text)return;
+  const time=new Date().toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
+  ui.history.push({text,time});
+  ui.records.textContent=ui.history.map(entry=>entry.time+'  '+entry.text).join('\n');
+}
+function updateModelPanel(row){
+  const ui=row.modelUi;
+  ui.elapsed.textContent='页面处理用时：'+(((ui.ended??Date.now())-ui.started)/1000).toFixed(1)+'秒';
+  ui.panelTitle.textContent=ui.button.textContent.replace('模型 · ','本条处理 · ');
+  ui.panelBody.textContent=ui.records.textContent;
+  if(row===latestModelInput){positionModelPanel();if(ui.follow)ui.panel.scrollTop=ui.panel.scrollHeight;}
+}
+function modelNotice(row,text){
+  if(!row?.modelUi)return;
+  row.modelUi.notice=text;modelHistory(row,text);detailLine(row.modelUi.extra,text);modelProgress(row,'调用中');
+}
+function positionModelPanel(){
+  if(!latestModelInput)return;
+  const ui=latestModelInput.modelUi,rect=latestModelInput.getBoundingClientRect();
+  const conversationLeft=Math.min(messageScroll.getBoundingClientRect().left,$('log').getBoundingClientRect().left);
+  const space=conversationLeft-48;
+  const viewportHeight=window.innerHeight||768,maxHeight=Math.max(80,viewportHeight-32);
+  ui.panel.style.maxHeight=maxHeight+'px';
+  if(space>=180){
+    ui.panel.style.position='fixed';ui.panel.style.left='24px';ui.panel.style.width=Math.min(440,space)+'px';
+    const height=Math.min(maxHeight,ui.panel.scrollHeight||60);
+    ui.panel.style.top=Math.max(16,Math.min(rect.top+8,viewportHeight-16-height))+'px';
+  }
+  else{ui.panel.style.position='static';ui.panel.style.left='';ui.panel.style.top='';ui.panel.style.width='';}
+}
+messageScroll.addEventListener('scroll',positionModelPanel,{passive:true});
+window.addEventListener('resize',positionModelPanel);
 let modelInfoVisible=false;
 try{modelInfoVisible=localStorage.getItem('jshi.showModelInfo')==='true';}catch{}
 window.addEventListener('jshi-model-info',event=>{
  modelInfoVisible=event.detail===true;
  try{localStorage.setItem('jshi.showModelInfo',String(modelInfoVisible));}catch{}
- document.querySelectorAll('#log .model-info').forEach(row=>row.hidden=!modelInfoVisible);
+ document.querySelectorAll('#log .model-info details').forEach(detail=>detail.open=modelInfoVisible);
 });
 function log(text, kind='notice', atMs=null) {
   // Also recognize model notices from a server that has not yet restarted.
   if(kind==='notice' && /：正在调用(?:可能计费的百炼模型|付费DeepSeek)（/.test(text))kind='model-info';
   if($('empty') && $('empty').remove) $('empty').remove();
   const p = document.createElement('p'); p.className = kind; p.textContent = text;
-  if(kind==='model-info'){p.className='notice model-info';p.hidden=!modelInfoVisible;}
+  if(kind==='model-info'){p.className='notice model-info';p.textContent='';const detail=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('span');summary.textContent='模型调用信息';body.textContent=text;detail.open=modelInfoVisible;detail.appendChild(summary);detail.appendChild(body);p.appendChild(detail);}
   if(kind==='notice' && text.length>140){p.textContent=text.slice(0,90)+'…';const details=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('span');summary.textContent='查看完整信息';body.textContent=text;details.appendChild(summary);details.appendChild(body);p.appendChild(details);}
   const time=document.createElement('time');time.textContent=(kind==='input' ? '收到 ' : kind==='reply' ? '生成 ' : '')+new Date(atMs || Date.now()).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});p.prepend(time);
   $('log').appendChild(p); while ($('log').children.length > 100) {
@@ -343,8 +423,26 @@ function log(text, kind='notice', atMs=null) {
     if(old.inputId){inputRows.delete(old.inputId);selectedInputs.delete(old.inputId);selectionChanged();}
     old.remove();
   }
+  if(kind==='input')modelInput(p);
   return p;
 }
+function inputDetails(p){
+  if(p.inputDetails)return p.inputDetails;
+  const extra=document.createElement('div');extra.className='input-extra';extra.hidden=true;
+  const toggle=document.createElement('button');toggle.className='input-toggle';toggle.textContent='详情';toggle.ariaExpanded='false';
+  toggle.onclick=()=>{extra.hidden=!extra.hidden;toggle.textContent=extra.hidden?'详情':'隐藏';toggle.ariaExpanded=String(!extra.hidden);};
+  p.appendChild(extra);p.appendChild(toggle);p.inputDetails={extra,toggle};return p.inputDetails;
+}
+function typedDetails(p,label){
+  const {extra}=inputDetails(p),identity=document.createElement('small');identity.className='jev-detail';
+  identity.textContent='文字输入 · 发言人物由页面选择：'+label+'；不经过声纹识别。';extra.prepend(identity);
+  return extra;
+}
+function timingSummary(timing){
+  const values=timing.end_to_end||{},names=[['jev_ms','JEV判断'],['main_cognition_ms','主认知'],['reply_ready_ms','收到输入至回复就绪']];
+  return names.filter(([key])=>Number.isFinite(values[key])).map(([key,label])=>label+' '+(values[key]/1000).toFixed(2)+'秒').join(' · ');
+}
+function detailLine(extra,text){const line=document.createElement('small');line.className='jev-detail';line.textContent=text;extra.appendChild(line);}
 async function devices() {
   // Device labels are available only after the browser grants microphone access.
   const grant = await navigator.mediaDevices.getUserMedia({audio:true});
@@ -403,7 +501,8 @@ function clearPlayback() {
   startedSegments.clear(); endedSegments.clear(); finishedSegments.clear();
 }
 function message(m) {
-  if(m.type==='typed_input'){if(pendingTyped&&pendingTyped.text===m.text){pendingTyped.badge.textContent='已接收';pendingTyped=null;textSending=false;$('send-text').disabled=false;}else log(m.label+'（文字）：'+m.text,'input');$('text-status').textContent='已进入当前对话，等待主流程处理。';return;}
+  if(m.type==='model_status'){modelCallStatus(m);return;}
+  if(m.type==='typed_input'){if(pendingTyped&&pendingTyped.text===m.text){pendingTyped.badge.textContent='已接收';pendingTyped=null;textSending=false;$('send-text').disabled=false;}else typedDetails(log(m.label+'（文字）：'+m.text,'input'),m.label);$('text-status').textContent='已进入当前对话，等待主流程处理。';return;}
   if(m.type==='typed_error'){if(pendingTyped){pendingTyped.badge.textContent='未发送：'+m.text;pendingTyped.badge.classList.add('failed');if(!$('typed').value)$('typed').value=pendingTyped.text;pendingTyped=null;}textSending=false;$('send-text').disabled=false;$('text-status').textContent=m.text;return;}
   if(m.type==='voice_settings' || m.type==='voice_settings_error'){
     if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);}
@@ -477,8 +576,8 @@ function message(m) {
     ask.appendChild(yes);ask.appendChild(no);return;
   }
   else if(m.type==='renamed'){speakerLabels.set(m.object_id,m.label);$('rename-ask').hidden=true;}
-  else if(m.type==='model_notice') log(m.text,'model-info');
-  else if(m.type==='notice') log(m.text);
+  else if(m.type==='model_notice') {if(latestModelInput)modelNotice(latestModelInput,m.text);else log(m.text,'model-info');}
+  else if(m.type==='notice') {if(/(?:主流程调用失败|语音轮次失败)/.test(m.text))modelProgress(latestModelInput,'处理失败',true);log(m.text);}
   else if(m.type==='write_failed') {$('retry-write').hidden=false;$('flow-write').textContent='记忆整理：失败，可重试';}
   else if(m.type==='write_started') $('flow-write').textContent='记忆整理：后台写入中';
   else if(m.type==='write_completed') {$('retry-write').hidden=true;$('flow-write').textContent='记忆整理：已完成';}
@@ -489,6 +588,7 @@ function message(m) {
   }
   else if(m.type==='flow_phase') {
     const label=phaseNames[m.stage]||m.stage;
+    modelProgress(latestModelInput,label);
     $(m.lane==='main'?'flow-main':'flow-input').textContent=(m.lane==='main'&&m.source==='visual_environment'?'环境观察 · ':'')+label;
     if(m.lane==='main'){mainStage=m.stage;if(m.stage==='resolve'&&$('flow-input').textContent===phaseNames.queued)$('flow-input').textContent='输入：已进入主流程';refreshStatus();}
   }
@@ -501,7 +601,7 @@ function message(m) {
     outcomeHint=m.replied?'':m.source==='visual_environment'?'观察完成，无需开口':m.mode==='wait'?'本轮选择等待':m.mode==='think'?'本轮只思考':'本轮未开口';
     if(!m.replied&&m.source!=='visual_environment')log(outcomeHint+(m.reason?'：'+m.reason:''),'notice');
   }
-  else if(m.type==='turn_complete') {mainBusy=false;$('flow-main').textContent='主流程：已完成'+(outcomeHint?' · '+outcomeHint:'');refreshStatus();}
+  else if(m.type==='turn_complete') {modelProgress(latestModelInput,'已完成',true);mainBusy=false;$('flow-main').textContent='主流程：已完成'+(outcomeHint?' · '+outcomeHint:'');refreshStatus();}
   else if(m.type==='input_pending') $('judge').textContent='主流程忙碌，新发言正在合并为下一批输入。';
   else if(m.type==='speaker') {
     const basis={self_introduction:'本次自我介绍关联',voiceprint_match:'已登记声纹匹配',unidentified:'身份未知',unassigned_audio:'本句暂不能归属，未新增访客',anonymous_voice_cluster:'匿名声纹轨迹，姓名未确认',voice_continuity:'沿用会话对象 · 本句姓名未确认',voice_scene:'多人现场',manual_annotation:'手动关联',context_attribution:'上下文推测，声纹未确认'};
@@ -528,9 +628,8 @@ function message(m) {
     const stamp='会话 +'+time(m.start_ms)+'–'+time(m.end_ms)+(m.recorded_start_at_ms!=null ? ' · 录音约 '+wall(m.recorded_start_at_ms)+'–'+wall(m.recorded_end_at_ms) : ''), p=log('','input',m.received_at_ms),meta=document.createElement('span'),body=document.createElement('span');
     meta.textContent=personLabel(m.speaker.label)+' · 轨迹 '+m.speaker.track_id+(m.overlap ? ' · 声音重叠' : '')+' · 声纹初判，等待 JEV';meta.className='message-meta';meta.title=stamp;
     const who=document.createElement('span');who.className='input-person';who.textContent=personLabel(m.speaker.label)+'：';body.textContent=m.text;body.className='message-body';p.appendChild(who);p.appendChild(body);
-    const extra=document.createElement('div');extra.className='input-extra';extra.hidden=true;extra.appendChild(meta);p.appendChild(extra);
+    const {extra,toggle}=inputDetails(p);extra.appendChild(meta);
     const jevNote=document.createElement('small');jevNote.className='jev-detail';jevNote.hidden=true;extra.appendChild(jevNote);
-    const toggle=document.createElement('button');toggle.className='input-toggle';toggle.textContent='详情';toggle.ariaExpanded='false';toggle.onclick=()=>{extra.hidden=!extra.hidden;toggle.textContent=extra.hidden?'详情':'隐藏';toggle.ariaExpanded=String(!extra.hidden);};p.appendChild(toggle);
     const ranking=document.createElement('small');ranking.className='voice-ranking';
     try{
       const d=JSON.parse(m.identity_note || '{}');
@@ -556,7 +655,7 @@ function message(m) {
     if(row && !row.meta.textContent.includes('未交主流程')) row.meta.textContent+=' · 未交主流程';
   }
   else if(m.type==='jev') {const labels={ignore:'只记录现场',resume:'继续当前状态',stop:'停止',respond:'接话',clarify:'澄清'}; $('judge').textContent='JEV：'+(m.direct_reply?'我回答':(labels[m.action] || m.action))+' · '+m.reason;}
-  else if(m.type==='jev_reply') {$('judge').textContent=m.route==='waiting_ack'?'JEV：等待接话 · 主认知正在处理':'JEV：我回答 · 短时聊天，本轮未进入主流程和记忆写入';}
+  else if(m.type==='jev_reply') {if(m.route==='self_reply')modelProgress(latestModelInput,'已完成',true);$('judge').textContent=m.route==='waiting_ack'?'JEV：等待接话 · 主认知正在处理':'JEV：我回答 · 短时聊天，本轮未进入主流程和记忆写入';}
   else if(m.type==='reply') {
     clearPlayback(); replyId=m.reply_id; paused=m.paused;audioDone=false;refreshStatus();
     let lastRow;
@@ -648,26 +747,27 @@ $('composer').onsubmit=async event=>{
  event.preventDefault();if(textSending)return;const text=$('typed').value.trim(),object_id=$('text-person').value;
  if(!text){$('typed').focus();return;}if(!object_id){$('text-status').textContent='先选择这段文字由谁说。';$('text-person').focus();return;}
  const actor=Array.from($('text-person').options).find(p=>p.value===object_id)?.textContent||speakerLabels.get(object_id)||'对方';
- const row=log(actor+'（文字）：'+text,'input'),badge=document.createElement('span');badge.className='send-state';badge.textContent='正在发送…';row.appendChild(badge);$('typed').value='';$('typed').focus();
+ const row=log(actor+'（文字）：'+text,'input'),badge=document.createElement('span');badge.className='send-state';badge.textContent='正在发送…';row.appendChild(badge);const extra=typedDetails(row,actor);modelProgress(row,'准备中');$('typed').value='';$('typed').focus();
  textSending=true;$('send-text').disabled=true;
  if(ready&&ws&&ws.readyState===WebSocket.OPEN){pendingTyped={text,badge};send({type:'text',text,object_id});$('text-status').textContent='已显示输入，等待接收确认。';return;}
  let phase='正在生成回应',started=Date.now(),timer,shown=false,complete=false,replyRow;
  function progress(){const seconds=Math.floor((Date.now()-started)/1000);$('text-status').textContent=phase+(seconds?' · 已用时 '+seconds+' 秒':'…');timer=setTimeout(progress,1000);}progress();
  function eventReceived(d){
+  if(d.type==='model_status'){modelCallStatus(d,row);return;}
   if(d.type==='error')throw Error(d.message||'主流程处理失败');
   if(d.type==='accepted'){badge.textContent='已接收';return;}
-  if(d.type==='flow_phase'){phase=phaseNames[d.stage]||d.stage;return;}
-  if(d.type==='model_notice'){log(d.text,'model-info');return;}
+  if(d.type==='flow_phase'){phase=phaseNames[d.stage]||d.stage;modelProgress(row,phase);return;}
+  if(d.type==='model_notice'){modelNotice(row,d.text);return;}
   if(d.type==='waiting_ack'){log('匠石 → '+(d.label||actor)+'：'+d.text,'reply');phase='匠石正在处理';$('text-status').textContent=phase;return;}
   if(d.reply&&!shown){replyRow=log('匠石 → '+(d.label||actor)+'：'+d.reply,'reply');shown=true;}
   if(d.type==='reply'){phase=shown?'回复已显示，正在完成本轮处理':'正在完成本轮处理';badge.textContent='已接收';$('text-status').textContent=phase;}
-  if(d.type==='complete'){showActions(d.actions,replyRow);complete=true;badge.textContent=d.route==='self_reply'?'JEV 我回答':'已处理';phase=d.route==='self_reply'?'短时聊天，本轮未进入主流程和记忆写入。':(shown?'本轮已完成。':'本轮已完成，未开口（'+d.mode+'）。')+(d.scene_write==='background'?'记忆在后台整理，可继续发送。':'');}
+  if(d.type==='complete'){modelProgress(row,'已完成',true);if(d.timing&&timingSummary(d.timing)){modelHistory(row,'服务端耗时：'+timingSummary(d.timing));updateModelPanel(row);}detailLine(extra,(d.route==='self_reply'?'JEV直接回答，未进入主认知。':'已进入主认知。')+(d.timing&&timingSummary(d.timing)?'\n'+timingSummary(d.timing):''));showActions(d.actions,replyRow);complete=true;badge.textContent=d.route==='self_reply'?'JEV 我回答':'已处理';phase=d.route==='self_reply'?'短时聊天，本轮未进入主流程和记忆写入。':(shown?'本轮已完成。':'本轮已完成，未开口（'+d.mode+'）。')+(d.scene_write==='background'?'记忆在后台整理，可继续发送。':'');}
  }
  try{const r=await fetch('/text-input',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/x-ndjson'},body:JSON.stringify({text,object_id})});if(!r.ok)throw Error(await r.text());
   if((r.headers.get('Content-Type')||'').includes('application/x-ndjson')){const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(line.trim())eventReceived(JSON.parse(line));}}buffer+=decoder.decode();if(buffer.trim())eventReceived(JSON.parse(buffer));if(!complete)throw Error('连接中断，未收到处理完成确认');}
   else eventReceived({...(await r.json()),type:'complete'});
   $('text-status').textContent=phase;
- }catch(e){badge.textContent=shown?'回复已显示，后续处理未完成':'发送或处理失败';badge.title=e.message;badge.classList.add('failed');log('处理失败：'+e.message);if(!shown&&!$('typed').value)$('typed').value=text;$('text-status').textContent=(shown?'后续保存异常：':'发送失败，输入仍保留在对话区：')+e.message;}
+ }catch(e){modelProgress(row,'处理失败',true);detailLine(extra,'失败原因：'+e.message);modelHistory(row,'失败原因：'+e.message);updateModelPanel(row);badge.textContent=shown?'回复已显示，后续处理未完成':'发送或处理失败';badge.title=e.message;badge.classList.add('failed');log('处理失败：'+e.message);if(!shown&&!$('typed').value)$('typed').value=text;$('text-status').textContent=(shown?'后续保存异常：':'发送失败，输入仍保留在对话区：')+e.message;}
  finally{clearTimeout(timer);textSending=false;$('send-text').disabled=false;$('typed').focus();}
 };
 $('enroll-clear').onclick=()=>{for(const id of selectedInputs.keys()){const row=inputRows.get(id);if(row){row.p.classList.remove('selected');row.button.textContent='选择声音';}}selectedInputs.clear();selectionChanged();};

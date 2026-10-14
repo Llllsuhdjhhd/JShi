@@ -268,3 +268,41 @@ def test_http_reason_classification_does_not_leak_body(monkeypatch,status,body,r
     assert error.value.retryable==retryable
     assert 'secret' not in str(error.value)
     assert 'gemini-3.6-flash' in str(error.value)
+
+
+def test_model_status_pairs_each_fallback_attempt_and_stream_cancellation():
+    events = []
+    class First:
+        name = 'first'
+        def chat(self, messages, max_tokens=None):
+            raise ProviderFailure(429, True)
+    class Last:
+        name = 'last'
+        def chat(self, messages, max_tokens=None):
+            return ModelResponse(text='ok', model=self.name)
+        def generate_stream(self, request):
+            yield 'one'
+            yield 'two'
+    router = RoutedModel(First(), on_status=events.append)
+    router.replace([First(), Last()])
+    assert router.chat([]).text == 'ok'
+    assert [e['state'] for e in events] == ['calling', 'failed', 'calling', 'completed']
+    assert events[0]['call_id'] == events[1]['call_id']
+    assert events[2]['call_id'] == events[3]['call_id']
+    assert events[0]['call_id'] != events[2]['call_id']
+    router.replace([Last()])
+    stream = router.generate_stream(None)
+    assert next(stream) == 'one'
+    stream.close()
+    assert [e['state'] for e in events[-2:]] == ['calling', 'cancelled']
+    assert events[-1]['elapsed_ms'] >= 0
+
+
+def test_model_status_callback_failure_does_not_break_response():
+    class Model:
+        name = 'local-test'
+        def generate(self, request):
+            return ModelResponse(text='ok', model=self.name)
+    def broken(event):
+        raise RuntimeError('observer failed')
+    assert RoutedModel(Model(), on_status=broken).generate(None).text == 'ok'

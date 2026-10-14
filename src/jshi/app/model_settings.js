@@ -13,7 +13,7 @@
   const displayLabel=el('label'),display=el('input');display.type='checkbox';
   try{display.checked=localStorage.getItem('jshi.showModelInfo')==='true';}catch{}
   display.onchange=()=>window.dispatchEvent(new CustomEvent('jshi-model-info',{detail:display.checked}));
-  displayLabel.append(display,document.createTextNode(' 显示对话中的模型调用信息'));form.append(displayLabel);
+  displayLabel.append(display,document.createTextNode(' 默认展开对话中的模型调用信息'));form.append(displayLabel);
   form.append(el('p','当前模型：'+row.current));
   const select=el('select');select.append(new Option('沿用启动配置',''));
   for(const [service,s] of Object.entries(state.services))for(const model of s.models)select.append(new Option(model+' · '+s.label,service+'|'+model));

@@ -16,7 +16,7 @@ class Element {
 }
 const nodes=new Map(),node=id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id);};
 const sent=[];
-const ctx=vm.createContext({document:{getElementById:node,createElement:()=>new Element()},navigator:{},setTimeout,clearTimeout,console,fetch:async()=>({ok:true,json:async()=>({people:[]})}),
+const ctx=vm.createContext({document:{getElementById:node,createElement:()=>new Element()},navigator:{},setTimeout,clearTimeout,setInterval,clearInterval,console,fetch:async()=>({ok:true,json:async()=>({people:[]})}),
   Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},WebSocket:{OPEN:1},sent,
 });
 require('./helpers/browser_environment.cjs')(ctx);
@@ -123,3 +123,82 @@ console.log('Conversation layout: inline debugging, maximize, restore and hide p
 vm.runInContext(`message({type:'transcript',text:'<unk> <unk>',final:false})`,ctx);assert.equal(node('live').textContent,'');
 vm.runInContext(`message({type:'transcript',text:'<|zh|>你好<unk>',final:false})`,ctx);assert.equal(node('live').textContent,'识别中：你好');
 vm.runInContext(`message({type:'transcript',text:'你好',final:true})`,ctx);assert.equal(node('live').textContent,'');
+
+// Details remain accessible with diagnostic content folded by default.
+vm.runInContext(`var typedRow=log('lux（文字）：哈喽','input');var typedExtra=typedDetails(typedRow,'lux');`,ctx);
+assert.equal(vm.runInContext('typedExtra.hidden',ctx),true);
+assert.match(vm.runInContext('typedExtra.children[0].textContent',ctx),/页面选择：lux/);
+vm.runInContext('typedRow.inputDetails.toggle.onclick()',ctx);
+assert.equal(vm.runInContext('typedExtra.hidden',ctx),false);
+assert.equal(vm.runInContext('typedRow.inputDetails.toggle.textContent',ctx),'隐藏');
+vm.runInContext('typedRow.inputDetails.toggle.onclick()',ctx);
+assert.equal(vm.runInContext('typedExtra.hidden',ctx),true);
+vm.runInContext(`var modelRow=log('JEV入口判断：DeepSeek（deepseek-v4-flash）','model-info');`,ctx);
+assert.notEqual(vm.runInContext('modelRow.hidden',ctx),true);
+assert.equal(vm.runInContext('modelRow.children[1].open',ctx),false);
+assert.match(vm.runInContext('modelRow.children[1].children[1].textContent',ctx),/deepseek-v4-flash/);
+assert.equal(vm.runInContext(`timingSummary({end_to_end:{jev_ms:1250,reply_ready_ms:2500}})`,ctx),'JEV判断 1.25秒 · 收到输入至回复就绪 2.50秒');
+console.log('Input and model details: collapsed by default, accessible on demand passed');
+
+vm.runInContext(`var statusRow=log('当前输入','input');message({type:'model_status',call_id:'main',state:'calling',purpose:'主认知',model:'deepseek-v4-flash'});message({type:'model_status',call_id:'write',state:'calling',purpose:'后台写场',model:'qwen3.5-flash'});`,ctx);
+assert.match(vm.runInContext('statusRow.modelUi.records.textContent',ctx),/主认知.*deepseek-v4-flash[\s\S]*后台写场.*qwen3.5-flash/);
+assert.equal(vm.runInContext('statusRow.modelUi.button.hidden===true',ctx),false);
+vm.runInContext('statusRow.modelUi.button.onclick()',ctx);
+assert.equal(vm.runInContext('statusRow.modelUi.extra.hidden',ctx),false);
+vm.runInContext(`var nextRow=log('下一条输入','input');message({type:'model_status',call_id:'main',state:'completed',purpose:'主认知',model:'deepseek-v4-flash',elapsed_ms:1230})`,ctx);
+assert.equal(vm.runInContext('statusRow.modelUi.button.hidden',ctx),true);
+assert.equal(vm.runInContext('statusRow.modelUi.extra.hidden',ctx),true);
+assert.equal(vm.runInContext('statusRow.modelUi.button.textContent',ctx),'模型 · 调用中');
+assert.match(vm.runInContext('nextRow.modelUi.records.textContent',ctx),/准备处理本条输入/);
+vm.runInContext(`message({type:'model_status',call_id:'write',state:'failed',purpose:'后台写场',model:'qwen3.5-flash',elapsed_ms:2200})`,ctx);
+assert.match(vm.runInContext('statusRow.modelUi.records.textContent',ctx),/失败.*2.20秒/);
+assert.equal(vm.runInContext('statusRow.modelUi.button.hidden',ctx),true);
+vm.runInContext('statusRow.inputDetails.toggle.onclick()',ctx);
+assert.equal(vm.runInContext('statusRow.modelUi.extra.hidden',ctx),false);
+console.log('Per-input model button: expansion, latest-only display and late events passed');
+
+vm.runInContext(`var legacyRow=log('兼容旧服务','input');modelProgress(legacyRow,'JEV 判断');`,ctx);
+assert.equal(vm.runInContext('legacyRow.modelUi.button.textContent',ctx),'模型 · JEV 判断');
+vm.runInContext(`modelProgress(legacyRow,'处理失败',true);`,ctx);
+assert.equal(vm.runInContext('legacyRow.modelUi.button.textContent',ctx),'模型 · 处理失败');
+console.log('Model progress: phase fallback and terminal failure passed');
+
+vm.runInContext(`var visibleStatus=log('本条','input');modelProgress(visibleStatus,'主认知 · 模型思考');message({type:'model_status',call_id:'side-test',state:'calling',purpose:'主认知',model:'deepseek-v4-flash'});`,ctx);
+assert.notEqual(vm.runInContext('visibleStatus.modelUi.panel.hidden',ctx),true);
+assert.match(vm.runInContext('visibleStatus.modelUi.panelBody.textContent',ctx),/主认知.*模型思考[\s\S]*deepseek-v4-flash.*调用中/);
+vm.runInContext(`var newerStatus=log('下一条','input');message({type:'model_status',call_id:'side-test',state:'completed',purpose:'主认知',model:'deepseek-v4-flash',elapsed_ms:1200})`,ctx);
+assert.equal(vm.runInContext('visibleStatus.modelUi.panel.hidden',ctx),true);
+assert.notEqual(vm.runInContext('newerStatus.modelUi.panel.hidden',ctx),true);
+console.log('Visible latest-input status panel: model/stage and previous panel hiding passed');
+// Full timeline is preserved; bottom-positioned input moves the panel upward.
+vm.runInContext(`var longStatus=log('过程测试','input');modelProgress(longStatus,'JEV 判断');modelProgress(longStatus,'主认知 · 模型思考');modelProgress(longStatus,'已完成',true);`,ctx);
+assert.match(vm.runInContext('longStatus.modelUi.panelBody.textContent',ctx),/准备处理[\s\S]*JEV 判断[\s\S]*主认知[\s\S]*已完成/);
+vm.runInContext(`window.innerHeight=800;$('log').getBoundingClientRect=()=>({left:520});messageScroll.getBoundingClientRect=()=>({left:520});longStatus.getBoundingClientRect=()=>({left:600,top:730});longStatus.modelUi.panel.scrollHeight=500;positionModelPanel();`,ctx);
+assert.equal(vm.runInContext('longStatus.modelUi.panel.style.top',ctx),'284px');
+assert.equal(vm.runInContext('longStatus.modelUi.panel.style.width',ctx),'440px');
+assert.ok(24+parseFloat(vm.runInContext('longStatus.modelUi.panel.style.width',ctx))<520);
+assert.match(vm.runInContext('longStatus.modelUi.elapsed.textContent',ctx),/页面处理用时：.*秒/);
+vm.runInContext('longStatus.modelUi.panel.scrollHeight=2000;positionModelPanel()',ctx);
+assert.equal(vm.runInContext('longStatus.modelUi.panel.style.top',ctx),'16px');
+assert.equal(vm.runInContext('longStatus.modelUi.panel.style.maxHeight',ctx),'768px');
+vm.runInContext(`$('log').getBoundingClientRect=()=>({left:30});messageScroll.getBoundingClientRect=()=>({left:30});longStatus.getBoundingClientRect=()=>({left:30,top:730});positionModelPanel();`,ctx);
+assert.equal(vm.runInContext('longStatus.modelUi.panel.style.position',ctx),'static');
+console.log('Model timeline: complete stage history, bottom clamp and narrow layout passed');
+
+// Exercise the actual text-submit handler with an older server's NDJSON events.
+(async()=>{
+  ctx.TextDecoder=TextDecoder;
+  const events=[{type:'accepted'},{type:'flow_phase',stage:'jev'},{type:'model_notice',text:'JEV：正在调用 DeepSeek'},{type:'error',message:'The read operation timed out'}];
+  const states=[];let index=0;
+  ctx.fetch=async()=>({ok:true,headers:{get:()=> 'application/x-ndjson'},body:{getReader:()=>({read:async()=>{
+    states.push(vm.runInContext('latestModelInput.modelUi.button.textContent',ctx));
+    return index<events.length?{done:false,value:Buffer.from(JSON.stringify(events[index++])+'\n')}:{done:true};
+  }})}});
+  vm.runInContext(`ready=false;textSending=false;$('text-person').replaceChildren(new Option('lux','lux-id'));$('text-person').value='lux-id';$('typed').value='明天天气怎样';`,ctx);
+  await vm.runInContext(`$('composer').onsubmit({preventDefault(){}})`,ctx);
+  assert.ok(states.includes('模型 · JEV 判断'));
+  assert.ok(states.includes('模型 · 调用中'));
+  assert.equal(vm.runInContext('latestModelInput.modelUi.button.textContent',ctx),'模型 · 处理失败');
+  assert.match(vm.runInContext('latestModelInput.modelUi.extra.children.at(-1).textContent',ctx),/read operation timed out/);
+  console.log('Text stream: live stage, calling notice and timeout failure passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});

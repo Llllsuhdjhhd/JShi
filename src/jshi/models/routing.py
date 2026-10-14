@@ -1,4 +1,7 @@
 """Provider adapters and per-request snapshots for live model routing."""
+from contextlib import contextmanager
+from time import monotonic
+from uuid import uuid4
 import json
 import re
 from threading import RLock
@@ -155,11 +158,12 @@ class ProviderModel:
 
 class RoutedModel:
     """Swap an immutable chain. A started request keeps its original chain."""
-    def __init__(self, initial, on_paid=None):
+    def __init__(self, initial, on_paid=None, on_status=None):
         self.chain = (initial,)
         self.lock = RLock()
         self.last = {}
         self.on_paid = on_paid
+        self.on_status = on_status
 
     @property
     def name(self): return getattr(self.chain[0],'name',type(self.chain[0]).__name__)
@@ -183,6 +187,29 @@ class RoutedModel:
         if isinstance(exc, (TimeoutError, URLError)):
             return 'timeout'
         return type(exc).__name__
+
+    @contextmanager
+    def _observe(self, model):
+        call_id, started = uuid4().hex, monotonic()
+        def emit(state):
+            if self.on_status:
+                try:
+                    self.on_status({'call_id': call_id, 'state': state,
+                        'model': getattr(model, 'name', type(model).__name__),
+                        'elapsed_ms': round((monotonic()-started)*1000)})
+                except Exception:
+                    pass  # UI observation must not alter model execution.
+        emit('calling')
+        try:
+            yield
+        except GeneratorExit:
+            emit('cancelled')
+            raise
+        except BaseException:
+            emit('failed')
+            raise
+        else:
+            emit('completed')
 
     def _notify_paid(self, model):
         name = getattr(model, 'name', type(model).__name__)
@@ -209,8 +236,9 @@ class RoutedModel:
         failed = []
         for index, model in enumerate(chain):
             try:
-                self._notify_paid(model)
-                result = model.chat(messages,max_tokens=max_tokens)
+                with self._observe(model):
+                    self._notify_paid(model)
+                    result = model.chat(messages,max_tokens=max_tokens)
                 reason = failed[0]['reason'] if failed else ''
                 self._note(model, index, degraded=bool(failed), fallback_reason=reason, failed=failed)
                 return result
@@ -225,8 +253,9 @@ class RoutedModel:
         failed = []
         for index, model in enumerate(chain):
             try:
-                self._notify_paid(model)
-                result = model.generate(request)
+                with self._observe(model):
+                    self._notify_paid(model)
+                    result = model.generate(request)
                 reason = failed[0]['reason'] if failed else ''
                 self._note(model, index, degraded=bool(failed), fallback_reason=reason, failed=failed)
                 return result
@@ -242,14 +271,15 @@ class RoutedModel:
         for index, model in enumerate(chain):
             emitted = False
             try:
-                self._notify_paid(model)
-                if hasattr(model,'generate_stream'): chunks = model.generate_stream(request)
-                else: chunks = (model.generate(request).text,)
-                for chunk in chunks:
-                    if chunk:
-                        emitted = True
-                        yield chunk
-                if not emitted: raise RuntimeError('模型未返回正文')
+                with self._observe(model):
+                    self._notify_paid(model)
+                    if hasattr(model,'generate_stream'): chunks = model.generate_stream(request)
+                    else: chunks = (model.generate(request).text,)
+                    for chunk in chunks:
+                        if chunk:
+                            emitted = True
+                            yield chunk
+                    if not emitted: raise RuntimeError('模型未返回正文')
                 reason = failed[0]['reason'] if failed else ''
                 self._note(model, index, degraded=bool(failed), fallback_reason=reason, failed=failed)
                 return
