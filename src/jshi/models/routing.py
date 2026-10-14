@@ -18,9 +18,15 @@ class ProviderFailure(RuntimeError):
 
 
 class ProviderModel:
-    def __init__(self, service, model, effort='low', max_tokens=None):
+    # Hot-path default: cap a single HTTP wait so one slow upstream cannot
+    # drag cognition / JEV p95 past the interactive budget (~8s). Background
+    # routes (write_zone / introspection) pass a higher timeout explicitly.
+    DEFAULT_TIMEOUT_S = 7.0
+
+    def __init__(self, service, model, effort='low', max_tokens=None, timeout=None):
         self.service, self.name, self.effort = dict(service), model, effort
         self.max_tokens = max_tokens
+        self.timeout = self.DEFAULT_TIMEOUT_S if timeout is None else float(timeout)
 
     def _payload(self, messages, stream=False, max_tokens=None):
         service = self.service
@@ -76,7 +82,7 @@ class ProviderModel:
 
     def _open(self, request):
         try:
-            return urlopen(request, timeout=45)
+            return urlopen(request, timeout=self.timeout)
         except HTTPError as exc:
             detail = exc.read(8192).decode('utf8',errors='replace').lower()
             try:
@@ -99,6 +105,14 @@ class ProviderModel:
             if code: reason+='（'+code+'）'
             raise ProviderFailure(exc.code, exc.code in {408,429,500,502,503,504} or signature or (exc.code in {402,403} and quota),
                 self.service['label']+' · '+self.name, reason) from None
+        except URLError as exc:
+            reason = exc.reason
+            timed_out = isinstance(reason, TimeoutError) or 'timed out' in str(reason).lower()
+            if timed_out or isinstance(exc, TimeoutError):
+                raise ProviderFailure(408, True, self.service['label']+' · '+self.name, f'请求超时（{self.timeout:g}s）') from None
+            raise
+        except TimeoutError:
+            raise ProviderFailure(408, True, self.service['label']+' · '+self.name, f'请求超时（{self.timeout:g}s）') from None
 
     def _text(self, result):
         if self.service['protocol']=='gemini':

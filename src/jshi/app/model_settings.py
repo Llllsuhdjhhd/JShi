@@ -16,7 +16,8 @@ LABELS = {'cognition':'主认知／回应','voice_jev':'JEV入口判断','write_
           'introspection':'自省','vision':'视觉理解','tool_plan':'工具规划','tool_wrap':'工具结果整理'}
 MODELS = {'deepseek':['deepseek-v4-flash','deepseek-v4-pro'],
           'qwen':['qwen3.5-flash','qwen3.5-flash-2026-02-23'],
-          'gemini':['gemini-3.6-flash','gemini-3.8-flash','gemini-3.5-flash','gemini-3.1-flash-lite'],
+          # Hot path prefers gemini-3-flash-preview (empirically ~1s); flash-lite is slow/fallback only.
+          'gemini':['gemini-3-flash-preview','gemini-3.6-flash','gemini-3.8-flash','gemini-3.5-flash','gemini-3.1-flash-lite'],
           'openrouter':['nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'],
           'cloudflare':['@cf/meta/llama-4-scout-17b-16e-instruct','@cf/mistralai/mistral-small-3.1-24b-instruct']}
 
@@ -118,7 +119,11 @@ class ModelSettings:
             # not turn it into a slow reasoning call on every utterance.
             if purpose=='voice_jev':
                 selected=('low' if model=='gemini-3.8-flash' else 'minimal') if service['protocol']=='gemini' and model.startswith('gemini-3') else 'off'
-            chain.append(ProviderModel(service,model,selected))
+            # Interactive routes: hard-cap HTTP wait so one slow call cannot push p95 past ~8s.
+            # Background write/introspection keep the longer ceiling.
+            hot = purpose in {None, 'cognition', 'voice_jev', 'tool_plan', 'tool_wrap', 'vision'}
+            timeout = ProviderModel.DEFAULT_TIMEOUT_S if hot else 45.0
+            chain.append(ProviderModel(service, model, selected, timeout=timeout))
         return chain
 
     def save(self, data):
