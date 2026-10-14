@@ -142,7 +142,9 @@ class VoiceJEV:
             # Bind only explicit self-introductions verified by the program.
             return InterruptDecision(action, str(data.get("reason", ""))[:200], claimed)
         except Exception:
-            return InterruptDecision("resume", "JEV unavailable; keep playing", claimed)
+            # Unavailable must not fail-open into respond (false_respond on garbage/ASR noise).
+            action, reason = self._unavailable_hold(delivery)
+            return InterruptDecision(action, reason, claimed)
 
     def decide_batch(self, subject_id: str, batch: list, context: list, delivery: dict, *, overlap: bool = False, on_request=None) -> BatchDecision:
         """一次判断整批。旧的单条 action JSON 仍接受，便于已有调用。"""
@@ -165,7 +167,8 @@ class VoiceJEV:
         if self.model is None or not joined.strip():
             return self._from_legacy(rules, batch)
         if monotonic() < self._unavailable_until:
-            return BatchDecision('respond', 'JEV接口暂不可用', self._items_for(batch, 'maybe', '入口判断失败'),
+            action, reason = self._unavailable_hold(delivery, batch_reason='JEV接口暂不可用')
+            return BatchDecision(action, reason, self._items_for(batch, 'no', '入口判断失败'),
                                  model_error=self._unavailable_error + '；60秒冷却期间不重复请求')
         from .jev_prompts import ENTRY_INSTRUCTION
         thin_batch = []
@@ -317,8 +320,20 @@ class VoiceJEV:
             if getattr(exc, 'code', None) in {401, 402, 403}:
                 self._unavailable_until = monotonic() + 60
                 self._unavailable_error = f'{type(exc).__name__}: HTTP {exc.code}'
-            return BatchDecision("respond", "未能初判", self._items_for(batch, "maybe", "未能初判"), rules.claimed_name, False,
+            action, reason = self._unavailable_hold(delivery, batch_reason='未能初判')
+            return BatchDecision(action, reason, self._items_for(batch, "no", "未能初判"), rules.claimed_name, False,
                 model_raw=raw_text, model_error=f"{type(exc).__name__}: {exc}")
+
+    @staticmethod
+    def _unavailable_hold(delivery: dict | None, *, batch_reason: str = '') -> tuple[str, str]:
+        """When JEV cannot judge, prefer no-answer over false respond.
+
+        Keep playing only when playback is clearly in progress; otherwise wait/ignore.
+        """
+        active = bool(delivery) and delivery.get("state") in {"playing", "paused", "queued"}
+        if active:
+            return "resume", batch_reason or "JEV unavailable; keep playing"
+        return "ignore", batch_reason or "JEV unavailable; wait"
 
     def _from_current(self, raw, batch, claimed):
         expected = {int(r["n"]) for r in batch}

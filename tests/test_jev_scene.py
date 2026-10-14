@@ -170,7 +170,7 @@ def test_invalid_batch_output_falls_back_without_false_confirmation():
             return ModelResponse(model='gate', text='{"level":3,"items":[],"control":"pass"}')
     result = VoiceJEV(Model()).decide_batch('stone', [{'n':1,'text':'匠石你好'}], [], {})
     assert not result.judged and result.model_error
-    assert result.items[0].to_jiangshi == 'maybe'
+    assert result.action == 'ignore' and result.items[0].to_jiangshi == 'no'
     assert not result.main_prompt_hint
 
 
