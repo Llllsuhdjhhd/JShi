@@ -11,6 +11,8 @@ from jshi.subject.domain import HistoryKind, HistoryRecord
 
 
 INTERNAL_PREFIX = '未命名访客'
+# Align with LocalSpeakers.confirmation_threshold default (max(threshold, 0.65)).
+VOICEPRINT_CONFIRM_THRESHOLD = 0.65
 
 
 def internal_name(profiles) -> str:
@@ -115,7 +117,11 @@ class VoiceIdentities:
         return canonical_voice_profile(self.profiles, profile)
 
     def resolve(self, track_id: str, *, voiceprint_id: str = "", confidence: float | None = None, cluster_id: str = "", uncertain: bool = False, tentative: bool = False) -> SpeakerEvidence:
-        if voiceprint_id:
+        # Weak evidence must not be upgraded to recognized, even if a voiceprint
+        # carrier hits. confidence is None means upstream already trusted the match.
+        weak = uncertain or tentative or (
+            confidence is not None and confidence < VOICEPRINT_CONFIRM_THRESHOLD)
+        if voiceprint_id and not weak:
             reference = voiceprint_id if voiceprint_id.startswith("local:") else f"volc:{voiceprint_id}"
             profile = self.profiles.find_by_carrier("voiceprint", reference)
             if profile is None and not voiceprint_id.startswith("local:"):

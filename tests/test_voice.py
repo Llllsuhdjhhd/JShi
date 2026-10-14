@@ -167,6 +167,51 @@ def test_carrier_collision_is_rejected_and_device_is_not_voiceprint(process):
     assert ids.resolve("B").object_id != "lux-id"
 
 
+def test_voiceprint_hit_with_uncertain_is_not_recognized(process):
+    process.profiles.add_carrier("lux-id", CarrierEntry("voiceprint", "volc:weak-unc"))
+    ids = VoiceIdentities(process.profiles, "stone", "session")
+    evidence = ids.resolve("0", voiceprint_id="weak-unc", confidence=0.9, uncertain=True)
+    assert evidence.status != "recognized"
+    assert evidence.method != "voiceprint_match"
+    assert evidence.method == "unassigned_audio"
+    assert ids.tracks.get("0") is None or ids.tracks["0"].status != "recognized"
+
+
+def test_voiceprint_hit_with_tentative_is_not_recognized(process):
+    process.profiles.add_carrier("lux-id", CarrierEntry("voiceprint", "local:model:weak-tent"))
+    ids = VoiceIdentities(process.profiles, "stone", "session")
+    evidence = ids.resolve(
+        "0", voiceprint_id="local:model:weak-tent", confidence=0.9,
+        cluster_id="pending-1", tentative=True)
+    assert evidence.status == "unknown"
+    assert evidence.method == "voice_continuity"
+    assert evidence.voiceprint_id == ""
+    stored = ids.tracks["0"]
+    assert stored.status == "unknown" and stored.method == "voice_continuity"
+    assert ids.clusters["pending-1"].status == "unknown"
+
+
+def test_voiceprint_hit_with_low_confidence_is_not_recognized(process):
+    process.profiles.add_carrier("lux-id", CarrierEntry("voiceprint", "volc:weak-low"))
+    ids = VoiceIdentities(process.profiles, "stone", "session")
+    evidence = ids.resolve("0", voiceprint_id="weak-low", confidence=0.5)
+    assert evidence.status != "recognized"
+    assert evidence.method != "voiceprint_match"
+    assert ids.tracks.get("0") is None or ids.tracks["0"].status != "recognized"
+
+
+def test_voiceprint_hit_with_high_confidence_is_recognized(process):
+    process.profiles.add_carrier("lux-id", CarrierEntry("voiceprint", "volc:strong"))
+    ids = VoiceIdentities(process.profiles, "stone", "session")
+    evidence = ids.resolve("0", voiceprint_id="strong", confidence=0.9)
+    assert evidence.status == "recognized"
+    assert evidence.method == "voiceprint_match"
+    assert evidence.object_id == "lux-id"
+    # confidence is None: upstream already trusted the match
+    trusted = ids.resolve("1", voiceprint_id="strong")
+    assert trusted.status == "recognized" and trusted.method == "voiceprint_match"
+
+
 def test_delivery_only_acknowledges_played_and_discards_stale():
     tracker = DeliveryTracker()
     d = tracker.begin("第一句。第二句。", "lux")
