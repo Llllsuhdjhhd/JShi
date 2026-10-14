@@ -219,7 +219,8 @@ def test_subject_nicknames_are_saved_in_portrait_for_the_identified_speaker(proc
     asyncio.run(run())
 
 
-def test_eight_supporting_samples_and_two_misses_use_distribution_without_training(process, tmp_path):
+def test_eight_supporting_samples_below_confirm_stay_tentative_with_ranking(process, tmp_path):
+    """Multi-segment ranking below Speakers confirm must not become a trusted known match."""
     speakers = LocalSpeakers(None, 'test', tmp_path/'prints.json', process.profiles, threshold=.6)
     speakers.embedding = lambda _: [1., 0.]
     speakers.enroll_samples([bytes(96000)], 'lux-id', user_labeled=True)
@@ -229,10 +230,49 @@ def test_eight_supporting_samples_and_two_misses_use_distribution_without_traini
         track, vpid, confidence = speakers.identify_timed(np.zeros(32000), start_ms=i*2000, end_ms=(i+1)*2000)
         if i < 9:
             assert not vpid and speakers.last_match['tentative']
-    assert vpid and track == 'known-lux-id'
-    assert abs(confidence-.606) < 1e-6
+    # Mean ~0.606 is above the stable distribution floor but below confirm (0.65).
+    assert not vpid and confidence is None
+    assert track.startswith('pending-')
+    assert speakers.last_match['tentative'] and speakers.last_match.get('ranking_below_confirm')
+    assert speakers.last_match['collection']['pick'] == 'lux-id'
     assert speakers.last_match['collection']['support_fraction'] == .8
+    assert abs(speakers.last_match['collection']['mean_match'] - .606) < 1e-6
     assert json.dumps(speakers.known, sort_keys=True) == bank_before
+
+
+def test_single_utterance_at_confirm_still_trusts_named_match(process, tmp_path):
+    """Trusted named match remains available via the confirm-gated single path."""
+    speakers = LocalSpeakers(None, 'test', tmp_path/'prints.json', process.profiles, threshold=.6)
+    speakers.embedding = lambda _: [1., 0.]
+    speakers.enroll_samples([bytes(96000)], 'lux-id', user_labeled=True)
+    speakers.embedding = lambda _: [.70, (1-.70**2)**.5]
+    track, vpid, confidence = speakers.identify_timed(np.zeros(48000), start_ms=0, end_ms=3000)
+    assert vpid and track == 'known-lux-id'
+    assert abs(confidence - .70) < 1e-6
+    assert speakers.last_match.get('tentative') is False
+    assert speakers.last_match['reason'] == '已匹配登记声纹'
+
+
+def test_weak_current_not_trusted_when_prior_clear_inflates_mean_match(process, tmp_path):
+    """pid_short_1236-style: prior clear same-track samples must not trust a weak current utt."""
+    speakers = LocalSpeakers(None, 'test', tmp_path/'prints.json', process.profiles, threshold=.6)
+    speakers.embedding = lambda _: [1., 0.]
+    speakers.enroll_samples([bytes(96000)], 'lux-id', user_labeled=True)
+    for i in range(8):
+        speakers.embedding = lambda _: [1., 0.]
+        track, vpid, confidence = speakers.identify_timed(
+            np.zeros(48000), start_ms=i * 3000, end_ms=(i + 1) * 3000)
+        assert vpid and confidence >= speakers.confirmation_threshold
+    speakers.embedding = lambda _: [.555, (1 - .555 ** 2) ** .5]
+    track, vpid, confidence = speakers.identify_timed(
+        np.zeros(48000), start_ms=24000, end_ms=27000)
+    assert not vpid and confidence is None
+    assert track.startswith('pending-')
+    assert speakers.last_match['tentative'] and speakers.last_match.get('ranking_below_confirm')
+    collection = speakers.last_match['collection']
+    assert collection['mean_match'] >= speakers.confirmation_threshold
+    assert collection['current_score'] < speakers.confirmation_threshold
+    assert collection['pick'] == 'lux-id'
 
 
 def test_ten_samples_do_not_confirm_an_inconsistent_mixture(process, tmp_path):

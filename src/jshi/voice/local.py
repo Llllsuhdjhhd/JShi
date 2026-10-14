@@ -411,12 +411,30 @@ class LocalSpeakers:
             ranked.sort(reverse=True)
             if ranked:
                 score, oid, key, scores = ranked[0]
+                # Distribution floor may sit below Speakers confirm (e.g. stable
+                # path min(.58, confirm)). Ranking evidence can use that floor.
+                # Trusted named match requires BOTH collection mean and this
+                # utterance's score ≥ confirmation — prior clear same-track
+                # samples must not inflate mean_match into a trusted short/weak turn.
                 match_floor = max(self.threshold, min(.58, self.confirmation_threshold) if stable else self.confirmation_threshold)
                 support = sum(value >= match_floor for value in scores)/len(scores)
                 gap = score-ranked[1][0] if len(ranked) > 1 else None
+                current_score = float(voiceprint_score(vector, dict(self._person_entries())[key]))
                 if score >= match_floor and support >= .8 and (gap is None or gap >= self.margin):
-                    self.last_match['collection'].update(pick=oid, mean_match=round(score, 3), support_fraction=round(support, 3))
-                    return self._matched_voice(vector, key, score, now, source_track)
+                    self.last_match['collection'].update(
+                        pick=oid, mean_match=round(score, 3), support_fraction=round(support, 3),
+                        gap=None if gap is None else round(gap, 3),
+                        current_score=round(current_score, 3),
+                        confirm_threshold=self.confirmation_threshold)
+                    if (score >= self.confirmation_threshold
+                            and current_score >= self.confirmation_threshold):
+                        return self._matched_voice(vector, key, score, now, source_track)
+                    # Mean and/or this utterance below confirm: keep pending + ranking.
+                    self.last_match.update(
+                        reason='多段分布倾向已有姓名但本句未达确认门槛'
+                        if current_score < self.confirmation_threshold
+                        else '多段分布倾向已有姓名但未达确认门槛',
+                        tentative=True, ranking_below_confirm=True)
         if stable:
             # Compare stable unnamed groups in a separate pool, after the named
             # decision. They never affect the named ranking or its margin.

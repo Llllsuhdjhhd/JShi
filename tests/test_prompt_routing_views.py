@@ -101,6 +101,8 @@ def test_temporary_voice_group_is_not_presented_as_named_identity():
             p=json.loads(request.input_text)['input']['lines'][0]
             assert p['identity']=='unresolved'
             assert p['continuity']['scope']=='continuity_only'
+            assert p['continuity']['same_cluster'] is True
+            assert p['continuity']['prior_p']=='P2'
             assert p['voice']['pick']==''
             assert p['voice_ranking']['first']=='P2'
             assert p['recent_confirmed']=={'p':'P2','gap_ms':3131,'same_track':True}
@@ -110,3 +112,42 @@ def test_temporary_voice_group_is_not_presented_as_named_identity():
         [{'p':'P2','at':1000,'track':'7','status':'recognized','text':'前一句'}],{})
     assert result.items[0].speaker_pick=='P2'
     assert 'scope' not in voice  # Transport annotations must not rewrite the original evidence.
+
+
+def test_weak_unidentified_gets_ranking_and_same_cluster_continuity():
+    voice={'pick':'','strength':'weak','basis':'本句声纹比较；相似度不是概率','score':.555}
+    class Gate:
+        def generate(self,request):
+            p=json.loads(request.input_text)['input']['lines'][0]
+            assert p['voice_ranking']=={'first':'P2','similarity':.555,'second':'P3','gap':.102}
+            assert p['continuity']['scope']=='continuity_only'
+            assert p['continuity']['same_cluster'] is True
+            assert p['continuity']['prior_p']=='P22'
+            assert p['continuity']['prior_judgment']=='P2'
+            assert p['continuity']['gap_ms']==2000
+            return ModelResponse(model='gate',text='{"items":[{"i":1,"person":"P2","certainty":"tentative","why":"同轨迹接续且候选领先"}],"level":3,"recall_memory":false,"control":"pass"}')
+    result=VoiceJEV(Gate()).decide_batch('stone',[{'n':1,'who':'unknown','track':'pending-a','at':5000,
+        'text':'继续说','voice_evidence':voice,
+        'candidates':[{'who':'P2','score':.555},{'who':'P3','score':.453}]}],
+        [{'p':'P22','at':3000,'track':'pending-a','status':'unknown','text':'上一句',
+          'judgment':{'person':'P2','certainty':'可能'}}],{})
+    assert result.items[0].speaker_pick=='P2'
+
+
+def test_mirror_jev_consumes_same_cluster_continuity_without_new_recognized():
+    from jshi.voice.jev_mirror import MirrorJEV, mirror_identity
+    voice={'pick':'','strength':'weak','basis':'本句声纹比较；相似度不是概率','score':.555}
+    result=VoiceJEV(MirrorJEV()).decide_batch('stone',[{'n':1,'who':'P22（待定声音3）','track':'pending-a','at':5000,
+        'text':'继续说','voice_evidence':{'pick':'P22','strength':'weak','basis':'临时声音连续性；只认出同一个声音'},
+        'candidates':[{'who':'P2','score':.555},{'who':'P3','score':.453}]}],
+        [{'p':'P22','at':3000,'track':'pending-a','status':'unknown','text':'上一句',
+          'judgment':{'person':'P2','certainty':'可能'}}],{})
+    assert result.judged
+    assert result.items[0].speaker_pick=='P2'
+    assert result.items[0].speaker_level=='可能'
+    assert result.items[0].speaker_pick!='P22'
+    # Ranking alone must not invent a person.
+    person, certainty, _ = mirror_identity({
+        'i':1,'p':'unknown','voice':voice,'candidates':[{'p':'P2','similarity':.555,'source':'voiceprint'}],
+        'voice_ranking':{'first':'P2','similarity':.555}})
+    assert person=='unknown' and certainty=='unknown'
