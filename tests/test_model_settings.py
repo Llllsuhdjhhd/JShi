@@ -78,6 +78,60 @@ def test_fallback_and_paid_notice_before_paid_call():
     router=RoutedModel(First(),on_paid=notices.append);router.replace([First(),Last()])
     assert router.generate(None).text=='answer'
     assert router.last['fallback']
+    assert router.last['degraded'] is True
+    assert router.last['fallback_reason'] == '429'
+    assert router.last['model'] == 'deepseek'
+    assert router.last['failed'] == [{'model': 'free', 'reason': '429'}]
+
+
+def test_timeout_fallback_records_degraded_success():
+    class First:
+        name='preview';service={}
+        def chat(self, messages, max_tokens=None):
+            raise ProviderFailure(408, True, 'G · preview', '请求超时（7s）')
+    class Lite:
+        name='gemini-3.1-flash-lite';service={}
+        def chat(self, messages, max_tokens=None):
+            return ModelResponse(text='{"mode":"wait"}', model=self.name)
+    router = RoutedModel(First()); router.replace([First(), Lite()])
+    assert router.chat([{'role':'user','content':'hi'}]).text == '{"mode":"wait"}'
+    assert router.last['degraded'] is True
+    assert router.last['fallback'] is True
+    assert router.last['fallback_reason'] == 'timeout'
+    assert router.last['model'] == 'gemini-3.1-flash-lite'
+    assert router.last['failed'][0] == {'model': 'preview', 'reason': 'timeout'}
+
+
+def test_clean_success_is_not_degraded():
+    class Only:
+        name='gemini-3-flash-preview';service={'label':'G'}
+        def chat(self, messages, max_tokens=None):
+            return ModelResponse(text='ok', model=self.name)
+    router = RoutedModel(Only())
+    assert router.chat([{'role':'user','content':'hi'}]).text == 'ok'
+    assert router.last['degraded'] is False
+    assert router.last['fallback'] is False
+    assert router.last['fallback_reason'] == ''
+    assert router.last['failed'] == []
+
+
+def test_hot_chain_gives_lite_degraded_timeout_when_not_first(tmp_path):
+    settings = ModelSettings(tmp_path, process(tmp_path), None)
+    settings.services['gemini'] = services()['gemini']
+    profile = {
+        'effort': 'low',
+        'choices': [
+            {'service': 'gemini', 'model': 'gemini-3-flash-preview'},
+            {'service': 'gemini', 'model': 'gemini-3.1-flash-lite'},
+        ],
+    }
+    settings.save({'name': 'cognition', 'profile': profile})
+    chain = settings.routes['cognition'].chain
+    assert chain[0].name == 'gemini-3-flash-preview'
+    assert chain[0].timeout == ProviderModel.DEFAULT_TIMEOUT_S
+    assert chain[1].name == 'gemini-3.1-flash-lite'
+    from jshi.app.model_settings import DEGRADED_TIMEOUT_S
+    assert chain[1].timeout == DEGRADED_TIMEOUT_S
 
 
 def test_no_fallback_after_stream_has_started():

@@ -20,6 +20,10 @@ MODELS = {'deepseek':['deepseek-v4-flash','deepseek-v4-pro'],
           'gemini':['gemini-3-flash-preview','gemini-3.6-flash','gemini-3.8-flash','gemini-3.5-flash','gemini-3.1-flash-lite'],
           'openrouter':['nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'],
           'cloudflare':['@cf/meta/llama-4-scout-17b-16e-instruct','@cf/mistralai/mistral-small-3.1-24b-instruct']}
+# When preferred hot models time out / 429, fall through to these with a longer
+# budget so the answer is a degraded success instead of a null prediction.
+SLOW_FALLBACK_MODELS = frozenset({'gemini-3.1-flash-lite'})
+DEGRADED_TIMEOUT_S = 25.0
 
 
 class ModelSettings:
@@ -121,8 +125,15 @@ class ModelSettings:
                 selected=('low' if model=='gemini-3.8-flash' else 'minimal') if service['protocol']=='gemini' and model.startswith('gemini-3') else 'off'
             # Interactive routes: hard-cap HTTP wait so one slow call cannot push p95 past ~8s.
             # Background write/introspection keep the longer ceiling.
+            # Slow fallback models (flash-lite) in non-first position get a longer
+            # degraded budget so timeout/429 on preferred models still yield an answer.
             hot = purpose in {None, 'cognition', 'voice_jev', 'tool_plan', 'tool_wrap', 'vision'}
-            timeout = ProviderModel.DEFAULT_TIMEOUT_S if hot else 45.0
+            if not hot:
+                timeout = 45.0
+            elif index > 0 and model in SLOW_FALLBACK_MODELS:
+                timeout = DEGRADED_TIMEOUT_S
+            else:
+                timeout = ProviderModel.DEFAULT_TIMEOUT_S
             chain.append(ProviderModel(service, model, selected, timeout=timeout))
         return chain
 
