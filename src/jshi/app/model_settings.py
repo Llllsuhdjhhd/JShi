@@ -16,9 +16,21 @@ LABELS = {'cognition':'主认知／回应','voice_jev':'JEV入口判断','write_
           'introspection':'自省','vision':'视觉理解','tool_plan':'工具规划','tool_wrap':'工具结果整理'}
 MODELS = {'deepseek':['deepseek-v4-flash','deepseek-v4-pro'],
           'qwen':['qwen3.5-flash','qwen3.5-flash-2026-02-23'],
-          'gemini':['gemini-3.6-flash','gemini-3.8-flash','gemini-3.5-flash','gemini-3.1-flash-lite'],
+          # Hot path prefers gemini-3-flash-preview (empirically ~1s); flash-lite is slow/fallback only.
+          'gemini':['gemini-3-flash-preview','gemini-3.6-flash','gemini-3.8-flash','gemini-3.5-flash','gemini-3.1-flash-lite'],
           'openrouter':['nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'],
           'cloudflare':['@cf/meta/llama-4-scout-17b-16e-instruct','@cf/mistralai/mistral-small-3.1-24b-instruct']}
+# When preferred hot models time out / 429, fall through to these with a longer
+# budget so the answer is a degraded success instead of a null prediction.
+# Slow/degraded fallbacks only (never preferred hot). Order when chained:
+# preview-first → flash-lite → qwen3.5-flash → DeepSeek last.
+SLOW_FALLBACK_MODELS = frozenset({
+    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash-lite',
+    'qwen3.5-flash',
+    'qwen3.5-flash-2026-02-23',
+})
+DEGRADED_TIMEOUT_S = 25.0
 
 
 class ModelSettings:
@@ -67,7 +79,9 @@ class ModelSettings:
             'api_key':os.getenv('JSHI_API_DEEPSEEK_API_KEY') or os.getenv('JSHI_MODEL_API_KEY','')},
           'gemini':{'label':'Gemini网关','protocol':'gemini','endpoint':'','api_key':''},
           'qwen':{'label':'阿里云百炼 Qwen（可计费）','protocol':'chat','thinking_style':'qwen','paid':True,
-              'endpoint':os.getenv('JSHI_API_QWEN_ENDPOINT','https://dashscope.aliyuncs.com/compatible-mode/v1'),
+              # Prefer explicit JSHI_* ; else DashScope env from dashscope.env (never hardcode key).
+              'endpoint':(os.getenv('JSHI_API_QWEN_ENDPOINT') or os.getenv('DASHSCOPE_BASE_URL')
+                          or 'https://dashscope.aliyuncs.com/compatible-mode/v1'),
               'api_key':os.getenv('JSHI_API_QWEN_API_KEY') or os.getenv('DASHSCOPE_API_KEY','')},
           'cloudflare':{'label':'Cloudflare Workers AI','protocol':'chat','endpoint':'','api_key':''},
           'openrouter':{'label':'OpenRouter免费','protocol':'chat','endpoint':'https://openrouter.ai/api/v1','api_key':''}}
@@ -118,7 +132,18 @@ class ModelSettings:
             # not turn it into a slow reasoning call on every utterance.
             if purpose=='voice_jev':
                 selected=('low' if model=='gemini-3.8-flash' else 'minimal') if service['protocol']=='gemini' and model.startswith('gemini-3') else 'off'
-            chain.append(ProviderModel(service,model,selected))
+            # Interactive routes: hard-cap HTTP wait so one slow call cannot push p95 past ~8s.
+            # Background write/introspection keep the longer ceiling.
+            # Slow fallback models (flash-lite / qwen) in non-first position get a longer
+            # degraded budget so timeout/429 on preferred models still yield an answer.
+            hot = purpose in {None, 'cognition', 'voice_jev', 'tool_plan', 'tool_wrap', 'vision'}
+            if not hot:
+                timeout = 45.0
+            elif index > 0 and model in SLOW_FALLBACK_MODELS:
+                timeout = DEGRADED_TIMEOUT_S
+            else:
+                timeout = ProviderModel.DEFAULT_TIMEOUT_S
+            chain.append(ProviderModel(service, model, selected, timeout=timeout))
         return chain
 
     def save(self, data):

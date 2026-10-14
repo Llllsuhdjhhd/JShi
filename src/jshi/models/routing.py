@@ -14,13 +14,21 @@ from .prompt import build_system, build_user
 class ProviderFailure(RuntimeError):
     def __init__(self, status, retryable, context='', reason=''):
         super().__init__(f'{context+"：" if context else ""}模型服务返回HTTP {status}{"；"+reason if reason else ""}')
+        self.status = status
         self.retryable = retryable
+        self.reason = reason
 
 
 class ProviderModel:
-    def __init__(self, service, model, effort='low', max_tokens=None):
+    # Hot-path default: cap a single HTTP wait so one slow upstream cannot
+    # drag cognition / JEV p95 past the interactive budget (~8s). Background
+    # routes (write_zone / introspection) pass a higher timeout explicitly.
+    DEFAULT_TIMEOUT_S = 7.0
+
+    def __init__(self, service, model, effort='low', max_tokens=None, timeout=None):
         self.service, self.name, self.effort = dict(service), model, effort
         self.max_tokens = max_tokens
+        self.timeout = self.DEFAULT_TIMEOUT_S if timeout is None else float(timeout)
 
     def _payload(self, messages, stream=False, max_tokens=None):
         service = self.service
@@ -76,7 +84,7 @@ class ProviderModel:
 
     def _open(self, request):
         try:
-            return urlopen(request, timeout=45)
+            return urlopen(request, timeout=self.timeout)
         except HTTPError as exc:
             detail = exc.read(8192).decode('utf8',errors='replace').lower()
             try:
@@ -99,6 +107,14 @@ class ProviderModel:
             if code: reason+='（'+code+'）'
             raise ProviderFailure(exc.code, exc.code in {408,429,500,502,503,504} or signature or (exc.code in {402,403} and quota),
                 self.service['label']+' · '+self.name, reason) from None
+        except URLError as exc:
+            reason = exc.reason
+            timed_out = isinstance(reason, TimeoutError) or 'timed out' in str(reason).lower()
+            if timed_out or isinstance(exc, TimeoutError):
+                raise ProviderFailure(408, True, self.service['label']+' · '+self.name, f'请求超时（{self.timeout:g}s）') from None
+            raise
+        except TimeoutError:
+            raise ProviderFailure(408, True, self.service['label']+' · '+self.name, f'请求超时（{self.timeout:g}s）') from None
 
     def _text(self, result):
         if self.service['protocol']=='gemini':
@@ -154,40 +170,79 @@ class RoutedModel:
     def _snapshot(self):
         with self.lock: return self.chain
 
-    def _note(self, model, index):
+    @staticmethod
+    def _fallback_reason(exc):
+        if isinstance(exc, ProviderFailure):
+            status = getattr(exc, 'status', None)
+            if status == 408: return 'timeout'
+            if status == 429: return '429'
+            if status is not None: return str(status)
+            msg = str(exc)
+            if '超时' in msg or '408' in msg: return 'timeout'
+            if '429' in msg or '额度' in msg: return '429'
+        if isinstance(exc, (TimeoutError, URLError)):
+            return 'timeout'
+        return type(exc).__name__
+
+    def _notify_paid(self, model):
+        name = getattr(model, 'name', type(model).__name__)
+        if (getattr(model, 'service', {}).get('paid') or name.startswith('deepseek')) and self.on_paid:
+            self.on_paid(name)
+
+    def _note(self, model, index, *, degraded=False, fallback_reason='', failed=()):
         name=getattr(model,'name',type(model).__name__)
-        with self.lock: self.last = {'model':name,'service':getattr(model,'service',{}).get('label','原配置'),'fallback':bool(index)}
-        if (getattr(model,'service',{}).get('paid') or name.startswith('deepseek')) and self.on_paid: self.on_paid(name)
+        with self.lock:
+            self.last = {
+                'model': name,
+                'service': getattr(model,'service',{}).get('label','原配置'),
+                'fallback': bool(index) or degraded,
+                'degraded': bool(degraded or index),
+                'fallback_reason': fallback_reason or '',
+                'failed': list(failed),
+            }
 
     def _retryable(self, exc):
         return isinstance(exc,ProviderFailure) and exc.retryable or isinstance(exc,(TimeoutError,ConnectionError,URLError))
 
     def chat(self, messages, max_tokens=None):
         chain = self._snapshot()
+        failed = []
         for index, model in enumerate(chain):
             try:
-                self._note(model,index)
+                self._notify_paid(model)
                 result = model.chat(messages,max_tokens=max_tokens)
+                reason = failed[0]['reason'] if failed else ''
+                self._note(model, index, degraded=bool(failed), fallback_reason=reason, failed=failed)
                 return result
             except Exception as exc:
-                if index+1==len(chain) or not self._retryable(exc): raise
+                failed.append({'model': getattr(model,'name',type(model).__name__), 'reason': self._fallback_reason(exc)})
+                if index+1==len(chain) or not self._retryable(exc):
+                    self._note(model, index, degraded=bool(failed), fallback_reason=self._fallback_reason(exc), failed=failed)
+                    raise
 
     def generate(self, request):
         chain = self._snapshot()
+        failed = []
         for index, model in enumerate(chain):
             try:
-                self._note(model,index)
+                self._notify_paid(model)
                 result = model.generate(request)
+                reason = failed[0]['reason'] if failed else ''
+                self._note(model, index, degraded=bool(failed), fallback_reason=reason, failed=failed)
                 return result
             except Exception as exc:
-                if index+1==len(chain) or not self._retryable(exc): raise
+                failed.append({'model': getattr(model,'name',type(model).__name__), 'reason': self._fallback_reason(exc)})
+                if index+1==len(chain) or not self._retryable(exc):
+                    self._note(model, index, degraded=bool(failed), fallback_reason=self._fallback_reason(exc), failed=failed)
+                    raise
 
     def generate_stream(self, request):
         chain = self._snapshot()
+        failed = []
         for index, model in enumerate(chain):
             emitted = False
             try:
-                self._note(model,index)
+                self._notify_paid(model)
                 if hasattr(model,'generate_stream'): chunks = model.generate_stream(request)
                 else: chunks = (model.generate(request).text,)
                 for chunk in chunks:
@@ -195,7 +250,12 @@ class RoutedModel:
                         emitted = True
                         yield chunk
                 if not emitted: raise RuntimeError('模型未返回正文')
+                reason = failed[0]['reason'] if failed else ''
+                self._note(model, index, degraded=bool(failed), fallback_reason=reason, failed=failed)
                 return
             except Exception as exc:
                 # Never splice two providers into the same partly delivered answer.
-                if emitted or index+1==len(chain) or not self._retryable(exc): raise
+                failed.append({'model': getattr(model,'name',type(model).__name__), 'reason': self._fallback_reason(exc)})
+                if emitted or index+1==len(chain) or not self._retryable(exc):
+                    self._note(model, index, degraded=bool(failed), fallback_reason=self._fallback_reason(exc), failed=failed)
+                    raise
