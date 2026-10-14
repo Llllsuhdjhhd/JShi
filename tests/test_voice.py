@@ -357,6 +357,9 @@ def test_jev_model_failure_keeps_playing_and_other_speaker_needs_judgment():
     class Broken:
         def generate(self,req): raise RuntimeError("timeout")
     assert VoiceJEV(Broken()).decide("stone","等会去哪",{},d).action=="resume"
+    # Idle / completed: unavailable must wait/ignore, never fail-open into respond.
+    assert VoiceJEV(Broken()).decide("stone","等会去哪",{},{"state":"completed"}).action=="ignore"
+    assert VoiceJEV(Broken()).decide("stone","等会去哪",{},{}).action=="ignore"
 
 
 def test_pending_jev_does_not_pause_audio(process):

@@ -260,8 +260,10 @@ def test_402_cooldown_preserves_failure_and_resumes_after_interval(monkeypatch, 
     model = Model()
     gate = VoiceJEV(model)
     batch = [{'n': 1, 'text': '你好'}]
-    assert '402' in gate.decide_batch('stone', batch, [], {}).model_error
-    assert '冷却' in gate.decide_batch('stone', batch, [], {}).model_error
+    first = gate.decide_batch('stone', batch, [], {})
+    cooled = gate.decide_batch('stone', batch, [], {})
+    assert '402' in first.model_error and first.action == 'ignore'
+    assert '冷却' in cooled.model_error and cooled.action == 'ignore'
     assert model.calls == 1
     now[0] += 61
     gate.decide_batch('stone', batch, [], {})

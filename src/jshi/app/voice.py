@@ -1257,8 +1257,11 @@ class VoiceConversation:
                                             activity_id=prompt_activity_id)
 
         def open_batch(reason):
-            items = tuple(BatchItem(int(item["n"]), "maybe", 0.5, reason) for item in batch)
-            return BatchDecision("respond", reason, items, "", False, model_error=reason)
+            # Timeout / concurrent-busy are also JEV-unavailable: do not fail-open into respond.
+            action, hold_reason = VoiceJEV._unavailable_hold(delivery, batch_reason=reason)
+            items = tuple(BatchItem(int(item["n"]), "no", 0.5, reason,
+                                    relevance="unrelated") for item in batch)
+            return BatchDecision(action, hold_reason, items, "", False, model_error=reason)
 
         if self.jev_future is not None and not self.jev_future.done():
             path = "rule"
@@ -1309,7 +1312,9 @@ class VoiceConversation:
                 self.input_records[u.input_id]['jev_finished_at'] = monotonic()
         if (timed_out or result.model_error) and monotonic() - self._last_jev_notice >= 30:
             self._last_jev_notice = monotonic()
-            message = 'JEV接口返回402，可能是余额或计费限制；本轮入口判断失败，声音初判和原话仍保留。' if '402' in result.model_error else 'JEV未能完成入口判断，已保留原话交主流程处理；这不是人物“不确定”的正常判断。'
+            message = ('JEV接口返回402，可能是余额或计费限制；本轮入口判断失败，声音初判和原话仍保留，本轮不开口。'
+                       if '402' in result.model_error else
+                       'JEV未能完成入口判断，已保留原话并等待，本轮不自动回应；这不是人物“不确定”的正常判断。')
             await self.emit('notice', text=message)
         elif result.routing_error and monotonic() - self._last_jev_notice >= 30:
             self._last_jev_notice = monotonic()
