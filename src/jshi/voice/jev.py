@@ -199,6 +199,26 @@ class VoiceJEV:
                     r = max(recent, key=lambda v:v['at'])
                     thin['recent_confirmed'] = {'p':r['p'], 'gap_ms':round(thin['at']-r['at']),
                         'same_track':bool(r.get('track') and r.get('track') == thin.get('track'))}
+            # Weak / unresolved / unidentified: attach same-track cluster continuity
+            # so JEV can keep one speaker without inventing a new recognized person.
+            voice_strength = str((thin.get('voice') or {}).get('strength')
+                                 or (row.get('voice_evidence') or {}).get('strength') or '')
+            needs_cluster = (thin.get('identity') == 'unresolved'
+                             or voice_strength in {'weak', 'unavailable'})
+            if needs_cluster and thin.get('track') and isinstance(thin.get('at'), (int, float)):
+                same_cluster = [r for r in context if isinstance(r, dict)
+                                and r.get('track') and r.get('track') == thin['track']
+                                and isinstance(r.get('at'), (int, float))
+                                and 0 <= thin['at'] - r['at'] <= 30000]
+                if same_cluster:
+                    prior = max(same_cluster, key=lambda v: v['at'])
+                    cont = dict(thin.get('continuity') or {'scope': 'continuity_only'})
+                    cont.update(same_cluster=True, prior_p=prior.get('p'),
+                                gap_ms=round(thin['at'] - prior['at']))
+                    judgment = prior.get('judgment') if isinstance(prior.get('judgment'), dict) else {}
+                    if judgment.get('person') and judgment['person'] not in {'', 'unknown', 'new'}:
+                        cont['prior_judgment'] = judgment['person']
+                    thin['continuity'] = cont
             if row.get("short_voice_hint"):
                 thin["short_voice_hint"] = "同一短句重复拼接，辅助比较，不是新增证据"
             if row.get('source'):
