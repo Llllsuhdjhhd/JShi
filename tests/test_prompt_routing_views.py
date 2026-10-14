@@ -132,3 +132,22 @@ def test_weak_unidentified_gets_ranking_and_same_cluster_continuity():
         [{'p':'P22','at':3000,'track':'pending-a','status':'unknown','text':'上一句',
           'judgment':{'person':'P2','certainty':'可能'}}],{})
     assert result.items[0].speaker_pick=='P2'
+
+
+def test_mirror_jev_consumes_same_cluster_continuity_without_new_recognized():
+    from jshi.voice.jev_mirror import MirrorJEV, mirror_identity
+    voice={'pick':'','strength':'weak','basis':'本句声纹比较；相似度不是概率','score':.555}
+    result=VoiceJEV(MirrorJEV()).decide_batch('stone',[{'n':1,'who':'P22（待定声音3）','track':'pending-a','at':5000,
+        'text':'继续说','voice_evidence':{'pick':'P22','strength':'weak','basis':'临时声音连续性；只认出同一个声音'},
+        'candidates':[{'who':'P2','score':.555},{'who':'P3','score':.453}]}],
+        [{'p':'P22','at':3000,'track':'pending-a','status':'unknown','text':'上一句',
+          'judgment':{'person':'P2','certainty':'可能'}}],{})
+    assert result.judged
+    assert result.items[0].speaker_pick=='P2'
+    assert result.items[0].speaker_level=='可能'
+    assert result.items[0].speaker_pick!='P22'
+    # Ranking alone must not invent a person.
+    person, certainty, _ = mirror_identity({
+        'i':1,'p':'unknown','voice':voice,'candidates':[{'p':'P2','similarity':.555,'source':'voiceprint'}],
+        'voice_ranking':{'first':'P2','similarity':.555}})
+    assert person=='unknown' and certainty=='unknown'

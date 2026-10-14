@@ -253,6 +253,28 @@ def test_single_utterance_at_confirm_still_trusts_named_match(process, tmp_path)
     assert speakers.last_match['reason'] == '已匹配登记声纹'
 
 
+def test_weak_current_not_trusted_when_prior_clear_inflates_mean_match(process, tmp_path):
+    """pid_short_1236-style: prior clear same-track samples must not trust a weak current utt."""
+    speakers = LocalSpeakers(None, 'test', tmp_path/'prints.json', process.profiles, threshold=.6)
+    speakers.embedding = lambda _: [1., 0.]
+    speakers.enroll_samples([bytes(96000)], 'lux-id', user_labeled=True)
+    for i in range(8):
+        speakers.embedding = lambda _: [1., 0.]
+        track, vpid, confidence = speakers.identify_timed(
+            np.zeros(48000), start_ms=i * 3000, end_ms=(i + 1) * 3000)
+        assert vpid and confidence >= speakers.confirmation_threshold
+    speakers.embedding = lambda _: [.555, (1 - .555 ** 2) ** .5]
+    track, vpid, confidence = speakers.identify_timed(
+        np.zeros(48000), start_ms=24000, end_ms=27000)
+    assert not vpid and confidence is None
+    assert track.startswith('pending-')
+    assert speakers.last_match['tentative'] and speakers.last_match.get('ranking_below_confirm')
+    collection = speakers.last_match['collection']
+    assert collection['mean_match'] >= speakers.confirmation_threshold
+    assert collection['current_score'] < speakers.confirmation_threshold
+    assert collection['pick'] == 'lux-id'
+
+
 def test_ten_samples_do_not_confirm_an_inconsistent_mixture(process, tmp_path):
     speakers = LocalSpeakers(None, 'test', tmp_path/'prints.json', process.profiles)
     for i in range(10):
