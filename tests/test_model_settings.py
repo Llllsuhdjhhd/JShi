@@ -134,6 +134,39 @@ def test_hot_chain_gives_lite_degraded_timeout_when_not_first(tmp_path):
     assert chain[1].timeout == DEGRADED_TIMEOUT_S
 
 
+def test_hot_chain_gives_qwen_degraded_timeout_after_lite_before_deepseek(tmp_path):
+    """Qwen is slow fallback only: after lite, before DeepSeek; not hot-first."""
+    settings = ModelSettings(tmp_path, process(tmp_path), None)
+    settings.services['gemini'] = services()['gemini']
+    settings.services['deepseek'] = services()['deepseek']
+    settings.services['qwen'] = {
+        'label': 'Q', 'protocol': 'chat', 'thinking_style': 'qwen', 'paid': True,
+        'endpoint': 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'api_key': 'secret',
+    }
+    profile = {
+        'effort': 'low',
+        'choices': [
+            {'service': 'gemini', 'model': 'gemini-3-flash-preview'},
+            {'service': 'gemini', 'model': 'gemini-3.1-flash-lite'},
+            {'service': 'qwen', 'model': 'qwen3.5-flash'},
+            {'service': 'deepseek', 'model': 'deepseek-v4-flash'},
+        ],
+    }
+    settings.save({'name': 'cognition', 'profile': profile})
+    chain = settings.routes['cognition'].chain
+    from jshi.app.model_settings import DEGRADED_TIMEOUT_S, SLOW_FALLBACK_MODELS
+    assert [m.name for m in chain] == [
+        'gemini-3-flash-preview', 'gemini-3.1-flash-lite', 'qwen3.5-flash', 'deepseek-v4-flash',
+    ]
+    assert chain[0].timeout == ProviderModel.DEFAULT_TIMEOUT_S
+    assert 'qwen3.5-flash' in SLOW_FALLBACK_MODELS
+    assert chain[1].timeout == DEGRADED_TIMEOUT_S
+    assert chain[2].timeout == DEGRADED_TIMEOUT_S
+    assert chain[2].service.get('thinking_style') == 'qwen'
+    # DeepSeek last keeps default hot timeout (paid last resort, not slow-fallback set).
+    assert chain[3].timeout == ProviderModel.DEFAULT_TIMEOUT_S
+
+
 def test_no_fallback_after_stream_has_started():
     class First:
         name='free';service={}
