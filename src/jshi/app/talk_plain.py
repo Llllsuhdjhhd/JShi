@@ -70,6 +70,7 @@ _PROGRAM_OUTPUT_PREFIXES = (
     "错误：",
     "上一轮尚未结束",
     "—— 闲时",
+    "—— say hello",
 )
 
 

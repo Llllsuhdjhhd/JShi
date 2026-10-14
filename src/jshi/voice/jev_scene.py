@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import math
+import os
 import re
 from pathlib import Path
 from threading import RLock
@@ -12,6 +14,29 @@ from jshi.core import SubjectState
 from jshi.models import ModelRequest
 from jshi.skill.base import parse_json_object
 from .jev_prompts import SCENE_INSTRUCTION
+
+
+def recent_episode(rows, cutoff_ms):
+    """Select the continuous conversation before this input, without deleting history."""
+    seconds = float(os.getenv('JSHI_JEV_CONTEXT_IDLE_SECONDS', '300'))
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError('JSHI_JEV_CONTEXT_IDLE_SECONDS 必须为正数秒数')
+    timed = []
+    for row in rows:
+        timestamp = (row.get('payload') or row).get('at')
+        if type(timestamp) in (int, float) and math.isfinite(timestamp) and 0 < timestamp <= cutoff_ms:
+            timed.append((timestamp, row))
+    timed.sort(key=lambda item: item[0])
+    boundary = cutoff_ms
+    start = len(timed)
+    for index in range(len(timed) - 1, -1, -1):
+        timestamp = timed[index][0]
+        if boundary - timestamp > seconds * 1000:
+            break
+        start = index
+        boundary = timestamp
+    selected = {id(row) for _, row in timed[start:]}
+    return [row for row in rows if id(row) in selected]
 
 
 class JEVSceneStore:
@@ -56,14 +81,17 @@ class JEVSceneStore:
         with self.lock:
             scene = ""
             rows = list(self.state["events"])
-            for revision in self.state.get("revisions", []):
+            revisions = self.state.get("revisions", [])
+            episode = recent_episode(rows + [r for revision in revisions for r in revision['events']], cutoff_ms)
+            episode_ids = {r['id'] for r in episode}
+            for revision in revisions:
                 if revision["at"] <= cutoff_ms:
                     scene = revision["scene"]
                 else:
                     rows.extend(revision["events"])
             current = set(current_ids)
             return scene, [deepcopy(r["payload"]) for r in sorted(rows, key=lambda r:r["seq"])
-                           if r["id"] not in current and (r["payload"].get("at") or 0) <= cutoff_ms]
+                           if r["id"] not in current and r['id'] in episode_ids]
 
     def correct(self, payload, *, codes=None, labels=None):
         """An in-flight writer cannot restore a scene predating manual corrections."""

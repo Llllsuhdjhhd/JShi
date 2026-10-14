@@ -22,10 +22,12 @@ def test_defaults_preserve_full_prompt_and_levels_remove_functions():
     assert len(texts[0]) > len(texts[1]) > len(texts[2])
     assert PERSONA_TOOL_NOTE in texts[0]
     for level, text in enumerate(texts[1:], 2):
-        assert '工具' not in text
+        assert '【任务2 · 工具】' not in text
+        assert PERSONA_TOOL_NOTE not in text
         assert set(reply_schema_for('smith', prompt_level=level)['properties']) == {'mode','reply','action','unsaid','reason','reply_targets'}
-    assert '事件发生时间' in texts[2]
-    assert '回忆：' in texts[2]
+    assert '正文“一年前”才是事件时间' in texts[2]
+    assert '记录写入时间' in texts[2]
+    assert '刚召回不等于刚发生' in texts[2]
 
 
 def test_modules_do_not_restore_tools_into_short_schema():
@@ -82,8 +84,10 @@ def test_short_main_keeps_memory_person_and_writer_memory(process):
 def test_one_writer_prompt_keeps_contract_and_classifies_blocks():
     text = write_instruction_for('smith')
     assert 'B1 是固定自我介绍' in text
-    assert '不把partial_text整句当成已听完' in text
-    assert '不要用 add 重复录入' in text
+    assert '只认可播放器确认的完成片段' in text
+    assert '准备说、开始播放、部分播出、整句播完和中断' in text
+    assert 'A块不能add、mod或del' in text
+    assert '不重复本轮输入、回应或已有内容' in text
     assert '仍只整理一份片场' in text
     assert '"op":"tier"' in text
     assert [PromptProfile(i).scene_view for i in range(1, 4)] == [3, 2, 1]
@@ -140,7 +144,8 @@ def test_jev_hint_reaches_real_main_request_and_pending_writer(process):
             await c.close()
     asyncio.run(run())
     assert writer.requests
-    assert '一、四项主要输入' in writer.requests[-1].persona_instruction
+    assert '一、材料及用途' in writer.requests[-1].persona_instruction
+    assert '合批次数为1与多轮采用同一格式' in writer.requests[-1].persona_instruction
     assert '【本次合批整理的输入输出】' in writer.requests[-1].persona_user_text
 
 

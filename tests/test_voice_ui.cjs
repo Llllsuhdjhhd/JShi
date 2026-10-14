@@ -19,6 +19,7 @@ const sent=[];
 const ctx=vm.createContext({document:{getElementById:node,createElement:()=>new Element()},navigator:{},setTimeout,clearTimeout,console,fetch:async()=>({ok:true,json:async()=>({people:[]})}),
   Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},WebSocket:{OPEN:1},sent,
 });
+require('./helpers/browser_environment.cjs')(ctx);
 vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1],ctx);
 vm.runInContext(`ws={readyState:1,close(){},send:x=>sent.push(JSON.parse(x))};
 message({type:'timeline',input_id:'one',start_ms:1000,end_ms:3000,text:'第一句',speaker:{object_id:'unknown-A',label:'未知',track_id:'7'}});

@@ -22,14 +22,27 @@ class VisionConfig:
     max_image_bytes: int = 8 * 1024 * 1024
     timeout_seconds: float = 45
     max_calls_per_hour: int = 120
+    face_enabled: bool = False
+    face_detector_model: str = ""
+    face_recognizer_model: str = ""
+    portrait_enabled: bool = True
+    portrait_limit: int = 8
+    face_identity_limit: int = 128
+    face_match_threshold: float = .50
+    face_match_gap: float = .08
+    face_min_size: int = 64
+    portrait_similarity_limit: float = .95
+    cloud_enabled: bool = True
 
     def __post_init__(self):
         if self.detector not in {"change", "yolo"}:
             raise ValueError("vision detector must be change or yolo")
         for name in ("sample_seconds", "archive_seconds", "cooldown_seconds", "refresh_seconds",
-                     "rolling_bytes", "memory_bytes", "retention_seconds", "max_image_bytes", "timeout_seconds", "max_calls_per_hour"):
+                     "rolling_bytes", "memory_bytes", "retention_seconds", "max_image_bytes", "timeout_seconds", "max_calls_per_hour", "portrait_limit", "face_min_size", "face_identity_limit"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"vision {name} must be positive")
+        if not 0 < self.face_match_threshold < 1 or not 0 <= self.face_match_gap < 1 or not 0 < self.portrait_similarity_limit <= 1:
+            raise ValueError('invalid face matching thresholds')
 
     @classmethod
     def from_env(cls):

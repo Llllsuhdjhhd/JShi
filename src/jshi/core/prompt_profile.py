@@ -20,8 +20,11 @@ def normalize_hint(value):
         return {}
     if "recall_memory" in value and type(value["recall_memory"]) is not bool:
         return {}
+    if value.get("main_image", "omit") not in ("omit", "include"):
+        return {}
     return {"level": value["level"], "needs": list(dict.fromkeys(needs)),
-            **({"recall_memory": value["recall_memory"]} if "recall_memory" in value else {})}
+            **({"recall_memory": value["recall_memory"]} if "recall_memory" in value else {}),
+            **({"main_image": value["main_image"]} if "main_image" in value else {})}
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,7 @@ class PromptProfile:
     level: int = 1
     modules: tuple[str, ...] = ()
     recall_memory: bool = True
+    main_image: str = "omit"
 
     @property
     def scene_view(self):
@@ -66,4 +70,5 @@ def select_profile(input_ids, calls):
             hints.append(hint)
     if not expected or covered != expected:
         return PromptProfile()
-    return PromptProfile(min(h["level"] for h in hints), recall_memory=any(h.get("recall_memory", True) for h in hints))
+    return PromptProfile(min(h["level"] for h in hints), recall_memory=any(h.get("recall_memory", True) for h in hints),
+                         main_image="include" if any(h.get("main_image") == "include" for h in hints) else "omit")

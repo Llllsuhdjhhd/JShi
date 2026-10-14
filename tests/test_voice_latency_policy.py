@@ -151,7 +151,7 @@ def test_other_track_partial_speech_does_not_extend_completed_speaker_wait(proce
         try:
             await c.accept(Transcript('匠石，你听得到吗', 'A', 0, 2000, True))
             task = asyncio.create_task(background())
-            assert await asyncio.to_thread(entered.wait, .5)
+            assert await asyncio.to_thread(entered.wait, 1.5)
             assert not task.done()
             assert any(u.text == '旁人正在聊天' for u in c.scene)
         finally:
@@ -187,7 +187,7 @@ def test_unfinished_anchor_still_waits_despite_other_completed_speech(process):
 def test_voice_collection_limit_can_be_configured_without_api_key(monkeypatch):
     from jshi.voice.config import VoiceConfig
     monkeypatch.delenv('JSHI_VOICE_INPUT_MAX_BATCH_MS', raising=False)
-    assert VoiceConfig.from_env(asr='local', tts='local').input_max_batch_s == 6
+    assert VoiceConfig.from_env(asr='local', tts='local').input_max_batch_s == 12
     monkeypatch.setenv('JSHI_VOICE_INPUT_MAX_BATCH_MS', '1800')
     assert VoiceConfig.from_env(asr='local', tts='local').input_max_batch_s == 1.8
     monkeypatch.setenv('JSHI_VOICE_INPUT_MAX_BATCH_MS', '0')

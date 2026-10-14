@@ -41,6 +41,7 @@
   #log{display:flex;flex-direction:column;gap:9px}#log p{margin:0;padding:9px 12px;border-radius:10px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line)}
   #log p.input{background:var(--input);margin-left:8%;border:1px solid transparent}#log p.reply{margin-right:6%;background:#fff;border:1px solid transparent;padding-left:0}
   #log p.notice{padding:8px 12px;font-size:12px;color:#6e737e;background:var(--surface);border:0;border-left:2px solid #edbc69;border-radius:0 8px 8px 0}
+  #log .model-info[hidden]{display:none!important}
   #log time{display:inline-block;color:var(--muted);font-size:11px;margin:0 8px 3px 0}#log .message-meta{font-size:11px;color:var(--muted)}#log .message-body{display:block;clear:both}
   #log details{margin-top:4px}#log details>summary{font-size:11px;font-weight:400;color:var(--muted)}
   #log p.selected{outline:2px solid var(--accent);background:#e7f0ff}.select-input{display:block;float:right;margin:0 0 3px 8px;padding:3px 8px;background:#ffffffb3;color:#5c677e;border:1px solid #dce4f2;font-size:11px}
@@ -59,8 +60,11 @@
   body{background:#f8f9fc}main{max-width:1160px;height:100dvh;display:flex;flex-direction:column;padding:24px 32px 16px}
   .workspace{display:flex;flex:1;min-height:0;align-items:stretch}.conversation{display:flex;flex-direction:column;flex:1;min-height:0;width:100%}
   .message-region{position:relative;display:flex;flex:1;min-height:0}
-  .message-scroll{flex:1;min-width:0;min-height:0;overflow:auto;padding:12px 8px 24px;scrollbar-width:none;-ms-overflow-style:none}
-  .message-scroll::-webkit-scrollbar{display:none}
+  .message-scroll{flex:1;min-width:0;min-height:0;overflow:auto;padding:12px 8px 24px;scrollbar-width:thin;scrollbar-color:transparent transparent}
+  .message-scroll.scrollbar-visible{scrollbar-color:#c9ced8 transparent}
+  .message-scroll::-webkit-scrollbar{width:6px}
+  .message-scroll::-webkit-scrollbar-thumb{background:transparent;border-radius:4px}
+  .message-scroll.scrollbar-visible::-webkit-scrollbar-thumb{background:#c9ced8}
   #jump-latest{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:3;display:grid;place-items:center;width:38px;height:38px;padding:0;margin:0;border-radius:50%;background:#fff;color:#525b68;border:1px solid #dfe4ec;box-shadow:0 3px 12px #20283818}
   #jump-latest:hover{background:#f0f4fa;color:#252b35}#jump-latest svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
   #log{max-width:840px;margin:0 auto}#log p.reply{padding:14px 18px;background:#fff;border:1px solid #e9edf3;margin-right:10%}#log p.input{padding:14px 18px;margin-left:10%}
@@ -183,7 +187,7 @@
     <p id="debug-title">尚未读取</p><pre id="debug-content"></pre>
   </details>
   <details class="panel"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1m-7 8v3m-4 0h8"/></svg>麦克风与声音检查</summary>
-    <label>语音识别 <select id="asr"><option value="">服务默认</option><option value="online">火山在线 · 多人时间线</option><option value="local">本地识别</option></select></label>
+    <label>语音识别 <select id="asr"><option value="">服务默认</option><option value="online">火山在线 · 多人时间线</option><option value="deepgram">Deepgram · 多人时间线</option><option value="local">本地识别</option></select></label>
     <p class="tip">在线识别会上传音频；声纹登记与匹配在本地进行。</p>
     <label for="device">麦克风</label><select id="device"><option value="">系统默认麦克风</option></select>
     <button class="secondary" id="devices">刷新设备</button>
@@ -197,18 +201,55 @@
 <script>
 const $ = id => document.getElementById(id);
 const messageScroll=$('message-scroll'), jumpLatest=$('jump-latest');
-let followLatest=true, scrollFrame=0;
+let followLatest=true, scrollFrame=0, scrollbarDragging=false, dragScrollTop=0, lastAutoScrollTop=null;
 function nearLatest(){return messageScroll.scrollHeight-messageScroll.clientHeight-messageScroll.scrollTop<=48;}
 function updateLatestButton(){jumpLatest.hidden=nearLatest()||messageScroll.clientHeight===0;}
 function refreshMessageScroll(){
   if(scrollFrame)return;
   scrollFrame=requestAnimationFrame(()=>{
     scrollFrame=0;
-    if(followLatest)messageScroll.scrollTop=messageScroll.scrollHeight;
+    if(followLatest){messageScroll.scrollTop=messageScroll.scrollHeight;lastAutoScrollTop=messageScroll.scrollTop;}
     updateLatestButton();
   });
 }
-messageScroll.addEventListener('scroll',()=>{followLatest=nearLatest();updateLatestButton();},{passive:true});
+// Layout changes and new messages can also fire scroll events. Only a user's
+// upward scroll/scrollbar drag pauses following; reaching the bottom resumes it.
+messageScroll.addEventListener('scroll',()=>{
+  if(scrollbarDragging&&messageScroll.scrollTop!==dragScrollTop&&messageScroll.scrollTop!==lastAutoScrollTop)followLatest=nearLatest();
+  if(nearLatest())followLatest=true;
+  updateLatestButton();
+},{passive:true});
+messageScroll.addEventListener('wheel',e=>{if(e.deltaY<0&&messageScroll.scrollTop>0)followLatest=false;},{passive:true});
+messageScroll.addEventListener('keydown',e=>{
+  if(messageScroll.scrollTop>0&&(['ArrowUp','PageUp','Home'].includes(e.key)||(e.key===' '&&e.shiftKey)))followLatest=false;
+});
+let touchScrollY=null;
+messageScroll.addEventListener('touchstart',e=>{touchScrollY=e.touches[0]?.clientY??null;},{passive:true});
+messageScroll.addEventListener('touchmove',e=>{
+  const y=e.touches[0]?.clientY;
+  if(touchScrollY!==null&&y>touchScrollY&&messageScroll.scrollTop>0)followLatest=false;
+  touchScrollY=y??null;
+},{passive:true});
+messageScroll.addEventListener('pointermove',e=>{
+  const bounds=messageScroll.getBoundingClientRect();
+  messageScroll.classList.toggle('scrollbar-visible',scrollbarDragging||e.clientX>=bounds.right-16);
+});
+messageScroll.addEventListener('pointerleave',()=>{if(!scrollbarDragging)messageScroll.classList.remove('scrollbar-visible');});
+messageScroll.addEventListener('pointerdown',e=>{
+  const bounds=messageScroll.getBoundingClientRect();
+  if(e.button===0&&e.target===messageScroll&&e.clientX>=bounds.right-16){
+    scrollbarDragging=true;dragScrollTop=messageScroll.scrollTop;
+    messageScroll.classList.add('scrollbar-visible');
+  }
+});
+document.addEventListener('pointerup',e=>{
+  if(!scrollbarDragging)return;
+  if(messageScroll.scrollTop!==dragScrollTop&&messageScroll.scrollTop!==lastAutoScrollTop)followLatest=nearLatest();
+  scrollbarDragging=false;
+  const bounds=messageScroll.getBoundingClientRect();
+  messageScroll.classList.toggle('scrollbar-visible',e.clientX>=bounds.right-16&&e.clientX<=bounds.right&&e.clientY>=bounds.top&&e.clientY<=bounds.bottom);
+  updateLatestButton();
+});
 jumpLatest.onclick=()=>{
   followLatest=true;
   messageScroll.scrollTo({top:messageScroll.scrollHeight,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});
@@ -282,9 +323,19 @@ let voiceprintAvailable=true;
 function personLabel(label){return /^未命名访客 \d+$/.test(label || '') ? label+' · 内部名，还不知道姓名' : (label || '待确认');}
 function selectionChanged(){ $('enroll-count').textContent=selectedInputs.size ? '已选 '+selectedInputs.size+' 段声音' : '尚未选择声音'; $('enroll').disabled=!selectedInputs.size || !voiceprintAvailable || !ws || ws.readyState!==WebSocket.OPEN; }
 function send(message) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); }
+let modelInfoVisible=false;
+try{modelInfoVisible=localStorage.getItem('jshi.showModelInfo')==='true';}catch{}
+window.addEventListener('jshi-model-info',event=>{
+ modelInfoVisible=event.detail===true;
+ try{localStorage.setItem('jshi.showModelInfo',String(modelInfoVisible));}catch{}
+ document.querySelectorAll('#log .model-info').forEach(row=>row.hidden=!modelInfoVisible);
+});
 function log(text, kind='notice', atMs=null) {
+  // Also recognize model notices from a server that has not yet restarted.
+  if(kind==='notice' && /：正在调用(?:可能计费的百炼模型|付费DeepSeek)（/.test(text))kind='model-info';
   if($('empty') && $('empty').remove) $('empty').remove();
   const p = document.createElement('p'); p.className = kind; p.textContent = text;
+  if(kind==='model-info'){p.className='notice model-info';p.hidden=!modelInfoVisible;}
   if(kind==='notice' && text.length>140){p.textContent=text.slice(0,90)+'…';const details=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('span');summary.textContent='查看完整信息';body.textContent=text;details.appendChild(summary);details.appendChild(body);p.appendChild(details);}
   const time=document.createElement('time');time.textContent=(kind==='input' ? '收到 ' : kind==='reply' ? '生成 ' : '')+new Date(atMs || Date.now()).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});p.prepend(time);
   $('log').appendChild(p); while ($('log').children.length > 100) {
@@ -426,6 +477,7 @@ function message(m) {
     ask.appendChild(yes);ask.appendChild(no);return;
   }
   else if(m.type==='renamed'){speakerLabels.set(m.object_id,m.label);$('rename-ask').hidden=true;}
+  else if(m.type==='model_notice') log(m.text,'model-info');
   else if(m.type==='notice') log(m.text);
   else if(m.type==='write_failed') {$('retry-write').hidden=false;$('flow-write').textContent='记忆整理：失败，可重试';}
   else if(m.type==='write_started') $('flow-write').textContent='记忆整理：后台写入中';
@@ -504,7 +556,7 @@ function message(m) {
     if(row && !row.meta.textContent.includes('未交主流程')) row.meta.textContent+=' · 未交主流程';
   }
   else if(m.type==='jev') {const labels={ignore:'只记录现场',resume:'继续当前状态',stop:'停止',respond:'接话',clarify:'澄清'}; $('judge').textContent='JEV：'+(m.direct_reply?'我回答':(labels[m.action] || m.action))+' · '+m.reason;}
-  else if(m.type==='jev_reply') {$('judge').textContent='JEV：我回答 · 短时聊天，本轮未进入主流程和记忆写入';}
+  else if(m.type==='jev_reply') {$('judge').textContent=m.route==='waiting_ack'?'JEV：等待接话 · 主认知正在处理':'JEV：我回答 · 短时聊天，本轮未进入主流程和记忆写入';}
   else if(m.type==='reply') {
     clearPlayback(); replyId=m.reply_id; paused=m.paused;audioDone=false;refreshStatus();
     let lastRow;
@@ -605,6 +657,8 @@ $('composer').onsubmit=async event=>{
   if(d.type==='error')throw Error(d.message||'主流程处理失败');
   if(d.type==='accepted'){badge.textContent='已接收';return;}
   if(d.type==='flow_phase'){phase=phaseNames[d.stage]||d.stage;return;}
+  if(d.type==='model_notice'){log(d.text,'model-info');return;}
+  if(d.type==='waiting_ack'){log('匠石 → '+(d.label||actor)+'：'+d.text,'reply');phase='匠石正在处理';$('text-status').textContent=phase;return;}
   if(d.reply&&!shown){replyRow=log('匠石 → '+(d.label||actor)+'：'+d.reply,'reply');shown=true;}
   if(d.type==='reply'){phase=shown?'回复已显示，正在完成本轮处理':'正在完成本轮处理';badge.textContent='已接收';$('text-status').textContent=phase;}
   if(d.type==='complete'){showActions(d.actions,replyRow);complete=true;badge.textContent=d.route==='self_reply'?'JEV 我回答':'已处理';phase=d.route==='self_reply'?'短时聊天，本轮未进入主流程和记忆写入。':(shown?'本轮已完成。':'本轮已完成，未开口（'+d.mode+'）。')+(d.scene_write==='background'?'记忆在后台整理，可继续发送。':'');}
@@ -613,7 +667,7 @@ $('composer').onsubmit=async event=>{
   if((r.headers.get('Content-Type')||'').includes('application/x-ndjson')){const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(line.trim())eventReceived(JSON.parse(line));}}buffer+=decoder.decode();if(buffer.trim())eventReceived(JSON.parse(buffer));if(!complete)throw Error('连接中断，未收到处理完成确认');}
   else eventReceived({...(await r.json()),type:'complete'});
   $('text-status').textContent=phase;
- }catch(e){badge.textContent=shown?'回复已显示，后续处理未完成':'发送或处理失败';badge.classList.add('failed');if(!shown&&!$('typed').value)$('typed').value=text;$('text-status').textContent=(shown?'后续保存异常：':'发送失败，输入仍保留在对话区：')+e.message;}
+ }catch(e){badge.textContent=shown?'回复已显示，后续处理未完成':'发送或处理失败';badge.title=e.message;badge.classList.add('failed');log('处理失败：'+e.message);if(!shown&&!$('typed').value)$('typed').value=text;$('text-status').textContent=(shown?'后续保存异常：':'发送失败，输入仍保留在对话区：')+e.message;}
  finally{clearTimeout(timer);textSending=false;$('send-text').disabled=false;$('typed').focus();}
 };
 $('enroll-clear').onclick=()=>{for(const id of selectedInputs.keys()){const row=inputRows.get(id);if(row){row.p.classList.remove('selected');row.button.textContent='选择声音';}}selectedInputs.clear();selectionChanged();};
@@ -631,7 +685,7 @@ for(const [id,role] of [['compare-enroll','enroll'],['compare-test','test']])$(i
 $('compare-run').onclick=()=>{if(!ready){$('compare-status').textContent='请先连接对话。';return;}send({type:'compare_run'});};
 $('compare-new').onclick=()=>{if(!ready){$('compare-status').textContent='请先连接对话。';return;}send({type:'compare_new'});};
 $('end').onclick=end;
-$('stop').onclick=()=>{ pause(); send({type:'stop'}); };
+$('stop').onclick=()=>{ clearPlayback(); $('status').textContent='已停止播放'; send({type:'stop'}); };
 $('retry-write').onclick=()=>{ send({type:'retry_write'}); $('retry-write').hidden=true; };
 $('test').onclick=async()=>{
   let stream, recorder, testContext;
@@ -678,6 +732,7 @@ async function connectVoice(token) {
     settlingVoice=false;
     const asr=$('asr').value || settings.asr;
     if(asr==='online' && !settings.online_available) throw new Error('在线识别尚未配置 JSHI_VOICE_API_KEY，请配置后重启服务');
+    if(asr==='deepgram' && !settings.deepgram_available) throw new Error('Deepgram尚未配置 JSHI_DEEPGRAM_API_KEY，请配置后重启服务');
     if(asr==='local' && !settings.local_available) throw new Error('本地识别未加载，请用 --asr local 启动服务');
     outputContext = new AudioContext(); await outputContext.resume();
     if(token!==connectionEpoch)return false;
@@ -732,4 +787,5 @@ function voiceButton(active,label){$('start').disabled=false;$('start').textCont
 $('start').onclick=()=>ready||connectionPromise?end():startVoice();
 </script>
 <script src="/vision_chat.js"></script>
+<script src="/model_settings.js"></script>
 </html>

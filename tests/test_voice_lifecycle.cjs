@@ -23,6 +23,7 @@ const ctx=vm.createContext({document:{getElementById:node,createElement:()=>new 
   fetch:async url=>({ok:true,json:async()=>url==='/status'?{busy:false,asr:'local',local_available:true}:{people:[]}}),
   AudioContext:Audio,AudioWorkletNode:class{constructor(){this.port={postMessage(){}}}connect(){return link}disconnect(){}},
   WebSocket:Socket,location:{host:'localhost'},Option:class extends Element{},setTimeout,clearTimeout,console});
+require('./helpers/browser_environment.cjs')(ctx);
 vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1],ctx);
 const call=s=>vm.runInContext(s,ctx),flush=async()=>{for(let n=0;n<12;n++)await Promise.resolve()};
 async function main(){

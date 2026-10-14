@@ -35,12 +35,14 @@ def test_unsaid_prompt_asks_to_name_speaker_in_prose():
     write = write_instruction_for(SMITH)
     wood = CognitionSkill(FakeModel({})).instruction
     packed = instruction_for(SMITH)
-    for text in (reply, write, wood, packed):
+    for text in (reply, wood, packed):
         assert "点名当前说话人" in text
         assert "不要另加" in text or "也不要改成「（名字）」标签" in text
     assert "明确事项" in reply
-    assert "【来源谁优先】" in reply
-    assert "【来源谁优先】" in wood
+    assert "沿用入口给出的逐条人物归属与确定程度" in write
+    assert "压缩时保持人物、时间、数字、来源和事实" in write
+    assert "【材料归属与证据使用】" in reply
+    assert "【材料归属与证据使用】" in wood
 
 
 def test_persona_parse_keeps_unsaid_on_respond():

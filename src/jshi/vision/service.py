@@ -8,10 +8,14 @@ from .model import VisionModel
 
 class VisionService:
     """Separate sampling and cloud workers, each with one pending frame."""
-    def __init__(self, store, config, model=None, detector=None):
+    def __init__(self, store, config, model=None, detector=None, modules=()):
         self.store, self.config = store, config
         self.model = model or VisionModel(config)
         self.detector = detector
+        from .evidence import EvidenceModules
+        from .faces import LocalFaces
+        self.faces = LocalFaces(store.root.parent, config)
+        self.modules = EvidenceModules({**({'face':self.faces} if config.face_enabled else {}), **dict(modules)})
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='vision')
         self.model_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='vision-model')
         self.lock = Lock()
@@ -23,7 +27,6 @@ class VisionService:
         self.last_frame = {}
         self.previous = {}
         self.on_update = None
-        self.scene_context = None
         self.action_future = None
         self.dirty = {}
         self.online_future = None
@@ -71,11 +74,45 @@ class VisionService:
                 self.dirty[key] = captured
         refresh_due = time()-self.last_online.get(key, 0) >= self.config.cooldown_seconds and (
             not current or key in self.dirty)
-        if current and not source_changed and not changed and not refresh_due:
+        extra_modules = bool(self.modules.modules)
+        from hashlib import sha256
+        image_signature = sha256(normalized).hexdigest()
+        if (not current and not extra_modules and not changed
+                and self.previous.get(('image',key)) == image_signature
+                and time()-self.last_online.get(key,0) < self.config.cooldown_seconds):
+            # While the first cloud observation is pending, identical frames add
+            # no evidence. Keep the pending photo instead of churning the database.
+            return None
+        if current and not source_changed and not changed and not refresh_due and not extra_modules:
             # Sampling continues, but an unchanged scene creates no saved image,
             # archive or snapshot, even when the periodic archive timer expires.
             return None
         frame = self.store.add_frame(subject, data, captured, source, **(clock or {}))
+        self.previous[('image',key)] = image_signature
+        from dataclasses import asdict
+        from .evidence import VisualEvidence
+        evidence = [asdict(VisualEvidence('local_detection', frame, captured, 'completed',
+                    {'detections':detections, 'changed':bool(changed)}, time()))]
+        if not self.config.face_enabled:
+            evidence.append(asdict(VisualEvidence('face', frame, captured, 'not_run', {'reason':'disabled','faces':[]},time())))
+        evidence.extend(self.modules.analyze(normalized, frame, captured, subject=subject))
+        self.store.add_evidence(subject, frame, evidence)
+        import json
+        summary = []
+        for row in evidence:
+            if row['module'] == 'local_detection': continue
+            value = row['result']
+            if row['module'] == 'face' and isinstance(value, dict):
+                value = [(f.get('face'), f.get('object_id')) for f in value.get('faces', ())]
+            summary.append((row['module'], row['status'], value))
+        signature = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+        previous_signature = self.previous.get(('modules',key))
+        module_changed = previous_signature is not None and signature != previous_signature
+        self.previous[('modules',key)] = signature
+        if module_changed:
+            changed = True
+            with self.lock:
+                self.dirty[key] = captured
         old_frame = self.last_frame.get(subject)
         self.last_frame[subject] = frame
         if old_frame:
@@ -87,6 +124,7 @@ class VisionService:
                 self.dirty[key] = captured
         online = time() - self.last_online.get(key, 0) >= self.config.cooldown_seconds and (
             not current or key in self.dirty or time() - self.last_online.get(key, 0) >= self.config.refresh_seconds)
+        online = online and self.config.cloud_enabled
         archive = (changed or source_changed or not current) and time() - self.last_archive.get(key, 0) >= self.config.archive_seconds
         if not online and not archive and not changed:
             self.store.discard_frame(subject, frame)
@@ -109,9 +147,9 @@ class VisionService:
             result = self.store.publish(subject, frame, description, detections, 'initial' if not current else 'change_or_refresh', self.config.model,
                                         change_degree=degree, change_reason=change_reason)
             self._clear_dirty(key, captured)
-        elif current and changed:
-            result = self.store.publish(subject, frame, current['description'], detections, 'local_detection', 'local',
-                                        described_at=current['described_at'], change_degree='low', change_reason='本地位置变化，环境描述未更新')
+        elif (current and changed) or (not current and not self.config.cloud_enabled):
+            result = self.store.publish(subject, frame, current['description'] if current else '仅有本地视觉检测，尚未完成语义观察。', detections, 'local_detection', 'local',
+                                        described_at=current['described_at'] if current else 0, change_degree='low' if current else 'unknown', change_reason='本地检测更新，环境描述未更新')
         else:
             result = None
         if not archive and not result:
@@ -125,14 +163,11 @@ class VisionService:
                 self.dirty.pop(key, None)
 
     def _observe(self, subject, frame, current):
-        kwargs = {'previous':current['description'] if current else ''}
-        if self.scene_context:
-            kwargs['scene'] = self.scene_context()
         if hasattr(self.model, 'observe'):
-            value = self.model.observe(self.store.image(frame, subject), **kwargs)
-            return value['description'], value['change_degree'], value.get('change_reason', '')
+            value = self.model.observe(self.store.image(frame, subject))
+            return value['description'], 'unknown', '未提供历史比较材料，仅完成当前观察。'
         # Older/custom providers may supply text only: no inferred retention grade.
-        return self.model.describe(self.store.image(frame, subject), **kwargs), 'unknown', ''
+        return self.model.describe(self.store.image(frame, subject)), 'unknown', ''
 
     def _schedule_online(self, subject, frame, detections, key):
         with self.lock:
@@ -175,9 +210,35 @@ class VisionService:
 
     def recall_image(self, subject, frame, question):
         image = self.store.image(frame, subject)
+        if not self.config.cloud_enabled:
+            raise RuntimeError('视觉大模型调用已关闭')
         if not self.store.claim_call(subject):
             raise RuntimeError('视觉模型达到每小时调用上限')
-        return self.model.describe(image, question=question, **({'scene':self.scene_context()} if self.scene_context else {}))
+        return self.model.describe(image, question=question)
+
+    def compare_images(self, subject, previous_frame, current_frame):
+        if not self.config.cloud_enabled:
+            raise RuntimeError('视觉大模型调用已关闭')
+        old = self.store.frame(previous_frame, subject)
+        new = self.store.frame(current_frame, subject)
+        if old['captured'] > new['captured']:
+            raise ValueError('comparison frames are in reverse time order')
+        old_image = self.store.image(previous_frame, subject)
+        new_image = self.store.image(current_frame, subject)
+        if not hasattr(self.model, 'observe'):
+            raise ValueError('视觉提供者不支持结构化比较')
+        if not self.store.claim_call(subject):
+            raise RuntimeError('视觉模型达到每小时调用上限')
+        return self.model.observe(new_image, previous_image=old_image,
+                                  comparison_time=f'历史图在当前图前{round(new["captured"]-old["captured"])}秒。')
+
+    def associate_face(self, subject, frame, face, object_id, *, basis='main_visual_association'):
+        evidence = self.store.evidence(frame, subject)
+        available = [f.get('face') for r in evidence if r['module'] == 'face' and r['status'] == 'completed'
+                     for f in (r.get('result') or {}).get('faces', ())]
+        if available.count(face) != 1:
+            raise ValueError('face is missing or ambiguous in the referenced observation')
+        return self.faces.bind(subject, face, object_id, basis=basis)
 
     def request_action(self, subject, action):
         import re

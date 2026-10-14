@@ -87,6 +87,23 @@ class WebData:
             from jshi.app.talk_session import _extract_prompt_section, _extract_json_schema, _PROMPT_SECTION_ALIASES
             ids = {activity_id}
             ids.update(c['prompt_activity_id'] for c in (snapshot or {}).get('voice', {}).get('jev_calls', []) if c.get('prompt_activity_id'))
+            ids.update((snapshot or {}).get('end_to_end', {}).get('jev_prompt_activity_ids', []))
+            # Older standalone text timings lack the voice snapshot. Follow the
+            # exact activity trigger to its input envelope, never a nearby turn.
+            if len(ids) == 1 and not activity_id.startswith('jev-'):
+                activities = self.read('subject:activities', query=activity_id, size=50)['rows']
+                for activity in activities:
+                    if activity.get('id') != activity_id or not activity.get('trigger'):
+                        continue
+                    trigger = activity['trigger']
+                    for event in self.read('subject:histories', query=trigger, size=50)['rows']:
+                        if event.get('id') != trigger:
+                            continue
+                        content = event.get('content', {})
+                        if isinstance(content, dict):
+                            envelope = content.get('envelope', {})
+                            ids.update(c['prompt_activity_id'] for c in envelope.get('jev_calls', [])
+                                       if c.get('prompt_activity_id'))
             calls = []
             for linked in ids:
                 calls.extend(r for r in self.read('prompts', query=linked, size=50)['rows']

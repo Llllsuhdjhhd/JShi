@@ -143,7 +143,7 @@ def test_first_stage_is_compact_and_only_selects_prompt():
         def generate(self, req):
             self.req = req
             payload = json.loads(req.input_text)
-            assert set(payload) == {'input', 'scene', 'now', 'short_chat'}
+            assert set(payload) == {'input', 'scene', 'now', 'short_chat', 'waiting'}
             assert payload['short_chat']['allowed'] is False
             assert payload['input']['unwritten'][0]['text'] == '要我帮你查天气吗？'
             assert 'long-internal-input-id' not in req.input_text
@@ -151,7 +151,7 @@ def test_first_stage_is_compact_and_only_selects_prompt():
             assert payload['input']['lines'][0]['name'] == 'lux'
             schema = json.loads(req.system_extra.split('Schema：')[1])
             assert 'tool_needed' not in schema['properties']
-            assert set(schema['properties']) == {'items', 'level', 'recall_memory', 'route', 'reply'}
+            assert set(schema['properties']) == {'items', 'level', 'recall_memory', 'main_image', 'route', 'reply', 'waiting_reply'}
             assert set(schema['properties']['items']['items']['properties']) == {'i','person','certainty','why'}
             return ModelResponse(model='gate', text=json.dumps({'level':1, 'recall_memory':False,
                 'items':[{'i':1,'person':'P1','certainty':'confirmed','why':'本句声纹明确，无具体冲突'}]}))
@@ -285,6 +285,37 @@ def test_scene_completed_after_input_cannot_add_future_context(tmp_path, monkeyp
     assert scene == ''
     assert [r['text'] for r in context] == ['此前实际说过']
     assert store.view(35)[0] == '后来才完成的场面'
+
+
+def test_entry_context_drops_old_episode_without_deleting_backlog(tmp_path, monkeypatch):
+    monkeypatch.setenv('JSHI_JEV_CONTEXT_IDLE_SECONDS', '300')
+    store = JEVSceneStore(tmp_path/'scene.json')
+    now = 1_000_000
+    store.append('old', {'text': '上次问过天气', 'at': now - 600_000})
+    store.append('recent', {'text': '刚才打招呼', 'at': now - 1000})
+    store.append('unknown-time', {'text': '不知何时的旧话'})
+    scene, context = store.view(now)
+    assert scene == ''
+    assert [r['text'] for r in context] == ['刚才打招呼']
+    assert len(store.snapshot()['events']) == 3
+
+
+def test_entry_context_preserves_long_continuous_conversation(tmp_path, monkeypatch):
+    monkeypatch.setenv('JSHI_JEV_CONTEXT_IDLE_SECONDS', '300')
+    store = JEVSceneStore(tmp_path/'scene.json')
+    for index, timestamp in enumerate((1000, 200_000, 400_000, 600_000)):
+        store.append(str(index), {'text': str(index), 'at': timestamp})
+    assert len(store.view(601_000)[1]) == 4
+    assert store.view(901_001) == ('', [])
+
+
+def test_old_scene_is_preserved_but_old_dialogue_is_not_recent(tmp_path, monkeypatch):
+    monkeypatch.setenv('JSHI_JEV_CONTEXT_IDLE_SECONDS', '300')
+    store = JEVSceneStore(tmp_path/'scene.json')
+    store.append('old', {'text': '已经离开的旧现场', 'at': 1000})
+    monkeypatch.setattr('jshi.voice.jev_scene.time', lambda: 700)
+    assert store.commit(store.snapshot(), '旧人物正在现场聊天')
+    assert store.view(700_001) == ('旧人物正在现场聊天', [])
 
 
 def test_background_notification_does_not_shift_filtered_batch_judgments(process):

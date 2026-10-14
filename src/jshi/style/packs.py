@@ -306,7 +306,7 @@ SUXIPO_BOOT_SCHEMA: Mapping = {
 # --------------------------------------------------------------------------- #
 # 斯密斯：人格块（任务1回应 / 任务2工具 / 文风平实 / 输出）
 # --------------------------------------------------------------------------- #
-from .prompt_levels import DIALOGUE_DIRECTION_NOTE
+from .prompt_levels import DIALOGUE_DIRECTION_NOTE, SMITH_MATERIAL_NOTE
 
 SMITH_BLOCK = """【你的任务】
 【任务1 · 回应】
@@ -381,12 +381,12 @@ WRITE_EDIT_RULES = """【edit 规则】
 未超限且无需增删改，edit 可为 []。程序先执行 del / mod，再加入 add，最后追加本轮输入和回应。"""
 
 
-def _persona_write_instruction(style_note: str) -> str:
+def _persona_write_instruction(style_note: str, *, material_note: str = WRITE_MATERIAL_NOTE) -> str:
     """人格写场调用（②）专用指令：只写场，不产出回应；本轮对白由程序追加。"""
     return (
         COMMON_CORE
         + "\n\n"
-        + WRITE_MATERIAL_NOTE
+        + material_note
         + "\n\n"
         + WRITE_EDIT_RULES
         + "\n\n"
@@ -402,8 +402,35 @@ SUXIPO_WRITE_INSTRUCTION = _persona_write_instruction(
     "句子短，用词朴素，少形容词、少副词；靠动作、对话、具体细节推进；情绪用细节露，不直说。"
     "对话简短克制，能省则省；一个细节接一个细节，像镜头那样，让场面自己说话。"
 )
-SMITH_WRITE_INSTRUCTION = _persona_write_instruction(
+AQIU_WRITE_INSTRUCTION = _persona_write_instruction(
     "平实、准确的语言，口语化。不要杜撰，不要文艺加工。注意时间、地点、人物等信息。语句连贯。"
+)
+
+SMITH_WRITE_MATERIAL_NOTE = """【写场】
+整理供下一轮交往继续使用的片场。先理解本次交往怎样承接已有情境，再更新记录；不生成对外回应。
+
+一、材料及用途
+- 【此时的片场】是此前保存的完整情境。以它为基础判断哪些仍适用、哪些应更新或清理；B编号用于引用已有块。
+- 【本次合批整理的输入输出】是本次尚未写入的完整事件清单，包含收到的内容、匠石的语言与动作、未开口事项及实际交付记录。合批次数为1与多轮采用同一格式。A编号对应程序随后保存的新块，用于理解新进展及标记重要性，不另抄输入或回应。记录时间不等于事件发生时间，事件时间以正文为准，缺失时不补造。
+- 【你此时的回忆】是相关历史经历的补充候选，不是本次新事件。只补入对当前理解和后续交往有用、片场尚未包含的内容；召回时间不改变经历发生时间。
+- 【人物肖像·可修订】和【人物相处经验·可修订】是理解人物的背景参考，不证明本轮意图，也不直接当作新事件搬入片场。当前表达与历史认识不同，应保留这种区别，不套用旧偏好。
+- 【片场字数】及有效约束控制篇幅和更新边界，应为新增事件留出空间。实际播放说明帮助核对交付状态，不作为重复事件再次写入。
+
+二、理解与整理
+按已有片场和合批事件还原谁在做什么、谁在与谁交流，活动怎样继续或改变。沿用入口给出的逐条人物归属与确定程度，保留事件时间和先后；不把暂定身份升为确认，不根据未提供的人物复核资料补造关系。
+
+从下一轮交往的需要出发，优先保留当前活动、交流关系、重要事实、有效约定、关键纠正和未了结事项。旧内容仍适用就保留，新证据明确改变了情况就更新对应内容；重复、过时或无关的部分可以删除。压缩时保持人物、时间、数字、来源和事实，不能用含糊总结冒充已经删去的具体材料。
+
+回应生成不等于交付完成，动作意图不等于已执行。准备说、开始播放、部分播出、整句播完和中断按实际记录分别理解，只认可播放器确认的完成片段。已有“我准备说”或“（播放器”开头的块不得mod为另一种交付事实，过时可整块删除，也不另造已播出结论。
+
+回忆只补当前需要的部分，不全量搬入或重复已有经历。未开口事项仍需告知或处理就保留，已经告知、解决或失去意义就清理；未再提起不表示已经结束。不写推理过程，不猜测缺失的输入、回应或执行结果。
+
+三、提交结果
+输出edit更新已有B块、补入必要历史内容，并为保留内容和新A块标tier。程序执行增删改后按清单顺序保存合批事件。A块不能add、mod或del，正文不重复输出。"""
+
+SMITH_WRITE_INSTRUCTION = _persona_write_instruction(
+    "平实、准确的语言，口语化。不要杜撰，不要文艺加工。注意时间、地点、人物等信息。语句连贯。",
+    material_note=SMITH_WRITE_MATERIAL_NOTE,
 )
 
 SCENE_TIER_NOTE = """【片场块重要性分档】
@@ -413,21 +440,22 @@ SCENE_TIER_NOTE = """【片场块重要性分档】
 3档：完整情境中可保留、但短版可以省略的补充细节。
 档位表示保留优先级，不是时间排序；不要改事实、改变先后关系或把所有块机械标为1。
 对本轮保留的已有块，包括未mod的块，输出 {"op":"tier","id":"B2","tier":1}。引用更新前的B编号，删除的块不用分档。add可直接带tier，不另抄正文。
-【程序将追加的新块】若提供，A1、A2等只用于标记其tier；输出 {"op":"tier","id":"A1","tier":2}，不要用add重复写入，不得mod/del这些新块。B1固定自述始终保留。
+【本次合批整理的输入输出】中的A1、A2等是待保存的新块；输出 {"op":"tier","id":"A1","tier":2}标记其tier，不用add重复写入，不得mod/del这些新块。B1固定自述始终保留。
 有交付计划或播放器事实时，保留重要状态的相关上下文，不能把未播计划当已播出。程序按1、1+2、1+2+3读取短、中、全三个视图，不再调用模型生成另两份。
 只输出一个JSON对象：{"edit":[...]}。分类只写编号与tier，不重复块正文。"""
 
 
-def _persona_reply_instruction(style_note: str, *, task1: str) -> str:
+def _persona_reply_instruction(style_note: str, *, task1: str, interpretation_note: str = "") -> str:
     """人格回复调用（①）专用指令：只回应、不写场（写场走 WriteZoneSkill/write_instruction）。"""
     return (
         COMMON_CORE
         + "\n\n"
+        + (interpretation_note + "\n\n" if interpretation_note else "")
         + "【你的任务】\n"
         + task1
         + "\n\n"
         + PERSONA_TOOL_NOTE
-        + "\n\n【现场发言与交往对象】\n"
+        + ("" if interpretation_note else "\n\n【现场发言与交往对象】\n"
         "你处在多人可能同时说话的现场。【此时的输入】记录这一轮收到的现场发言，"
         "既可能有人对你说话，也可能有人互相聊天、对第三人说话或自言自语。"
         "这些话一并保留，是为了让你理解现场；进入输入不表示每句话都在对你说，也不表示每句话都要回答。\n"
@@ -452,7 +480,7 @@ def _persona_reply_instruction(style_note: str, *, task1: str) -> str:
         "稳定匿名对象可延续本会话交往；‘声音归属待定’只是未归属音频的占位，不代表所有这些话来自同一个人。"
         "没有能归到当前对象的片场或回忆，就不要编造ta的过去、说过的话或约定；"
         "有明确对象关联的真实经历才可自然使用，不因 provisional 就否认已发生的交往。\n"
-        + SOURCE_PRIORITY_NOTE
+        + SOURCE_PRIORITY_NOTE)
         + "\n\n【文风】\n"
         + style_note
         + "\n\n【你的输出】\n"
@@ -485,14 +513,13 @@ SUXIPO_REPLY_INSTRUCTION = _persona_reply_instruction(
 )
 SMITH_REPLY_INSTRUCTION = _persona_reply_instruction(
     "平实、准确的语言，口语化。不要杜撰，不要文艺加工。注意时间、地点、人物等信息。语句连贯。",
+    interpretation_note=SMITH_MATERIAL_NOTE + "\n" + DIALOGUE_DIRECTION_NOTE,
     task1=(
         "【任务1 · 回应】\n"
-        "你是匠石。【此时的片场】是已经写好的场面，记着你与各对象之间的来往；"
-        "【此时的输入】是这一轮新输入，可能包含多人的发言；不是每句都在对你说话。【你此时的回忆】是这一轮让你想起来的旧片段。\n"
         + PERSONA_SITUATION_NOTE
         + "\n假设你在这个片场，你要结合片场的情景、【此时的输入】里的整批发言以及你的回忆，先判断当前与你形成的交往，"
         "给出你这一拍回应。\n"
-        + DIALOGUE_DIRECTION_NOTE + "\n" + RESPONSE_MODE_BLOCK
+        + RESPONSE_MODE_BLOCK
     ),
 )
 
@@ -632,7 +659,7 @@ def builtin_packs() -> tuple[StylePack, ...]:
             display_name="阿丘",
             aliases=("阿丘", "aqiu"),
             reply_instruction=AQIU_REPLY_INSTRUCTION,
-            **smith_kwargs,
+            **{**smith_kwargs, 'write_instruction': AQIU_WRITE_INSTRUCTION},
         ),
     )
 

@@ -25,7 +25,7 @@ def test_identity_protocol_does_not_gate_background_or_playback():
         assert result.judged and result.action == 'respond'
         assert result.items[0].identity_only and result.items[0].keep
         assert result.items[0].to_jiangshi == ''
-        assert result.main_prompt_hint == {'level': 3, 'needs': [], 'recall_memory': False}
+        assert result.main_prompt_hint == {'level': 3, 'needs': [], 'recall_memory': False, 'main_image':'omit'}
     assert gate.decide_batch('stone', [{'n': 1, 'text': '匠石，别说了'}], [], {}).action == 'stop'
     assert gate.decide_batch('stone', [{'n': 1, 'text': '停一下，我补充一句'}], [], {}).action == 'stop'
 
@@ -48,7 +48,8 @@ def test_first_judgment_precedes_scene_and_main_receives_context(process):
         async def send(message): sent.append(message)
         c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(SlowGate()), input_pause_s=.01)
         try:
-            c.jev_scene_store.append('old', {'text': '此前两人在交流游戏', 'at': 1})
+            from time import time
+            c.jev_scene_store.append('old', {'text': '此前两人在交流游戏', 'at': time()*1000 - 1000})
             assert c.jev_scene_store.commit(c.jev_scene_store.snapshot(), '两人在共同游戏，主要彼此问答，匠石尚未被纳入。')
             await c.accept(Transcript('这把木镐给你', 'A', 0, 1800, True))
             while not entered.is_set(): await asyncio.sleep(.01)

@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-13",
+  "scope": "fixed public sentence only; no history, memories, pictures or DeepSeek calls",
+  "user": "Reply with OK only.",
+  "system": null,
+  "results": [
+    {
+      "service": "Gemini gateway",
+      "model": "gemini-3.6-flash",
+      "mode": "stream",
+      "status": 200,
+      "text": "OK",
+      "seconds": 3.31
+    },
+    {
+      "service": "Cloudflare Workers AI",
+      "model": "@cf/meta/llama-4-scout-17b-16e-instruct",
+      "mode": "nonstream",
+      "status": 200,
+      "text": "OK",
+      "seconds": 2.27
+    },
+    {
+      "service": "OpenRouter free",
+      "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "mode": "nonstream",
+      "status": 200,
+      "text": "OK",
+      "seconds": 4.0
+    }
+  ],
+  "version": "JShi User-Agent correction; OpenRouter smoke before header correction",
+  "limits": "Connectivity only; does not measure production prompts or speech latency"
+}

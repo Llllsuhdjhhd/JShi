@@ -80,7 +80,7 @@ def test_low_voice_candidate_can_be_finally_confirmed_and_select_memory_independ
     class Gate:
         def generate(self,request):
             p=json.loads(request.input_text)
-            assert p['input']['lines'][0]['track']=='7'
+            assert p['input']['lines'][0]['track']=='T1'
             assert p['input']['unwritten'][0]['p']=='P2'
             return ModelResponse(model='gate',text=json.dumps({'level':3,'recall_memory':False,'control':'pass',
                 'items':[{'i':1,'person':'P2','certainty':'confirmed','to':'maybe','keep':'related',

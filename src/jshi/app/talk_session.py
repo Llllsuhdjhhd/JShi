@@ -28,7 +28,7 @@ def _env_flag(name: str) -> bool:
 
 
 class IdleTrial:
-    """对话壳调试：无输入满间隔则开一轮闲时；满轮数后关闭。"""
+    """say hello：无新发言时主动启动认知；是否开口由认知决定。"""
 
     def __init__(
         self,
@@ -72,8 +72,9 @@ class IdleTrial:
 
     def banner(self) -> str:
         return (
-            f"闲时试验：{int(self.seconds)} 秒无输入将主动开口，"
+            f"say hello · 主动思考：{int(self.seconds)} 秒无输入将启动一轮认知，"
             f"最多 {self.max_rounds} 轮后关闭。"
+            "是否开口由认知决定，不强制打招呼。"
             "未切换说话人即默认当前对象在场。可用 /style 阿丘。"
         )
 
@@ -449,16 +450,16 @@ class TalkSession:
         return self._handle_utterance(line)
 
     def handle_idle(self) -> TalkOutcome:
-        """无对方原话的一轮外部活动。满调试轮数后不再开。"""
+        """say hello主动认知：没有对方新原话，满轮数后不再触发。"""
         if self.busy or not self.idle_trial.due():
             return TalkOutcome()
         outcome = self._handle_utterance("", stimulus=STIMULUS_IDLE)
         self.idle_trial.note_fire()
-        events = (TalkEvent("notice", "—— 闲时 ——"), *outcome.events)
+        events = (TalkEvent("notice", "—— say hello · 主动思考 ——"), *outcome.events)
         if not self.idle_trial.can_fire():
             events = (
                 *events,
-                TalkEvent("notice", "闲时试验已关闭（已满 2 轮）。"),
+                TalkEvent("notice", f"say hello · 主动思考已关闭（已满 {self.idle_trial.max_rounds} 轮）。"),
             )
         return TalkOutcome(events, quit=outcome.quit)
 

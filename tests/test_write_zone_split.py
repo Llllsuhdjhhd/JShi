@@ -187,11 +187,41 @@ def test_persona_write_receives_current_response_in_actual_prompt(tmp_path):
     process.experience("stone", "现在天气怎么样", object_ref="user")
 
     prompt = build_user(write.last_request)
-    assert "【此时的输入】" in prompt
+    assert "【此时的输入】" not in prompt
     assert "【此时的片场】" in prompt
-    assert "【你的回应】" in prompt
-    assert "这次先告诉你天气。" in prompt
+    assert "【你的回应】" not in prompt
+    assert "【程序将追加的新块】" not in prompt
+    assert prompt.count("【本次合批整理的输入输出】") == 1
+    assert "合批次数：1" in prompt
+    assert prompt.count("这次先告诉你天气。") == 1
     assert "点头" in prompt
     assert "user 的路线结果暂缓告知。" in prompt
-    assert '"target_ids": ["user"]' in prompt
-    assert '"target_ids": ["OBJ-USER"]' not in prompt
+    assert "OBJ-USER" not in prompt
+    assert "A1（记录时间：" in prompt and "事件时间以正文为准" in prompt
+
+
+def test_smith_writer_merges_two_turns_without_repeating_events(tmp_path):
+    from jshi.models.prompt import build_user
+    from jshi.skill import SkillModelPort, WriteZoneSkill
+    from jshi.style import SMITH
+    class Writer(WriteModel):
+        def generate(self, request):
+            self.last_request = request
+            return ModelResponse(model=self.name, text='{"edit":[]}')
+    write = Writer()
+    process, _ = runtime(tmp_path, ReplyModel(), SkillModelPort(WriteZoneSkill(write), apply_to=("write_zone",)))
+    process.style_packs.set('stone', SMITH)
+    process.zone_store.boot('stone', value='我是匠石。', scene=['user正在聊天。'])
+    process.experience('stone','第一轮独有内容',object_ref='user',defer_write=True)
+    process.experience('stone','第二轮独有内容',object_ref='user',defer_write=True)
+    assert process.take_deferred_write()()
+    prompt = build_user(write.last_request)
+    assert '合批次数：2' in prompt
+    events = prompt.split('【本次合批整理的输入输出】',1)[1]
+    assert events.count('第一轮独有内容') == events.count('第二轮独有内容') == 1
+    assert '【此时的输入】' not in prompt and '【你的回应】' not in prompt
+    assert '【程序将追加的新块】' not in prompt
+    assert 'A4（记录时间：' in prompt
+    blocks = process.zone_store.get('stone')
+    saved = '\n'.join(blocks)
+    assert saved.count('第一轮独有内容') == saved.count('第二轮独有内容') == 1

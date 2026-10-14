@@ -10,6 +10,7 @@ from time import monotonic
 from jshi.core import SubjectState
 from jshi.models import ModelRequest
 from jshi.skill.base import parse_json_object
+from .jev_prompts import SINGLE_INSTRUCTION
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,15 @@ class BatchDecision:
     main_prompt_hint: dict | None = None
     routing_error: str = ""  # Valid identity judgments survive invalid routing fields.
     direct_reply: str = ""
+    waiting_reply: str = ""
+
+    @property
+    def front_choice(self):
+        if self.direct_reply:
+            return 'self_reply'
+        if self.waiting_reply:
+            return f"main_l{(self.main_prompt_hint or {}).get('level', 1)}_ack"
+        return 'main_silent'
 
 
 def explicit_name(text: str) -> str:
@@ -92,6 +102,8 @@ class VoiceJEV:
 
     def decide(self, subject_id: str, text: str, speaker: dict, delivery: dict, *, overlap: bool = False, on_request=None) -> InterruptDecision:
         normalized = text.strip().rstrip("。！!，,？?").strip()
+        if re.match(r'^(?:匠石[，,：:\s]*)?(?:(?:好[了啦]?){1,3}[，,\s]*)?(?:先[，,\s]*){0,2}(?:别说[了啦]|不要说[了啦]|停止|停一下|先停)(?=[，,。！!？?\s]|$|别说[了啦]|不要说[了啦]|停止|停一下)', normalized):
+            return InterruptDecision('stop', 'explicit stop')
         if normalized in {"停", "停止", "别说了", "停一下", "等等", "等一下"}:
             return InterruptDecision("stop", "explicit stop")
         if re.match(r'^(?:匠石[，,：:\s]*)?(?:停止|别说了|停一下|先停|不要说了)(?:[，,。！!？?\s]|$)', normalized):
@@ -108,27 +120,17 @@ class VoiceJEV:
         claimed = explicit_name(text)
         if self.model is None:
             return InterruptDecision("resume" if active else "respond", "JEV rule fallback", claimed)
+        from .jev_input import compact_jev_input
+        # Retain conversational context, not the full host envelope and records.
+        context = {k:delivery[k] for k in ('state', 'spoken', 'pending', 'names_for_jiangshi',
+            'attention', 'scene', 'main_scene', 'person_portraits', 'collection') if k in delivery}
+        payload = compact_jev_input({'utterance':text, 'speaker':speaker,
+                                     'delivery':context, 'now':delivery.get('now')})
         request = ModelRequest(
             purpose="voice_jev",
-            input_text=json.dumps({"utterance": text, "speaker": speaker, "delivery": delivery}, ensure_ascii=False),
+            input_text=json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
             subject_state=SubjectState(subject_id, "匠石", "判断当前插话如何接续"),
-            system_extra=("你是匠石的 JEV，判断这一批现场发言是否在对匠石说话、是否需要回应。按 delivery.state 判断状态，不能假定一直在播放。只输出 JSON："
-                '{"action":"ignore|resume|stop|respond|clarify","reason":"简短依据","claimed_name":""}。'
-                "空闲或刚说完时，旁人聚会聊天、对别人提问、笑声、附和和没有回应必要的结束语选 ignore：只留现场，不触发主流程回答。"
-                "正在播放时判断是否明确插话；正在对话时结合现场判断是否承接对匠石的问题，不因出现问号就认定在问匠石。"
-                "resume 表示继续播放，用于附和、噪声、不完整碎片、旁人互聊或并非对匠石说的话；"
-                "stop 用于明确要求停止；respond 用于向匠石的提问、补充、纠正、接话、问候、分享或表达感受；"
-                "持续对话中的自然承接不要求问号或每句点名匠石，也不要求先提出任务；结合现场判断，不能把旁人互聊当作分享给匠石。"
-                "clarify 仅用于明确向匠石说话但需要澄清的内容。换人本身不是打断依据。不要生成回答。"
-                "claimed_name 只取说话人明确的自我介绍，不取提及的其他人。"
-                "身份未明或换了对象时，不要把附和擅自归给原说话人。"
-                "姓名未知、匿名访客、声音归属待定都不是忽略或拒绝进入主流程的理由。"
-                "新来者向匠石打招呼、自我介绍、叫匠石名字纠正其名字、询问能否听见，应按内容选 respond 或 clarify。"
-                "没有姓名也能正常对话。判断对象是匠石的依据是称呼、语义和上下文，不能要求先登记声纹或确认姓名。"
-                "delivery.attention 是接话关注权重：近期对话者更值得关注，但不是身份或声纹证据，"
-                "不能仅凭高权重打断，也不能忽略新来者的明确提问。结合 delivery.scene 中各人的发言判断。"
-                "人声比普通背景声更值得分析；响亮、尖锐、突出不等于向匠石说话，不据此停止播放。"
-                "转写可能包含扬声器回声；如果内容只是复述当前回应，且没有明显向匠石接话，继续播放。"),
+            system_extra=SINGLE_INSTRUCTION,
         )
         try:
             if on_request is not None:
@@ -210,10 +212,13 @@ class VoiceJEV:
         if delivery.get('environment'):
             payload['environment'] = delivery['environment']
         payload['short_chat'] = delivery.get('short_chat', {'allowed':False})
+        payload['waiting'] = delivery.get('waiting', {'allowed':False})
         packed = delivery.get('envelope')
         if packed:
             payload['input']['envelope'] = {**packed, 'parts':[
                 {k:v for k,v in p.items() if k != 'image_url'} for p in packed.get('parts', ())]}
+        from .jev_input import compact_jev_input
+        payload = compact_jev_input(payload)
         schema = {"type": "object", "properties": {
             "items": {"type": "array", "items": {"type": "object", "properties": {
                 "i": {"type": "integer", "enum": [row['n'] for row in batch]}, "person": {"type": "string", "enum": sorted({"unknown", *[
@@ -225,9 +230,11 @@ class VoiceJEV:
                 "minItems": len(batch), "maxItems": len(batch)},
             "level": {"type": "integer", "enum": [1, 2, 3]},
             "recall_memory": {"type":"boolean"},
-            "route": {"enum":["main", "self_reply"]},
-            "reply": {"type":"string", "maxLength":160}},
-            "required": ["items", "level", "recall_memory", "route", "reply"], "additionalProperties": False}
+            "main_image": {"enum":["omit", "include"]},
+            "route": {"enum":["main", "self_reply"] if delivery.get('short_chat', {}).get('allowed') is True else ["main"]},
+            "reply": {"type":"string", "maxLength":160 if delivery.get('short_chat', {}).get('allowed') is True else 0},
+            "waiting_reply": {"type":"string", "maxLength":16}},
+            "required": ["items", "level", "recall_memory", "main_image", "route", "reply"], "additionalProperties": False}
         request = ModelRequest(purpose="voice_jev", input_text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             subject_state=SubjectState(subject_id, "匠石", "快速入口判断"),
             system_extra=ENTRY_INSTRUCTION + "\nJSON Schema：" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
@@ -243,7 +250,8 @@ class VoiceJEV:
                 modern = "level" in data or any("i" in row for row in data["items"] if isinstance(row, dict))
                 if modern:
                     result = self._from_current(data["items"], batch, rules.claimed_name)
-                    hint = normalize_hint({"level": data.get("level"), "recall_memory": data.get("recall_memory")})
+                    hint = normalize_hint({"level": data.get("level"), "recall_memory": data.get("recall_memory"),
+                                           "main_image": data.get("main_image", "omit")})
                     if not hint:
                         hint = {"level": 1, "needs": [], "recall_memory": False}
                         result = replace(result, routing_error='JEV档位或回忆开关缺失/无效；保留人物终审，回退完整档且不追加历史召回')
@@ -258,15 +266,27 @@ class VoiceJEV:
                 elif not modern and control == "continue" and active and all(r.to_jiangshi == "no" for r in result.items):
                     result = replace(result, action="resume")
                 direct = data.get('reply', '')
+                if modern and data.get('route') == 'self_reply' and delivery.get('short_chat', {}).get('allowed') is not True:
+                    result = replace(result, routing_error='本轮没有直接回答许可；保留人物终审，交主认知')
                 if (modern and data.get('route') == 'self_reply' and delivery.get('short_chat', {}).get('allowed') is True
                         and not overlap and not any(row.get('source') == 'visual_environment' for row in batch)
                         and hint.get('level') == 3 and hint.get('recall_memory') is False
+                        and hint.get('main_image', 'omit') == 'omit'
                         and result.judged and not result.routing_error
                         and isinstance(direct, str) and 0 < len(direct.strip()) <= 160
                         and all(row.speaker_pick == delivery['short_chat'].get('person_code', row.speaker_pick)
                                 for row in result.items)
                         and all(row.speaker_level == '确定' for row in result.items)):
                     result = replace(result, direct_reply=direct.strip(), reason='短时聊天，由JEV我回答')
+                waiting = delivery.get('waiting', {})
+                brief = data.get('waiting_reply', '')
+                budget = waiting.get('levels', {}).get(f"L{hint.get('level')}", {}) if modern else {}
+                if (modern and data.get('route') == 'main' and waiting.get('allowed') is True
+                        and not overlap and not result.routing_error and result.judged
+                        and not any(row.get('source') == 'visual_environment' for row in batch)
+                        and budget.get('expected_seconds', 0) >= 2
+                        and isinstance(brief, str) and 0 < len(brief.strip()) <= min(16, budget.get('max_chars', 0))):
+                    result = replace(result, waiting_reply=brief.strip())
                 return replace(result, model_raw=raw_text,
                     main_prompt_hint=hint if modern else normalize_hint(data.get("main_prompt_hint")) or None)
             action = data.get("action")

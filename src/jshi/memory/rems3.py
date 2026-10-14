@@ -118,6 +118,7 @@ def experience_payload(experience: MemoryExperience) -> dict[str, Any]:
         "occurred_at": _local_naive(experience.occurred_at),
         "segment_id": experience.segment_id,
         "origin": experience.origin,
+        **({'media':tuple(experience.media)} if getattr(experience, 'media', ()) else {}),
     }
 
 
@@ -163,6 +164,7 @@ def from_ingest_result(raw: Any) -> BackendIngestResult:
         role_ids=_as_tuple(getattr(raw, "role_ids", ())),
         unclosed_count=int(getattr(raw, "unclosed_count", 0) or 0),
         errors=_as_tuple(getattr(raw, "errors", ())),
+        media_marks=getattr(raw, 'media_marks', None),
     )
 
 
@@ -406,7 +408,9 @@ class Rems3MemoryBackend:
                 experiences=experiences,
             )
         batch_cls, experience_cls = self._engine_types
-        experiences = tuple(experience_cls(**dict(item)) for item in experiences_raw)
+        import inspect
+        accepts_media = 'media' in inspect.signature(experience_cls).parameters
+        experiences = tuple(experience_cls(**{k:v for k,v in dict(item).items() if accepts_media or k != 'media'}) for item in experiences_raw)
         return batch_cls(
             subject_id=payload["subject_id"],
             experiences=experiences,

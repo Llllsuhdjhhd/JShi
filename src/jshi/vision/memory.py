@@ -47,13 +47,19 @@ class VisualMemory:
                     if change not in seen:
                         additions.append(change)
                         seen.add(change)
-            experiences.append(replace(e, text=e.text + ('\n' + '\n'.join(additions) if additions else '')))
+            media = tuple({'reference':s['frame'], 'snapshot':s['id'], 'captured_at':s['captured'],
+                           'description_at':s['described_at'], 'kind':'image', 'analysis':s.get('analysis', ())}
+                          for s in ss if s['image_available'])
+            experiences.append(replace(e, text=e.text + ('\n' + '\n'.join(additions) if additions else ''),
+                                       media=tuple(getattr(e, 'media', ())) + media))
         timings['visual_prepare_ms'] = round((perf_counter() - prepared) * 1000, 3)
         backend_started = perf_counter()
         result = self.backend.ingest_batch(replace(batch, experiences=tuple(experiences)))
         timings['backend_ms'] = round((perf_counter() - backend_started) * 1000, 3)
         delivery_started = perf_counter()
-        self.store.record_delivery(batch.subject_id, associations, result.stored_marks)
+        self.store.record_delivery(batch.subject_id, associations, result.stored_marks,
+                                   getattr(result, 'media_marks', None),
+                                   finished=not result.errors and result.unclosed_count == 0)
         timings['visual_delivery_ms'] = round((perf_counter() - delivery_started) * 1000, 3)
         timings['status'] = 'succeeded'
         return result

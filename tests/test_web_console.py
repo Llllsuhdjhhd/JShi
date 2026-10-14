@@ -107,6 +107,33 @@ def test_saved_debug_buttons_work_without_voice_connection(process):
     asyncio.run(run())
 
 
+def test_saved_text_jev_prompt_follows_exact_input_trigger(tmp_path):
+    with sqlite3.connect(tmp_path/'subject.sqlite3') as conn:
+        conn.execute('create table activities(id text, subject_id text, trigger text)')
+        conn.execute('create table histories(sequence integer, id text, subject_id text, content text)')
+        conn.execute('insert into activities values(?,?,?)', ('turn-1','stone','input-1'))
+        for sequence, event_id, subject, link in [(1,'input-1','stone','jev-1'),
+                (2,'input-2','stone','jev-2'), (3,'input-1','other','jev-private')]:
+            content = {'text':'input-1', 'envelope':{'jev_calls':[{'prompt_activity_id':link}]}}
+            conn.execute('insert into histories values(?,?,?,?)',
+                         (sequence,event_id,subject,json.dumps(content)))
+    (tmp_path/'activity_timings.jsonl').write_text(json.dumps(
+        {'activity_id':'turn-1','subject_id':'stone','end_to_end':{'jev_ms':1177.1}})+'\n',encoding='utf-8')
+    rows = [{'kind':'prompt','hash':'rules','text':'entry rules'}]
+    rows.extend({'kind':'call','activity_id':link,'subject_id':'stone','purpose':'voice_jev',
+        'system_hash':'rules','user_text':text} for link,text in
+        [('jev-1','correct input'),('jev-2','unrelated input'),('jev-private','private input')])
+    (tmp_path/'step_inputs.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows),encoding='utf-8')
+    browser = WebData(tmp_path,'stone')
+    result = browser.diagnostics(section='prompt',activity_id='turn-1',purpose='voice_jev')
+    assert 'correct input' in result['text']
+    assert 'unrelated input' not in result['text'] and 'private input' not in result['text']
+    # Newly saved timings carry the association without database lookup.
+    (tmp_path/'activity_timings.jsonl').write_text(json.dumps({'activity_id':'new-turn','subject_id':'stone',
+        'end_to_end':{'jev_prompt_activity_ids':['jev-1']}})+'\n',encoding='utf-8')
+    assert 'correct input' in browser.diagnostics(section='prompt',activity_id='new-turn',purpose='voice_jev')['text']
+
+
 def test_text_without_microphone_preserves_selected_identity(process):
     async def run():
         app = create_app(process,'stone',VoiceConfig(api_key=''))
@@ -163,6 +190,54 @@ def test_text_timing_includes_delayed_jev_and_streams_before_completion(process)
             assert entry['complete_ms'] >= timing['total_ms'] + 45
             assert entry['complete_ms'] >= entry['reply_ready_ms']
             assert entry['browser_display_included'] is False
+    asyncio.run(run())
+
+
+def test_independent_text_shows_waiting_ack_before_main_reply(process, monkeypatch):
+    monkeypatch.setenv('JSHI_JEV_WAIT_ACK_ENABLED', 'true')
+    from threading import Event
+    from jshi.models import ModelResponse
+    from jshi.voice.jev import VoiceJEV
+    from jshi.voice.wait_ack import wait_timing, model_key
+    entered, release = Event(), Event()
+    original = process.cognition.generate
+    def slow_main(request):
+        entered.set()
+        assert release.wait(5)
+        return original(request)
+    process.cognition.generate = slow_main
+    class Gate:
+        def generate(self, request):
+            payload = json.loads(request.input_text)
+            assert payload['waiting']['allowed'] is True
+            return ModelResponse(model='mock', text=json.dumps({
+                'items':[{'i':1,'person':'P1','certainty':'confirmed','why':'用户已选人物'}],
+                'level':1,'recall_memory':False,'main_image':'omit',
+                'route':'main','reply':'','waiting_reply':'嗯，我想一下。'}))
+    async def run():
+        app = create_app(process, 'stone', VoiceConfig(api_key=''), jev=VoiceJEV(Gate()))
+        async with TestClient(TestServer(app)) as client:
+            origin = str(client.make_url('')).rstrip('/')
+            response = await client.post('/text-input', headers={
+                'Origin':origin, 'Accept':'application/x-ndjson'},
+                json={'text':'匠石，帮我分析一下','object_id':'lux-id'})
+            events = []
+            try:
+                while True:
+                    event = json.loads(await asyncio.wait_for(response.content.readline(),3))
+                    events.append(event)
+                    if event['type']=='waiting_ack':break
+                assert events[-1]['text']=='嗯，我想一下。'
+                assert not any(e['type']=='reply' for e in events)
+                assert not release.is_set()  # Main has not returned.
+            finally:
+                release.set()
+            events += [json.loads(line) for line in (await response.text()).splitlines()]
+            assert entered.is_set()
+            assert [e['type'] for e in events if e['type'] not in {'flow_phase'}] == [
+                'accepted','waiting_ack','reply','complete']
+            assert next(e for e in events if e['type']=='reply')['reply'] != '嗯，我想一下。'
+            assert wait_timing(process).guidance(model_key(process),allowed=True)['levels']['L1']['samples']==1
     asyncio.run(run())
 
 

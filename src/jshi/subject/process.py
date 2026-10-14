@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -225,9 +226,14 @@ class AssembledCurrentState:
     pending_write_text: str = ""
     pending_write_ids: tuple[str, ...] = ()
     pending_write_blocks: tuple[str, ...] = ()
+    pending_write_block_times: tuple[str, ...] = ()
     pending_through_sequence: int = 0
     prompt_level: int = 1
     recall_memory: bool = True
+    main_image: str = "omit"
+    media_context: str = ""
+    media_source_ids: tuple[str, ...] = ()
+    force_image_review: bool = False
     prompt_modules: tuple[str, ...] = ()
     interaction_scene: str = ""
     visual_snapshot: Mapping | None = None
@@ -338,6 +344,10 @@ class SubjectProcess:
     ) -> None:
         self.repository = repository
         self.vision = vision
+        from jshi.vision.main_media import MainImageGate
+        from uuid import uuid4
+        self._main_images = MainImageGate()
+        self._media_context = uuid4().hex
         self.identities = identities
         self.cognition = cognition
         self.person_review_model = person_review_model or (cognition if hasattr(cognition, '_skill') else None)
@@ -526,6 +536,7 @@ class SubjectProcess:
             tool_hot_state="",
             prompt_level=profile.level,
             recall_memory=profile.recall_memory,
+            main_image=profile.main_image,
             stimulus=stimulus if stimulus == STIMULUS_IDLE else STIMULUS_SPEECH,
         )
 
@@ -770,14 +781,16 @@ class SubjectProcess:
                     speaker.label, text, source=next((p.kind for p in envelope.parts if p.kind != "text"), "text") if envelope else "text",
                     level="确定" if speaker.status == "confirmed" else "不确定",
                     evidence="入口提供的对象归属", parts=parts),)
-            current = replace(current, input_items=items, input_parts=parts)
+            current = replace(current, input_items=items, input_parts=parts, media_source_ids=(fact.id,))
             if envelope and envelope.speaker.status == "unknown" and not incoming:
                 self.unknown_inputs.append(envelope.input_id, envelope.speaker.object_id,
                     text, envelope.session_id, envelope.start_ms, envelope.end_ms)
         modes = tuple(dict.fromkeys(str(mode).strip() for mode in processing_modes if str(mode).strip()))
         current = replace(current, processing_modes=modes or ("interaction",))
         if observed_environment and self.vision:
-            note = "以下是视觉环境材料，不是人物发言；观察时间可能早于本轮。\n" + self.vision.store.render(observed_environment)
+            note = "以下是视觉环境材料，不是人物发言；观察时间可能早于本轮。\n" + self.vision.store.render(observed_environment, tuple((object_codes or {}).items()))
+            if self.vision.config.face_enabled and self.vision.config.portrait_enabled:
+                note += '\n有明确视觉身份依据时，可用embodied动作“关联面孔 F代号 P代号：依据”关联人物参考；声音归属不单独证明脸的身份，无依据不关联。'
             current = replace(current, visual_snapshot=observed_environment,
                               transport_context=(current.transport_context + '\n' + note).strip())
         if envelope is not None:
@@ -787,7 +800,9 @@ class SubjectProcess:
                               object_codes=tuple((object_codes or {}).items()))
             from jshi.core.prompt_profile import select_profile
             profile = select_profile((u.input_id for u in envelope.current_utterances), envelope.jev_calls)
-            current = replace(current, prompt_level=profile.level, prompt_modules=profile.modules, recall_memory=profile.recall_memory)
+            current = replace(current, prompt_level=profile.level, prompt_modules=profile.modules, recall_memory=profile.recall_memory,
+                              main_image=profile.main_image, media_context=envelope.session_id,
+                              media_source_ids=(fact.id,), force_image_review=bool(re.search(r'(?:重新|重|再)(?:看|检查|观察).{0,12}(?:图|照片|画面)|(?:图|照片|画面).{0,12}(?:重新|再)(?:看|检查|观察)', text)))
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -911,6 +926,8 @@ class SubjectProcess:
                 objects = _speaker_object_mapping(speaker, objects, speaker.aliases)
             current = replace(current, input_text=envelope.text, input_review_text='',
                               speaker=self._assembly_speaker(speaker=speaker, object_id=None))
+        response = self._apply_visual_associations(subject_id, current, response,
+            allowed=action_allowed is None or action_allowed())
         phase('action')
         deliver_verbal(verbal_text(response.response_plan))
         reply_ready_mono = time.monotonic()
@@ -1175,6 +1192,10 @@ class SubjectProcess:
                 background_write_included=False,
                 browser_display_included=False,
             )
+            if envelope is not None and envelope.jev_calls:
+                end_to_end['jev_prompt_activity_ids'] = list(dict.fromkeys(
+                    call['prompt_activity_id'] for call in envelope.jev_calls
+                    if call.get('prompt_activity_id')))
             timing = replace(timing, end_to_end=end_to_end)
         self.last_activity_timing = timing
         try:
@@ -1301,6 +1322,28 @@ class SubjectProcess:
         level = valid_level(current.prompt_level)
         return PromptProfile(level, recall_memory=current.recall_memory)
 
+    def _apply_visual_associations(self, subject_id, current, response, *, allowed=True):
+        visible = []
+        for item in response.response_plan.items:
+            match = re.fullmatch(r'关联面孔\s+(F\d+)\s+(P\d+)[：:]\s*(\S.*)', item.text.strip()) if item.channel == 'embodied' else None
+            if not match:
+                visible.append(item)
+                continue
+            # Internal reference bookkeeping must never become spoken robot actions.
+            if not allowed or not self.vision or not current.visual_snapshot:
+                continue
+            object_id = dict(current.object_codes).get(match[2])
+            if not object_id or not self.profiles.get(object_id):
+                continue
+            try:
+                self.vision.associate_face(subject_id, current.visual_snapshot['frame'], match[1], object_id)
+                self.repository.add_history(HistoryRecord(subject_id=subject_id, kind=HistoryKind.SUBJECT,
+                    event_type='visual_identity_association', content={'frame':current.visual_snapshot['frame'],
+                        'face':match[1], 'object_id':object_id, 'basis':match[3][:160]}))
+            except (ValueError, KeyError) as exc:
+                self.vision.store.error(subject_id, str(exc))
+        return replace(response,response_plan=replace(response.response_plan,items=tuple(visible)))
+
     def _material_chars(self, current: AssembledCurrentState) -> int:
         """木头攒下的素材字数：账本原文(活跃区) + 回忆 + 价值。"""
         total = 0
@@ -1400,6 +1443,7 @@ class SubjectProcess:
         include_tool: bool = True,
         now: datetime | None = None,
         live_zone: bool = False,
+        include_turn: bool = True,
     ) -> str:
         label = current.speaker.label if current.speaker else "对方"
         stamp = now or datetime.now().astimezone()
@@ -1444,7 +1488,8 @@ class SubjectProcess:
             from jshi.core.main_input import render_inputs
             normalized = render_inputs(current.input_items)
             turn = normalized
-        parts.append("【此时的输入】\n" + turn)
+        if include_turn:
+            parts.append("【此时的输入】\n" + turn)
         if memories:
             parts.append("【你此时的回忆】\n" + "\n".join(memories))
         if profile.recall_memory and any(r.source == 'memory' and r.error for r in current.source_report):
@@ -1613,6 +1658,20 @@ class SubjectProcess:
             reply_block = unsaid_block = ""
         return current.pending_write_blocks or tuple(value for value in (input_block, reply_block, unsaid_block) if value)
 
+    def _smith_write_events(self, current, response):
+        """One event list for both one-turn and multi-turn writes and A tiers."""
+        blocks = self._zone_append_texts(current, response)
+        count = len(current.pending_write_ids) or 1
+        times = current.pending_write_block_times
+        lines = ["【本次合批整理的输入输出】", f"合批次数：{count}"]
+        for i, block in enumerate(blocks, 1):
+            recorded = times[i-1] if i <= len(times) else ""
+            label = f"（记录时间：{recorded}；事件时间以正文为准）" if recorded else ""
+            lines.append(f"A{i}{label}：{block}")
+        if not blocks:
+            lines.append("（没有待追加事件）")
+        return "\n".join(lines)
+
     def _apply_zone_edit(self, subject_id, reply_response, current, write_result, code_restore=None):
         append_texts = self._zone_append_texts(current, reply_response, code_restore)
         if append_texts or getattr(write_result, "zone_edit", ()):
@@ -1773,7 +1832,7 @@ class SubjectProcess:
         store = self.vision.store
         associations = store.associated_many(subject, [(f.source_ids, f.id.removeprefix('memory:')) for f in memory], images_only=True)
         numbers, images, enriched = {}, [], {}
-        enabled = getattr(getattr(self.vision, 'config', store.config), 'cognition_images', False)
+        enabled = current.main_image == 'include' and getattr(getattr(self.vision, 'config', store.config), 'cognition_images', False)
         for fragment, snapshots in zip(memory, associations):
             notes = []
             for snapshot in snapshots:
@@ -1790,7 +1849,7 @@ class SubjectProcess:
                             'image_url':'data:image/jpeg;base64,'+base64.b64encode(data).decode()})
                 number = numbers[frame]
                 notes.append(f"关联历史图片{number}；拍摄时间 {snapshot['captured']}；" +
-                    ('原图随本轮提供。' if enabled else f'本轮未提供原图；可用动作“回看照片 {frame}：观察问题”查看。'))
+                    ('原图由本轮带图与去重规则检查后提供，不能仅凭此引用声称已看图。' if enabled else f'本轮未提供原图；可用动作“回看照片 {frame}：观察问题”查看。'))
             if notes:
                 enriched[fragment.id] = replace(fragment, content=fragment.content+'\n'+'\n'.join(notes))
         return replace(current, fragments=tuple(enriched.get(f.id, f) for f in current.fragments),
@@ -1811,6 +1870,17 @@ class SubjectProcess:
         其余段(活跃区/打分)继续收、最终返回完整 ``ModelResponse``。
         """
         current = self._recall_media(current)
+        media_context = current.media_context or self._media_context
+        media_tokens, media_references = (), ()
+        if self.vision:
+            parts = list(current.input_parts)
+            if current.visual_snapshot and not any(p.get('kind') == 'image' for p in parts):
+                parts.append({'kind':'image', 'reference':current.visual_snapshot['frame']})
+            parts, media_tokens, media_references = self._main_images.prepare(
+                parts, subject=current.subject_state.subject_id, context=media_context,
+                allowed=current.main_image == 'include' and self.vision.config.cognition_images,
+                store=self.vision.store, force=current.force_image_review)
+            current = replace(current, input_parts=parts)
         speaker = None
         if current.speaker is not None:
             speaker = ModelSpeaker(
@@ -1889,6 +1959,13 @@ class SubjectProcess:
             response = self.cognition.generate_stream(request, on_reply=on_reply)
         else:
             response = self.cognition.generate(request)
+        if self.vision and media_tokens:
+            self._main_images.commit(current.subject_state.subject_id, media_context, media_tokens)
+            try:
+                self.vision.store.record_main_images(current.subject_state.subject_id, current.media_source_ids,
+                                                     media_references)
+            except Exception:
+                logger.exception('Cognition succeeded but visual memory association failed')
         if persona_instruction and self.style_packs.get(current.subject_state.subject_id) == "smith" and self._prompt_profile(current).level != 1:
             if response.tool_intent or response.tool_handling or response.tool_consumed:
                 self.repository.add_history(HistoryRecord(subject_id=current.subject_state.subject_id,
@@ -2001,6 +2078,9 @@ class SubjectProcess:
                                   prompt_level=min(row.get("prompt_level", 1) for row in rows),
                                   pending_write_ids=tuple(row["id"] for row in rows),
                                   pending_write_blocks=tuple(block for row in rows for block in row.get("blocks", (row["text"],))),
+                                  pending_write_block_times=tuple(row['text'].split(']',1)[0]+']'
+                                      if row['text'].startswith('[') and ']' in row['text'] else ''
+                                      for row in rows for block in row.get('blocks',(row['text'],))),
                                   pending_through_sequence=max((row.get("sequence", 0) for row in rows), default=0))
             try:
                 wrote = self._commit_zone(sid, activity, current, response, speaker, recalled,
@@ -2163,20 +2243,21 @@ class SubjectProcess:
             )
             persona_schema = write_schema_for(pack_id, registry=registry)
             persona_user_text = self._persona_user_text(
-                current, boot=False, include_tool=False, now=now, live_zone=True
+                current, boot=False, include_tool=False, now=now, live_zone=True, include_turn=pack_id != "smith"
             )
-            plan = response.response_plan
-            persona_user_text += "\n\n【你的回应】\n" + json.dumps(
-                {
-                    "mode": plan.mode if plan is not None else "wait",
-                    "items": [
-                        {"channel": item.channel, "text": item.text,
-                         "target_ids": [dict(current.object_codes).get(oid, self._object_display(oid)) for oid in item.target_ids]}
-                        for item in plan.items
-                    ] if plan is not None else [],
-                    "unsaid": unsaid_text,
-                }, ensure_ascii=False,
-            )
+            if pack_id != "smith":
+                plan = response.response_plan
+                persona_user_text += "\n\n【你的回应】\n" + json.dumps(
+                    {
+                        "mode": plan.mode if plan is not None else "wait",
+                        "items": [
+                            {"channel": item.channel, "text": item.text,
+                             "target_ids": [dict(current.object_codes).get(oid, self._object_display(oid)) for oid in item.target_ids]}
+                            for item in plan.items
+                        ] if plan is not None else [],
+                        "unsaid": unsaid_text,
+                    }, ensure_ascii=False,
+                )
         else:
             persona_instruction = ""
             persona_schema = None
@@ -2184,15 +2265,11 @@ class SubjectProcess:
                 current, reply_text, unsaid_text
             )
 
-        if current.pending_write_text:
+        if persona and pack_id == "smith":
+            persona_user_text += "\n\n" + self._smith_write_events(current, response)
+        elif current.pending_write_text:
             persona_user_text += "\n\n【本次合批整理的输入输出】\n" + current.pending_write_text.split("\n", 1)[-1]
             persona_user_text += "\n只将以上合批时间线作为本次新增事件；其他本轮原话、回应是对照材料，已包含的或此前已提交的内容不再追加。按时间顺序一起整理，计划与实际交付须区分。"
-        if persona and pack_id == "smith":
-            append_texts = self._zone_append_texts(current, response)
-            if append_texts:
-                persona_user_text += "\n\n【程序将追加的新块】\n" + "\n".join(
-                    f"A{i}：{text}" for i, text in enumerate(append_texts, 1))
-                persona_user_text += "\n只标这些新块的重要性tier，不重复输出正文；它们不计入现有B编号。"
         context = self._model_context(
             subject_id, working_recalled, current.fragments, current.context_view, record_mappings=False
         )

@@ -34,6 +34,8 @@ class MemoryExperience:
     # 说话/互动对象 id（本段主体对话的对象；区别于 objects 的泛提及）。
     # None = 主体自述/系统段。用于回忆时按说话人软纠偏（design/1010 防串线）。
     interlocutor: str | None = None
+    # Raw media stays in the visual store; the backend receives references and evidence.
+    media: tuple[Mapping[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,8 @@ class BackendIngestResult:
     role_ids: tuple[str, ...] = ()  # 本轮登记/更新的 01 对象，可为空
     unclosed_count: int = 0
     errors: tuple[str, ...] = ()
+    # None: retain media with accepted experiences. Explicit mapping selects media per segment.
+    media_marks: Mapping[str, Sequence[str]] | None = None
 
 
 __all__ = [

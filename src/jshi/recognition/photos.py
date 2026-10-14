@@ -87,3 +87,18 @@ class PersonPhotos:
             if not c.execute("select 1 from sqlite_master where name='person_photo_history'").fetchone(): return None
             row=c.execute('select image from person_photo_history where subject_id=? and object_id=? and id=?',(subject_id,object_id,photo_id)).fetchone()
         return bytes(row[0]) if row else None
+
+    def withdraw_face_association(self, subject_id, object_id, face):
+        """Keep uncertain history while removing a corrected automatic portrait."""
+        if not self.path.is_file(): return
+        marker = f'视觉面孔关联 {face}'
+        with sqlite3.connect(self.path, timeout=3) as c:
+            if not c.execute("select 1 from sqlite_master where name='person_photo_history'").fetchone(): return
+            for photo_id, evidence, basis in c.execute('select id,evidence,basis from person_photo_history where subject_id=? and object_id=?', (subject_id,object_id)).fetchall():
+                if basis in ('main_visual_association', 'local_face_match') and marker in json.loads(evidence):
+                    c.execute("update person_photo_history set status='candidate' where id=?", (photo_id,))
+            latest = c.execute("select image from person_photo_history where subject_id=? and object_id=? and status='confirmed' order by last_seen desc limit 1", (subject_id,object_id)).fetchone()
+            if latest:
+                c.execute('insert or replace into person_photos values(?,?,?,?)',(subject_id,object_id,latest[0],time()))
+            else:
+                c.execute('delete from person_photos where subject_id=? and object_id=?',(subject_id,object_id))

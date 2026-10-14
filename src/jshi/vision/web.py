@@ -21,7 +21,11 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
     async def state(request):
         environment = await asyncio.to_thread(vision.store.latest_sample, subject_id)
         errors = await asyncio.to_thread(vision.store.errors, subject_id)
+        profiles = getattr(process, 'profiles', None)
+        people = await asyncio.to_thread(profiles.list) if profiles else ()
         return web.json_response({'environment':environment,
+            'people':[{'object_id':p.object_id,'label':p.label} for p in people],
+            'face_enabled':vision.config.face_enabled, 'portrait_enabled':vision.config.portrait_enabled,
             'sample_seconds':vision.config.sample_seconds, 'model':vision.config.model,
             'errors':errors, 'server_time':time(), 'voice_active':voice_active()}, headers={'Cache-Control':'no-store'})
 
@@ -75,6 +79,29 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
             raise web.HTTPBadRequest(text=str(exc))
         return web.json_response({'accepted':True}, status=202)
 
+    async def associate_face(request):
+        same_origin(request)
+        try:
+            payload = await request.json()
+            object_id = str(payload['object_id'])
+            if process.profiles.get(object_id) is None:
+                raise ValueError('人物不存在')
+            await asyncio.to_thread(vision.associate_face, subject_id, str(payload['frame']),
+                                    str(payload['face']), object_id, basis='manual')
+        except (KeyError, ValueError, TypeError) as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        return web.json_response({'associated':True})
+
+    async def compare(request):
+        same_origin(request)
+        try:
+            payload = await request.json()
+            result = await asyncio.to_thread(vision.compare_images, subject_id,
+                str(payload['previous_frame']), str(payload['current_frame']))
+        except (KeyError, ValueError, TypeError, RuntimeError) as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        return web.json_response(result)
+
     async def watch():
         while True:
             environment = await queue.get()
@@ -113,3 +140,5 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
     app.router.add_get('/api/vision/photo/{frame}', photo)
     app.router.add_get('/api/vision/memories', memories)
     app.router.add_post('/api/vision/interpret', interpret)
+    app.router.add_post('/api/vision/associate-face', associate_face)
+    app.router.add_post('/api/vision/compare', compare)

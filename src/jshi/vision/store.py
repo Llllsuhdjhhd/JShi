@@ -19,6 +19,10 @@ class VisionStore:
             c.execute('pragma auto_vacuum=full')
             c.executescript('''
                 create table if not exists assets(id text primary key, data blob not null, size integer not null);
+                create table if not exists evidence(frame text not null, module text not null, data text not null,
+                    primary key(frame,module));
+                create table if not exists media_sources(subject text not null, source_id text not null,
+                    snapshot text not null, primary key(subject,source_id,snapshot));
                 create table if not exists frames(id text primary key, subject text not null, source text not null,
                     captured real not null, received real not null, asset text not null);
                 create table if not exists snapshots(id text primary key, subject text not null, frame text not null,
@@ -94,6 +98,20 @@ class VisionStore:
             raise KeyError("photo unavailable")
         return bytes(row[0])
 
+    def add_evidence(self, subject, frame, rows):
+        self.frame(frame, subject)
+        with self.db() as c:
+            for row in rows:
+                if row['frame'] != frame:
+                    raise ValueError('evidence belongs to another frame')
+                c.execute('insert or replace into evidence values(?,?,?)',
+                          (frame, row['module'], json.dumps(row, ensure_ascii=False)))
+
+    def evidence(self, frame, subject):
+        self.frame(frame, subject)
+        with self.db() as c:
+            return [json.loads(r[0]) for r in c.execute('select data from evidence where frame=? order by module', (frame,))]
+
     def frame(self, frame, subject):
         with self.db() as c:
             row = c.execute("select id,source,captured,received,asset from frames where id=? and subject=?", (frame, subject)).fetchone()
@@ -145,6 +163,8 @@ class VisionStore:
         result = dict(row)
         result['image_available'] = bool(c.execute("select 1 from frames where id=? and subject=?", (row['frame'], row['subject'])).fetchone())
         result['detections'] = json.loads(result['detections'])
+        result['analysis'] = [json.loads(r[0]) for r in c.execute('select data from evidence where frame=? order by module', (row['frame'],))]
+        result['environment_experience'] = {'status':'not_implemented', 'references':[]}
         envelope = c.execute('select metadata from envelopes where frame=?', (result['frame'],)).fetchone()
         result['envelope'] = json.loads(envelope[0]) if envelope else None
         return result
@@ -186,7 +206,7 @@ class VisionStore:
                 union select snapshot from events where subject=?) order by s.captured desc limit ?''', (subject, subject, subject, limit))]
         return [self.snapshot(sid, subject) for sid in ids]
 
-    def bind(self, subject, source_id, sid):
+    def bind(self, subject, source_id, sid, *, photo_candidate=False):
         with self.db() as c:
             c.execute('begin immediate')
             s = c.execute("select frame,description_frame,change_degree from snapshots where id=? and subject=?", (sid, subject)).fetchone()
@@ -197,9 +217,25 @@ class VisionStore:
                 (select snapshot from bindings where retain_photo=1 union select snapshot from events where retain_photo=1)''')}
             wanted = {r[0] for r in c.execute('select asset from frames where id=?', (s[1],))}
             sizes = {r[0]:r[1] for r in c.execute('select id,size from assets')}
-            retained = s[2] in ('medium', 'high') and bool(wanted) and (wanted <= pinned or sum(sizes[a] for a in pinned | wanted) <= self.config.memory_bytes)
+            retained = (photo_candidate or s[2] in ('medium', 'high')) and bool(wanted) and (wanted <= pinned or sum(sizes[a] for a in pinned | wanted) <= self.config.memory_bytes)
             c.execute("insert or ignore into bindings values(?,?,?,?)", (subject, source_id, sid, int(retained)))
         return retained
+
+    def record_main_images(self, subject, source_ids, frames):
+        for frame in dict.fromkeys(frames):
+            with self.db() as c:
+                existing = c.execute("select id from snapshots where subject=? and frame=? and reason='main_image' order by completed desc limit 1", (subject,frame)).fetchone()
+            snapshot = self.snapshot(existing[0],subject) if existing else self.publish(
+                subject, frame, '主认知实际接收的图片；未由此记录补造视觉描述。',
+                reason='main_image', described_at=0, make_current=False)
+            if not snapshot:
+                continue
+            for source_id in source_ids:
+                # One input may reference several photos; distinct keys keep them all.
+                self.bind(subject, source_id + ':photo:' + frame, snapshot['id'], photo_candidate=True)
+            with self.db() as c:
+                for source_id in source_ids:
+                    c.execute('insert or ignore into media_sources values(?,?,?)', (subject, source_id, snapshot['id']))
 
     def associated(self, subject, source_ids=(), event_id=""):
         return self.associated_many(subject, [(source_ids, event_id)])[0]
@@ -214,6 +250,8 @@ class VisionStore:
                 ids = {r[0] for r in c.execute("select snapshot from events where subject=? and event_id=?"+photo_filter, (subject, event_id))} if event_id else set()
                 for source in source_ids:
                     ids.update(r[0] for r in c.execute("select snapshot from bindings where subject=? and source_id=?"+photo_filter, (subject, source)))
+                    ids.update(r[0] for r in c.execute('select m.snapshot from media_sources m where m.subject=? and m.source_id=?' + (
+                        ' and exists(select 1 from bindings b where b.subject=m.subject and b.snapshot=m.snapshot and b.retain_photo=1)' if images_only else ''), (subject,source)))
                 snapshots = []
                 for sid in ids:
                     if sid not in cache:
@@ -233,14 +271,24 @@ class VisionStore:
                 results.append(list(unique.values()))
         return results
 
-    def record_delivery(self, subject, snapshots, stored_marks):
+    def record_delivery(self, subject, snapshots, stored_marks, media_marks=None, *, finished=True):
         with self.db() as c:
             for segment, ss in snapshots.items():
                 for event in stored_marks.get(segment, ()):
                     for s in ss:
                         retained = c.execute('select max(retain_photo) from bindings where subject=? and snapshot=?', (subject,s['id'])).fetchone()[0] or 0
-                        c.execute("insert or ignore into events values(?,?,?,?)", (subject, event, s['id'], retained))
+                        if media_marks is not None:
+                            retained = retained and s['frame'] in media_marks.get(segment, ())
+                        c.execute("insert into events values(?,?,?,?) on conflict(subject,event_id,snapshot) do update set retain_photo=excluded.retain_photo", (subject, event, s['id'], retained))
                         c.execute("insert or ignore into delivered values(?,?)", (subject, s['id']))
+                if media_marks is not None:
+                    for s in ss:
+                        if s['frame'] not in media_marks.get(segment, ()):
+                            c.execute('update bindings set retain_photo=0 where subject=? and snapshot=?', (subject,s['id']))
+                elif finished and not stored_marks.get(segment):
+                    for s in ss:
+                        if s['reason'] == 'main_image':
+                            c.execute('update bindings set retain_photo=0 where subject=? and snapshot=?', (subject,s['id']))
 
     def errors(self, subject):
         with self.db() as c:
@@ -270,6 +318,7 @@ class VisionStore:
             c.execute("delete from frames where subject=? and id=? and id not in (select frame from snapshots union select frame from sample_current union select frame from archives union select frame from inflight)", (subject, frame))
             c.execute("delete from assets where id not in (select asset from frames)")
             c.execute('delete from envelopes where frame not in (select id from frames)')
+            c.execute('delete from evidence where frame not in (select id from frames)')
 
     def archive(self, frame):
         with self.db() as c:
@@ -315,9 +364,22 @@ class VisionStore:
                 c.execute('delete from inflight where frame=?', (frame,))
 
     @staticmethod
-    def render(s):
+    def render(s, object_codes=()):
         from datetime import datetime, timezone
-        at = datetime.fromtimestamp(s['captured'], timezone.utc).isoformat()
-        described = datetime.fromtimestamp(s['described_at'], timezone.utc).isoformat() if s['described_at'] else '尚未完成'
-        return f"【环境观察 {at}；版本 {s['id']}；描述依据 {described}；环境变化 {s.get('change_degree', 'unknown')}】\n{s['description']}\n" + (
-            "【本地检测变化】" + json.dumps(s['detections'], ensure_ascii=False) if s['detections'] else "")
+        at = datetime.fromtimestamp(s['captured'], timezone.utc).isoformat(timespec='seconds')
+        described = datetime.fromtimestamp(s['described_at'], timezone.utc).isoformat(timespec='seconds') if s['described_at'] else '尚未完成'
+        codes = {oid:code for code,oid in object_codes}
+        analysis = []
+        for row in s.get('analysis', ()):
+            value = {k:row[k] for k in ('module', 'observed_at', 'status', 'result') if k in row}
+            if isinstance(value.get('observed_at'), (int,float)):
+                value['observed_at'] = round(value['observed_at']) if value['observed_at'] > 0 else None
+            if isinstance(value.get('result'), dict) and 'faces' in value['result']:
+                value['result'] = {**value['result'], 'faces':[
+                    {**{k:v for k,v in face.items() if k != 'object_id'},
+                     **({'person':codes[face['object_id']]} if face.get('object_id') in codes else {})}
+                    for face in value['result']['faces']]}
+            analysis.append(value)
+        return f"【环境观察 {at}；描述依据 {described}；环境变化 {s.get('change_degree', 'unknown')}】\n{s['description']}\n" + (
+            "【本地检测】" + json.dumps(s['detections'], ensure_ascii=False) if s['detections'] else "") + (
+            '\n【视觉模块证据】' + json.dumps(analysis, ensure_ascii=False) if analysis else '')

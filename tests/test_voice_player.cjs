@@ -7,7 +7,7 @@ const html = fs.readFileSync(path.join(__dirname,'../src/jshi/app/voice_ui.html'
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const nodes = new Map();
 function node(id) {
-  if (!nodes.has(id)) nodes.set(id,{textContent:'',children:[],value:0,focus(){},classList:{add(){},remove(){}},appendChild(){},prepend(p){this.children.unshift(p);},replaceChildren(){},add(){}});
+  if (!nodes.has(id)) nodes.set(id,{textContent:'',children:[],value:0,focus(){},classList:{add(){},remove(){}},appendChild(p){this.children.push(p);},prepend(p){this.children.unshift(p);},replaceChildren(){},add(){}});
   return nodes.get(id);
 }
 const sent = [], sources = [];
@@ -21,9 +21,11 @@ const context = vm.createContext({
   pcm:Buffer.alloc(200).toString('base64'),
   sendRaw:s=>sent.push(JSON.parse(s)),assert,
 });
+require('./helpers/browser_environment.cjs')(context);
 vm.runInContext(script,context);
 vm.runInContext(`log('旧消息');log('新消息');`,context);
-assert.equal(node('log').children[0].textContent,'新消息');
+assert.equal(node('log').children[0].textContent,'旧消息');
+assert.equal(node('log').children.at(-1).textContent,'新消息');
 vm.runInContext(`
 ws={readyState:1,send:sendRaw}; outputContext=audio;ready=true;
 message({type:'reply',reply_id:'one',text:'第一句。',paused:false});

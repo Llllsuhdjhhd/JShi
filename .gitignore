@@ -25,6 +25,10 @@ step_inputs.jsonl
 .jshi-try/
 .env
 .env.local
+.jshi/model_settings.local.json
+.jshi/model_settings.local.tmp
+**/model_settings.local.json
+**/model_settings.local.tmp
 logs/
 dist/
 build/

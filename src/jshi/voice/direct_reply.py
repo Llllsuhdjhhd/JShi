@@ -1,12 +1,14 @@
 """Session-only materials for JEV's short-chat exit; no memory writes."""
 from collections import deque
 from threading import RLock
+from time import time
 
 
 class DirectReplyState:
     def __init__(self):
         self.lock = RLock()
         self.people = {}
+        self.portrait_cache = {}
         self.recent = deque(maxlen=8)
 
     def prime(self, subject, result):
@@ -14,6 +16,24 @@ class DirectReplyState:
         if not current.speaker or not current.speaker.object_id:
             return
         reports = {r.source:r for r in current.source_report}
+        report = reports.get('person_portrait')
+        if report and report.status == 'implemented' and not report.error:
+            from jshi.memory.portrait_views import bounded_portrait
+            with self.lock:
+                for fragment in current.fragments:
+                    oid = fragment.object_id or current.speaker.object_id
+                    if fragment.source == 'person_portrait' and oid and fragment.content.strip():
+                        l3 = dict(getattr(fragment, 'portrait_levels', ()) or ()).get('L3')
+                        if isinstance(l3, str) and l3.strip() and len(l3.strip()) <= 200:
+                            text = l3.strip()
+                        else:
+                            shorter = [text.strip() for text in getattr(fragment, 'alternatives', ())
+                                       if isinstance(text,str) and text.strip() and len(text.strip()) <= 200]
+                            text = max(shorter, key=len) if shorter else bounded_portrait(fragment.content, 200)
+                        self.portrait_cache[(subject, oid)] = {
+                            'portrait':text, 'cached_at':time()}
+                while len(self.portrait_cache) > 64:
+                    self.portrait_cache.pop(next(iter(self.portrait_cache)))
         if ('person_portrait' not in reports or any(reports[name].error or reports[name].status != 'implemented'
                for name in ('person_portrait', 'person_experience') if name in reports)):
             return
@@ -45,6 +65,14 @@ class DirectReplyState:
         with self.lock:
             self.recent.append({'subject':subject,'object_id':oid,'input':text[:200],'reply':reply[:200]})
         return True
+
+    def portraits(self, subject, object_ids, *, cutoff_ms=None):
+        """Reuse previously loaded text; never fetch memory on the JEV fast path."""
+        with self.lock:
+            return {oid:dict(self.portrait_cache[(subject, oid)])
+                    for oid in tuple(dict.fromkeys(object_ids))[:4]
+                    if (subject, oid) in self.portrait_cache
+                    and (cutoff_ms is None or self.portrait_cache[(subject, oid)]['cached_at'] * 1000 <= cutoff_ms)}
 
 
 def reply_state(process):

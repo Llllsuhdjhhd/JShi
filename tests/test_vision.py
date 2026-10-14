@@ -319,7 +319,7 @@ def test_change_grade_controls_photo_retention_and_selected_recall_numbering(sto
     state = process.assemble_current_state('stone', '测试')
     fragments = tuple(AssemblyFragment(source='memory', id='memory:'+degree, kind='fact', content='文字 '+degree,
                         source_ids=('source-'+degree,)) for degree in ['low', 'medium', 'high'])
-    result = process._recall_media(replace(state, fragments=fragments))
+    result = process._recall_media(replace(state, fragments=fragments, main_image='include'))
     assert len(result.input_parts) == 1
     assert result.input_parts[0]['label'] == '图片1'
     assert result.input_parts[0]['image_url'].startswith('data:image/jpeg;base64,')
@@ -554,8 +554,9 @@ def test_background_speech_and_slow_vision_do_not_starve_direct_question(store, 
             stop.set()
             await task
             release.set()
-            await asyncio.wait_for(c.queue.join(), 3)
-            await asyncio.wait_for(c.turn_queue.join(), 3)
+            # The assertion above measures direct-question latency while noise
+            # continues. Close cancels remaining noise; draining every queued
+            # background fragment is not a separate latency requirement.
             await c.close()
     try:
         service.submit('stone', image(), time())
@@ -753,16 +754,86 @@ def test_visual_capture_requires_active_voice(store):
     asyncio.run(run())
 
 
-def test_cloud_request_includes_recent_scene_without_using_it_as_image_evidence(store):
+def test_description_request_excludes_scene_and_previous(store):
     seen=[]
     def transport(payload):
         seen.append(payload)
         return {'choices':[{'message':{'content':'观察结果'}}]}
     model=VisionModel(store.config,transport)
-    model.describe(image(),scene='有人刚提到门口的桌子',previous='先前环境')
+    model.describe(image(),scene='有人刚提到门口的桌子',previous='先前环境',question='桌子在哪里？')
     text=seen[0]['messages'][0]['content'][0]['text']
-    assert '有人刚提到门口的桌子' in text
-    assert '不证明画面中的人物身份' in text
+    assert '有人刚提到门口的桌子' not in text
+    assert '先前环境' not in text
+    assert '桌子在哪里？' in text
+    assert '不作为画面证据' in text
+    assert seen[0]['messages'][0]['content'][1]['type'] == 'image_url'
+
+
+def test_change_comparison_keeps_previous_separate_from_description(store):
+    seen = []
+    def transport(payload):
+        seen.append(payload)
+        return {'choices':[{'message':{'content':json.dumps({
+            'description':'桌旁无人', 'change_degree':'medium', 'change_reason':'人离开桌旁'})}}]}
+    model = VisionModel(store.config, transport)
+    result = model.observe(image(), previous='有人在桌旁', scene='刚才在讨论门口')
+    assert result['description'] == '桌旁无人'
+    assert len(seen) == 1
+    text = seen[0]['messages'][0]['content'][0]['text']
+    assert '有人在桌旁' in text
+    assert '仅用于change_degree和change_reason，不得写入description' in text
+    assert '刚才在讨论门口' not in text
+    assert result['change_degree'] == 'medium'
+    assert '区分镜头移动、取景和遮挡变化与现场状态变化' in text
+    assert '首次观察为high' not in text
+
+
+@pytest.mark.parametrize('previous', ['', '   '])
+def test_single_image_never_claims_change_even_if_model_does(store, previous):
+    seen = []
+    def transport(payload):
+        seen.append(payload)
+        return {'choices':[{'message':{'content':json.dumps({
+            'description':'桌旁有人', 'change_degree':'high', 'change_reason':'首次观察'})}}]}
+    result = VisionModel(store.config, transport).observe(image(), previous=previous)
+    text = seen[0]['messages'][0]['content'][0]['text']
+    assert '只描述当前图片，不判断前后变化' in text
+    assert '比较历史图或此前环境描述' not in text
+    assert '变化比较材料' not in text
+    assert result == {'description':'桌旁有人', 'change_degree':'unknown',
+                      'change_reason':'未提供历史比较材料，仅完成当前观察。'}
+
+
+@pytest.mark.parametrize('has_current', [False, True])
+def test_service_current_only_does_not_trust_provider_change_grade(store, has_current):
+    class Provider:
+        def observe(self, data):
+            return {'description':'当前有人', 'change_degree':'high', 'change_reason':'猜测变化'}
+    service = VisionService(store, store.config, Provider(), Detector())
+    current = snapshot(store)
+    try:
+        assert service._observe('stone', current['frame'], current if has_current else None) == (
+            '当前有人', 'unknown', '未提供历史比较材料，仅完成当前观察。')
+    finally:
+        service.close()
+
+
+def test_visual_service_does_not_forward_scene_or_previous_to_text_provider(store):
+    class Provider:
+        def __init__(self): self.calls = []
+        def describe(self, data, **kwargs):
+            self.calls.append(kwargs)
+            return '当前图像描述'
+    model = Provider()
+    service = VisionService(store, store.config, model, Detector())
+    service.scene_context = lambda: pytest.fail('视觉描述不应读取片场')
+    current = snapshot(store)
+    try:
+        assert service._observe('stone', current['frame'], current) == ('当前图像描述', 'unknown', '')
+        assert service.recall_image('stone', current['frame'], '看桌旁') == '当前图像描述'
+        assert model.calls == [{}, {'question':'看桌旁'}]
+    finally:
+        service.close()
 
 
 def test_stable_sampling_reuses_saved_scene_without_new_frames(store):

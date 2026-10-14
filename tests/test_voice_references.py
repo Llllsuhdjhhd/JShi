@@ -173,7 +173,8 @@ def test_candidate_worker_does_not_block_entry_and_playback_feedback_reaches_jev
                                          sample_source=audio,input_pause_s=0,jev=VoiceJEV(model))
         try:
             conversation.interaction_feedback.played('prior',0,'怎么称呼你？',['lux-id'],['old-input'])
-            conversation.jev_scene_store.append('played:prior:0',{'p':'匠石','text':'怎么称呼你？','basis':'已播出','at':1})
+            from time import time
+            conversation.jev_scene_store.append('played:prior:0',{'p':'匠石','text':'怎么称呼你？','basis':'已播出','at':time()*1000})
             await conversation.accept(Transcript('匠石你好。','A',0,3000,True))
             await asyncio.wait_for(conversation.queue.join(),2)
             await asyncio.wait_for(conversation.turn_queue.join(),2)

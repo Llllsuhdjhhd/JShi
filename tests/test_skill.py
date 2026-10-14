@@ -101,7 +101,7 @@ def test_system_extra_has_compact_schema_and_no_speaker():
 def test_instruction_keeps_rules_without_examples():
     text = CognitionSkill.instruction
     assert "【关于你】" in text
-    assert "【关于输入】" in text
+    assert "【材料及用途】" in text
     assert "【价值】" in text
     assert "【回应方式】" in text
     assert "【本轮职责】" in text
@@ -117,7 +117,7 @@ def test_instruction_keeps_rules_without_examples():
     assert "不伤害人类" in text
     assert "respond（回话）" in text
     assert "ignore（忽略）" in text
-    assert "【来源谁优先】" in text
+    assert "【材料归属与证据使用】" in text
     assert "明确事项" in text
     # 回复调用不再写场；写场在 WriteZoneSkill。
     assert "rewritten_context" not in text
