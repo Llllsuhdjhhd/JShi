@@ -6,6 +6,7 @@ import hashlib
 import base64
 import json
 import logging
+import re
 from time import monotonic, time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
@@ -487,18 +488,18 @@ class VoiceConversation:
     @staticmethod
     def unfinished(text):
         # Conservative mid-turn cue at the JEV/main boundary (not a full parser).
-        # Expanded endings cover SmoothConv-style half-sentences (一些/变成了/那种…).
-        import re
+        # Longer fixed tails + 变成了 / 那种 / 的那种…; do not flag common complete
+        # short-reply tokens (一些/这个/那个/还有/所以/变成) as incomplete endings.
         raw = text.strip()
         text = raw.rstrip('，。！？,.!?… ')
-        if text.endswith(('还有一种问题是', '问题是', '就是说', '比如说', '比方说', '然后', '因为', '如果', '但是', '的话', '不需要', '我想', '我觉得', '一些', '变成了', '变成', '那种', '所以', '还有', '这个', '那个')):
+        if text.endswith(('还有一种问题是', '问题是', '就是说', '比如说', '比方说', '然后', '因为', '如果', '但是', '的话', '不需要', '我想', '我觉得', '变成了', '那种')):
             return True
         if re.search(r'的那种\w{0,8}$', text):
             return True
         # Very short stub without closer particle / finals (e.g. 那我回来).
-        # Exclude complete short closers (走吧、好的、嗯).
+        # Exclude complete short closers (走吧、好的、嗯、就是这个、还有).
         if len(text) <= 6 and not re.search(r'[。！？.!?]$', raw):
-            if re.search(r'(吧|了|啊|呀|呢|吗|喔|哦|嗯|好|走|行|对|是|停)$', text):
+            if re.search(r'(吧|了|啊|呀|呢|吗|喔|哦|嗯|好|走|行|对|是|停|的|一些|这个|那个|还有|所以|变成)$', text):
                 return False
             return True
         return False

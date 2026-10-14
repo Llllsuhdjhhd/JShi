@@ -24,9 +24,9 @@ MODELS = {'deepseek':['deepseek-v4-flash','deepseek-v4-pro'],
 # budget so the answer is a degraded success instead of a null prediction.
 # Slow/degraded fallbacks only (never preferred hot). Order when chained:
 # preview-first → flash-lite → qwen3.5-flash → DeepSeek last.
+# Only models listed in MODELS above; no orphan names (e.g. gemini-3.5-flash-lite).
 SLOW_FALLBACK_MODELS = frozenset({
     'gemini-3.1-flash-lite',
-    'gemini-3.5-flash-lite',
     'qwen3.5-flash',
     'qwen3.5-flash-2026-02-23',
 })
