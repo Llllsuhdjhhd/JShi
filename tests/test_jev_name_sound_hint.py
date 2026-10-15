@@ -17,14 +17,18 @@ _SINGLE_RULES = (
     '会议场景下的祈使、翻页、换方案等方案陈述应ignore',
     '若有弱提示或明确叫名，本条不盖掉接话',
     '弱线索（k<n，如1/2）在句首称呼＋面向听者的疑问或请求（呢、吗、你觉得等）时倾向respond',
-    '仍必须让位为ignore',
+    '同名让位仅当scene或现场材料中确实出现hint.token（现场另有同名真人）时才ignore',
+    '谐音指向匠石本人、scene未出现该token时不让位',
+    '不得凭空假定另有同名真人',
 )
 _ENTRY_RULES = (
     '场景写「助手」不等于默认接令',
     '会议场景下的祈使、翻页、换方案等方案陈述不当成对匠石下指令',
     '若有弱提示或明确叫名，本条不盖掉接话判断',
     '弱线索（k<n，如1/2）在句首称呼＋面向听者的疑问或请求（呢、吗、你觉得等）时倾向视为对匠石接话',
-    '仍必须让位于该现场证据',
+    '同名让位仅当scene或现场材料中确实出现hint.token（现场另有同名真人）时才让位',
+    '谐音指向匠石本人、scene未出现该token时不让位',
+    '不得凭空假定另有同名真人',
 )
 
 
@@ -158,7 +162,8 @@ def test_jiangjiang_weak_hint_yields_to_scene_presence_not_respond():
     assert hint['matched'] == '1/2' and hint['token'] == '江江'
     assert '江江' in (payload.get('delivery') or {}).get('scene', '')
     assert weak_hint_yields_to_scene(hint, scene) is True
-    assert '仍必须让位为ignore' in stub.requests[0].system_extra
+    assert '同名让位仅当scene或现场材料中确实出现hint.token' in stub.requests[0].system_extra
+    assert '如江江' not in stub.requests[0].system_extra
     assert decision.action == 'ignore'
 
 

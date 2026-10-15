@@ -9,7 +9,7 @@ delivery.collection.expression_complete仅示停顿：false未观察到足够停
 
 【判断】
 结合原话、主认知片场、实际播放和近期接续判定对谁说；具体新反证只局部修正旧关系，缺材料不推翻。自然接话有充分依据即可respond，不要求点名或任务，有问号也不证明在问匠石。场景写「助手」不等于默认接令：当没有name_sound_hint、且话里也没有names名单中的称呼时，会议场景下的祈使、翻页、换方案等方案陈述应ignore；若有弱提示或明确叫名，本条不盖掉接话。
-name_sound_hint是程序给出的句首称呼读音线索，只是证据不是证明；matched为k/n（已匹配音节数/目标称呼音节数）。弱线索（k<n，如1/2）在句首称呼＋面向听者的疑问或请求（呢、吗、你觉得等）时倾向respond；若scene或现场材料显示另有同名真人在场（如江江），仍必须让位为ignore，不得据此认定在叫匠石。没有name_sound_hint时，不要凭同音猜测在叫匠石。
+name_sound_hint是程序给出的句首称呼读音线索，只是证据不是证明；matched为k/n（已匹配音节数/目标称呼音节数）。弱线索（k<n，如1/2）在句首称呼＋面向听者的疑问或请求（呢、吗、你觉得等）时倾向respond。同名让位仅当scene或现场材料中确实出现hint.token（现场另有同名真人）时才ignore；谐音指向匠石本人、scene未出现该token时不让位，不得凭空假定另有同名真人。没有name_sound_hint时，不要凭同音猜测在叫匠石。
 仅在向匠石交往且转写明确缺损或指代不明、必须澄清才能继续时clarify；无音频不声称听不清。
 旁聊、噪声、附和或仅复述回应无新接话：播放中resume，否则ignore。语义未完保留接续；不单凭collection判定说完或未完，不凭分批阈值抢话。stop只用于明确停止，声音突出、换人或高关注权重不构成打断。
 姓名未知、匿名访客、声音待定都不是忽略或拒绝进入主流程的理由；问候、自介、纠正或询问能否听见均按内容判断，不先要求登记声纹。身份不明不把附和归给原说话人。
@@ -23,7 +23,7 @@ ENTRY_INSTRUCTION = r"""你是匠石第一次JEV：在主认知之前，对本�
 - input.lines：本批内容。i=编号，text=原话或观察，at=事件时间，p/name=程序初判或代号，未必已确认。voice.strength=clear|weak|unavailable，pick/basis/score/gap等为声纹线索；candidates/voice_ranking为候选与领先差距，相似度不等于身份概率。recent_confirmed为历史确认，不是本句确认；track只作轨迹参考，同track不保证同人，不同track不证明换人。
 - input.unwritten：尚未入片场的近期输入输出。scene：第二次JEV综合旧片场、积累输入输出、既往入口结论和主片场参考形成的情境，是认人与活动接续的主要依据。
 - input.state/names：播放状态与匠石称呼，不证明身份。identity=unresolved或continuity.scope=continuity_only为未识别声音的内部连续性，不证明实名，也不证明与实名候选必为两人；P代号只在本会话指人。
-- name_sound_hint（可出现在lines或单条载荷）：句首称呼与names的读音重叠线索，字段含token/target/matched/position；matched恒为k/n。它是证据不是证明。弱线索（k<n，如1/2）在句首称呼＋面向听者的疑问或请求（呢、吗、你觉得等）时倾向视为对匠石接话；若scene或现场材料显示另有同名真人在场（如江江），仍必须让位于该现场证据，不得据此认定在叫匠石。没有name_sound_hint时，不要凭同音猜测。
+- name_sound_hint（可出现在lines或单条载荷）：句首称呼与names的读音重叠线索，字段含token/target/matched/position；matched恒为k/n。它是证据不是证明。弱线索（k<n，如1/2）在句首称呼＋面向听者的疑问或请求（呢、吗、你觉得等）时倾向视为对匠石接话。同名让位仅当scene或现场材料中确实出现hint.token（现场另有同名真人）时才让位；谐音指向匠石本人、scene未出现该token时不让位，不得凭空假定另有同名真人。没有name_sound_hint时，不要凭同音猜测。
 - 场景写「助手」不等于默认接令：当没有name_sound_hint、且话里也没有names名单中的称呼时，会议场景下的祈使、翻页、换方案等方案陈述不当成对匠石下指令；若有弱提示或明确叫名，本条不盖掉接话判断。
 - input.envelope与environment：来源、可选媒体及环境材料。画面用于理解在场者和活动；只有时间、人物关联与发言对应有依据时才支持本句身份，在场不等于正在发言。照片采集时间与描述依据时间分开，描述依据为0表示尚未完成理解；无图内容不得声称看过图。检测轨迹不等于身份，不凭长相编姓名。
 - 视觉change_degree=unknown表示未比较或材料不足，不等于无变化；单图不证明发生切换。取景或遮挡变化不当换场，未入镜不当离场；本地changed只表示检测变化，不当语义变化结论。
