@@ -49,20 +49,20 @@ def test_name_sound_hint_matched_fractions():
 
 
 def test_hello_prefix_then_cjk_vocative():
-    """Leading Latin is ignored; CJK vocative ≤4 still matches (e.g. HELLO 士 → 匚石 1/2)."""
-    names = ['匚石', '匚石啊', '匚石同学']
+    """Leading Latin is ignored; CJK vocative ≤4 still matches (e.g. HELLO 士 → 匠石 1/2)."""
+    names = ['匠石', '匠石啊', '匠石同学']
     assert name_sound_hint('HELLO 士', names) == {
-        'token': '士', 'target': '匚石', 'matched': '1/2', 'position': 'vocative'}
+        'token': '士', 'target': '匠石', 'matched': '1/2', 'position': 'vocative'}
     assert name_sound_hint('HELLO 士，…', names) == {
-        'token': '士', 'target': '匚石', 'matched': '1/2', 'position': 'vocative'}
+        'token': '士', 'target': '匠石', 'matched': '1/2', 'position': 'vocative'}
 
 
 def test_no_hint_for_unrelated_vocatives_and_latin():
     for text in ('連軍啊', '小左', 'Ross', 'Phoebe'):
         assert name_sound_hint(text, NAMES) is None
-    # Pure Latin still yields no hint even when 匚石 is on the names list.
-    assert name_sound_hint('Ross', ['匚石']) is None
-    assert name_sound_hint('Phoebe', ['匚石']) is None
+    # Pure Latin still yields no hint even when 匠石 is on the names list.
+    assert name_sound_hint('Ross', ['匠石']) is None
+    assert name_sound_hint('Phoebe', ['匠石']) is None
 
 
 def test_decide_payload_includes_hint_and_instruction_rule():

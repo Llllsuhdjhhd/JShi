@@ -13,7 +13,6 @@ _PINYIN: dict[str, str] = {
     '匠': 'jiang', '将': 'jiang', '江': 'jiang', '姜': 'jiang', '豇': 'jiang',
     '石': 'shi', '室': 'shi', '士': 'shi', '事': 'shi', '市': 'shi', '试': 'shi',
     '诗': 'shi', '师': 'shi', '史': 'shi', '是': 'shi',
-    '匚': 'fang',  # rare glyph sometimes seen in nickname lists; not a 匠 homophone
     '连': 'lian', '連': 'lian',
     '军': 'jun', '軍': 'jun',
     '小': 'xiao', '左': 'zuo',
