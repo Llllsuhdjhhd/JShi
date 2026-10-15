@@ -4,13 +4,43 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
 import math
+import os
 import re
 from time import monotonic
 
 from jshi.core import SubjectState
 from jshi.models import ModelRequest
+from jshi.models.routing import (
+    ProviderFailure,
+    ProviderModel,
+    RoutedModel,
+    _cap_model_timeout,
+    _model_name,
+    is_lite_model,
+)
 from jshi.skill.base import parse_json_object
 from .jev_prompts import SINGLE_INSTRUCTION
+
+# Wall-clock budget for decide / decide_batch model calls (lite + one Qwen fallback).
+JEV_GATE_BUDGET_S = 8.0
+
+
+def default_jev_fallback_models():
+    """Build Bailian/DashScope qwen3.5-flash from existing env plumbing when keyed."""
+    api_key = os.getenv('JSHI_API_QWEN_API_KEY') or os.getenv('DASHSCOPE_API_KEY', '')
+    if not api_key:
+        return []
+    endpoint = (os.getenv('JSHI_API_QWEN_ENDPOINT') or os.getenv('DASHSCOPE_BASE_URL')
+                or 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+    service = {
+        'label': '阿里云百炼 Qwen（可计费）',
+        'protocol': 'chat',
+        'thinking_style': 'qwen',
+        'paid': True,
+        'endpoint': endpoint,
+        'api_key': api_key,
+    }
+    return [ProviderModel(service, 'qwen3.5-flash', 'off', timeout=ProviderModel.DEFAULT_TIMEOUT_S)]
 
 
 @dataclass(frozen=True)
@@ -81,10 +111,77 @@ def explicit_name(text: str) -> str:
 
 
 class VoiceJEV:
-    def __init__(self, model=None) -> None:
+    def __init__(self, model=None, *, budget_s: float = JEV_GATE_BUDGET_S, fallback_models=None) -> None:
         self.model = model
+        self.budget_s = float(budget_s)
+        self.fallback_models = (list(fallback_models) if fallback_models is not None
+                                else default_jev_fallback_models())
         self._unavailable_until = 0.0
         self._unavailable_error = ''
+
+    def _generate_gate(self, request):
+        """Call the gate model within ``budget_s``; lite timeout → one ``fallback_models`` try.
+
+        Never retries lite. If the budget is exhausted or the single fallback fails, raise so
+        callers use ``_unavailable_hold`` (idle→ignore, playing→resume; never respond).
+        """
+        deadline = monotonic() + self.budget_s
+
+        def remaining():
+            return deadline - monotonic()
+
+        def call_one(model):
+            left = remaining()
+            if left <= 0:
+                raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
+            return _cap_model_timeout(model, left).generate(request)
+
+        def try_fallback(from_exc):
+            if remaining() <= 0:
+                raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted') from from_exc
+            if not self.fallback_models:
+                raise from_exc
+            # Exactly one call to the first fallback provider (Qwen by default).
+            return call_one(self.fallback_models[0])
+
+        primary = self.model
+        if isinstance(primary, RoutedModel):
+            chain = primary._snapshot()
+            failed = []
+            for index, model in enumerate(chain):
+                try:
+                    with primary._observe(model):
+                        primary._notify_paid(model)
+                        result = call_one(model)
+                    reason = failed[0]['reason'] if failed else ''
+                    primary._note(model, index, degraded=bool(failed), fallback_reason=reason, failed=failed)
+                    return result
+                except Exception as exc:
+                    failed.append({'model': _model_name(model), 'reason': RoutedModel._fallback_reason(exc)})
+                    timed_out = RoutedModel._is_timeout(exc)
+                    if timed_out and is_lite_model(model):
+                        # Do not retry lite or continue the primary chain past it.
+                        primary._note(model, index, degraded=True, fallback_reason='timeout', failed=failed)
+                        result = try_fallback(exc)
+                        fb = self.fallback_models[0]
+                        primary._note(fb, index + 1, degraded=True, fallback_reason='timeout', failed=failed)
+                        return result
+                    if index + 1 == len(chain) or not primary._retryable(exc) or remaining() <= 0:
+                        if remaining() <= 0:
+                            primary._note(model, index, degraded=bool(failed), fallback_reason='timeout', failed=failed)
+                            raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted') from exc
+                        primary._note(model, index, degraded=bool(failed),
+                                      fallback_reason=RoutedModel._fallback_reason(exc), failed=failed)
+                        raise
+            raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
+
+        try:
+            return call_one(primary)
+        except Exception as exc:
+            # Lite timeout only: do not retry lite; one fallback_models call with remaining budget.
+            if RoutedModel._is_timeout(exc) and is_lite_model(primary):
+                return try_fallback(exc)
+            raise
 
     def decide_envelope(self, subject_id, envelope, delivery, *, vision=None, on_request=None):
         from jshi.core.inputpack import packet
@@ -135,7 +232,7 @@ class VoiceJEV:
         try:
             if on_request is not None:
                 on_request(request)
-            data = parse_json_object(self.model.generate(request).text)
+            data = parse_json_object(self._generate_gate(request).text)
             action = data.get("action")
             if action not in {"ignore", "resume", "stop", "respond", "clarify"}:
                 raise ValueError("invalid JEV action")
@@ -266,7 +363,7 @@ class VoiceJEV:
         try:
             if on_request is not None:
                 on_request(request)
-            raw_text = self.model.generate(request).text
+            raw_text = self._generate_gate(request).text
             data = parse_json_object(raw_text)
             if isinstance(data.get("items"), list):
                 from jshi.core.prompt_profile import normalize_hint

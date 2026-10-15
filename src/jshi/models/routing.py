@@ -156,6 +156,29 @@ class ProviderModel:
                 if text: yield text
 
 
+def _model_name(model):
+    return str(getattr(model, 'name', None) or type(model).__name__)
+
+
+def is_lite_model(model):
+    """Gemini flash-lite (and test stubs named *lite*) used as JEV slow fallback."""
+    name = _model_name(model).lower()
+    return 'flash-lite' in name or name.endswith('-lite') or name == 'lite'
+
+
+def _cap_model_timeout(model, remaining_s):
+    """Bound one ProviderModel HTTP wait by remaining gate budget; leave stubs unchanged."""
+    if remaining_s <= 0:
+        raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
+    timeout = getattr(model, 'timeout', None)
+    if timeout is None or not hasattr(model, 'service') or not hasattr(model, 'name'):
+        return model
+    capped = min(float(timeout), float(remaining_s))
+    if capped <= 0:
+        raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
+    return ProviderModel(model.service, model.name, model.effort, model.max_tokens, timeout=capped)
+
+
 class RoutedModel:
     """Swap an immutable chain. A started request keeps its original chain."""
     def __init__(self, initial, on_paid=None, on_status=None):
@@ -186,7 +209,13 @@ class RoutedModel:
             if '429' in msg or '额度' in msg: return '429'
         if isinstance(exc, (TimeoutError, URLError)):
             return 'timeout'
+        if getattr(exc, 'code', None) == 408:
+            return 'timeout'
         return type(exc).__name__
+
+    @classmethod
+    def _is_timeout(cls, exc):
+        return cls._fallback_reason(exc) == 'timeout'
 
     @contextmanager
     def _observe(self, model):
