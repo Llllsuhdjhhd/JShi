@@ -1,6 +1,7 @@
 """JEV decides whether an utterance warrants interrupting ongoing playback."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, replace
 import json
 import math
@@ -24,7 +25,17 @@ from .jev_prompts import SINGLE_INSTRUCTION
 # Wall-clock budget for decide / decide_batch model calls (lite + one Qwen fallback).
 JEV_GATE_BUDGET_S = 8.0
 # Keep at least this much of budget_s for the single Qwen fallback after a lite timeout.
-JEV_GATE_FALLBACK_RESERVE_S = 3.0
+JEV_GATE_FALLBACK_RESERVE_S = 3.5
+
+_FALLBACK_EXECUTOR: ThreadPoolExecutor | None = None
+
+
+def _jev_fallback_executor() -> ThreadPoolExecutor:
+    """Lazily shared pool for hard-deadline Qwen fallback waits (sync gate, no asyncio)."""
+    global _FALLBACK_EXECUTOR
+    if _FALLBACK_EXECUTOR is None:
+        _FALLBACK_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix='jev-gate-fb')
+    return _FALLBACK_EXECUTOR
 
 
 def default_jev_fallback_models():
@@ -138,8 +149,9 @@ class VoiceJEV:
 
         Never retries lite. Lite per-call timeout is capped at
         ``min(timeout, budget remaining − fallback_reserve_s)`` so Qwen keeps a reserve
-        (default 3s; ≈5s lite with budget 8). If the budget is exhausted or the single
-        fallback fails, raise so callers use ``_unavailable_hold`` (never respond).
+        (default 3.5s; ≈4.5s lite with budget 8). The Qwen call runs in a worker thread and
+        is waited with ``future.result(timeout=remaining)`` so a hung provider cannot exceed
+        the wall-clock budget; on wait timeout raise for ``_unavailable_hold`` (never respond).
         """
         deadline = monotonic() + self.budget_s
 
@@ -158,13 +170,20 @@ class VoiceJEV:
             return self.fallback_reserve_s if self.fallback_models else 0.0
 
         def try_fallback(from_exc):
-            if remaining() <= 0:
+            left = remaining()
+            if left <= 0:
                 raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted') from from_exc
             if not self.fallback_models:
                 raise from_exc
-            # Exactly one call to the first fallback provider (Qwen by default); no reserve.
-            # JEV-only: force DashScope enable_thinking false (thinking on ≈14s; off ≈1–3s).
-            return call_one(_jev_fallback_provider(self.fallback_models[0]), reserve=0.0)
+            # Exactly one Qwen (or injected) call; force thinking off; hard wall-clock wait.
+            fb = _jev_fallback_provider(self.fallback_models[0])
+            target = _cap_model_timeout(fb, left)
+            future = _jev_fallback_executor().submit(target.generate, request)
+            try:
+                return future.result(timeout=left)
+            except FuturesTimeoutError:
+                # Orphaned call may still run; do not block the sync gate on it.
+                raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted') from from_exc
 
         primary = self.model
         if isinstance(primary, RoutedModel):

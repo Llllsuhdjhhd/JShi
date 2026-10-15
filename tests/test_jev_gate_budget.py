@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from io import BytesIO
 
 import pytest
@@ -97,12 +98,28 @@ class QwenFail:
         raise ProviderFailure(500, True, 'Q · qwen', '服务暂时失败')
 
 
+class QwenHang:
+    """Ignores HTTP timeout and blocks the worker thread; gate must hard-wait and hold."""
+    name = 'qwen3.5-flash'
+    service = {'label': 'Q', 'thinking_style': 'qwen'}
+    timeout = 7.0
+
+    def __init__(self, sleep_s=10.0):
+        self.sleep_s = sleep_s
+        self.calls = 0
+
+    def generate(self, request):
+        self.calls += 1
+        time.sleep(self.sleep_s)
+        return ModelResponse(model=self.name, text=_ok_batch(why='should not win'))
+
+
 def test_budget_s_and_fallback_models_init_defaults(monkeypatch):
     monkeypatch.delenv('JSHI_API_QWEN_API_KEY', raising=False)
     monkeypatch.delenv('DASHSCOPE_API_KEY', raising=False)
     gate = VoiceJEV()
     assert gate.budget_s == JEV_GATE_BUDGET_S == 8.0
-    assert gate.fallback_reserve_s == JEV_GATE_FALLBACK_RESERVE_S == 3.0
+    assert gate.fallback_reserve_s == JEV_GATE_FALLBACK_RESERVE_S == 3.5
     assert gate.fallback_models == []
 
 
@@ -136,21 +153,40 @@ def test_qwen_success_used_after_lite_timeout(monkeypatch):
 
 
 def test_lite_runs_to_reserve_cap_then_qwen_judged(monkeypatch):
-    """Lite capped at budget_s − fallback_reserve_s (5s); Qwen 2.5s → judged, not hold."""
+    """Lite capped at budget_s − fallback_reserve_s (4.5s); Qwen 3.04s → judged, not hold."""
     clock = FakeClock()
     monkeypatch.setattr('jshi.voice.jev.monotonic', clock)
     lite = LiteTimeout(clock, timeout=7.0)
-    qwen = QwenOk(clock, cost=2.5, text=_ok_batch(why='预留后Qwen终审'))
-    gate = VoiceJEV(lite, budget_s=8.0, fallback_models=[qwen], fallback_reserve_s=3.0)
+    qwen = QwenOk(clock, cost=3.04, text=_ok_batch(why='预留后Qwen终审'))
+    gate = VoiceJEV(lite, budget_s=8.0, fallback_models=[qwen], fallback_reserve_s=3.5)
     started = clock()
     result = gate.decide_batch('stone', _batch(), [], {'state': 'completed'})
     elapsed = clock() - started
     assert result.judged and result.action == 'respond' and not result.model_error
     assert result.items[0].speaker_reason == '预留后Qwen终审'
     assert lite.calls == 1 and qwen.calls == 1
-    assert lite.last_wait == 5.0  # min(7, 8 − 3)
-    assert elapsed == 7.5
+    assert lite.last_wait == 4.5  # min(7, 8 − 3.5)
+    assert elapsed == pytest.approx(7.54)
     assert elapsed <= gate.budget_s
+
+
+def test_qwen_hang_hard_deadline_holds_within_budget(monkeypatch):
+    """Hung Qwen (sleep ignores timeout) → hold; wall clock ≤ budget + small epsilon."""
+    clock = FakeClock()
+    monkeypatch.setattr('jshi.voice.jev.monotonic', clock)
+    # Lite consumes 4.5s on the fake clock → remaining wait for Qwen is 3.5s real.
+    lite = LiteTimeout(clock, timeout=7.0)
+    qwen = QwenHang(sleep_s=10.0)
+    gate = VoiceJEV(lite, budget_s=8.0, fallback_models=[qwen], fallback_reserve_s=3.5)
+    started = time.monotonic()
+    result = gate.decide_batch('stone', _batch(), [], {'state': 'idle'})
+    elapsed = time.monotonic() - started
+    assert result.action == 'ignore'
+    assert not result.judged and result.model_error
+    assert result.items[0].to_jiangshi == 'no'
+    assert lite.calls == 1 and qwen.calls == 1
+    assert lite.last_wait == 4.5
+    assert elapsed <= gate.budget_s + 0.75
 
 
 @pytest.mark.parametrize('state,expected', [
@@ -190,8 +226,8 @@ def test_qwen_failure_after_lite_timeout_holds(monkeypatch):
 def test_total_elapsed_bounded_by_budget_with_fake_clock(monkeypatch):
     clock = FakeClock()
     monkeypatch.setattr('jshi.voice.jev.monotonic', clock)
-    lite = LiteTimeout(clock, timeout=5.0)
-    qwen = QwenOk(clock, cost=2.5)
+    lite = LiteTimeout(clock, timeout=4.5)
+    qwen = QwenOk(clock, cost=3.0)
     gate = VoiceJEV(lite, budget_s=8.0, fallback_models=[qwen])
     started = clock()
     result = gate.decide_batch('stone', _batch(), [], {'state': 'completed'})
@@ -251,7 +287,7 @@ def test_jev_qwen_fallback_outgoing_payload_has_enable_thinking_false(monkeypatc
         {'label': 'Q', 'protocol': 'chat', 'thinking_style': 'qwen', 'paid': True,
          'endpoint': 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'api_key': 'test-key'},
         'qwen3.5-flash', 'low', timeout=7.0)
-    gate = VoiceJEV(lite, budget_s=8.0, fallback_models=[qwen], fallback_reserve_s=3.0)
+    gate = VoiceJEV(lite, budget_s=8.0, fallback_models=[qwen], fallback_reserve_s=3.5)
     result = gate.decide_batch('stone', _batch(), [], {'state': 'completed'})
     assert result.judged and result.action == 'respond'
     assert captured['body']['model'] == 'qwen3.5-flash'
