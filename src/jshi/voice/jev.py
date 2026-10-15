@@ -23,6 +23,8 @@ from .jev_prompts import SINGLE_INSTRUCTION
 
 # Wall-clock budget for decide / decide_batch model calls (lite + one Qwen fallback).
 JEV_GATE_BUDGET_S = 8.0
+# Keep at least this much of budget_s for the single Qwen fallback after a lite timeout.
+JEV_GATE_FALLBACK_RESERVE_S = 3.0
 
 
 def default_jev_fallback_models():
@@ -40,7 +42,17 @@ def default_jev_fallback_models():
         'endpoint': endpoint,
         'api_key': api_key,
     }
+    # effort='off' → ProviderModel emits enable_thinking=false on the DashScope body.
     return [ProviderModel(service, 'qwen3.5-flash', 'off', timeout=ProviderModel.DEFAULT_TIMEOUT_S)]
+
+
+def _jev_fallback_provider(model):
+    """JEV fallback path only: Qwen must send enable_thinking false (not thinking-on ~14s)."""
+    if isinstance(model, ProviderModel) and (model.service or {}).get('thinking_style') == 'qwen':
+        if model.effort == 'off':
+            return model
+        return ProviderModel(model.service, model.name, 'off', model.max_tokens, timeout=model.timeout)
+    return model
 
 
 @dataclass(frozen=True)
@@ -111,38 +123,48 @@ def explicit_name(text: str) -> str:
 
 
 class VoiceJEV:
-    def __init__(self, model=None, *, budget_s: float = JEV_GATE_BUDGET_S, fallback_models=None) -> None:
+    def __init__(self, model=None, *, budget_s: float = JEV_GATE_BUDGET_S,
+                 fallback_models=None, fallback_reserve_s: float = JEV_GATE_FALLBACK_RESERVE_S) -> None:
         self.model = model
         self.budget_s = float(budget_s)
         self.fallback_models = (list(fallback_models) if fallback_models is not None
                                 else default_jev_fallback_models())
+        self.fallback_reserve_s = float(fallback_reserve_s)
         self._unavailable_until = 0.0
         self._unavailable_error = ''
 
     def _generate_gate(self, request):
         """Call the gate model within ``budget_s``; lite timeout → one ``fallback_models`` try.
 
-        Never retries lite. If the budget is exhausted or the single fallback fails, raise so
-        callers use ``_unavailable_hold`` (idle→ignore, playing→resume; never respond).
+        Never retries lite. Lite per-call timeout is capped at
+        ``min(timeout, budget remaining − fallback_reserve_s)`` so Qwen keeps a reserve
+        (default 3s; ≈5s lite with budget 8). If the budget is exhausted or the single
+        fallback fails, raise so callers use ``_unavailable_hold`` (never respond).
         """
         deadline = monotonic() + self.budget_s
 
         def remaining():
             return deadline - monotonic()
 
-        def call_one(model):
+        def call_one(model, *, reserve=0.0):
             left = remaining()
-            if left <= 0:
+            usable = left - float(reserve)
+            if usable <= 0:
                 raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
-            return _cap_model_timeout(model, left).generate(request)
+            return _cap_model_timeout(model, usable).generate(request)
+
+        def lite_reserve():
+            # Only reserve when a fallback provider is configured.
+            return self.fallback_reserve_s if self.fallback_models else 0.0
 
         def try_fallback(from_exc):
             if remaining() <= 0:
                 raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted') from from_exc
             if not self.fallback_models:
                 raise from_exc
-            # Exactly one call to the first fallback provider (Qwen by default).
-            return call_one(self.fallback_models[0])
+            # Exactly one call to the first fallback provider (Qwen by default); no reserve.
+            # JEV-only: force DashScope enable_thinking false (thinking on ≈14s; off ≈1–3s).
+            return call_one(_jev_fallback_provider(self.fallback_models[0]), reserve=0.0)
 
         primary = self.model
         if isinstance(primary, RoutedModel):
@@ -152,7 +174,8 @@ class VoiceJEV:
                 try:
                     with primary._observe(model):
                         primary._notify_paid(model)
-                        result = call_one(model)
+                        reserve = lite_reserve() if is_lite_model(model) else 0.0
+                        result = call_one(model, reserve=reserve)
                     reason = failed[0]['reason'] if failed else ''
                     primary._note(model, index, degraded=bool(failed), fallback_reason=reason, failed=failed)
                     return result
@@ -176,7 +199,8 @@ class VoiceJEV:
             raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
 
         try:
-            return call_one(primary)
+            reserve = lite_reserve() if is_lite_model(primary) else 0.0
+            return call_one(primary, reserve=reserve)
         except Exception as exc:
             # Lite timeout only: do not retry lite; one fallback_models call with remaining budget.
             if RoutedModel._is_timeout(exc) and is_lite_model(primary):

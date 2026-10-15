@@ -166,17 +166,44 @@ def is_lite_model(model):
     return 'flash-lite' in name or name.endswith('-lite') or name == 'lite'
 
 
+class _TimeoutBound:
+    """Delegate generate while advertising a capped HTTP timeout (stubs + ProviderModel)."""
+
+    def __init__(self, model, timeout):
+        self._model = model
+        self.timeout = float(timeout)
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+    def generate(self, request):
+        model = self._model
+        if isinstance(model, ProviderModel):
+            return ProviderModel(model.service, model.name, model.effort, model.max_tokens,
+                                timeout=self.timeout).generate(request)
+        previous = getattr(model, 'timeout', None)
+        if previous is not None:
+            model.timeout = self.timeout
+            try:
+                return model.generate(request)
+            finally:
+                model.timeout = previous
+        return model.generate(request)
+
+
 def _cap_model_timeout(model, remaining_s):
-    """Bound one ProviderModel HTTP wait by remaining gate budget; leave stubs unchanged."""
+    """Bound one model HTTP wait by remaining (or reserved) gate budget."""
     if remaining_s <= 0:
         raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
     timeout = getattr(model, 'timeout', None)
-    if timeout is None or not hasattr(model, 'service') or not hasattr(model, 'name'):
+    if timeout is None:
         return model
     capped = min(float(timeout), float(remaining_s))
     if capped <= 0:
         raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
-    return ProviderModel(model.service, model.name, model.effort, model.max_tokens, timeout=capped)
+    if isinstance(model, ProviderModel):
+        return ProviderModel(model.service, model.name, model.effort, model.max_tokens, timeout=capped)
+    return _TimeoutBound(model, capped)
 
 
 class RoutedModel:
