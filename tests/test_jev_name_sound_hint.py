@@ -14,7 +14,7 @@ NAMES = ['匠石', '匠石啊', '匠石同学', '将士']
 # Instruction contract phrases added for name_sound_hint / meeting / weak-hint rules.
 _SINGLE_RULES = (
     '场景写「助手」不等于默认接令',
-    '会议场景下的祈使、翻页、换方案等方案陈述应ignore',
+    '会议场景下的祈使、翻页、换方案等方案陈述，以及对第三方的交办、催收、追问欠款，应ignore',
     '若有弱提示或明确叫名，本条不盖掉接话',
     '弱线索（k<n，如1/2）在句首称呼＋面向听者的疑问或请求（呢、吗、你觉得等）时倾向respond',
     '同名让位仅当scene或现场材料中确实出现hint.token（现场另有同名真人）时才ignore',
@@ -23,7 +23,7 @@ _SINGLE_RULES = (
 )
 _ENTRY_RULES = (
     '场景写「助手」不等于默认接令',
-    '会议场景下的祈使、翻页、换方案等方案陈述不当成对匠石下指令',
+    '会议场景下的祈使、翻页、换方案等方案陈述，以及对第三方的交办、催收、追问欠款，不当成对匠石下指令',
     '若有弱提示或明确叫名，本条不盖掉接话判断',
     '弱线索（k<n，如1/2）在句首称呼＋面向听者的疑问或请求（呢、吗、你觉得等）时倾向视为对匠石接话',
     '同名让位仅当scene或现场材料中确实出现hint.token（现场另有同名真人）时才让位',
@@ -73,8 +73,9 @@ def _scripted_single_action(payload: dict) -> str:
         if 0 < k < n and re.search(r'呢|吗|你觉得', utterance):
             return 'respond'
     named = any(n and n in utterance for n in names)
-    meeting_imperative = bool(re.search(r'翻页|下一页|换方案|换个方案|方案改', utterance))
-    if hint is None and not named and meeting_imperative:
+    third_party_assign = bool(re.search(
+        r'翻页|下一页|换方案|换个方案|方案改|催緊|催紧|催收|欠款|追回|交办|交辦', utterance))
+    if hint is None and not named and third_party_assign:
         return 'ignore'
     return 'respond'
 
@@ -147,6 +148,21 @@ def test_meeting_imperative_without_hint_ignore():
     payload = json.loads(stub.requests[0].input_text)
     assert 'name_sound_hint' not in payload
     assert name_sound_hint(text, NAMES) is None
+    assert decision.action == 'ignore'
+
+
+def test_third_party_debt_chase_without_hint_ignore():
+    """v0_003-style multiparty催欠款交办：无 hint、无名单称呼 → ignore（在场助手≠接令）。"""
+    stub = RuleContractStub()
+    text = '你們要催緊點，年底前一定把錢追回來。'
+    decision = VoiceJEV(stub).decide(
+        'stone', text, {},
+        {'state': 'completed', 'names_for_jiangshi': NAMES,
+         'scene': '【在场】多人交谈；匠石是在场的助手。P2、P3在旁。'})
+    payload = json.loads(stub.requests[0].input_text)
+    assert 'name_sound_hint' not in payload
+    assert name_sound_hint(text, NAMES) is None
+    assert '对第三方的交办、催收、追问欠款' in stub.requests[0].system_extra
     assert decision.action == 'ignore'
 
 
