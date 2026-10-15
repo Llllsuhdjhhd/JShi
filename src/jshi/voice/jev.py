@@ -1,16 +1,69 @@
 """JEV decides whether an utterance warrants interrupting ongoing playback."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, replace
 import json
 import math
+import os
 import re
 from time import monotonic
 
 from jshi.core import SubjectState
 from jshi.models import ModelRequest
+from jshi.models.routing import (
+    ProviderFailure,
+    ProviderModel,
+    RoutedModel,
+    _cap_model_timeout,
+    _model_name,
+    is_lite_model,
+)
 from jshi.skill.base import parse_json_object
 from .jev_prompts import SINGLE_INSTRUCTION
+
+# Wall-clock budget for decide / decide_batch model calls (lite + one Qwen fallback).
+JEV_GATE_BUDGET_S = 8.0
+# Keep at least this much of budget_s for the single Qwen fallback after a lite timeout.
+JEV_GATE_FALLBACK_RESERVE_S = 3.5
+
+_FALLBACK_EXECUTOR: ThreadPoolExecutor | None = None
+
+
+def _jev_fallback_executor() -> ThreadPoolExecutor:
+    """Lazily shared pool for hard-deadline Qwen fallback waits (sync gate, no asyncio)."""
+    global _FALLBACK_EXECUTOR
+    if _FALLBACK_EXECUTOR is None:
+        _FALLBACK_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix='jev-gate-fb')
+    return _FALLBACK_EXECUTOR
+
+
+def default_jev_fallback_models():
+    """Build Bailian/DashScope qwen3.5-flash from existing env plumbing when keyed."""
+    api_key = os.getenv('JSHI_API_QWEN_API_KEY') or os.getenv('DASHSCOPE_API_KEY', '')
+    if not api_key:
+        return []
+    endpoint = (os.getenv('JSHI_API_QWEN_ENDPOINT') or os.getenv('DASHSCOPE_BASE_URL')
+                or 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+    service = {
+        'label': '阿里云百炼 Qwen（可计费）',
+        'protocol': 'chat',
+        'thinking_style': 'qwen',
+        'paid': True,
+        'endpoint': endpoint,
+        'api_key': api_key,
+    }
+    # effort='off' → ProviderModel emits enable_thinking=false on the DashScope body.
+    return [ProviderModel(service, 'qwen3.5-flash', 'off', timeout=ProviderModel.DEFAULT_TIMEOUT_S)]
+
+
+def _jev_fallback_provider(model):
+    """JEV fallback path only: Qwen must send enable_thinking false (not thinking-on ~14s)."""
+    if isinstance(model, ProviderModel) and (model.service or {}).get('thinking_style') == 'qwen':
+        if model.effort == 'off':
+            return model
+        return ProviderModel(model.service, model.name, 'off', model.max_tokens, timeout=model.timeout)
+    return model
 
 
 @dataclass(frozen=True)
@@ -81,10 +134,97 @@ def explicit_name(text: str) -> str:
 
 
 class VoiceJEV:
-    def __init__(self, model=None) -> None:
+    def __init__(self, model=None, *, budget_s: float = JEV_GATE_BUDGET_S,
+                 fallback_models=None, fallback_reserve_s: float = JEV_GATE_FALLBACK_RESERVE_S) -> None:
         self.model = model
+        self.budget_s = float(budget_s)
+        self.fallback_models = (list(fallback_models) if fallback_models is not None
+                                else default_jev_fallback_models())
+        self.fallback_reserve_s = float(fallback_reserve_s)
         self._unavailable_until = 0.0
         self._unavailable_error = ''
+
+    def _generate_gate(self, request):
+        """Call the gate model within ``budget_s``; lite timeout → one ``fallback_models`` try.
+
+        Never retries lite. Lite per-call timeout is capped at
+        ``min(timeout, budget remaining − fallback_reserve_s)`` so Qwen keeps a reserve
+        (default 3.5s; ≈4.5s lite with budget 8). The Qwen call runs in a worker thread and
+        is waited with ``future.result(timeout=remaining)`` so a hung provider cannot exceed
+        the wall-clock budget; on wait timeout raise for ``_unavailable_hold`` (never respond).
+        """
+        deadline = monotonic() + self.budget_s
+
+        def remaining():
+            return deadline - monotonic()
+
+        def call_one(model, *, reserve=0.0):
+            left = remaining()
+            usable = left - float(reserve)
+            if usable <= 0:
+                raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
+            return _cap_model_timeout(model, usable).generate(request)
+
+        def lite_reserve():
+            # Only reserve when a fallback provider is configured.
+            return self.fallback_reserve_s if self.fallback_models else 0.0
+
+        def try_fallback(from_exc):
+            left = remaining()
+            if left <= 0:
+                raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted') from from_exc
+            if not self.fallback_models:
+                raise from_exc
+            # Exactly one Qwen (or injected) call; force thinking off; hard wall-clock wait.
+            fb = _jev_fallback_provider(self.fallback_models[0])
+            target = _cap_model_timeout(fb, left)
+            future = _jev_fallback_executor().submit(target.generate, request)
+            try:
+                return future.result(timeout=left)
+            except FuturesTimeoutError:
+                # Orphaned call may still run; do not block the sync gate on it.
+                raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted') from from_exc
+
+        primary = self.model
+        if isinstance(primary, RoutedModel):
+            chain = primary._snapshot()
+            failed = []
+            for index, model in enumerate(chain):
+                try:
+                    with primary._observe(model):
+                        primary._notify_paid(model)
+                        reserve = lite_reserve() if is_lite_model(model) else 0.0
+                        result = call_one(model, reserve=reserve)
+                    reason = failed[0]['reason'] if failed else ''
+                    primary._note(model, index, degraded=bool(failed), fallback_reason=reason, failed=failed)
+                    return result
+                except Exception as exc:
+                    failed.append({'model': _model_name(model), 'reason': RoutedModel._fallback_reason(exc)})
+                    timed_out = RoutedModel._is_timeout(exc)
+                    if timed_out and is_lite_model(model):
+                        # Do not retry lite or continue the primary chain past it.
+                        primary._note(model, index, degraded=True, fallback_reason='timeout', failed=failed)
+                        result = try_fallback(exc)
+                        fb = self.fallback_models[0]
+                        primary._note(fb, index + 1, degraded=True, fallback_reason='timeout', failed=failed)
+                        return result
+                    if index + 1 == len(chain) or not primary._retryable(exc) or remaining() <= 0:
+                        if remaining() <= 0:
+                            primary._note(model, index, degraded=bool(failed), fallback_reason='timeout', failed=failed)
+                            raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted') from exc
+                        primary._note(model, index, degraded=bool(failed),
+                                      fallback_reason=RoutedModel._fallback_reason(exc), failed=failed)
+                        raise
+            raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
+
+        try:
+            reserve = lite_reserve() if is_lite_model(primary) else 0.0
+            return call_one(primary, reserve=reserve)
+        except Exception as exc:
+            # Lite timeout only: do not retry lite; one fallback_models call with remaining budget.
+            if RoutedModel._is_timeout(exc) and is_lite_model(primary):
+                return try_fallback(exc)
+            raise
 
     def decide_envelope(self, subject_id, envelope, delivery, *, vision=None, on_request=None):
         from jshi.core.inputpack import packet
@@ -135,7 +275,7 @@ class VoiceJEV:
         try:
             if on_request is not None:
                 on_request(request)
-            data = parse_json_object(self.model.generate(request).text)
+            data = parse_json_object(self._generate_gate(request).text)
             action = data.get("action")
             if action not in {"ignore", "resume", "stop", "respond", "clarify"}:
                 raise ValueError("invalid JEV action")
@@ -266,7 +406,7 @@ class VoiceJEV:
         try:
             if on_request is not None:
                 on_request(request)
-            raw_text = self.model.generate(request).text
+            raw_text = self._generate_gate(request).text
             data = parse_json_object(raw_text)
             if isinstance(data.get("items"), list):
                 from jshi.core.prompt_profile import normalize_hint
