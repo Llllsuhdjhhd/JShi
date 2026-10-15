@@ -21,6 +21,7 @@ from jshi.models.routing import (
 )
 from jshi.skill.base import parse_json_object
 from .jev_prompts import SINGLE_INSTRUCTION
+from .name_sound import name_sound_hint
 
 # Wall-clock budget for decide / decide_batch model calls (lite + one Qwen fallback).
 JEV_GATE_BUDGET_S = 8.0
@@ -264,8 +265,11 @@ class VoiceJEV:
         # Retain conversational context, not the full host envelope and records.
         context = {k:delivery[k] for k in ('state', 'spoken', 'pending', 'names_for_jiangshi',
             'attention', 'scene', 'main_scene', 'person_portraits', 'collection') if k in delivery}
-        payload = compact_jev_input({'utterance':text, 'speaker':speaker,
-                                     'delivery':context, 'now':delivery.get('now')})
+        raw = {'utterance': text, 'speaker': speaker, 'delivery': context, 'now': delivery.get('now')}
+        hint = name_sound_hint(text, delivery.get('names_for_jiangshi') or ['匠石'])
+        if hint:
+            raw['name_sound_hint'] = hint
+        payload = compact_jev_input(raw)
         request = ModelRequest(
             purpose="voice_jev",
             input_text=json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
@@ -311,12 +315,18 @@ class VoiceJEV:
             return BatchDecision(action, reason, self._items_for(batch, 'no', '入口判断失败'),
                                  model_error=self._unavailable_error + '；60秒冷却期间不重复请求')
         from .jev_prompts import ENTRY_INSTRUCTION
+        names = delivery.get("names_for_jiangshi") or ["匠石"]
         thin_batch = []
         for row in batch:
             who = str(row.get("who") or "")
             code = who.split("（", 1)[0]
             thin = {"i": row["n"], "p": code if re.fullmatch(r"P\d+", code) else "unknown", "at": row.get("at", row.get("at_ms")),
                     "text": row["text"], "voice": dict(row.get("voice_evidence") or {})}
+            if row.get("seconds") is not None:
+                thin["seconds"] = row["seconds"]
+            hint = name_sound_hint(str(row.get("text") or ""), names)
+            if hint:
+                thin["name_sound_hint"] = hint
             if '临时声音连续性' in str(thin['voice'].get('basis','')):
                 thin['identity'] = 'unresolved'
                 thin['continuity'] = {**thin['voice'], 'scope':'continuity_only'}
