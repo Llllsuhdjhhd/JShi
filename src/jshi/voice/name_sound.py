@@ -23,11 +23,12 @@ _PINYIN: dict[str, str] = {
 # Strip polite / vocative suffixes from names_for_jiangshi entries before syllabifying.
 _NAME_SUFFIX = re.compile(r'(?:同学|老师|先生|女士|啊|呀|呢|吧|嘛|哟)+$')
 
-# Leading vocative: ≤4 chars, then comma / particle / ellipsis / clause break.
+# Chinese vocative name part: ≤4 CJK, then comma / particle / ellipsis / EOS / clause break.
 _VOCATIVE = re.compile(
-    r'^([\u4e00-\u9fffA-Za-z]{1,4})'
-    r'(?:[，,、…\.\s]+|\.{2,}|[啊呀呢吧嘛哟]+|(?=[？?！!]))'
+    r'^([\u4e00-\u9fff]{1,4})'
+    r'(?:[，,、…\.\s]+|\.{2,}|[啊呀呢吧嘛哟]+|(?=[？?！!])|$)'
 )
+_LATIN_WORD = re.compile(r'[A-Za-z]+')
 
 
 def _syllables(text: str) -> list[str] | None:
@@ -47,9 +48,23 @@ def _syllables(text: str) -> list[str] | None:
     return out
 
 
+def _skip_leading_latin(text: str) -> str:
+    """Ignore leading Latin/ASCII letter words and whitespace before the CJK vocative."""
+    pos = 0
+    n = len(text)
+    while pos < n:
+        while pos < n and text[pos].isspace():
+            pos += 1
+        match = _LATIN_WORD.match(text, pos)
+        if not match:
+            break
+        pos = match.end()
+    return text[pos:]
+
+
 def leading_vocative_token(text: str) -> str:
-    """Extract the leading vocative token (≤4 chars), or empty if not vocative-shaped."""
-    raw = (text or '').strip()
+    """Extract the leading CJK vocative (≤4 chars), allowing a Latin prefix before it."""
+    raw = _skip_leading_latin((text or '').strip())
     if not raw:
         return ''
     match = _VOCATIVE.match(raw)
