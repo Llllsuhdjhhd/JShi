@@ -51,6 +51,7 @@ class InputEnvelope:
     final: bool = True
     overlap: bool = False
     delivery_context: str = ""
+    voice_delivery: bool = False  # Text submitted in a voice session is also player-delivered.
     utterances: tuple[SceneUtterance, ...] = ()
     current_utterances: tuple[SceneUtterance, ...] = ()
     deferred_interrupt: bool = False

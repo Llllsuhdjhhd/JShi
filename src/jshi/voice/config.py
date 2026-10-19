@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from jshi.core.params import VOICE_INPUT_PAUSE_MS, VISUAL_TURN_IDLE_SECONDS
+
+ASR_HOTWORDS = ('陆广', '陆兴', '秦奋', '广', '广广', 'JEV', '匠石', '匠匠', '声纹', '未来城', '匠')
 
 
 @dataclass(frozen=True)
@@ -28,7 +31,8 @@ class VoiceConfig:
     identity_mode: str = "diarization"  # multi-speaker or single-speaker voiceprint
     template: VoiceTemplate = VoiceTemplate()
     jev_timeout_s: float = 3.0
-    end_window_ms: int = 500
+    end_window_ms: int = 800
+    asr_hotwords: tuple[str, ...] = ASR_HOTWORDS
     tts_transport: str = 'websocket'
     input_pause_s: float = VOICE_INPUT_PAUSE_MS / 1000
     environment_idle_s: float = VISUAL_TURN_IDLE_SECONDS
@@ -39,8 +43,17 @@ class VoiceConfig:
     deepgram_model: str = 'nova-3'
     deepgram_language: str = 'zh-CN'
     deepgram_diarize: bool = True
+    separation_backend: str = 'off'
+    separation_device: str = 'cpu'
+    separation_timeout_s: float = 30.0
 
     def __post_init__(self) -> None:
+        if self.separation_backend not in {'off', 'pyannote'}:
+            raise ValueError('JSHI_VOICE_SEPARATION须为off或pyannote')
+        if not 1 <= self.separation_timeout_s <= 120:
+            raise ValueError('声音分离最长等待须为1–120秒')
+        if self.separation_backend != 'off' and not self.api_key:
+            raise ValueError('分离音轨独立转写需要JSHI_VOICE_API_KEY')
         if self.asr_backend not in {"online", "local", "deepgram"}:
             raise ValueError("voice ASR backend must be online, local or deepgram")
         if not self.deepgram_model.strip() or not self.deepgram_language.strip():
@@ -87,6 +100,9 @@ class VoiceConfig:
             raise ValueError('JSHI_DEEPGRAM_DIARIZE必须为true或false')
         return cls(
             api_key=key,
+            separation_backend=os.getenv('JSHI_VOICE_SEPARATION', 'off'),
+            separation_device=os.getenv('JSHI_VOICE_SEPARATION_DEVICE', 'cpu'),
+            separation_timeout_s=float(os.getenv('JSHI_VOICE_SEPARATION_TIMEOUT_S', '30')),
             deepgram_api_key=deepgram_key,
             deepgram_model=os.getenv('JSHI_DEEPGRAM_MODEL','nova-3').strip(),
             deepgram_language=os.getenv('JSHI_DEEPGRAM_LANGUAGE','zh-CN').strip(),
@@ -97,7 +113,9 @@ class VoiceConfig:
             tts_resource=os.getenv("JSHI_VOICE_TTS_RESOURCE", "seed-tts-2.0"),
             voiceprint_group=os.getenv("JSHI_VOICEPRINT_GROUP", ""),
             identity_mode=os.getenv("JSHI_VOICE_IDENTITY_MODE", "diarization"),
-            end_window_ms=int(os.getenv("JSHI_VOICE_END_WINDOW_MS", "500")),
+            end_window_ms=int(os.getenv("JSHI_VOICE_END_WINDOW_MS", "800")),
+            asr_hotwords=tuple(dict.fromkeys(w.strip() for w in re.split(r'[,，;；\n]',
+                os.getenv('JSHI_VOICE_ASR_HOTWORDS', ','.join(ASR_HOTWORDS))) if w.strip())),
             tts_transport=os.getenv('JSHI_VOICE_TTS_TRANSPORT', 'websocket'),
             input_pause_s=int(os.getenv('JSHI_VOICE_INPUT_PAUSE_MS', str(VOICE_INPUT_PAUSE_MS))) / 1000,
             environment_idle_s=int(os.getenv('JSHI_VOICE_ENVIRONMENT_IDLE_MS', str(int(VISUAL_TURN_IDLE_SECONDS*1000)))) / 1000,

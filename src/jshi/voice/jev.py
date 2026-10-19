@@ -60,6 +60,7 @@ class BatchDecision:
     routing_error: str = ""  # Valid identity judgments survive invalid routing fields.
     direct_reply: str = ""
     waiting_reply: str = ""
+    control: str = ""  # keep / stop / redirect; independent of identity and routing.
 
     @property
     def front_choice(self):
@@ -102,21 +103,11 @@ class VoiceJEV:
 
     def decide(self, subject_id: str, text: str, speaker: dict, delivery: dict, *, overlap: bool = False, on_request=None) -> InterruptDecision:
         normalized = text.strip().rstrip("。！!，,？?").strip()
-        if re.match(r'^(?:匠石[，,：:\s]*)?(?:(?:好[了啦]?){1,3}[，,\s]*)?(?:先[，,\s]*){0,2}(?:别说[了啦]|不要说[了啦]|停止|停一下|先停)(?=[，,。！!？?\s]|$|别说[了啦]|不要说[了啦]|停止|停一下)', normalized):
-            return InterruptDecision('stop', 'explicit stop')
-        if normalized in {"停", "停止", "别说了", "停一下", "等等", "等一下"}:
-            return InterruptDecision("stop", "explicit stop")
-        if re.match(r'^(?:匠石[，,：:\s]*)?(?:停止|别说了|停一下|先停|不要说了)(?:[，,。！!？?\s]|$)', normalized):
-            return InterruptDecision('stop', 'explicit stop')
         active = bool(delivery) and delivery.get("state") in {"playing", "paused", "queued"}
         if overlap:
             return InterruptDecision("resume" if active else "ignore", "overlapping speech; avoid blind interruption")
         if not normalized:
             return InterruptDecision("resume", "no utterance")
-        if normalized in {"了", "就", "那个", "的", "是"}:
-            return InterruptDecision("resume", "incomplete fragment; wait for meaningful utterance")
-        if normalized in {"嗯", "啊", "哦", "是", "对", "对的", "好", "好的", "那个", "就", "了", "哈哈", "哈哈哈哈"}:
-            return InterruptDecision("resume", "backchannel or incomplete fragment; keep playing")
         claimed = explicit_name(text)
         if self.model is None:
             return InterruptDecision("resume" if active else "respond", "JEV rule fallback", claimed)
@@ -146,7 +137,29 @@ class VoiceJEV:
             action, reason = self._unavailable_hold(delivery)
             return InterruptDecision(action, reason, claimed)
 
+    @staticmethod
+    def _selected_text(row):
+        who = str(row.get('who') or '').split('（', 1)[0]
+        return who if (row.get('source') == 'web_text'
+                       and (row.get('speaker') or {}).get('method') == 'user_selected'
+                       and re.fullmatch(r'P\d+', who)) else ''
+
     def decide_batch(self, subject_id: str, batch: list, context: list, delivery: dict, *, overlap: bool = False, on_request=None) -> BatchDecision:
+        result = self._decide_batch(subject_id, batch, context, delivery, overlap=overlap, on_request=on_request)
+        bound = {row['n']: self._selected_text(row) for row in batch if self._selected_text(row)}
+        if not bound:
+            return result
+        items = tuple(replace(item, speaker_pick=bound[item.n], speaker_level='确定',
+            speaker_score=1.0, speaker_reason='文字输入由用户选择人物',
+            to_jiangshi='yes', score=1.0, relevance='related', identity_only=False,
+            reason='用户选择人物，文字直接对匠石说', evidence_relation='user_selected')
+            if item.n in bound else item for item in result.items)
+        # An idle text message is already a submitted request, even if entry routing fails.
+        if len(bound) == len(batch) and result.control != 'stop' and delivery.get('state') not in {'thinking', 'playing', 'paused', 'queued'}:
+            result = replace(result, action='respond', control='redirect', judged=True)
+        return replace(result, items=items)
+
+    def _decide_batch(self, subject_id: str, batch: list, context: list, delivery: dict, *, overlap: bool = False, on_request=None) -> BatchDecision:
         """一次判断整批。旧的单条 action JSON 仍接受，便于已有调用。"""
         texts = [str(item.get("text") or "") for item in batch]
         joined = "\n".join(texts)
@@ -185,12 +198,21 @@ class VoiceJEV:
                 thin["name"] = who[len(code):].strip("（）")
             if "track" in row:
                 thin["track"] = row["track"]
-            candidates = [{"p": c["who"], "similarity": round(c["score"], 3) if isinstance(c.get("score"), (int, float)) else None,
+            candidates = [{"p": c["who"],
+                           ("classification_score" if c.get('source') == 'personal_classifier' else "similarity"):
+                               round(c["score"], 3) if isinstance(c.get("score"), (int, float)) else None,
                            "source": c.get("source", "voice"), "names": c.get("names", [])}
                           for c in row.get("candidates", [])]
+            for packed,original in zip(candidates,row.get('candidates',[])):
+                if packed['source']=='personal_classifier':
+                    packed['validation']='limited' if original.get('verified') is False else 'cross_session'
+                    if isinstance(original.get('threshold'),(int,float)):
+                        packed['threshold']=round(original['threshold'],3)
+            if row.get('joint_evidence'):
+                thin['joint_evidence']=row['joint_evidence']
             if candidates:
                 thin["candidates"] = candidates
-                ranked = sorted((c for c in candidates if isinstance(c['similarity'],(int,float))),key=lambda c:c['similarity'],reverse=True)
+                ranked = sorted((c for c in candidates if isinstance(c.get('similarity'),(int,float))),key=lambda c:c['similarity'],reverse=True)
                 if ranked:
                     thin['voice_ranking'] = {'first':ranked[0]['p'], 'similarity':ranked[0]['similarity']}
                     if len(ranked)>1:
@@ -228,10 +250,14 @@ class VoiceJEV:
                 thin['source'] = row['source']
             if row.get('overlap'):
                 thin['overlap'] = True
+            if self._selected_text(row):
+                thin['binding'] = {'person': thin['p'], 'certainty': 'confirmed', 'to_jiangshi': 'yes'}
             thin_batch.append(thin)
         payload = {"input": {"state": delivery.get("state", ""), "names": delivery.get("names_for_jiangshi", ["匠石"]),
                              "unwritten": context, "lines": thin_batch},
                    "scene": delivery.get("jev_scene", ""), "now": delivery.get("now")}
+        payload['conversation'] = delivery.get('conversation', [])
+        payload['playback'] = {k: delivery[k] for k in ('state', 'spoken', 'pending') if k in delivery}
         if delivery.get('environment'):
             payload['environment'] = delivery['environment']
         payload['short_chat'] = delivery.get('short_chat', {'allowed':False})
@@ -254,10 +280,11 @@ class VoiceJEV:
             "level": {"type": "integer", "enum": [1, 2, 3]},
             "recall_memory": {"type":"boolean"},
             "main_image": {"enum":["omit", "include"]},
+            "control": {"enum": ["keep", "stop", "redirect"]},
             "route": {"enum":["main", "self_reply"] if delivery.get('short_chat', {}).get('allowed') is True else ["main"]},
             "reply": {"type":"string", "maxLength":160 if delivery.get('short_chat', {}).get('allowed') is True else 0},
             "waiting_reply": {"type":"string", "maxLength":16}},
-            "required": ["items", "level", "recall_memory", "main_image", "route", "reply"], "additionalProperties": False}
+            "required": ["items", "level", "recall_memory", "main_image", "control", "route", "reply"], "additionalProperties": False}
         request = ModelRequest(purpose="voice_jev", input_text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             subject_state=SubjectState(subject_id, "匠石", "快速入口判断"),
             system_extra=ENTRY_INSTRUCTION + "\nJSON Schema：" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
@@ -281,17 +308,22 @@ class VoiceJEV:
                 else:
                     result = self._from_items(data["items"], batch, rules.claimed_name, needs_main_review=data.get("needs_main_review") is True)
                 control = data.get("control")
-                active = delivery.get("state") in {"playing", "paused", "queued"}
-                if not modern and control == "stop":
-                    # Stop permission needs an explicit instruction, not just a model flag.
-                    if any(re.search(r"停止|别说了|停一下|不要说|先停", t) for t in texts):
-                        result = replace(result, action="stop", reason="明确停止要求")
+                active = delivery.get("state") in {"thinking", "playing", "paused", "queued"}
+                if control in {'keep', 'stop', 'redirect'}:
+                    result = replace(result, control=control,
+                        action='stop' if control == 'stop' else 'respond' if control == 'redirect' else 'ignore',
+                        reason={'stop':'JEV语义判断：停止当前任务','keep':'JEV语义判断：不干预当前任务',
+                                'redirect':'JEV语义判断：接续或改向'}[control])
+                elif modern and (control is not None or active):
+                    result = replace(result, control='keep', action='ignore',
+                        routing_error='播放控制无效，本批保留为观察，不中断当前任务')
                 elif not modern and control == "continue" and active and all(r.to_jiangshi == "no" for r in result.items):
                     result = replace(result, action="resume")
                 direct = data.get('reply', '')
                 if modern and data.get('route') == 'self_reply' and delivery.get('short_chat', {}).get('allowed') is not True:
                     result = replace(result, routing_error='本轮没有直接回答许可；保留人物终审，交主认知')
                 if (modern and data.get('route') == 'self_reply' and delivery.get('short_chat', {}).get('allowed') is True
+                        and control not in {'keep', 'stop'}
                         and not overlap and not any(row.get('source') == 'visual_environment' for row in batch)
                         and hint.get('level') == 3 and hint.get('recall_memory') is False
                         and hint.get('main_image', 'omit') == 'omit'
@@ -350,8 +382,9 @@ class VoiceJEV:
             who = str(source.get("who") or "").split("（", 1)[0]
             if re.fullmatch(r"P\d+", who) and not unresolved:
                 allowed.add(who)
-            pick = row.get("person")
-            certainty = row.get("certainty")
+            bound = self._selected_text(source)
+            pick = bound or row.get("person")
+            certainty = "confirmed" if bound else row.get("certainty")
             # Accept only exact labels supplied for this row; never guess a name's ID.
             if pick == source.get("who"):
                 pick = who if re.fullmatch(r"P\d+", who) else "unknown" if certainty == "unknown" else pick

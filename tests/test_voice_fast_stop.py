@@ -7,12 +7,15 @@ from jshi.app.voice import VoiceConversation, bounded_online_match
 from jshi.voice.jev import VoiceJEV
 from jshi.voice.volc import Transcript
 from tests.test_voice import FakeCloud, process
+from tests.test_voice_control import ScriptedControl
 
 
 @pytest.mark.parametrize('text',['别说啦','好了好了别说啦','好了好了，别说了','匠石，别说啦',
                                '别说了别说了','先先不要说了不要说了'])
-def test_colloquial_stop_is_a_local_rule(text):
-    assert VoiceJEV().decide('s',text,{},{}).action=='stop'
+def test_colloquial_stop_uses_the_semantic_model(text):
+    model=ScriptedControl('stop')
+    assert VoiceJEV(model).decide_batch('s',[{'n':1,'text':text}],[],{}).control=='stop'
+    assert len(model.requests)==1
 
 
 def test_quoted_stop_is_not_a_stop_command():
@@ -23,12 +26,14 @@ def test_stop_bypasses_busy_input_and_invalidates_old_generation(process):
     async def run():
         sent=[]
         async def send(message):sent.append(message)
-        c=VoiceConversation(process,'stone',FakeCloud(),send)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(ScriptedControl('stop')))
+        c.person_reviewer=None
         try:
             old_epoch=c.epoch
             c.active_turn={'state':'thinking'}
             c.input_pause_s=12
             await c.accept(Transcript('好了好了别说啦','A',0,1800,True))
+            await asyncio.wait_for(c.queue.join(),1)
             assert c.epoch==old_epoch+1
             assert c.queue.empty() and c.turn_queue.empty()
             assert any(m['type']=='stop' for m in sent)

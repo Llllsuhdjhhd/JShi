@@ -2,18 +2,29 @@
 from dataclasses import replace
 from threading import RLock
 from time import time
+from uuid import uuid4
+import sqlite3
 
 
 class SessionAudio:
-    def __init__(self, seconds=45):
+    def __init__(self, seconds=45, *, archive=None):
         self.limit = int(seconds * 32000)  # mono 16 kHz int16
         self.data = bytearray()
         self.offset = 0
         self.lock = RLock()
         self.started_at_ms = None
+        self.archive = archive
+        self.capture_id = uuid4().hex
+        self.archive_error = ''
 
     def append(self, pcm):
         with self.lock:
+            if self.archive is not None and pcm and not self.archive_error:
+                try:
+                    self.archive.append(self.capture_id,self.offset+len(self.data),pcm)
+                    self.archive_error = ''
+                except (OSError, sqlite3.Error) as exc:
+                    self.archive_error = str(exc)
             if self.started_at_ms is None and pcm:
                 self.started_at_ms = time() * 1000 - len(pcm) / 32
             self.data.extend(pcm)
@@ -26,17 +37,17 @@ class SessionAudio:
         with self.lock:
             start, end = start_ms * 32 - self.offset, end_ms * 32 - self.offset
             if start < 0 or end > len(self.data) or end <= start:
-                return None
+                return self.archive.segment(self.capture_id,start_ms,end_ms) if self.archive else None
             return bytes(self.data[start:end])
 
-    def match(self, transcript, speakers):
+    def match(self, transcript, speakers, *, pcm=None):
         if not transcript.final or transcript.voiceprint_id:
             return transcript
-        if transcript.overlap:
+        if transcript.overlap and transcript.audio_kind != 'separated':
             with speakers.lock:
                 speakers.last_embedding.pop(transcript.track_id, None)
             return replace(transcript, identity_uncertain=True, identity_note='声音重叠，不据此确认或新增人物')
-        pcm = self.segment(transcript.start_ms, transcript.end_ms)
+        pcm = pcm if pcm is not None else self.segment(transcript.start_ms, transcript.end_ms)
         if pcm is None:
             with speakers.lock:
                 speakers.last_embedding.pop(transcript.track_id, None)

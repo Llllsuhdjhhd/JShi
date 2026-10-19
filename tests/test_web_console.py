@@ -234,7 +234,7 @@ def test_independent_text_shows_waiting_ack_before_main_reply(process, monkeypat
                 release.set()
             events += [json.loads(line) for line in (await response.text()).splitlines()]
             assert entered.is_set()
-            assert [e['type'] for e in events if e['type'] not in {'flow_phase'}] == [
+            assert [e['type'] for e in events if e['type'] not in {'flow_phase', 'model_status'}] == [
                 'accepted','waiting_ack','reply','complete']
             assert next(e for e in events if e['type']=='reply')['reply'] != '嗯，我想一下。'
             assert wait_timing(process).guidance(model_key(process),allowed=True)['levels']['L1']['samples']==1

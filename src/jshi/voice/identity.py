@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import replace
+import math
 import re
 from time import monotonic
 
@@ -11,7 +12,7 @@ from jshi.subject.domain import HistoryKind, HistoryRecord
 
 
 INTERNAL_PREFIX = '未命名访客'
-# Align with LocalSpeakers.confirmation_threshold default (max(threshold, 0.65)).
+# Default for cloud/unconfigured sources; local callers pass their active model's setting.
 VOICEPRINT_CONFIRM_THRESHOLD = 0.65
 
 
@@ -116,11 +117,17 @@ class VoiceIdentities:
         # or moving voiceprint registrations between stored profiles.
         return canonical_voice_profile(self.profiles, profile)
 
-    def resolve(self, track_id: str, *, voiceprint_id: str = "", confidence: float | None = None, cluster_id: str = "", uncertain: bool = False, tentative: bool = False) -> SpeakerEvidence:
+    def resolve(self, track_id: str, *, voiceprint_id: str = "", confidence: float | None = None, cluster_id: str = "", uncertain: bool = False, tentative: bool = False, local_confirmation_threshold: float | None = None) -> SpeakerEvidence:
         # Weak evidence must not be upgraded to recognized, even if a voiceprint
         # carrier hits. confidence is None means upstream already trusted the match.
-        weak = uncertain or tentative or (
-            confidence is not None and confidence < VOICEPRINT_CONFIRM_THRESHOLD)
+        threshold = VOICEPRINT_CONFIRM_THRESHOLD
+        if voiceprint_id.startswith('local:') and local_confirmation_threshold is not None:
+            if (type(local_confirmation_threshold) not in (int, float)
+                    or not math.isfinite(local_confirmation_threshold) or not 0 <= local_confirmation_threshold <= 1):
+                raise ValueError('本地声纹确认门槛无效')
+            threshold = local_confirmation_threshold
+        weak = uncertain or tentative or (confidence is not None and (
+            type(confidence) not in (int, float) or not math.isfinite(confidence) or confidence < threshold))
         if voiceprint_id and not weak:
             reference = voiceprint_id if voiceprint_id.startswith("local:") else f"volc:{voiceprint_id}"
             profile = self.profiles.find_by_carrier("voiceprint", reference)
@@ -158,7 +165,7 @@ class VoiceIdentities:
                 profile = self.profiles.create(ObjectProfile(new_object_id(), label, status='provisional', source='voice_anonymous'))
                 self.clusters[cluster_id] = SpeakerEvidence(track_id, profile.object_id, label, 'unknown', 'anonymous_voice_cluster')
             evidence = replace(self.associated(self.clusters[cluster_id]), track_id=track_id)
-            if tentative:
+            if weak:
                 evidence = replace(evidence, status='unknown', method='voice_continuity', confidence=None, voiceprint_id='')
             self.tracks[track_id] = evidence
             return evidence
@@ -166,7 +173,11 @@ class VoiceIdentities:
             # No stable speaker info: each utterance has a separate track, never
             # reuse the preceding speaker merely because it is the same microphone.
             self.tracks[track_id] = SpeakerEvidence(track_id, new_object_id())
-        return self.tracks[track_id]
+        evidence = self.tracks[track_id]
+        if weak and evidence.method == 'voiceprint_match':
+            evidence = replace(evidence, status='unknown', method='voice_continuity', confidence=None, voiceprint_id='')
+            self.tracks[track_id] = evidence
+        return evidence
 
     def introduce(self, track_id: str, name: str, *, basis: str = 'explicit_self_introduction', cluster_id: str = '', uncertain: bool = False) -> tuple[SpeakerEvidence, str]:
         old = self.resolve(track_id, cluster_id=cluster_id, uncertain=uncertain)

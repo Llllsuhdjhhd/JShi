@@ -27,6 +27,7 @@ from jshi.voice.delivery import DeliveryTracker
 from jshi.voice.identity import VoiceIdentities, attach_voiceprint
 from jshi.voice.interaction import InteractionFeedback
 from jshi.voice.jev import BatchDecision, InterruptDecision, VoiceJEV
+from jshi.subject.cancellation import TurnCancelled
 
 
 async def bounded_online_match(audio, transcript, speakers, executor, pending, timeout_s):
@@ -48,13 +49,19 @@ from jshi.voice.volc import Transcript, TranscriptAssembler, VolcVoice, pack_asr
 
 
 class VoiceConversation:
-    def __init__(self, process, subject_id: str, cloud, send, *, jev=None, timeout_s=3.0, local_speakers=None, input_pause_s=VOICE_INPUT_PAUSE_MS / 1000, sample_source=None, candidate_timeout_s=1.2, session_id=None, input_max_batch_s=12.0, input_batch_chars=20, scene_idle_s=15.0, scene_batch_inputs=6, scene_batch_chars=800, scene_max_wait_s=30.0, environment_idle_s=VISUAL_TURN_IDLE_SECONDS) -> None:
+    def __init__(self, process, subject_id: str, cloud, send, *, jev=None, timeout_s=3.0, local_speakers=None, input_pause_s=VOICE_INPUT_PAUSE_MS / 1000, sample_source=None, candidate_timeout_s=1.2, session_id=None, input_max_batch_s=12.0, input_batch_chars=20, scene_idle_s=15.0, scene_batch_inputs=6, scene_batch_chars=800, scene_max_wait_s=30.0, environment_idle_s=VISUAL_TURN_IDLE_SECONDS, personal_speakers=None, audio_preparer=None) -> None:
         self.process, self.subject_id, self.cloud, self.send = process, subject_id, cloud, send
+        self.personal_speakers = personal_speakers
+        from jshi.voice.sources import SpeakerAudioPreparer
+        self.audio_preparer = audio_preparer or SpeakerAudioPreparer()
         self.session_id = session_id or uuid4().hex
         if not isinstance(self.session_id, str) or not self.session_id.isalnum() or len(self.session_id) > 64:
             raise ValueError("invalid voice session identifier")
         self.identities = VoiceIdentities(process.profiles, subject_id, self.session_id, process.repository)
         self.delivery = DeliveryTracker()
+        from jshi.voice.dialogue import dialogue_state
+        self.dialogue = dialogue_state(process)
+        self.dialogue.import_history(subject_id, process.repository.list_history(subject_id, HistoryKind.FACT, 2000))
         previous = [r for r in process.repository.list_history(subject_id, HistoryKind.FACT, 100)
                     if r.event_type == "voice_delivery" and r.content.get("reply_id")]
         if previous:
@@ -66,7 +73,10 @@ class VoiceConversation:
         self.input_records = {}
         self.sample_bytes = 0
         self.annotations = {}
+        self.personal_label_lock = asyncio.Lock()
         self.background_tasks = set()
+        self.personal_prediction_lock = asyncio.Lock()
+        self.personal_prediction_jobs = {}
         self.debug_history = deque(maxlen=12)
         self.voice_timings = {}
         self.last_jev = None
@@ -170,6 +180,12 @@ class VoiceConversation:
                 # further browser writes during that close-handler race.
                 self.output_disconnected = True
 
+    def resolve_speaker(self, transcript):
+        return self.identities.resolve(transcript.track_id, voiceprint_id=transcript.voiceprint_id,
+            confidence=transcript.confidence, cluster_id=transcript.speaker_cluster_id,
+            uncertain=transcript.identity_uncertain, tentative=transcript.identity_tentative,
+            local_confirmation_threshold=getattr(self.local_speakers, 'confirmation_threshold', None))
+
     async def diagnostics(self, section: str, *, activity_id="", part="all", purpose="all") -> None:
         if section not in {"prompt", "timing", "tool", "input", "scene", "identity", "delivery", "jev", "jev_scene", "response"}:
             return
@@ -251,8 +267,7 @@ class VoiceConversation:
                 t = row['transcript']
                 old = self.source_speakers.get(iid)
                 if old is None:
-                    old = self.identities.resolve(t.track_id, voiceprint_id=t.voiceprint_id,
-                        cluster_id=t.speaker_cluster_id, uncertain=t.identity_uncertain)
+                    old = self.resolve_speaker(t)
                 previous[iid] = old
             evidence, _ = self.identities.introduce('manual-' + uuid4().hex, name, basis='manual_selection')
             if evidence.status != 'introduced':
@@ -283,11 +298,239 @@ class VoiceConversation:
                 "text": "用户将选择的声音明确关联为" + evidence.label, "at": time()*1000},
                 codes=self.code_owner, labels=self.code_labels)
             self.unknown_inputs.bind(tuple(input_ids), evidence.object_id)
+            if self.personal_speakers is not None:
+                for iid, row in selected_pairs:
+                    self.personal_speakers.submit_capture(row['pcm'], evidence.object_id, self.session_id,
+                        iid, self.local_speakers, source='manual')
             await self.emit('enrollment', input_ids=input_ids, object_id=evidence.object_id, label=evidence.label, **stats)
         except Exception as exc:
             ids = list(dict.fromkeys(input_ids)) if isinstance(input_ids, list) else []
             problem_ids = [ids[i] for i in getattr(exc, 'sample_indices', ()) if i < len(ids)]
             await self.emit('enrollment_error', text=str(exc), problem_input_ids=problem_ids)
+
+    async def label_personal_inputs(self, input_ids, object_id):
+        """Human labels survive short-clip voiceprint enrollment rejection."""
+        async with self.personal_label_lock:
+            await self._label_personal_inputs(input_ids, object_id)
+
+    async def _publish_personal_auto(self, input_id, job):
+        try:
+            sid = await asyncio.wrap_future(job['future'])
+            if sid is None:
+                return
+            async with self.personal_label_lock:
+                row = self.input_records.get(input_id)
+                saved = await asyncio.to_thread(self.personal_speakers.store.sample, sid)
+                if (not row or not saved or saved['source'] != 'voiceprint'
+                        or 'personal_label_before' in row):
+                    return
+                row['personal_auto_saved'] = saved['object_id']
+                person = self.process.profiles.get(saved['object_id'])
+                if person is None:
+                    return
+                await self.emit('personal_auto_labelled', input_ids=[input_id],
+                    object_id=saved['object_id'], label=person.label, score=saved['score'])
+        except Exception as exc:
+            self.record('personal_voice_auto_failed', {'input_id': input_id, 'reason': str(exc)})
+
+    async def _label_personal_inputs(self, input_ids, object_id):
+        try:
+            if self.personal_speakers is None:
+                raise ValueError('个人声音学习尚未启用')
+            if not isinstance(input_ids, list) or not 1 <= len(input_ids) <= 32:
+                raise ValueError('请选择 1–32 条声音')
+            from jshi.voice.personal_store import OTHER_VOICE
+            negative_only = object_id == OTHER_VOICE
+            profile = None if negative_only else self.personal_speakers._person(object_id)
+            selected = []
+            for iid in dict.fromkeys(input_ids):
+                row = self.input_records.get(str(iid))
+                if not row or not row.get('pcm') or row['transcript'].overlap:
+                    raise ValueError('所选声音已过期、没有音频或包含重叠声音')
+                selected.append((str(iid), row))
+            saved = []
+            for iid, row in selected:
+                before = row.get('personal_label_before')
+                if before is None:
+                    prior = self.annotations.get(iid) or next((u.speaker for u in self.scene if u.input_id == iid),
+                        self.source_speakers.get(iid, SpeakerEvidence(row['transcript'].track_id)))
+                    unknown = self.unknown_inputs.read(iid)
+                    before = {'speaker': prior, 'annotation': self.annotations.get(iid),
+                              'binding': unknown.get('manual_object_id') if unknown else None}
+                future = self.personal_speakers.submit_capture(row['pcm'], object_id, self.session_id,
+                    iid, self.local_speakers, source='manual')
+                if future is None:
+                    raise ValueError('个人声音采集队列已满，请稍后再试')
+                saved.append(await asyncio.wrap_future(future))
+                row['personal_label_before'] = before
+                if negative_only:
+                    if before['annotation'] is None:
+                        self.annotations.pop(iid, None)
+                    else:
+                        self.annotations[iid] = before['annotation']
+                    self.unknown_inputs.bind((iid,), before['binding'])
+                    self.scene = deque((replace(u, speaker=before['speaker']) if u.input_id == iid else u
+                        for u in self.scene), maxlen=24)
+                else:
+                    self.annotations[iid] = SpeakerEvidence(row['transcript'].track_id, object_id,
+                        profile.label, 'recognized', 'manual_annotation')
+                    self.unknown_inputs.bind((iid,), object_id)
+            self.scene = deque((replace(u, speaker=self.annotations.get(u.input_id, u.speaker)) for u in self.scene), maxlen=24)
+            if not negative_only:
+                self.jev_scene_store.correct({'basis': 'manual_annotation',
+                    'p': self.assign_code(object_id, profile.label), 'text': '用户将选择的声音明确关联为' + profile.label,
+                    'at': time()*1000}, codes=self.code_owner, labels=self.code_labels)
+            self.record('personal_voice_manual_label', {'input_ids': input_ids, 'object_id': object_id,
+                                                       'sample_ids': saved})
+            await self.emit('personal_labelled', input_ids=input_ids, object_id=object_id,
+                            label='其他（电视／电子设备，仅反例）' if negative_only else profile.label,
+                            negative_only=negative_only, samples=len(saved))
+        except Exception as exc:
+            await self.emit('personal_label_error', text=str(exc),
+                            input_ids=input_ids if isinstance(input_ids, list) else [], object_id=object_id)
+
+    async def unlabel_personal_inputs(self, input_ids):
+        async with self.personal_label_lock:
+            try:
+                if self.personal_speakers is None:
+                    raise ValueError('个人声音学习尚未启用')
+                if not isinstance(input_ids, list) or not 1 <= len(input_ids) <= 32:
+                    raise ValueError('请选择 1–32 条声音')
+                selected = [(str(iid), self.input_records.get(str(iid))) for iid in dict.fromkeys(input_ids)]
+                if any(not row or not ('personal_label_before' in row or 'personal_auto_saved' in row)
+                       for _, row in selected):
+                    raise ValueError('这条声音没有可撤销的训练收录，或已过期')
+                restored = []
+                manual = []
+                for iid, row in selected:
+                    await asyncio.wrap_future(self.personal_speakers.collector.submit(
+                        self.personal_speakers.store.withdraw, self.session_id, iid))
+                    before = row.pop('personal_label_before', None)
+                    row.pop('personal_auto_saved', None)
+                    if before is not None:
+                        manual.append(row)
+                        if before['annotation'] is None:
+                            self.annotations.pop(iid, None)
+                        else:
+                            self.annotations[iid] = before['annotation']
+                        self.unknown_inputs.bind((iid,), before['binding'])
+                        self.scene = deque((replace(u, speaker=before['speaker']) if u.input_id == iid else u
+                                            for u in self.scene), maxlen=24)
+                        speaker = before['speaker']
+                    else:
+                        speaker = self.annotations.get(iid) or next((u.speaker for u in self.scene if u.input_id == iid),
+                            self.source_speakers.get(iid, SpeakerEvidence(row['transcript'].track_id)))
+                    restored.append({'input_id': iid, 'speaker': asdict(speaker), 'identity_unchanged': before is None,
+                        'identity_display':self.identity_display(iid,speaker)})
+                if manual:
+                    self.jev_scene_store.correct({'basis': 'manual_annotation_undo',
+                        'text': '用户撤销以下语句的人工训练标注，先前标签不再作为人工身份依据：' +
+                                '；'.join(row['transcript'].text[:100] for row in manual), 'at': time()*1000},
+                        codes=self.code_owner, labels=self.code_labels)
+                self.record('personal_voice_manual_undo', {'input_ids': input_ids})
+                await self.emit('personal_unlabelled', input_ids=input_ids, restored=restored)
+            except Exception as exc:
+                await self.emit('personal_label_error', text=str(exc), action='undo',
+                                input_ids=input_ids if isinstance(input_ids, list) else [])
+
+    async def _run_personal_prediction(self, transcript, record):
+        """Score every compatible model independently of voiceprint candidates."""
+        try:
+            async with self.personal_prediction_lock:
+                if self.input_records.get(transcript.input_id) is not record:
+                    return
+                future = self.personal_speakers.submit_predict(record['pcm'], self.local_speakers)
+                if future is None:
+                    previous = getattr(self.personal_speakers, 'predict_future', None)
+                    if previous is not None and not previous.done():
+                        try:
+                            await asyncio.shield(asyncio.wrap_future(previous))
+                        except Exception:
+                            pass
+                        future = self.personal_speakers.submit_predict(record['pcm'], self.local_speakers)
+                if future is None:
+                    record['personal_classifier'] = {'status':'busy'}
+                else:
+                    result = dict(await asyncio.shield(asyncio.wrap_future(future)))
+                    features = result.pop('debug_features', None)
+                    if transcript.overlap and transcript.audio_kind != 'separated':
+                        result.update(matched='', overlap=True)
+                    if self.input_records.get(transcript.input_id) is not record:
+                        return
+                    record['personal_classifier'] = result
+                    await self._archive_update(transcript.input_id, classifier=result,
+                        classifier_result=self.personal_prediction_view(record), features=features)
+                    try:
+                        self.record('personal_voice_prediction', {'input_id':transcript.input_id, **result})
+                    except Exception:
+                        logging.getLogger(__name__).exception('Personal prediction diagnostics could not be saved')
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            record['personal_classifier'] = {'status':'error', 'detail':str(exc)}
+            logging.getLogger(__name__).exception('Personal speaker scoring failed')
+        if self.input_records.get(transcript.input_id) is record:
+            try:
+                speaker = self.annotations.get(transcript.input_id) or next(
+                    (u.speaker for u in reversed(self.scene) if u.input_id == transcript.input_id),
+                    self.source_speakers.get(transcript.input_id))
+                view = self.identity_display(transcript.input_id, speaker) if speaker is not None else None
+                await self._archive_update(transcript.input_id,
+                    classifier_result=self.personal_prediction_view(record), **({'identity_display':view} if view else {}))
+                await self.emit('personal_prediction', input_id=transcript.input_id,
+                    personal_prediction=self.personal_prediction_view(record),
+                    identity_display=view,
+                    identity_comparison=self.identity_comparison(transcript.input_id))
+            except Exception:
+                logging.getLogger(__name__).exception('Personal speaker result could not be published')
+
+    async def personal_identity(self, transcript, evidence, *, wait=True):
+        record = self.input_records.get(transcript.input_id, {})
+        if self.personal_speakers is None:
+            record['personal_classifier'] = {'status':'not_configured'}
+            return self.annotations.get(transcript.input_id, evidence)
+        if not record.get('pcm'):
+            record['personal_classifier'] = {'status':'no_audio'}
+            return self.annotations.get(transcript.input_id, evidence)
+        job = self.personal_prediction_jobs.get(transcript.input_id)
+        if job is None:
+            record['personal_classifier'] = {'status':'queued' if self.personal_prediction_lock.locked() else 'pending'}
+            job = asyncio.create_task(self._run_personal_prediction(transcript, record))
+            self.personal_prediction_jobs[transcript.input_id] = job
+        if wait:
+            try:
+                await asyncio.wait_for(asyncio.shield(job), self.candidate_timeout_s)
+            except asyncio.TimeoutError:
+                # The job continues and publishes its real result to this input.
+                pass
+        manual = self.annotations.get(transcript.input_id)
+        if manual is not None and manual.method == 'manual_annotation':
+            return manual
+        if evidence.status in {'recognized', 'introduced'}:
+            return evidence
+        result = record.get('personal_classifier', {})
+        if result.get('matched'):
+            row = next(r for r in result['ranking'] if r['object_id'] == result['matched'])
+            return SpeakerEvidence(transcript.track_id, row['object_id'], row['label'],
+                                   'recognized', 'personal_classifier', row['score'])
+        return evidence
+
+    @staticmethod
+    def personal_prediction_view(record):
+        """Publish this utterance's actual outputs, without internal version metadata."""
+        import math
+        result = record.get('personal_classifier', {})
+        ranking = []
+        for row in result.get('ranking', ()):
+            score = row.get('score')
+            if type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= 1:
+                continue
+            ranking.append({key: row[key] for key in ('object_id', 'label', 'score', 'threshold', 'verified', 'stale_labels') if key in row})
+        view = {'status': result.get('status', 'not_called'), 'matched': result.get('matched', ''),
+                'ranking': ranking, 'overlap': result.get('overlap', False)}
+        if result.get('status') == 'error':
+            view['detail'] = str(result.get('detail', ''))[:180]
+        return view
 
     def current_speaker(self):
         return next((u.speaker for u in reversed(self.scene)
@@ -321,10 +564,30 @@ class VoiceConversation:
                 old = next(iter(self.input_records))
                 self.sample_bytes -= len(self.input_records.pop(old).get('pcm') or b'')
             await self.emit('typed_input', text=text, label=profile.label, input_id=iid)
-            self.enqueue_turn(InputEnvelope(session_id=self.session_id, source='web_text',
+            envelope = InputEnvelope(session_id=self.session_id, source='web_text',
                 parts=(InputPart('text', text),), speaker=evidence, input_id=iid,
                 start_ms=start, end_ms=start,
-                utterances=tuple(self.scene), current_utterances=(utterance,), deferred_interrupt=True))
+                utterances=tuple(self.scene), current_utterances=(utterance,), deferred_interrupt=True)
+            if self.active_turn is not None or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}:
+                input_epoch = self.epoch
+                decision, record, items = await self._judge((utterance,), evidence, False, envelope)
+                if input_epoch != self.epoch:
+                    return
+                current = tuple(self._apply_attribution((utterance,), items))
+                control = record.get('control')
+                if not control and decision.action == 'stop':
+                    control = 'stop'  # Semantic result from a legacy compatible model.
+                if control in {'stop', 'redirect'}:
+                    await self.stop('semantic_' + control)
+                self._capture_jev_inputs(current, items)
+                await self._publish_attribution(current, items, record)
+                if control in {'keep', 'stop'}:
+                    return
+                if not record.get('judged'):
+                    self._preserve_background(current)
+                    return
+                envelope = replace(envelope, current_utterances=current, deferred_interrupt=False, jev_calls=(record,))
+            self.enqueue_turn(envelope)
             return
         speaker = self.current_speaker()
         if speaker is None:
@@ -370,8 +633,6 @@ class VoiceConversation:
         await self.emit('renamed', object_id=object_id, previous=pending[1], label=evidence.label)
 
     def record(self, event_type: str, payload: dict) -> None:
-        if event_type == 'voice_delivery' and payload.get('reply_id') in self.direct_reply_ids:
-            return
         self.process.repository.add_history(HistoryRecord(
             subject_id=self.subject_id, kind=HistoryKind.FACT, event_type=event_type,
             content={"session_id": self.session_id, **payload}, source_ids=()))
@@ -392,9 +653,19 @@ class VoiceConversation:
         if self.tts_task and not self.tts_task.done():
             self.tts_task.cancel()
         self.pending_plans.clear()
+        await self.emit("stop", reply_id=rid)
+        try:
+            self.dialogue.stop(self.session_id)
+        except OSError:
+            logging.getLogger(__name__).exception('Playback stopped but shared dialogue could not be saved')
         if reason in {'explicit stop', 'connection closed'}:
             while not self.queue.empty():
-                self.queue.get_nowait()
+                discarded = self.queue.get_nowait()
+                try:
+                    self.dialogue.input(self.subject_id, discarded.input_id, discarded.text,
+                                        '声音归属待定', time()*1000)
+                except OSError:
+                    logging.getLogger(__name__).exception('Stopped input could not be saved')
                 self.queue.task_done()
             if self.input_carry is not None:
                 self.input_carry = None
@@ -403,18 +674,20 @@ class VoiceConversation:
             while not self.turn_queue.empty():
                 self.turn_queue.get_nowait()
                 self.turn_queue.task_done()
-        await self.emit("stop", reply_id=rid)
         self.record("voice_delivery", self.delivery.snapshot())
 
         snapshot = self.delivery.snapshot()
-        if rid and rid not in self.direct_reply_ids and snapshot.get('state') == 'stopped':
+        if rid and snapshot.get('state') == 'stopped':
             self.jev_scene_store.append(f"stopped:{rid}", {"p": "匠石", "at": time()*1000,
                 "basis": "播放中断", "text": "播放已中断；曾开始的句子未确认完整播出，未播放内容不算已说。"})
             self.process.note_scene_delivery(self.subject_id, f"stopped:{rid}",
-                "（播放器交付中断）" + json.dumps(snapshot, ensure_ascii=False)
+                "（播放器交付中断）" + json.dumps(self.dialogue.clean(snapshot, subject=self.subject_id), ensure_ascii=False)
                 + "；partial_text只表示该句曾开始播放，不知道具体播到哪个字；pending_text尚未播放。")
 
     async def accept(self, transcript, *, asr_received_mono=None, asr_received_at_ms=None, online_identity_ms=0) -> None:
+        if transcript.replaces:
+            await self._revise_transcript(transcript)
+            return
         if not any(ch.isalnum() for ch in transcript.text):
             await self.emit('transcript', **asdict(transcript))
             return  # No text: do not start or extend the conversational timer.
@@ -428,15 +701,9 @@ class VoiceConversation:
         while len(self.speech_input_at) > 128:
             self.speech_input_at.pop(next(iter(self.speech_input_at)))
         await self.emit("transcript", **asdict(transcript))
-        if (transcript.final and not transcript.overlap
-                and VoiceJEV().decide(self.subject_id, transcript.text, {}, {}).action == 'stop'):
-            self.record('voice_stop_input', {'text':transcript.text, 'at':time()*1000, 'path':'immediate_rule'})
-            await self.stop('explicit stop')
-            await self.emit('jev', action='stop', reason='明确停止，未等待声纹或模型')
-            return
         if not transcript.final:
             if not transcript.track_id.startswith("pending-"):
-                evidence = self.identities.resolve(transcript.track_id, voiceprint_id=transcript.voiceprint_id, confidence=transcript.confidence, cluster_id=transcript.speaker_cluster_id, uncertain=transcript.identity_uncertain, tentative=transcript.identity_tentative)
+                evidence = self.resolve_speaker(transcript)
                 await self.emit("speaker", **asdict(evidence), jev_status="pending")
             return
         # Bound queue growth without discarding an already accepted input.
@@ -459,11 +726,76 @@ class VoiceConversation:
         while len(self.input_records) > 128 or self.sample_bytes > 16 * 1024 * 1024:
             old = next(iter(self.input_records))
             self.sample_bytes -= len(self.input_records.pop(old)['pcm'] or b'')
+            job = self.personal_prediction_jobs.pop(old, None)
+            if job is not None and not job.done():
+                job.cancel()
             self.annotations.pop(old, None)
             self.source_speakers.pop(old, None)
             self.candidate_cache.pop(old, None)
         self.input_idle.clear()
+        if self.sample_source and getattr(self.sample_source,'archive',None):
+            try:
+                await asyncio.to_thread(self.sample_source.archive.save_input,iid,
+                    self.sample_source.capture_id,asdict(transcript),pcm=pcm,
+                    received_at_ms=self.input_records[iid]['received_at_ms'])
+                self.input_records[iid]['audio_saved'] = not self.sample_source.archive_error
+            except Exception:
+                logging.getLogger(__name__).exception('Recent input audio indexing failed')
+                await self.emit('notice',text='本句录音保存失败；当前对话继续。')
         await self.queue.put(transcript)
+
+    async def _archive_update(self,iid,**values):
+        if self.sample_source and getattr(self.sample_source,'archive',None):
+            try:
+                await asyncio.to_thread(self.sample_source.archive.update,iid,**values)
+            except Exception:
+                logging.getLogger(__name__).exception('Recent audio diagnostics update failed')
+
+    async def _revise_transcript(self, transcript):
+        rows = sorted(((iid, row) for iid, row in self.input_records.items()
+            if row.get('transcript') is not None and
+            row.get('audio_kind') != 'separated' and
+            (row['transcript'].start_ms, row['transcript'].end_ms) in transcript.replaces),
+            key=lambda item: item[1]['transcript'].start_ms)
+        if not rows:
+            return  # old audio outside the retained session window is not new input
+        if all(isinstance(row.get('superseded_by'), list) for _, row in rows):
+            # A mixed-stream correction cannot replace independent source texts.
+            for iid, row in rows:
+                row['transcript'] = replace(row['transcript'], text=transcript.text)
+                await self._archive_update(iid, transcript=asdict(row['transcript']))
+            self.record('voice_asr_source_parent_revision', {'input_ids':[iid for iid,_ in rows],
+                'text':transcript.text})
+            return
+        ids = [iid for iid, _ in rows]
+        old = [row['transcript'].text for _, row in rows]
+        first_id, first = rows[0]
+        first['transcript'] = replace(first['transcript'], text=transcript.text,
+            start_ms=transcript.start_ms, end_ms=transcript.end_ms)
+        await self._archive_update(first_id,transcript=asdict(first['transcript']))
+        # Keep the original audio/evidence; a text correction cannot rename a person.
+        for _, row in rows[1:]:
+            row['superseded_by'] = first_id
+        self.dialogue.revise_input(self.subject_id, ids, transcript.text)
+        correction = '【语音识别修订】此前转写“' + ' / '.join(old) + '”应为“' + transcript.text + '”；同一段声音的文字修正，不是新发言，不据此改变人物归属。'
+        self.record('voice_asr_revision', {'input_ids': ids, 'previous': old,
+            'text': transcript.text, 'start_ms': transcript.start_ms, 'end_ms': transcript.end_ms})
+        if any(row.get('processing_started') for _, row in rows):
+            self.process.note_scene_delivery(self.subject_id, 'asr-revision:'+uuid4().hex, correction)
+            self.jev_scene_store.append('asr-revision:'+uuid4().hex,
+                {'text': correction, 'at': time()*1000, 'basis': 'asr_revision'},
+                codes=self.code_owner, labels=self.code_labels)
+        await self.emit('transcript_revision', input_ids=ids, text=transcript.text)
+
+    def _latest_utterances(self, current):
+        result = []
+        for u in current:
+            row = self.input_records.get(u.input_id, {})
+            if row.get('superseded_by'):
+                continue
+            latest = row.get('transcript')
+            result.append(replace(u, text=latest.text) if latest is not None else u)
+        return result
 
     async def request_emergency_interrupt(self, reason: str, *, expected_epoch=None) -> bool:
         """预留给明确紧急事件的入口；调用方负责判定，不做危险检测。"""
@@ -483,6 +815,10 @@ class VoiceConversation:
                 return ('cluster', transcript.speaker_cluster_id)
             if transcript.track_id and not transcript.track_id.startswith(('pending-', 'unidentified-', 'overlap-')):
                 return ('track', transcript.track_id)
+        # A provisional track only isolates its text-activity clock. It does
+        # not establish same-person identity, a name, or trusted voice evidence.
+        if not transcript.overlap and transcript.track_id and not transcript.track_id.startswith('overlap-'):
+            return ('provisional', transcript.track_id)
         return None
 
     @staticmethod
@@ -496,13 +832,10 @@ class VoiceConversation:
             return True
         if re.search(r'的那种\w{0,8}$', text):
             return True
-        # Very short stub without closer particle / finals (e.g. 那我回来).
-        # Exclude complete short closers (走吧、好的、嗯、就是这个、还有).
-        if len(text) <= 6 and not re.search(r'[。！？.!?]$', raw):
-            if re.search(r'(吧|了|啊|呀|呢|吗|喔|哦|嗯|好|走|行|对|是|停|的|一些|这个|那个|还有|所以|变成)$', text):
-                return False
-            return True
-        return False
+        # Shortness alone does not establish an unfinished expression:
+        # questions like 在忙什么 and complete requests like 我想问一件事
+        # must not acquire a four-second hold merely for lacking punctuation.
+        return text == '那我回来'
 
     def assign_code(self, object_id: str, label: str) -> str:
         if not object_id:
@@ -601,6 +934,12 @@ class VoiceConversation:
         marks = {r.n: r for r in items}
         evidence_rows = self._jev_batch(current)
         for n, u in enumerate(current, 1):
+            latest = self.input_records.get(u.input_id, {}).get('transcript')
+            if latest is not None:
+                u = replace(u, text=latest.text)
+            if self.input_records.get(u.input_id, {}).get('superseded_by'):
+                continue
+            self.dialogue.input(self.subject_id, u.input_id, u.text, u.speaker.label, u.received_at_ms)
             if u.input_id not in self.recorded_inputs:
                 if u.speaker.method == 'user_selected':
                     self.record('web_text_input', {'input_id':u.input_id, 'text':u.text,
@@ -613,7 +952,10 @@ class VoiceConversation:
                    "status": u.speaker.status, "track": u.speaker.track_id, "input_id": u.input_id,
                    "entry_status": entry_status or ('completed' if n in marks and marks[n].speaker_pick else 'failed'),
                    "voice": evidence_rows[n-1]['voice_evidence'],
-                   "candidates": [{"p": c['who'], "similarity": c.get('score'), "source": c.get('source'),
+                   "joint_evidence": evidence_rows[n-1].get('joint_evidence',{}),
+                   "candidates": [{"p": c['who'],
+                                   ('classification_score' if c.get('source')=='personal_classifier' else 'similarity'):c.get('score'),
+                                   "source": c.get('source'), "verified":c.get('verified'),
                                    "names": c.get('names', [])} for c in evidence_rows[n-1]['candidates']],
                    "short_voice_hint": evidence_rows[n-1]['short_voice_hint']}
             initial = self.source_speakers.get(u.input_id, u.speaker)
@@ -668,9 +1010,12 @@ class VoiceConversation:
                         from datetime import datetime
                         with self.process._write_lock:
                             main_scene = self.process.zone_store.render(self.subject_id, now=datetime.now().astimezone())
-                        return self.person_reviewer.run(self.subject_id, snapshot, main_scene,
+                        model_snapshot = self.dialogue.clean(snapshot, subject=self.subject_id)
+                        result = self.person_reviewer.run(self.subject_id, model_snapshot, self.dialogue.filter_text(main_scene, subject=self.subject_id),
                             on_request=lambda req: self.process._record_step_input(req, self.person_reviewer.model,
                                 subject_id=self.subject_id, activity_id=review_id))
+                        snapshot['material_window'] = model_snapshot.get('material_window', {})
+                        return result
                     started = monotonic()
                     self._last_scene_attempt = started
                     scene, raw = await loop.run_in_executor(self.person_review_executor, run)
@@ -711,7 +1056,9 @@ class VoiceConversation:
                     continue
                 code = self.assign_code(oid, profile.label)
                 candidates.append({"who": code, "names": [profile.label, *profile.aliases],
-                                   "score": candidate.get("score"), "source": candidate.get("source", "voiceprint"),
+                                   "score": (round(candidate['score'], 3)
+                                             if candidate.get('source') == 'personal_classifier' and isinstance(candidate.get('score'), (int, float))
+                                             else candidate.get("score")), "source": candidate.get("source", "voiceprint"),
                                    **{key:candidate[key] for key in ('reference_count', 'stddev', 'sample_limited') if key in candidate}})
                 profiles.append({"who": code, "candidate_only": True, "portrait_names": self.process.profiles.address_line(oid)})
             sound = self.sound_code(u)
@@ -820,7 +1167,9 @@ class VoiceConversation:
                 matched = {}
             stats = next((row for row in matched.get('candidates', ()) if row.get('object_id') == speaker.object_id), {})
             return [{**{key:stats[key] for key in ('reference_count', 'stddev', 'sample_limited') if key in stats},
-                     "object_id": speaker.object_id, "label": speaker.label, "score": transcript.confidence, "source": speaker.method}], "already_identified"
+                     "object_id": speaker.object_id, "label": speaker.label,
+                     "score": speaker.confidence if speaker.method == 'personal_classifier' else transcript.confidence,
+                     "source": speaker.method}], "already_identified"
         try:
             matched = json.loads(transcript.identity_note or "{}")
         except (ValueError, TypeError):
@@ -843,7 +1192,7 @@ class VoiceConversation:
         if not self.local_speakers or not pcm:
             return [], "no_audio_or_model"
         short = len(pcm) < 48000
-        if short and (transcript.overlap or len(pcm) < 6400):
+        if short and ((transcript.overlap and transcript.audio_kind != 'separated') or len(pcm) < 6400):
             return [], "short_audio"
         if self.candidate_future is not None and not self.candidate_future.done():
             return [], "previous_candidate_still_running"
@@ -1004,9 +1353,19 @@ class VoiceConversation:
     def voice_evidence(self, utterance, candidates):
         """Physical support uses original measurements, never a previous model guess."""
         import math
+        if utterance.speaker.method == 'manual_annotation':
+            return {'pick': self.assign_code(utterance.speaker.object_id, utterance.speaker.label),
+                    'strength': 'clear', 'basis': '用户人工确认本句归属'}
         original = self.source_speakers.get(utterance.input_id, utterance.speaker)
         if original.method == "voiceprint_match":
             return {"pick": self.assign_code(original.object_id, original.label), "strength": "clear", "basis": "声纹已匹配"}
+        personal = self.input_records.get(utterance.input_id, {}).get('personal_classifier', {})
+        if personal.get('matched'):
+            row = next((r for r in personal.get('ranking', ()) if r['object_id'] == personal['matched']), None)
+            if row:
+                return {'pick': self.assign_code(row['object_id'], row['label']), 'strength': 'clear',
+                        'score': round(row['score'], 3), 'threshold': round(row['threshold'], 3),
+                        'basis': '个人二分类模型通过独立验证后的门槛；分类分数不是原声纹相似度或身份概率'}
         if original.method in {"anonymous_voice_cluster", "voice_continuity"}:
             return {"pick": self.assign_code(original.object_id, original.label),
                     "strength": "clear" if original.method == "anonymous_voice_cluster" and utterance.speaker.status != "introduced" else "weak",
@@ -1033,6 +1392,26 @@ class VoiceConversation:
                 "gap": gap, "threshold": threshold, "margin": margin,
                 "basis": "本句声纹比较；相似度不是概率"}
 
+    def identity_comparison(self,input_id):
+        from jshi.voice.identity_comparison import compare_identity
+        comparison = compare_identity(self.candidate_cache.get(input_id,[]),
+            self.input_records.get(input_id,{}).get('personal_classifier',{}),
+            voice_threshold=getattr(self.local_speakers,'confirmation_threshold',getattr(self.local_speakers,'threshold',.33)),
+            voice_margin=getattr(self.local_speakers,'margin',.08))
+        if self.input_records.get(input_id,{}).get('personal_classifier',{}).get('overlap'):
+            comparison.update(mlp_high=False, mlp_priority=False)
+        winner = comparison.get('mlp',{}).get('object_id')
+        if any(r.get('object_id') == winner and r.get('stale_labels')
+               for r in self.input_records.get(input_id,{}).get('personal_classifier',{}).get('ranking',[])):
+            comparison.update(mlp_high=False, mlp_priority=False)
+        return comparison
+
+    def identity_display(self,input_id,speaker,certainty=''):
+        from jshi.voice.identity_comparison import identity_display
+        return identity_display(asdict(speaker),self.identity_comparison(input_id),certainty=certainty,
+            classifier=self.input_records.get(input_id,{}).get('personal_classifier',{}),
+            original=asdict(self.source_speakers.get(input_id,speaker)))
+
     def _jev_batch(self, utterances):
         batch = []
         for index, utterance in enumerate(utterances, start=1):
@@ -1051,13 +1430,32 @@ class VoiceConversation:
                     **{key:item[key] for key in ('reference_count', 'stddev', 'sample_limited') if key in item},
                     "names": [profile.label, *profile.aliases] if profile else [],
                     "portrait_names": self.process.profiles.address_line(item["object_id"])})
+            personal=self.input_records.get(utterance.input_id,{}).get('personal_classifier',{})
+            for item in personal.get('ranking',[]):
+                code=self.assign_code(item['object_id'],item.get('label',''))
+                existing=next((c for c in candidates if c['source']=='personal_classifier' and c['who']==code),None)
+                if existing is not None:
+                    existing.update(verified=item.get('verified',True),threshold=item.get('threshold',.8))
+                    continue
+                profile=self.process.profiles.get(item['object_id'])
+                if profile is None or profile.status=='rejected':continue
+                candidates.append({'who':self.assign_code(item['object_id'],profile.label),'score':item['score'],
+                    'source':'personal_classifier','verified':item.get('verified',True),
+                    'threshold':item.get('threshold',.8),'names':[profile.label,*profile.aliases]})
+            comparison=self.identity_comparison(utterance.input_id)
+            joint={k:v for k,v in comparison.items() if k not in {'voice','mlp'}}
+            for kind in ('voice','mlp'):
+                if kind in comparison:
+                    r=comparison[kind]
+                    joint[kind]={'p':self.assign_code(r['object_id'],r.get('label','')),
+                        **{k:round(v,3) if type(v) is float else v for k,v in r.items() if k not in {'object_id','label'}}}
             batch.append({"n": index, "input_id": utterance.input_id, "track": utterance.speaker.track_id,
                           "sound": self.sound_code(utterance),
                           "who": self.display_speaker(utterance.speaker), "text": utterance.text,
                           "seconds": round(max(0, utterance.end_ms - utterance.start_ms) / 1000, 2),
                           "basis": utterance.speaker.method, "at": utterance.received_at_ms, "at_ms": utterance.start_ms, "candidates": candidates,
                           "short_voice_hint": self.input_records.get(utterance.input_id, {}).get('short_voice_hint', {}),
-                          "voice_evidence": self.voice_evidence(utterance, candidates)})
+                          "joint_evidence":joint,"voice_evidence": self.voice_evidence(utterance, candidates)})
         return batch
 
     def _jev_context(self, utterances):
@@ -1072,7 +1470,8 @@ class VoiceConversation:
         updated = []
         for index, utterance in enumerate(utterances, start=1):
             item = next((it for it in items if it.n == index), None)
-            speaker = utterance.speaker
+            annotated = self.annotations.get(utterance.input_id)
+            speaker = annotated if annotated and annotated.method == 'manual_annotation' else utterance.speaker
             if speaker.method == 'visual_scene':
                 updated.append(utterance)
                 self.annotations[utterance.input_id] = speaker
@@ -1093,12 +1492,14 @@ class VoiceConversation:
                     if r.get("source") != "repeated_short_audio" or
                     (item.semantic_pick == item.speaker_pick and item.semantic_reason)}
                 allowed.add(speaker.object_id)
+                allowed.update(r['object_id'] for r in self.input_records.get(utterance.input_id,{}).get('personal_classifier',{}).get('ranking',[]))
                 if oid in allowed and item.speaker_level in {"确定", "可能"}:
                     profile = self.process.profiles.get(oid)
                     if profile is not None:
                         speaker = replace(speaker, object_id=oid, label=profile.label,
                             method="jev_attribution", status="recognized" if item.speaker_level == "确定" else "provisional")
-                elif item.speaker_pick in {"unknown", "new"} and item.speaker_reason and initial.method == "voiceprint_match":
+                elif (item.speaker_pick in {"unknown", "new"} and item.speaker_reason
+                      and (initial.method == "voiceprint_match" or speaker.method == 'personal_classifier')):
                     speaker = replace(speaker, object_id="input:" + utterance.input_id, label="声音归属待定",
                         method="unassigned_audio", status="unknown", confidence=None, voiceprint_id="")
                 if persist:
@@ -1123,7 +1524,12 @@ class VoiceConversation:
         for n, u in enumerate(utterances, 1):
             item = marks.get(n)
             completed = bool(record.get("judged") and item and item.speaker_pick)
+            display=self.identity_display(u.input_id,u.speaker,item.speaker_level if completed else '')
+            await self._archive_update(u.input_id,identity_display=display,jev_final={
+                'speaker':asdict(u.speaker),'certainty':item.speaker_level if completed else '',
+                'reason':item.speaker_reason if completed else record.get('reason','')})
             await self.emit("identity_final", input_id=u.input_id, speaker=asdict(u.speaker),
+                identity_display=display,
                 voice_initial=asdict(self.source_speakers.get(u.input_id, u.speaker)),
                 jev_status="completed" if completed else "failed",
                 certainty=item.speaker_level if completed else "",
@@ -1189,13 +1595,19 @@ class VoiceConversation:
         # 还没有交付记录时，状态是空的。空状态不能当成正在播放，
         # 否则没有模型的初判会一律选择继续播放，话进不了主流程。
         state = (snapshot or {}).get("state") or "completed"
-        delivery = {"state": state, "spoken": spoken[:200],
+        delivery = {"state": state, "spoken": spoken[-1200:],
                     "pending": (snapshot or {}).get("pending_text", "")[:200], "names_for_jiangshi": names,
                     "attention": self.attention.hint(speaker, overlap=overlap),
                     "short_chat": self.direct_replies.context(self.subject_id, [u.speaker.object_id for u in utterances]),
                     "jev_scene": self.jev_scene_store.view(
                         min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=time()*1000))[0],
                     "now": time()*1000}
+        if self.active_turn is not None and state == 'completed':
+            delivery['state'] = 'thinking'
+        cutoff = min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=time()*1000)
+        delivery['conversation'] = self.dialogue.recent(self.subject_id, cutoff=cutoff,
+            exclude={u.input_id for u in utterances})
+        delivery = self.dialogue.clean(delivery, subject=self.subject_id)
         from jshi.voice.wait_ack import model_key
         delivery['waiting'] = self.wait_ack_timing.guidance(model_key(self.process),
             allowed=state == 'completed' and not overlap and not self.pending_voice and not self.output_disconnected
@@ -1236,6 +1648,8 @@ class VoiceConversation:
         for row, u in zip(batch, utterances):
             row['source'] = ('visual_environment' if u.speaker.method == 'visual_scene' else
                              'web_text' if u.speaker.method == 'user_selected' else 'voice')
+            if row['source'] == 'web_text':
+                row['speaker'] = {'method': 'user_selected'}
             if row['source'] == 'visual_environment':
                 row.update(who='unknown', candidates=[], voice_evidence={'strength':'unavailable','basis':'视觉观察，无声音身份'})
         if not batch:
@@ -1299,14 +1713,14 @@ class VoiceConversation:
                   "prompt_requested": bool(sent_requests) if type(self.jev) is VoiceJEV else None,
                   "judged": result.judged, "model_error": result.model_error}
         record['routing_error'] = result.routing_error
+        record['control'] = result.control
         record['direct_reply'] = result.direct_reply if not timed_out else ''
         record['waiting_reply'] = result.waiting_reply if not timed_out else ''
         record['front_choice'] = result.front_choice if not timed_out else 'main_silent'
         record['visual_snapshot_id'] = envelope.visual_snapshot_id
         record['input_parts'] = [asdict(p) for p in envelope.parts]
-        if not record['direct_reply']:
-            self.record('voice_jev_diagnostics', {**record, 'model_raw': result.model_raw,
-                'model_error': result.model_error})
+        self.record('voice_jev_diagnostics', {**record, 'model_raw': result.model_raw,
+            'model_error': result.model_error})
         for u in utterances:
             if u.input_id in self.input_records:
                 self.input_records[u.input_id]['jev_finished_at'] = monotonic()
@@ -1321,6 +1735,68 @@ class VoiceConversation:
             await self.emit('notice', text=result.routing_error)
         return decision, record, result.items
 
+    async def _prepare_speaker_audio(self, batch):
+        """Replace a mixed batch only after all independent sources are ready."""
+        if self.sample_source is None or any(t.input_id in self.annotations for t in batch):
+            return batch
+        try:
+            prepared = await self.audio_preparer.prepare(batch, self.sample_source)
+        except Exception as exc:
+            self.record('voice_source_preparation', {'status':'fallback', 'detail':str(exc),
+                'input_ids':[t.input_id for t in batch]})
+            await self.emit('notice', text='声音分离未完成，保留原始发言：'+str(exc))
+            from jshi.voice.sources import original_sources
+            prepared = original_sources(batch, self.sample_source)
+        if all(kind != 'separated' for _, _, kind in prepared):
+            output = []
+            for t, pcm, kind in prepared:
+                t = replace(t, audio_kind=kind)
+                row = self.input_records.get(t.input_id)
+                if row is not None:
+                    row.update(transcript=t, audio_kind=kind)
+                output.append(t)
+            return output
+        parents = [t.input_id for t in batch]
+        base = dict(self.input_records.get(parents[0], {}))
+        output = []
+        for t, pcm, kind in prepared:
+            iid = uuid4().hex
+            t = replace(t, input_id=iid, audio_kind=kind)
+            if self.local_speakers is not None:
+                if self.candidate_future is None or self.candidate_future.done():
+                    from functools import partial
+                    self.candidate_future = asyncio.get_running_loop().run_in_executor(
+                        self.candidate_executor, partial(self.sample_source.match, t, self.local_speakers, pcm=pcm))
+                    self.candidate_future.add_done_callback(lambda f:f.exception() if not f.cancelled() else None)
+                    try:
+                        t = await asyncio.wait_for(asyncio.shield(self.candidate_future), self.candidate_timeout_s)
+                    except Exception:
+                        t = replace(t, identity_uncertain=True)
+            self.input_records[iid] = {**{k:base[k] for k in ('at','received_at_ms','gap_before','asr_lag_ms') if k in base},
+                'transcript':t, 'pcm':pcm, 'audio_kind':kind, 'source_inputs':parents}
+            self.sample_bytes += len(pcm)
+            archive = getattr(self.sample_source, 'archive', None)
+            if archive:
+                try:
+                    capture = 'source-'+iid
+                    await asyncio.to_thread(archive.append, capture, t.start_ms*32, pcm)
+                    await asyncio.to_thread(archive.save_input, iid, capture, asdict(t), pcm=pcm,
+                        received_at_ms=base.get('received_at_ms'))
+                    await self._archive_update(iid, source_inputs=parents, audio_kind=kind,
+                        original_capture=self.sample_source.capture_id)
+                    self.input_records[iid]['audio_saved'] = True
+                except Exception:
+                    logging.getLogger(__name__).exception('Extracted source archive failed')
+            output.append(t)
+        for t in batch:
+            row = self.input_records.get(t.input_id)
+            if row is not None:
+                row['superseded_by'] = [u.input_id for u in output]
+                await self._archive_update(t.input_id, separated_inputs=row['superseded_by'])
+        self.record('voice_source_preparation', {'status':'separated', 'input_ids':parents,
+            'outputs':[t.input_id for t in output], 'speakers':len({t.track_id for t in output})})
+        return output
+
     async def _work(self) -> None:
         while True:
             transcript = self.input_carry if self.input_carry is not None else await self.queue.get()
@@ -1329,6 +1805,7 @@ class VoiceConversation:
             worker_started = monotonic()
             input_epoch = self.epoch
             batch = [transcript]
+            queued_count = None
             collection_started = self.input_records.get(transcript.input_id, {}).get('at', worker_started)
             collection_trigger = 'capacity'
             try:
@@ -1337,9 +1814,13 @@ class VoiceConversation:
                 anchor_key = self.speech_group_key(anchor)
                 expression_complete = False
                 while len(batch) < 64:
-                    # Explicit stop is not delayed by conversational batching.
-                    if not batch[-1].overlap and VoiceJEV().decide(self.subject_id, batch[-1].text, {}, {}).action == 'stop':
-                        collection_trigger = 'stop'
+                    # Playback/thinking control uses this same JEV1 request, without
+                    # waiting for the normal speech batch or matching stop words.
+                    if self.active_turn is not None or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}:
+                        while not self.queue.empty() and len(batch) < 64:
+                            batch.append(self.queue.get_nowait())
+                        collection_trigger = 'active_control'
+                        expression_complete = not self.unfinished(batch[-1].text)
                         break
                     if self.input_batch_chars and sum(ch.isalnum() for item in batch for ch in item.text) >= self.input_batch_chars:
                         collection_trigger = 'chars'
@@ -1374,19 +1855,28 @@ class VoiceConversation:
                             anchor = incoming
                     except asyncio.TimeoutError:
                         continue
+                queued_count = len(batch)
                 batch.sort(key=lambda t: (t.start_ms, t.end_ms))
+                if collection_trigger != 'active_control':
+                    batch = await self._prepare_speaker_audio(batch)
                 group_ready = monotonic()
                 binding_notes = []
                 current = []
                 from jshi.voice.jev import explicit_name
                 for transcript in batch:
                     input_record = self.input_records.get(transcript.input_id, {})
+                    if input_record.get('superseded_by'):
+                        continue
+                    transcript = input_record.get('transcript', transcript)
+                    input_record['processing_started'] = True
                     input_record["group_ready_at"] = group_ready
                     input_record['collection_trigger'] = collection_trigger
                     input_record["worker_started_at"] = max(worker_started, input_record.get("at", worker_started))
                     identity_started = monotonic()
-                    evidence = self.identities.resolve(transcript.track_id, voiceprint_id=transcript.voiceprint_id, confidence=transcript.confidence, cluster_id=transcript.speaker_cluster_id, uncertain=transcript.identity_uncertain, tentative=transcript.identity_tentative)
+                    evidence = self.resolve_speaker(transcript)
                     self.source_speakers[transcript.input_id] = evidence
+                    evidence = await self.personal_identity(transcript, evidence,
+                        wait=collection_trigger != 'active_control')
                     answer = self.identities.name_answer(evidence, transcript.text) if not transcript.overlap else ''
                     claimed = (explicit_name(transcript.text) or answer) if not transcript.overlap else ""
                     remembered = False
@@ -1434,7 +1924,17 @@ class VoiceConversation:
                             lambda pcm=pcm, t=transcript, actor=actor: self.local_speakers.collect_candidate(pcm, t.input_id,
                                 actor, self.session_id, overlap=t.overlap, start_ms=t.start_ms, end_ms=t.end_ms))
                     candidate_started = monotonic()
-                    found, candidate_status = await self.rank_candidates(transcript, evidence)
+                    if collection_trigger == 'active_control':
+                        found, candidate_status = [], '控制判断使用已有证据，不等待额外声音模型'
+                    else:
+                        found, candidate_status = await self.rank_candidates(transcript, evidence)
+                    personal = input_record.get('personal_classifier', {})
+                    if personal.get('ranking') and not personal.get('matched'):
+                        # Preserve both sources; their scores are not ranked against one another.
+                        found = [*found, *[{key: row[key] for key in ('object_id', 'label', 'score', 'source')}
+                                          for row in personal['ranking'][:3]
+                                          if row.get('verified') is not False
+                                          and row['object_id'] not in {r['object_id'] for r in found}]]
                     input_record["candidate_ms"] = round((monotonic() - candidate_started) * 1000)
                     input_record["candidate_status"] = candidate_status
                     if input_record.get('short_voice_hint'):
@@ -1466,10 +1966,38 @@ class VoiceConversation:
                             transcript.text, self.session_id, transcript.start_ms, transcript.end_ms)
                         if not saved:
                             await self.emit("notice", text="未知人物暂存已达到500MB上限；本轮交往仍继续保留，暂不增加独立历史。")
+                    utterance = self._latest_utterances([utterance])
+                    if not utterance:
+                        continue
+                    utterance = utterance[0]
                     current.append(utterance)
                     self.last_track = transcript.track_id
-                    await self.emit("timeline", **asdict(utterance))
+                    # Publish separately from identity: even a very weak first place can
+                    # preselect a training label, without confirming the speaker.
+                    ui_candidates = [{**row, 'source': row.get('source', 'voiceprint')} for row in found if row.get('source', 'voiceprint') in
+                                     {'voiceprint', 'voiceprint_match', 'repeated_short_audio'}
+                                     and isinstance(row.get('score'), (int, float))]
+                    await self._archive_update(transcript.input_id,speaker=asdict(evidence),
+                        identity_display=self.identity_display(transcript.input_id,evidence),
+                        voiceprint_candidates=ui_candidates,identity_note=utterance.identity_note,
+                        identity_comparison=self.identity_comparison(transcript.input_id),
+                        classifier_result=self.personal_prediction_view(input_record))
+                    await self.emit("timeline", **asdict(utterance), voiceprint_candidates=ui_candidates,
+                                    identity_display=self.identity_display(transcript.input_id,evidence),
+                                    audio_saved=input_record.get('audio_saved',False),
+                                    identity_comparison=self.identity_comparison(transcript.input_id),
+                                    personal_prediction=self.personal_prediction_view(input_record))
+                    if self.personal_speakers is not None:
+                        job = self.personal_speakers.collect_original(input_record.get('pcm'), transcript,
+                            self.source_speakers[transcript.input_id], self.session_id, self.local_speakers,
+                            candidates=ui_candidates)
+                        if job:
+                            task = asyncio.create_task(self._publish_personal_auto(transcript.input_id, job))
+                            self.background_tasks.add(task)
+                            task.add_done_callback(self.background_tasks.discard)
                     await self.emit("speaker", **asdict(evidence), jev_status="pending")
+                if not current:
+                    continue
                 evidence = current[-1].speaker
                 active = self.delivery.snapshot().get("state") in {"playing", "paused", "queued"} or self.active_turn is not None
                 explicit_stop = any(not u.overlap and VoiceJEV().decide(self.subject_id, u.text, {}, {}).action == 'stop' for u in current)
@@ -1486,19 +2014,30 @@ class VoiceConversation:
                     record['collection_trigger'] = collection_trigger
                     record['collected_chars'] = sum(ch.isalnum() for u in current for ch in u.text)
                     current = self._apply_attribution(current, items, persist=not bool(record.get('direct_reply')))
+                    current = self._latest_utterances(current)
+                    if not current:
+                        continue
                     await self._publish_attribution(current, items, record)
                     jev_calls = (record,)
                 # Publish only after entry judgment/rule completion. Background
                 # snapshots must never race ahead of this batch's first JEV.
-                if not (jev_calls and jev_calls[-1].get('direct_reply')):
-                    self._capture_jev_inputs(current, items, entry_status='rule' if explicit_stop else None)
+                control = jev_calls[-1].get('control') if jev_calls else ''
+                if control in {'stop', 'redirect'}:
+                    await self.stop('semantic_' + control)
+                    input_epoch = self.epoch
+                    active = busy = False
+                self._capture_jev_inputs(current, items, entry_status='rule' if explicit_stop else None)
+                if control == 'stop':
+                    continue
+                if control == 'keep':
+                    self._preserve_background(current)
+                    continue
                 self.pending_voice = False
                 if busy:
                     await self.emit('input_pending', count=len(current))
                 else:
                     self.last_jev = asdict(decision)
-                    if not (jev_calls and jev_calls[-1].get('direct_reply')):
-                        self.record("voice_jev", {"input": self.render_input(current, items), "track_id": transcript.track_id, **asdict(decision)})
+                    self.record("voice_jev", {"input": self.render_input(current, items), "track_id": transcript.track_id, **asdict(decision)})
                     await self.emit("jev", **asdict(decision))
                 if decision.action in {"resume", "ignore"}:
                     self._preserve_background(current)
@@ -1541,7 +2080,7 @@ class VoiceConversation:
             except Exception as exc:
                 await self.emit("notice", text=f"语音轮次失败：{type(exc).__name__}：{exc}")
             finally:
-                for _ in batch:
+                for _ in range(queued_count if queued_count is not None else len(batch)):
                     self.queue.task_done()
                 if self.queue.empty() and self.input_carry is None:
                     self.input_idle.set()
@@ -1553,11 +2092,16 @@ class VoiceConversation:
             envelope, epoch = await self.turn_queue.get()
             # Writing is independent; cognition sees committed scene + pending events.
             write_wait_ms = 0
-            pending = [envelope]
+            pending = [envelope] if epoch == self.epoch else []
             while not self.turn_queue.empty():
-                newer, epoch = self.turn_queue.get_nowait()
-                pending.append(newer)
+                newer, newer_epoch = self.turn_queue.get_nowait()
+                if newer_epoch == self.epoch:
+                    pending.append(newer)
                 self.turn_queue.task_done()
+            if not pending:
+                self.turn_queue.task_done()
+                continue
+            epoch = self.epoch
             envelope = self.merge_envelopes(pending)
             self.turn_busy = True
             try:
@@ -1567,7 +2111,9 @@ class VoiceConversation:
                     self.defer_environment(envelope)
                     continue
                 def annotated(u): return replace(u, speaker=self.identities.associated(self.annotations.get(u.input_id, u.speaker)))
-                current = tuple(annotated(u) for u in envelope.current_utterances)
+                current = tuple(annotated(u) for u in self._latest_utterances(envelope.current_utterances))
+                if envelope.current_utterances and not current:
+                    continue
                 from jshi.voice.jev import BatchItem
                 items = ()
                 if envelope.deferred_interrupt:
@@ -1579,8 +2125,16 @@ class VoiceConversation:
                         parts=tuple(InputPart(**p) for p in record.get('input_parts', ())))
                     await self.emit('jev', **asdict(decision))
                     self.last_jev = asdict(decision)
-                    if not record.get('direct_reply'):
-                        self.record('voice_jev', {'input': self.render_input(current, items), **asdict(decision)})
+                    self.record('voice_jev', {'input': self.render_input(current, items), **asdict(decision)})
+                    if record.get('control') in {'stop', 'redirect'}:
+                        await self.stop('semantic_' + record['control'])
+                        epoch = self.epoch
+                    self._capture_jev_inputs(current, items)
+                    if record.get('control') == 'stop':
+                        continue
+                    if record.get('control') == 'keep':
+                        self._preserve_background(current)
+                        continue
                     if decision.action in {'ignore', 'resume', 'stop'}:
                         self.unreported_jev.extend(envelope.jev_calls)
                     if decision.action in {'ignore', 'resume'}:
@@ -1604,7 +2158,7 @@ class VoiceConversation:
                             and set(call.get('input_ids', ())) == {u.input_id for u in current}
                             and call.get('collection_complete') is not False
                             and not any(self.unfinished(u.text) for u in current)
-                            and self.direct_replies.accept(self.subject_id, oid, '\n'.join(u.text for u in current), direct)):
+                            and self.direct_replies.accept(self.subject_id, oid, '\n'.join(u.text for u in current), direct, include_reply=False)):
                         await self._direct_reply(direct, oid, epoch, envelope, current, call)
                         continue
                 facts = []
@@ -1654,7 +2208,10 @@ class VoiceConversation:
                         speaker = SpeakerEvidence("scene", self.scene_id, "语音现场", "unknown", "voice_scene")
                     envelope = replace(envelope, current_utterances=current,
                         utterances=current, speaker=speaker,
-                        delivery_context='',
+                        delivery_context=self.dialogue.note(self.subject_id,
+                            cutoff=min((u.received_at_ms for u in current if u.received_at_ms is not None), default=time()*1000),
+                            exclude={u.input_id for u in current}),
+                        voice_delivery=True,
                         parts=(InputPart('text', text), *envelope.parts[1:]))
                 if envelope.jev_calls and not envelope.visual_snapshot_id:
                     call = envelope.jev_calls[-1]
@@ -1667,6 +2224,8 @@ class VoiceConversation:
                 plan = await self._respond(envelope, epoch)
                 await self.emit('turn_outcome', source=envelope.source, mode=plan.mode,
                                 replied=bool(plan.verbal_text()), reason=plan.reason[:200])
+            except TurnCancelled:
+                await self.emit('notice', text='上一轮认知已中断，旧回复已作废。')
             except Exception as exc:
                 await self.emit("notice", text=f"主流程调用失败：{exc}")
             finally:
@@ -1731,7 +2290,7 @@ class VoiceConversation:
 
         def plan_ready(plan):
             nonlocal emitted
-            if emitted:
+            if emitted or epoch != self.epoch or self.closed:
                 return
             emitted = True
             actions = [i.text for i in plan.items if i.channel == 'embodied' and i.text.strip() and i.text.strip() != '无动作']
@@ -1759,6 +2318,9 @@ class VoiceConversation:
                           and (not i.target_ids or any(self.object_of(t) in valid for t in i.target_ids))) if plan.mode == "respond" else ()
             if not items:
                 return
+            from jshi.voice.delivery import sentences
+            self.dialogue.plan(self.subject_id, self.session_id + ':' + str(turn_key), self.session_id,
+                [segment for item in items for segment in sentences(item.text)])
             loop.call_soon_threadsafe(lambda: asyncio.create_task(self._start_plan(items, envelope.speaker.object_id, epoch, turn_key)))
 
         if len(envelope.jev_calls) == 1:
@@ -1786,18 +2348,20 @@ class VoiceConversation:
             reviewed, envelope, speaker = self.apply_main_review(response, incoming, epoch)
             return reviewed, envelope, speaker
         def experience():
-            result = self.process.experience(self.subject_id, envelope.text, envelope=envelope,
-                objects={u.speaker.label:u.speaker.object_id for u in (*envelope.utterances, *envelope.current_utterances) if u.speaker.status in {"introduced", "recognized"}},
-                resolved_speaker=self.identities.candidate(envelope.speaker), on_voice_plan=plan_ready,
-                on_phase=phase_ready,
-                defer_write=True, code_restore=self.restore_codes,
-                action_allowed=lambda: not self.closed and epoch == self.epoch,
-                on_conversation_review=review_ready,
-                object_codes={oid: code for code, oid in self.code_owner.items()})
+            from jshi.subject.cancellation import generation_scope
+            with generation_scope(lambda: not self.closed and epoch == self.epoch):
+                result = self.process.experience(self.subject_id, envelope.text, envelope=envelope,
+                    objects={u.speaker.label:u.speaker.object_id for u in (*envelope.utterances, *envelope.current_utterances) if u.speaker.status in {"introduced", "recognized"}},
+                    resolved_speaker=self.identities.candidate(envelope.speaker), on_voice_plan=plan_ready,
+                    on_phase=phase_ready,
+                    defer_write=True, code_restore=self.restore_codes,
+                    action_allowed=lambda: not self.closed and epoch == self.epoch,
+                    on_conversation_review=review_ready,
+                    object_codes={oid: code for code, oid in self.code_owner.items()})
             return result, self.process.last_model_response, result.selected_tool_ids
 
         result, response, selected = await loop.run_in_executor(self.turn_executor, experience)
-        self.direct_replies.prime(self.subject_id, result)
+        self.direct_replies.prime(self.subject_id, result, include_reply=False)
         job = self.process.take_deferred_write()
         if job is not None:
             # Queued requests are wakeups, not one immutable write per turn.
@@ -1863,6 +2427,10 @@ class VoiceConversation:
     async def _start_plan(self, items, object_id, epoch, turn_key) -> None:
         if self.closed or epoch != self.epoch:
             return
+        from jshi.voice.delivery import sentences
+        key = self.session_id + ':' + str(turn_key)
+        self.dialogue.plan(self.subject_id, key, self.session_id,
+                           [segment for item in items for segment in sentences(item.text)])
         if self.delivery.snapshot().get("state") in {"queued", "playing", "paused"}:
             if len(self.pending_plans) == self.pending_plans.maxlen:
                 await self.emit("notice", text="待播回应较多，暂不增加新语音。")
@@ -1871,6 +2439,7 @@ class VoiceConversation:
             return
         text = "\n".join(i.text for i in items)
         d = self.delivery.begin(text, object_id, items=items)
+        self.dialogue.bind(key, d.reply_id)
         if self.voice_timings.get(turn_key, (None, {}))[1].get('route') in {'self_reply', 'waiting_ack'}:
             self.direct_reply_ids.add(d.reply_id)
         self.reply_records[turn_key] = d
@@ -1937,6 +2506,8 @@ class VoiceConversation:
 
     async def acknowledge(self, payload: dict) -> None:
         if self.delivery.acknowledge(str(payload.get("reply_id", "")), int(payload.get("segment", -1)), payload.get("phase", "")):
+            if payload.get('phase') == 'completed':
+                self.dialogue.played(str(payload['reply_id']), int(payload['segment']))
             measured = self.voice_timings.get(self.reply_epochs.get(str(payload.get('reply_id',''))))
             if measured and payload.get('phase') == 'started' and 'playback_start_ms' not in measured[1]:
                 measured[1]['playback_start_ms'] = round((monotonic() - measured[0]) * 1000)
@@ -1947,10 +2518,13 @@ class VoiceConversation:
                     self.played_history.append({'who':'匠石', 'basis':'已播出',
                         'text':d.texts[int(payload['segment'])], 'targets':list(d.targets[int(payload['segment'])]),
                         'at':time()*1000})
-                    if measured and measured[1].get('route') == 'waiting_ack':
+                    if measured:
                         self.jev_scene_store.append(f"played:{d.reply_id}:{payload['segment']}",
                             {'p':'匠石', 'text':d.texts[int(payload['segment'])],
-                             'basis':'等待接话已播出', 'at':time()*1000})
+                             'basis':'JEV回复已播出', 'at':time()*1000})
+                        self.process.note_scene_delivery(self.subject_id,
+                            f"played:{d.reply_id}:{payload['segment']}",
+                            '（播放器确认已播出）匠石：' + d.texts[int(payload['segment'])])
                     await self._next_plan()
                 return
             if payload.get("phase") == "completed":
@@ -2011,6 +2585,11 @@ class VoiceConversation:
         if self.background_tasks:
             progress('等待登记或诊断任务结束')
             await asyncio.gather(*self.background_tasks, return_exceptions=True)
+        self.worker.cancel()
+        for job in self.personal_prediction_jobs.values():
+            job.cancel()
+        await asyncio.gather(*self.personal_prediction_jobs.values(), return_exceptions=True)
+        self.personal_prediction_jobs.clear()
         self.input_records.clear()
         self.annotations.clear()
         self.worker.cancel()
@@ -2021,6 +2600,7 @@ class VoiceConversation:
             self.input_carry = None
             self.queue.task_done()
         self.person_review_executor.shutdown(wait=False, cancel_futures=True)
+        self.audio_preparer.close()
         if self.tts_task:
             await asyncio.gather(self.tts_task, return_exceptions=True)
         # Running synchronous cognition finishes its write; stale callbacks are
@@ -2045,12 +2625,18 @@ class VoiceConversation:
             await asyncio.gather(*self.sample_jobs, return_exceptions=True)
 
 
-def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=None, local_tts=None, online_speakers=None, *, speaker_models=None, trial_root=None):
+def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=None, local_tts=None, online_speakers=None, *, speaker_models=None, trial_root=None, personal_speakers=None):
     from aiohttp import web, ClientSession, ClientTimeout, WSMsgType
 
     visual = getattr(process, 'vision', None)
     from jshi.voice.direct_reply import reply_state
     text_direct_replies = reply_state(process)
+    from jshi.voice.dialogue import dialogue_state
+    dialogue = dialogue_state(process)
+    from jshi.voice.recent_audio import RecentAudio
+    recent_audio = RecentAudio(process.repository.path.parent/'recent_audio'/
+        hashlib.sha256(subject_id.encode()).hexdigest()[:16])
+    dialogue.import_history(subject_id, process.repository.list_history(subject_id, HistoryKind.FACT, 2000))
     app = web.Application(client_max_size=max(8 * 1024 * 1024, visual.config.max_image_bytes if visual else 0))
     busy = False
     cleanup_stage = ""
@@ -2062,6 +2648,18 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     model_notice_sink = None
     model_status_sink = None
     environment_pending = None
+    if personal_speakers is None:
+        try:
+            from jshi.voice.personal import PersonalSpeakers
+            personal_speakers = PersonalSpeakers(process.repository.path.parent / 'personal_speakers' /
+                hashlib.sha256(subject_id.encode()).hexdigest()[:16], process.profiles)
+        except ImportError:
+            logging.getLogger(__name__).info('Personal classifiers unavailable: install voice-personal extra')
+
+    async def close_personal(app):
+        if personal_speakers is not None:
+            await asyncio.to_thread(personal_speakers.close)
+    app.on_cleanup.append(close_personal)
 
     async def deliver_environment(environment, decision):
         nonlocal registry_busy, environment_pending
@@ -2109,6 +2707,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         from jshi.voice.wait_ack import wait_timing, model_key
         result = await asyncio.to_thread(judge.decide_envelope, subject_id, envelope,
             {'state':'completed', 'jev_scene':scene, 'unwritten':unwritten, 'now':time()*1000,
+             'conversation':dialogue.recent(subject_id, exclude={envelope.input_id}),
              'waiting':wait_timing(process).guidance(model_key(process), allowed=waiting_allowed, mode='text'),
              'short_chat':text_direct_replies.context(subject_id, [envelope.speaker.object_id])}, vision=visual, on_request=capture)
         jev_finished = monotonic()
@@ -2118,17 +2717,19 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                   'direct_reply':result.direct_reply,
                   'waiting_reply':result.waiting_reply,
                   'front_choice':result.front_choice,
+                  'control':result.control,
                   'ms':round((jev_finished-jev_started)*1000, 1),
                   'input_prepare_ms':round((prepared-prepare_started)*1000, 1),
                   'prompt_activity_id':'jev-'+envelope.input_id}
-        if not result.direct_reply:
-            scene_store.append(envelope.input_id, {'text':envelope.text, 'at':time()*1000,
-                                                  'source':envelope.source, 'basis':'统一输入信封'})
+        dialogue.input(subject_id, envelope.input_id, envelope.text, envelope.speaker.label)
+        scene_store.append(envelope.input_id, {'text':envelope.text, 'at':time()*1000,
+                                              'source':envelope.source, 'basis':'统一输入信封'})
         utterance = SceneUtterance(envelope.text, envelope.speaker, 0, 0, input_id=envelope.input_id,
                                     received_at_ms=time()*1000, identity_note='统一信封来源：'+envelope.source)
         entry = dict(envelope.entry_timing)
         entry.update(input_prepare_ms=record['input_prepare_ms'], jev_ms=record['ms'])
-        return replace(envelope, jev_calls=(record,), current_utterances=(utterance,), entry_timing=entry)
+        return replace(envelope, jev_calls=(record,), current_utterances=(utterance,), entry_timing=entry,
+                       delivery_context=dialogue.note(subject_id, exclude={envelope.input_id}))
 
     async def flush_text_scene():
         nonlocal pending_text_write, text_write_error
@@ -2165,6 +2766,48 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
 
     async def page(request):
         return web.FileResponse(Path(__file__).with_name("voice_ui.html"))
+
+    async def recent_audio_page(request):
+        return web.FileResponse(Path(__file__).with_name('recent_audio.html'))
+
+    async def recent_audio_index(request):
+        return web.json_response({'hours':recent_audio.hours,'max_bytes':recent_audio.max_bytes,
+            'inputs':await asyncio.to_thread(recent_audio.recent),
+            'recordings':await asyncio.to_thread(recent_audio.continuous)},headers={'Cache-Control':'no-store'})
+
+    async def recent_audio_stream(request):
+        try:start=int(request.match_info['start'])
+        except ValueError:raise web.HTTPBadRequest(text='音频位置无效')
+        body=await asyncio.to_thread(recent_audio.stream_wav,request.match_info['capture'],start)
+        if body is None:raise web.HTTPNotFound(text='连续录音不存在或已清理')
+        return web.Response(body=body,content_type='audio/wav',headers={'Cache-Control':'no-store'})
+
+    async def recent_audio_item(request):
+        iid=request.match_info['iid']
+        if request.path.endswith('.wav'):
+            try:
+                padding=int(request.query.get('padding_ms','0'))
+            except ValueError:
+                raise web.HTTPBadRequest(text='音频边界参数无效')
+            if not 0 <= padding <= 2000:
+                raise web.HTTPBadRequest(text='前后音频最多各两秒')
+            body=await asyncio.to_thread(recent_audio.wav,iid,padding_ms=padding)
+            if body is None:raise web.HTTPNotFound(text='录音尚未保存或已超出保留范围')
+            return web.Response(body=body,content_type='audio/wav',headers={'Cache-Control':'no-store'})
+        value=await asyncio.to_thread(recent_audio.get,iid)
+        if value is None:raise web.HTTPNotFound(text='录音记录不存在或已过期')
+        return web.json_response(value,headers={'Cache-Control':'no-store'})
+
+    async def voice_context_settings(request):
+        if request.method == 'POST':
+            if request.headers.get('Origin', '') != f'http://{request.host}':
+                raise web.HTTPForbidden(text='上下文设置需要同源请求')
+            try:
+                payload = await request.json()
+                await asyncio.to_thread(dialogue.configure, payload['include_unplayed'])
+            except (ValueError, TypeError, KeyError) as exc:
+                raise web.HTTPBadRequest(text=str(exc))
+        return web.json_response({'include_unplayed':dialogue.include_unplayed}, headers={'Cache-Control':'no-store'})
 
     async def worklet(request):
         return web.FileResponse(Path(__file__).with_name("voice_capture.js"))
@@ -2230,6 +2873,11 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     raise ValueError('存在多个同名对象，请选择具体对象')
                 object_id = evidence.object_id
             stats = await asyncio.to_thread(speakers.enroll_samples, pcm, object_id, user_labeled=True)
+            if personal_speakers is not None:
+                recording = 'enrollment-' + hashlib.sha256(b''.join(pcm)).hexdigest()[:32]
+                for clip in pcm:
+                    personal_speakers.submit_capture(clip, object_id, recording,
+                        hashlib.sha256(clip).hexdigest(), speakers, source='manual')
             return web.json_response({'object_id': object_id, 'label': name, **stats})
         except (ValueError, KeyError, TypeError) as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -2291,7 +2939,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             headers={"Cache-Control": "no-store"})
 
     async def text_people(request):
-        return web.json_response({'people': [{'object_id': p.object_id, 'label': p.label}
+        return web.json_response({'people': [{'object_id': p.object_id, 'label': p.label, 'source': p.source}
             for p in process.profiles.list() if p.status != 'rejected' and p.source != 'voice_scene']},
             headers={'Cache-Control': 'no-store'})
 
@@ -2362,11 +3010,27 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     entry = dict(judged_envelope.entry_timing)
                     entry['entry_total_ms'] = round((monotonic()-received_mono)*1000, 1)
                     judged_envelope = replace(judged_envelope, entry_timing=entry)
+                    control = judged_envelope.jev_calls[-1].get('control')
+                    if control in {'keep', 'stop'}:
+                        from types import SimpleNamespace
+                        from jshi.subject.process import ActivityTiming
+                        from jshi.core.contracts import utc_now
+                        elapsed = round((monotonic()-received_mono)*1000, 1)
+                        timing = ActivityTiming('jev-'+envelope.input_id, utc_now().isoformat(), (), 0,
+                            {'route':'control','control':control,'reply_ready_ms':elapsed,'complete_ms':elapsed,
+                             'main_called':False,'memory_written':False})
+                        process.repository.add_history(HistoryRecord(subject_id=subject_id, kind=HistoryKind.FACT,
+                            event_type='jev_control',content={'input':text,'control':control},source_ids=()))
+                        return SimpleNamespace(response_plan=ResponsePlan('ignore'),action_text='',timing=timing,
+                                               activity_id=timing.activity_id,route='control')
                     direct = judged_envelope.jev_calls[-1].get('direct_reply', '')
                     if direct and text_direct_replies.accept(subject_id, profile.object_id, text, direct):
                         from types import SimpleNamespace
                         from jshi.subject.process import ActivityTiming
                         plan = ResponsePlan('respond', items=(ResponseItem('verbal', direct, (profile.object_id,)),))
+                        dialogue.plan(subject_id, 'text:'+envelope.input_id, 'web-text', [direct], shown=True)
+                        process.repository.add_history(HistoryRecord(subject_id=subject_id, kind=HistoryKind.FACT,
+                            event_type='jev_direct_reply', content={'input':text, 'reply':direct, 'delivery':'text_sent'}, source_ids=()))
                         plan_ready(plan) if streaming else None
                         elapsed = round((monotonic()-received_mono)*1000, 1)
                         from jshi.core.contracts import utc_now
@@ -2414,7 +3078,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     event = {'type':'complete','reply':result.response_plan.verbal_text(),
                         'actions':[i.text for i in result.response_plan.items if i.channel=='embodied' and i.text.strip() and i.text.strip()!='无动作'],
                         'mode':result.response_plan.mode,'label':profile.label,
-                        'scene_write':'none' if getattr(result,'route','main')=='self_reply' else 'background',
+                        'scene_write':'none' if getattr(result,'route','main') in {'self_reply','control'} else 'background',
                         'route':getattr(result,'route','main'),
                         'activity_id':str(getattr(result,'activity_id','')),
                         'timing':asdict(result.timing) if result.timing else None}
@@ -2435,7 +3099,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 raise
             reply = result.action_text or ''
             return web.json_response({'reply': reply, 'mode': result.response_plan.mode,
-                'scene_write': 'none' if getattr(result,'route','main')=='self_reply' else 'background',
+                'scene_write': 'none' if getattr(result,'route','main') in {'self_reply','control'} else 'background',
                 'route':getattr(result,'route','main'),
                 'timing': asdict(result.timing) if result.timing else None,
                 'label': profile.label, 'activity_id': str(getattr(result, 'activity_id', ''))},
@@ -2471,8 +3135,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         receiver = None
         asr = None
         local_executor = None
+        local_pump = None
         cloud = None
-        audio = SessionAudio()
+        audio = SessionAudio(archive=recent_audio)
         try:
             await ws.prepare(request)
             async with ClientSession(timeout=ClientTimeout(total=None, sock_connect=15, sock_read=60)) as http:
@@ -2497,16 +3162,28 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     speakers.binding.clear()
                     if hasattr(speakers, 'reset_session'):
                         speakers.reset_session()
+                from jshi.voice.sources import SpeakerAudioPreparer, PyannoteSeparator
+                preparer = SpeakerAudioPreparer(
+                    PyannoteSeparator(device=config.separation_device) if config.separation_backend == 'pyannote' else None,
+                    cloud.transcribe_source if config.separation_backend == 'pyannote' else None,
+                    timeout_s=config.separation_timeout_s)
                 conversation = VoiceConversation(process, subject_id, local_tts or cloud, ws.send_json, jev=jev,
                     timeout_s=config.jev_timeout_s, local_speakers=speakers, input_pause_s=config.input_pause_s, sample_source=audio,
                     candidate_timeout_s=config.candidate_timeout_s, input_max_batch_s=config.input_max_batch_s,
                     input_batch_chars=config.input_batch_chars,
                     environment_idle_s=config.environment_idle_s,
+                    personal_speakers=personal_speakers, audio_preparer=preparer,
                     session_id=request.query.get("session") or None)
                 active_conversation = conversation
                 if use_local is not None:
                     use_local.reset_session()
                     local_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-local-asr")
+                    from jshi.voice.local_input import LocalAudioPump
+                    async def local_error(exc):
+                        if not ws.closed:
+                            await conversation.emit('notice', text=f'本地识别失败：{exc}')
+                            await ws.close()
+                    local_pump = LocalAudioPump(use_local, local_executor, conversation.accept, local_error)
                 else:
                     if backend == 'deepgram':
                         from jshi.voice.deepgram import DeepgramASR
@@ -2541,11 +3218,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                                 continue
                             for transcript in assembler.accept(payload):
                                 received_mono, received_at_ms = monotonic(), time()*1000
-                                if (transcript.final and not transcript.overlap
-                                        and VoiceJEV().decide(subject_id, transcript.text, {}, {}).action == 'stop'):
-                                    await conversation.accept(transcript)
-                                    continue
-                                if speakers is not None:
+                                if speakers is not None and not transcript.replaces:
                                     transcript, identity_pending = await bounded_online_match(audio, transcript, speakers,
                                         local_executor, identity_pending, config.candidate_timeout_s)
                                 await conversation.accept(transcript, asr_received_mono=received_mono,
@@ -2584,11 +3257,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     if message.type == WSMsgType.BINARY:
                         if len(message.data) > 32000 or len(message.data) % 2:
                             raise ValueError("invalid microphone PCM frame")
-                        audio.append(message.data)
+                        await asyncio.to_thread(audio.append,message.data)
+                        if audio.archive_error and not getattr(audio,'archive_error_reported',False):
+                            await conversation.emit('notice',text='录音保存失败：'+audio.archive_error)
+                            audio.archive_error_reported=True
                         if use_local is not None:
-                            transcripts = await asyncio.get_running_loop().run_in_executor(local_executor, use_local.feed, message.data)
-                            for transcript in transcripts:
-                                await conversation.accept(transcript)
+                            local_pump.feed(message.data)
                         else:
                             await asr.send_bytes(message.data if backend == 'deepgram' else pack_asr(message.data, audio=True))
                     elif message.type == WSMsgType.TEXT:
@@ -2640,9 +3314,24 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                                 await conversation.emit('voice_settings_error', text=str(exc), match_threshold=getattr(speakers, 'threshold', None),
                                     single_confirmation_threshold=getattr(speakers, 'confirmation_threshold', None))
                         elif kind == 'text':
-                            await conversation.typed(payload.get('text', ''), payload.get('object_id', ''))
+                            async def submit_text(text=payload.get('text', ''), oid=payload.get('object_id', '')):
+                                try:
+                                    await conversation.typed(text, oid)
+                                except Exception as exc:
+                                    await conversation.emit('typed_error', text=str(exc))
+                            task = asyncio.create_task(submit_text())
+                            conversation.background_tasks.add(task)
+                            task.add_done_callback(conversation.background_tasks.discard)
                         elif kind == 'rename_confirm':
                             await conversation.apply_rename(str(payload.get('object_id', '')), str(payload.get('name', '')), bool(payload.get('accept')))
+                        elif kind == 'personal_label':
+                            task = asyncio.create_task(conversation.label_personal_inputs(payload.get('input_ids'), payload.get('object_id', '')))
+                            conversation.background_tasks.add(task)
+                            task.add_done_callback(conversation.background_tasks.discard)
+                        elif kind == 'personal_unlabel':
+                            task = asyncio.create_task(conversation.unlabel_personal_inputs(payload.get('input_ids')))
+                            conversation.background_tasks.add(task)
+                            task.add_done_callback(conversation.background_tasks.discard)
                         elif kind == 'enroll_inputs':
                             task = asyncio.create_task(conversation.enroll_inputs(payload.get('input_ids'), payload.get('name', '')))
                             conversation.background_tasks.add(task)
@@ -2677,6 +3366,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 actions = []
                 if asr:
                     actions.append(('关闭语音识别连接', asr.close))
+                if local_pump:
+                    actions.append(('收尾本地语音识别', local_pump.finish))
                 if conversation:
                     actions.append(('保存本轮状态', lambda: conversation.close(on_progress=closing)))
                 if cloud is not None and hasattr(cloud, 'close'):
@@ -2699,6 +3390,13 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         return ws
 
     app.router.add_get("/", page)
+    app.router.add_get('/recent-audio',recent_audio_page)
+    app.router.add_get('/api/recent-audio',recent_audio_index)
+    app.router.add_get('/api/recent-audio-stream/{capture}/{start}.wav',recent_audio_stream)
+    app.router.add_get('/api/recent-audio/{iid}.wav',recent_audio_item)
+    app.router.add_get('/api/recent-audio/{iid}',recent_audio_item)
+    app.router.add_get('/api/voice-context', voice_context_settings)
+    app.router.add_post('/api/voice-context', voice_context_settings)
     app.router.add_get("/voice_capture.js", worklet)
     app.router.add_get("/status", status)
     app.router.add_get('/vision_chat.js', vision_chat_script)
@@ -2724,6 +3422,16 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     app.router.add_get('/voice-enroll', enrollment_page)
     app.router.add_get('/voice-registry', registry)
     app.router.add_post('/voice-registry', registry)
+    from jshi.app.personal_speakers import install_personal_routes
+    async def personal_features(model):
+        if model:
+            if not speaker_models or model not in speaker_models:
+                raise ValueError('未知声音特征模型')
+            return await asyncio.to_thread(speaker_models[model])
+        if active_conversation is not None:
+            return active_conversation.local_speakers
+        return online_speakers or (local.speakers if local else None)
+    install_personal_routes(app, personal_speakers, process.profiles, personal_features)
     if getattr(process, 'vision', None):
         from jshi.vision.web import install_vision
         install_vision(app, process, subject_id, deliver_environment, voice_active=lambda: active_conversation is not None)

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>最近录音 · 匠石</title>
+<style>body{font:15px/1.7 system-ui;background:#f7f9fc;color:#26374d;max-width:1000px;margin:30px auto;padding:0 18px}article{padding:18px;margin:14px 0;background:white;border:1px solid #e1e7f0;border-radius:12px}small,p{color:#66788e}audio{display:block;max-width:100%;margin:10px 0}button,a{color:#245fba;margin-right:14px}pre{white-space:pre-wrap;word-break:break-word;font-size:12px}h1{font-size:24px}</style>
+<h1>最近录音</h1><p>本地保留最近24小时的输入声音，音频最多512 MB。停止对话后仍保留；超过时间或容量会清理最早的录音。录音不会自动加入训练集。</p>
+<button id="refresh">刷新</button><span id="status"></span><main id="rows"></main><details><summary>连续录音片段（含未完成转写的声音）</summary><div id="streams"></div></details>
+<script>
+const $=id=>document.getElementById(id);
+function link(parent,text,url){const a=document.createElement('a');a.textContent=text;a.href=url;a.target='_blank';a.rel='noopener';parent.append(a);return a;}
+async function refresh(){
+ try{const r=await fetch('/api/recent-audio',{cache:'no-store'});if(!r.ok)throw Error(await r.text());const data=await r.json();$('rows').replaceChildren();
+ $('status').textContent=data.inputs.length?'最近 '+data.inputs.length+' 条':'暂时没有保存的录音';
+ for(const row of data.inputs){const m=row.metadata,t=m.transcript||{},box=document.createElement('article'),head=document.createElement('div'),detail=document.createElement('small');
+ head.textContent=(t.text||'未提供转写');detail.textContent=new Date(m.received_at_ms||row.created*1000).toLocaleString('zh-CN')+' · '+((row.end_ms-row.start_ms)/1000).toFixed(3)+' 秒 · '+(m.speaker?.label||'人物待定');box.append(head,detail);
+ const scores=m.classifier?.ranking||m.classifier_result?.ranking||[];if(scores.length){const p=document.createElement('p');p.textContent='MLP：'+scores.map(s=>(s.label||'未命名')+' '+s.score.toFixed(6)+(s.version?' · 版本 '+s.version.slice(0,8):'')).join('；');box.append(p);}
+ if(row.audio_available){const path='/api/recent-audio/'+encodeURIComponent(row.input_id)+'.wav',audio=document.createElement('audio');audio.controls=true;audio.preload='none';audio.src=path;box.append(audio);link(box,'下载本句',path).download='录音-'+row.input_id+'.wav';const context=document.createElement('button');context.textContent='听前后各0.5秒';context.onclick=()=>{audio.src=path+'?padding_ms=500';audio.play().catch(()=>{});};box.append(context);}
+ else{const p=document.createElement('p');p.textContent='对应音频未完整保存或已清理，现保留判断记录。';box.append(p);}
+ const details=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');summary.textContent='排查详情：分段、原声纹、模型版本和特征';pre.textContent=JSON.stringify(row,null,2);details.append(summary,pre);box.append(details);link(box,'下载排查记录','/api/recent-audio/'+encodeURIComponent(row.input_id)).download=row.input_id+'.json';$('rows').append(box);}
+ $('streams').replaceChildren();for(const part of data.recordings||[]){const box=document.createElement('article'),label=document.createElement('div'),audio=document.createElement('audio');label.textContent='记录至 '+new Date(part.updated*1000).toLocaleString('zh-CN')+' · '+(part.size/32000).toFixed(2)+' 秒';audio.controls=true;audio.preload='none';audio.src='/api/recent-audio-stream/'+encodeURIComponent(part.capture)+'/'+part.start+'.wav';box.append(label,audio);link(box,'下载连续录音',audio.src).download='连续录音.wav';$('streams').append(box);}
+ }catch(e){$('status').textContent='读取失败：'+e.message;}
+}
+$('refresh').onclick=refresh;refresh();
+</script></html>

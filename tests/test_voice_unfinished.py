@@ -7,6 +7,10 @@ from jshi.app.voice import VoiceConversation
 @pytest.mark.parametrize(
     'text',
     [
+        '在忙什么',
+        '我想问一件事',
+        '你听得到吗',
+        '主使',
         '就是这个',
         '给我一些',
         '还有',

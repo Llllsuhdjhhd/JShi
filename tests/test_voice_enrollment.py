@@ -352,6 +352,54 @@ def test_lower_confirmation_threshold_still_requires_candidate_margin(process, t
     assert not speakers.identify([0]*32000)[1]
 
 
+@pytest.mark.parametrize('segmented', [False, True])
+def test_configured_low_threshold_survives_local_decode_and_identity_linking(process, tmp_path, segmented):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from jshi.recognition import CarrierEntry, ObjectProfile
+    from jshi.voice.diarization import LocalDiarizer
+    from jshi.voice.local import LocalASR
+    from tests.test_asr_text import Recognizer
+    process.profiles.create(ObjectProfile('other', '其他人', status='confirmed'))
+    speakers = LocalSpeakers(None, 'model', tmp_path/'voices.json', process.profiles)
+    speakers.known = {'a': {'object_id': 'lux-id', 'embedding': [.424, (1-.424**2)**.5]},
+                      'b': {'object_id': 'other', 'embedding': [.053, (1-.053**2)**.5]}}
+    speakers.embedding = lambda _: [1., 0.]
+    speakers.set_threshold(.33)
+    process.profiles.add_carrier('lux-id', CarrierEntry('voiceprint', 'local:model:a'))
+    recognizer = Recognizer()
+    recognizer.text = '这句话应按当前门槛确认'
+    diarizer = None
+    if segmented:
+        engine = SimpleNamespace(process=lambda samples: SimpleNamespace(sort_by_start_time=lambda: [
+            SimpleNamespace(start=0., end=3., speaker=0)]))
+        diarizer = LocalDiarizer(engine, speakers, recognizer)
+    asr = LocalASR(recognizer, speakers=speakers, diarizer=diarizer)
+    t = replace(asr.feed(np.zeros(48000, dtype='<i2').tobytes(), final=True)[0], input_id='score424')
+    assert t.voiceprint_id == 'local:model:a' and t.confidence == pytest.approx(.424)
+    note = json.loads(t.identity_note)
+    assert note['single_confirmation_threshold'] == .33
+    assert note['candidates'][0]['score'] == .424
+    assert note['candidates'][1]['score'] == .053
+    async def run():
+        sent = []
+        async def send(message): sent.append(message)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, local_speakers=speakers, input_pause_s=.01)
+        current = c.delivery.begin('原来的回答。', 'lux-id')
+        c.delivery.acknowledge(current.reply_id, 0, 'started')
+        try:
+            await c.accept(t)
+            await asyncio.wait_for(c.queue.join(), 3)
+            event = next(m for m in sent if m['type'] == 'timeline')
+            assert event['speaker']['object_id'] == 'lux-id'
+            assert event['speaker']['status'] == 'recognized'
+            assert c.source_speakers[event['input_id']].method == 'voiceprint_match'
+            assert not any(p.source == 'voice_anonymous' for p in process.profiles.list())
+        finally:
+            await c.close()
+    asyncio.run(run())
+
+
 def test_short_repeat_hint_extracts_without_collecting_or_binding(process, tmp_path):
     speakers = LocalSpeakers(None, 'model', tmp_path / 'voices.json', process.profiles)
     speakers.known = {'a': {'object_id': 'lux-id', 'embedding': [1., 0.]}}

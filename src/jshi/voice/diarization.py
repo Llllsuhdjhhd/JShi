@@ -1,5 +1,7 @@
 """Time-stamped speaker segmentation. This does not extract clean audio sources."""
 from __future__ import annotations
+from contextlib import nullcontext
+import json
 from types import SimpleNamespace
 
 from .volc import Transcript
@@ -48,14 +50,20 @@ class LocalDiarizer:
             if overlap:
                 # Mixed source audio cannot safely enroll or identify a person.
                 track, vpid, confidence = f"overlap-{offset_ms}-{i}", "", None
-            elif hasattr(self.speakers, 'identify_timed'):
-                track, vpid, confidence = self.speakers.identify_timed(audio, source_track=str(span.speaker),
-                    start_ms=offset_ms + start // 16, end_ms=offset_ms + end // 16)
+                match = {'reason': '声音重叠，不据此确认姓名'}
+                note = json.dumps(match, ensure_ascii=False)
             else:
-                track, vpid, confidence = self.speakers.identify(audio)
+                with getattr(self.speakers, 'lock', nullcontext()):
+                    if hasattr(self.speakers, 'identify_timed'):
+                        track, vpid, confidence = self.speakers.identify_timed(audio, source_track=str(span.speaker),
+                            start_ms=offset_ms + start // 16, end_ms=offset_ms + end // 16)
+                    else:
+                        track, vpid, confidence = self.speakers.identify(audio)
+                    match = dict(getattr(self.speakers, 'last_match', {}))
+                    note = json.dumps(match, ensure_ascii=False)
             output.append(Transcript(text, track, offset_ms + start // 16, offset_ms + end // 16,
                                      True, overlap, vpid, confidence,
                                      speaker_cluster_id=track if not overlap and not track.startswith('unidentified-') else '',
                                      identity_tentative=not overlap and not vpid and not track.startswith('unidentified-')
-                                         and getattr(self.speakers, 'last_match', {}).get('tentative', True)))
+                                         and match.get('tentative', True), identity_note=note))
         return tuple(output)

@@ -15,7 +15,7 @@ class IdentityGate:
         return ModelResponse(model='identity', text=json.dumps({
             'items': [{'i': r['i'], 'person': 'unknown', 'certainty': 'unknown',
                        'why': '有效候选不足，无法合理选人'} for r in lines],
-            'level': 3, 'recall_memory': False}))
+            'level': 3, 'recall_memory': False, 'control':'redirect'}))
 
 
 def test_identity_protocol_does_not_gate_background_or_playback():
@@ -26,8 +26,10 @@ def test_identity_protocol_does_not_gate_background_or_playback():
         assert result.items[0].identity_only and result.items[0].keep
         assert result.items[0].to_jiangshi == ''
         assert result.main_prompt_hint == {'level': 3, 'needs': [], 'recall_memory': False, 'main_image':'omit'}
-    assert gate.decide_batch('stone', [{'n': 1, 'text': '匠石，别说了'}], [], {}).action == 'stop'
-    assert gate.decide_batch('stone', [{'n': 1, 'text': '停一下，我补充一句'}], [], {}).action == 'stop'
+    # An identity-only fixture supplies no semantic control: text matching must
+    # not invent a stop decision outside the model's result.
+    assert gate.decide_batch('stone', [{'n': 1, 'text': '匠石，别说了'}], [], {}).action != 'stop'
+    assert gate.decide_batch('stone', [{'n': 1, 'text': '停一下，我补充一句'}], [], {}).action != 'stop'
 
 
 def test_first_judgment_precedes_scene_and_main_receives_context(process):

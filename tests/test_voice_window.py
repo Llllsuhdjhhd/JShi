@@ -152,8 +152,8 @@ def test_single_request_reuses_context_and_compacts_ids_without_mutating_source(
     assert speaker['object_id']=='very-long-internal-person-id' and delivery['scene'][0]['at']==999000
     assert '历史文字肖像' in requests[0].system_extra
     before=len(requests)
-    assert VoiceJEV(Model()).decide('stone','停止',speaker,delivery).action=='stop'
-    assert len(requests)==before
+    assert VoiceJEV(Model()).decide('stone','停止',speaker,delivery).action=='respond'
+    assert len(requests)==before+1
 
 
 def test_cached_portrait_is_scoped_and_single_context_excludes_future_scene(process):

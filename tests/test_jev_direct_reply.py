@@ -24,7 +24,7 @@ class ShortChatModel:
         lines = json.loads(request.input_text)['input']['lines']
         output = {'items':[{'i':r['i'], 'person':r['p'], 'certainty':'confirmed',
                            'why':'当前人物由用户选择'} for r in lines],
-                  'level':3, 'recall_memory':False, 'route':'self_reply', 'reply':'嗯，我在。'}
+                  'level':3, 'recall_memory':False, 'control':'redirect', 'route':'self_reply', 'reply':'嗯，我在。'}
         output.update(self.changes)
         return ModelResponse(model='fake', text=json.dumps(output))
 
@@ -88,7 +88,7 @@ def test_web_first_turn_main_then_short_reply_skips_main_and_memory(process, str
             assert response.status == 200, await response.text()
             if streaming:
                 events = [json.loads(row) for row in (await response.text()).splitlines()]
-                assert [r['type'] for r in events if r['type']!='flow_phase'] == ['accepted','reply','complete']
+                assert [r['type'] for r in events if r['type'] not in {'flow_phase','model_status'}] == ['accepted','reply','complete']
                 assert [r['stage'] for r in events if r['type']=='flow_phase'] == ['jev']
                 body = events[-1]
             else:
@@ -100,7 +100,8 @@ def test_web_first_turn_main_then_short_reply_skips_main_and_memory(process, str
             assert entry['main_called'] is False and entry['memory_written'] is False
             assert entry['reply_ready_ms'] >= entry['jev_ms']
             assert len(process.cognition.requests) == count
-            assert process.repository.path.read_bytes() == history_before
+            assert process.repository.path.read_bytes() != history_before
+            assert any(r.event_type=='jev_direct_reply' for r in process.repository.list_history('stone',limit=100))
             assert tuple(process.activity_ledger.list_experiences('stone')) == ledger_before
             assert {p.name:p.read_bytes() for p in root.glob('*scene*.json')} == scenes
             payloads = [json.loads(r.input_text) for r in model.requests]
@@ -154,8 +155,10 @@ def test_voice_short_reply_and_playback_do_not_write_memories(process, source):
                 await c.acknowledge({'reply_id':reply['reply_id'],'segment':0,'phase':phase})
             assert len(process.cognition.requests) == count
             assert tuple(process.activity_ledger.list_experiences('stone')) == ledger
-            assert process.repository.path.read_bytes() == before
-            assert not c.jev_scene_store.snapshot()['events']
+            assert process.repository.path.read_bytes() != before
+            records=c.jev_scene_store.snapshot()['events']
+            assert any(r['payload'].get('text')=='谢谢' for r in records)
+            assert any(r['payload'].get('text')=='嗯，我在。' for r in records)
             assert c.last_debug['timing']['end_to_end']['main_called'] is False
             assert c.last_debug['timing']['end_to_end']['reply_ready_ms'] is not None
         finally:
