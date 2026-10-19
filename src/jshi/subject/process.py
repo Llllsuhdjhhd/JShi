@@ -589,6 +589,8 @@ class SubjectProcess:
         visual_snapshot=None,
     ) -> SubjectActivityResult:
         def phase(stage):
+            from .cancellation import check
+            check()
             if on_phase is not None:
                 on_phase(stage)
         phase('resolve')
@@ -772,15 +774,16 @@ class SubjectProcess:
                 source="text" if "文字输入" in u.identity_note else "audio",
                 level="确定" if u.speaker.status == "recognized" or u.speaker.method == "manual_annotation" else (
                     "可能" if u.speaker.method in {"self_report", "context_attribution"} else "不确定"),
-                evidence={"self_report": "对方自报称呼，尚未核定", "context_attribution": "入口上下文推测", "voiceprint_match": "入口声纹匹配", "manual_annotation": "人工关联"}.get(u.speaker.method, "入口未确认姓名"),
+                evidence={"self_report": "对方自报称呼，尚未核定", "context_attribution": "入口上下文推测", "voiceprint_match": "入口声纹匹配", "manual_annotation": "人工关联", "user_selected": "文字输入由用户选择人物"}.get(u.speaker.method, "入口未确认姓名"),
                 parts=parts, number=annotations.get(u.input_id, {}).get('n', ''),
-                direction=annotations.get(u.input_id, {}).get('direction', ''),
+                direction='yes' if u.speaker.method == 'user_selected' else annotations.get(u.input_id, {}).get('direction', ''),
                 relevance=annotations.get(u.input_id, {}).get('relevance', '')) for u in incoming)
             if not items:
                 items = (make_input(envelope.input_id if envelope else fact.id, speaker.object_id,
                     speaker.label, text, source=next((p.kind for p in envelope.parts if p.kind != "text"), "text") if envelope else "text",
-                    level="确定" if speaker.status == "confirmed" else "不确定",
-                    evidence="入口提供的对象归属", parts=parts),)
+                    level="确定" if speaker.status == "confirmed" or (envelope and envelope.speaker.method == "user_selected") else "不确定",
+                    evidence="文字输入由用户选择人物" if envelope and envelope.speaker.method == "user_selected" else "入口提供的对象归属",
+                    direction="yes" if envelope and envelope.speaker.method == "user_selected" else "", parts=parts),)
             current = replace(current, input_items=items, input_parts=parts, media_source_ids=(fact.id,))
             if envelope and envelope.speaker.status == "unknown" and not incoming:
                 self.unknown_inputs.append(envelope.input_id, envelope.speaker.object_id,
@@ -795,7 +798,8 @@ class SubjectProcess:
                               transport_context=(current.transport_context + '\n' + note).strip())
         if envelope is not None:
             # 信封只留在入口和记录里。主流程看到的是已经整理好的文字。
-            current = replace(current, audio_delivery=any(p.kind == "audio" for p in envelope.parts), input_review_text='',
+            current = replace(current, audio_delivery=envelope.voice_delivery or any(p.kind == "audio" for p in envelope.parts), input_review_text='',
+                              transport_context=(current.transport_context + '\n' + envelope.delivery_context).strip(),
                               interaction_scene=envelope.interaction_scene,
                               object_codes=tuple((object_codes or {}).items()))
             from jshi.core.prompt_profile import select_profile
@@ -914,6 +918,8 @@ class SubjectProcess:
             on_reply=deliver_verbal if on_verbal is not None else None,
         )
         tool_ids = dict(current.tool_codes)
+        from .cancellation import check
+        check()
         response = replace(response,
             tool_consumed=tuple(tool_ids.get(token, token) for token in response.tool_consumed),
             tool_handling=tuple({**item, "task_id": tool_ids.get(item.get("task_id"), item.get("task_id"))}
@@ -1048,7 +1054,7 @@ class SubjectProcess:
         label = speaker.label if speaker else "未知来源"
         plain = _plain_turn_input(current.input_text)
         event_blocks = ["（空闲观察，距上次交往已过3分钟，没有新发言）"] if idle else [f'{label}说：“{plain}”']
-        if spoken_text:
+        if spoken_text and (not current.audio_delivery or getattr(self, 'voice_dialogue', None) is None or self.voice_dialogue.include_unplayed):
             prefix = "我准备说（尚未确认播放）" if current.audio_delivery else "我说"
             for item in plan.items:
                 if item.channel == "verbal" and item.text.strip():
@@ -1936,6 +1942,8 @@ class SubjectProcess:
                 current.context_view,
             ) + extra_context,
         )
+        if getattr(self, 'voice_dialogue', None) is not None:
+            request = self.voice_dialogue.request(request)
         self._record_step_input(
             request,
             self.cognition,
@@ -1955,10 +1963,8 @@ class SubjectProcess:
                     "scene_view": profile.scene_view,
                     "instruction_chars": len(persona_instruction), "user_chars": len(persona_user_text),
                 }))
-        if on_reply is not None and hasattr(self.cognition, "generate_stream"):
-            response = self.cognition.generate_stream(request, on_reply=on_reply)
-        else:
-            response = self.cognition.generate(request)
+        from .cancellation import invoke
+        response = invoke(self.cognition, request, on_reply=on_reply)
         if self.vision and media_tokens:
             self._main_images.commit(current.subject_state.subject_id, media_context, media_tokens)
             try:
@@ -2300,6 +2306,8 @@ class SubjectProcess:
             stimulus=current.stimulus,
             context=context,
         )
+        if getattr(self, 'voice_dialogue', None) is not None:
+            request = self.voice_dialogue.request(request)
         def generate(attempt):
             started_at = datetime.now().astimezone().isoformat()
             began = time.perf_counter()

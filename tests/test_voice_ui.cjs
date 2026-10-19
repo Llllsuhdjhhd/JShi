@@ -26,6 +26,9 @@ message({type:'timeline',input_id:'one',start_ms:1000,end_ms:3000,text:'第一�
 message({type:'timeline',input_id:'two',start_ms:3100,end_ms:5000,text:'第二句',speaker:{object_id:'unknown-B',label:'未知',track_id:'9'}});
 inputRows.get('one').button.onclick();inputRows.get('two').button.onclick();`,ctx);
 assert.equal(node('enroll-count').textContent,'已选 2 段声音');
+vm.runInContext(`message({type:'transcript_revision',input_ids:['one'],text:'第一句的最终修订'});`,ctx);
+assert.equal(vm.runInContext("inputRows.get('one').body.textContent",ctx),'第一句的最终修订');
+assert.equal(vm.runInContext('inputRows.size',ctx),2);
 node('enroll-name').value='lux';node('enroll').onclick();
 assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))),{type:'enroll_inputs',input_ids:['one','two'],name:'lux'});
 vm.runInContext(`message({type:'enrollment',input_ids:['one','two'],object_id:'lux-id',label:'lux',clips:2,seconds:3.9});`,ctx);
@@ -103,7 +106,7 @@ node('toggle-inspector').onclick();
 assert.equal(node('debug-workspace').hidden,false);
 assert.equal(node('conversation').hidden,false);
 node('maximize-debug').onclick();
-assert.equal(node('conversation').hidden,true);
+assert.equal(node('conversation').hidden,false);
 assert.equal(node('maximize-debug').textContent,'还原');
 node('open-work').onclick();
 assert.equal(node('settings-pane').hidden,true);
@@ -165,14 +168,16 @@ console.log('Model progress: phase fallback and terminal failure passed');
 
 vm.runInContext(`var visibleStatus=log('本条','input');modelProgress(visibleStatus,'主认知 · 模型思考');message({type:'model_status',call_id:'side-test',state:'calling',purpose:'主认知',model:'deepseek-v4-flash'});`,ctx);
 assert.notEqual(vm.runInContext('visibleStatus.modelUi.panel.hidden',ctx),true);
-assert.match(vm.runInContext('visibleStatus.modelUi.panelBody.textContent',ctx),/主认知.*模型思考[\s\S]*deepseek-v4-flash.*调用中/);
+assert.match(vm.runInContext('visibleStatus.modelUi.panelBody.textContent',ctx),/主认知 · 进行中/);
+assert.doesNotMatch(vm.runInContext('visibleStatus.modelUi.panelBody.textContent',ctx),/deepseek-v4-flash|模型思考/);
+assert.match(vm.runInContext('visibleStatus.modelUi.records.textContent',ctx),/deepseek-v4-flash/);
 vm.runInContext(`var newerStatus=log('下一条','input');message({type:'model_status',call_id:'side-test',state:'completed',purpose:'主认知',model:'deepseek-v4-flash',elapsed_ms:1200})`,ctx);
 assert.equal(vm.runInContext('visibleStatus.modelUi.panel.hidden',ctx),true);
 assert.notEqual(vm.runInContext('newerStatus.modelUi.panel.hidden',ctx),true);
 console.log('Visible latest-input status panel: model/stage and previous panel hiding passed');
 // Full timeline is preserved; bottom-positioned input moves the panel upward.
 vm.runInContext(`var longStatus=log('过程测试','input');modelProgress(longStatus,'JEV 判断');modelProgress(longStatus,'主认知 · 模型思考');modelProgress(longStatus,'已完成',true);`,ctx);
-assert.match(vm.runInContext('longStatus.modelUi.panelBody.textContent',ctx),/准备处理[\s\S]*JEV 判断[\s\S]*主认知[\s\S]*已完成/);
+assert.match(vm.runInContext('longStatus.modelUi.panelBody.textContent',ctx),/收到输入[\s\S]*接话判断[\s\S]*主认知[\s\S]*本轮完成/);
 vm.runInContext(`window.innerHeight=800;$('log').getBoundingClientRect=()=>({left:520});messageScroll.getBoundingClientRect=()=>({left:520});longStatus.getBoundingClientRect=()=>({left:600,top:730});longStatus.modelUi.panel.scrollHeight=500;positionModelPanel();`,ctx);
 assert.equal(vm.runInContext('longStatus.modelUi.panel.style.top',ctx),'284px');
 assert.equal(vm.runInContext('longStatus.modelUi.panel.style.width',ctx),'440px');
@@ -185,8 +190,143 @@ vm.runInContext(`$('log').getBoundingClientRect=()=>({left:30});messageScroll.ge
 assert.equal(vm.runInContext('longStatus.modelUi.panel.style.position',ctx),'static');
 console.log('Model timeline: complete stage history, bottom clamp and narrow layout passed');
 
+// One-click labels use the original voiceprint ranking and wait for persistence.
+vm.runInContext(`trainingPeople=[{object_id:'lux-id',label:'lux'},{object_id:'lg-id',label:'luguang'}];
+refreshTrainingLabel(inputRows.get('ranked'));`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('ranked').training.pick.value`,ctx),'lux-id');
+vm.runInContext(`inputRows.get('ranked').training.button.onclick()`,ctx);
+assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))),{type:'personal_label',input_ids:['ranked'],object_id:'lux-id'});
+assert.equal(vm.runInContext(`inputRows.get('ranked').training.button.textContent`,ctx),'保存中…');
+vm.runInContext(`message({type:'personal_labelled',input_ids:['ranked'],object_id:'lux-id',label:'lux',samples:1})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('ranked').training.button.textContent`,ctx),'✓ 已加入');
+vm.runInContext(`message({type:'identity_final',input_id:'ranked',jev_status:'completed',speaker:{object_id:'lg-id',label:'luguang'},voice_initial:{label:'未知'}})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('ranked').who.textContent`,ctx),'lux[人工确定]：');
+vm.runInContext(`inputRows.get('ranked').training.pick.value='lg-id';inputRows.get('ranked').training.pick.onchange();inputRows.get('ranked').training.button.onclick();`,ctx);
+assert.equal(sent.at(-1).object_id,'lg-id');
+vm.runInContext(`message({type:'personal_label_error',input_ids:['ranked'],object_id:'lg-id',text:'采集队列已满'})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('ranked').training.button.textContent`,ctx),'保存更正');
+assert.match(vm.runInContext(`inputRows.get('ranked').training.status.textContent`,ctx),/队列已满/);
+vm.runInContext(`inputRows.get('ranked').training.button.onclick();message({type:'personal_labelled',input_ids:['ranked'],object_id:'lg-id',label:'luguang',samples:1})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('ranked').training.savedId`,ctx),'lg-id');
+assert.equal(vm.runInContext(`inputRows.get('mixed').training.button.disabled`,ctx),true);
+assert.equal(vm.runInContext(`inputRows.get('anon').training.pick.value`,ctx),'');
+node('toggle-inspector').onclick();
+vm.runInContext(`positionModelPanel()`,ctx);
+assert.equal(node('conversation').hidden,false);
+assert.equal(vm.runInContext(`latestModelInput.modelUi.panel.hidden`,ctx),true);
+node('close-inspector').onclick();
+vm.runInContext(`positionModelPanel()`,ctx);
+assert.equal(vm.runInContext(`latestModelInput.modelUi.panel.hidden`,ctx),false);
+console.log('Inline training: candidate default, saved check, relabel, failure and preserved conversation passed');
+
+// Weak voiceprint ranking only preselects the dataset label. JEV uncertainty stays visible.
+vm.runInContext(`message({type:'timeline',input_id:'weak',start_ms:20000,end_ms:24000,text:'弱声纹测试',
+  identity_note:'本句原声纹仍待确认',voiceprint_candidates:[{object_id:'lux-id',label:'lux',score:.127,source:'voiceprint'},{object_id:'lg-id',label:'luguang',score:.086,source:'voiceprint'}],
+  speaker:{object_id:'pending',label:'声音归属待定',status:'unknown',method:'voice_continuity',track_id:'weak-track'}})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('weak').training.pick.value`,ctx),'lux-id');
+assert.equal(vm.runInContext(`inputRows.get('weak').who.textContent`,ctx),'归属待定：');
+assert.match(vm.runInContext(`inputRows.get('weak').ranking.textContent`,ctx),/第一名：lux 0.127.*第二名：luguang 0.086.*差距：0.041/);
+vm.runInContext(`message({type:'identity_final',input_id:'weak',jev_status:'completed',certainty:'可能',reason:'声纹较弱，上下文仅支持可能',
+  speaker:{object_id:'lux-id',label:'lux',status:'provisional',method:'jev_attribution'},voice_initial:{label:'声音归属待定'}})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('weak').who.textContent`,ctx),'lux[JEV可能]：');
+assert.match(vm.runInContext(`inputRows.get('weak').jevNote.textContent`,ctx),/JEV未提供数值置信度/);
+assert.equal(vm.runInContext(`inputRows.get('weak').training.savedId`,ctx),'');
+vm.runInContext(`inputRows.get('weak').training.button.onclick();message({type:'personal_labelled',input_ids:['weak'],object_id:'lux-id',label:'lux',samples:1});inputRows.get('weak').training.undo.onclick()`,ctx);
+assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))),{type:'personal_unlabel',input_ids:['weak']});
+assert.equal(vm.runInContext(`inputRows.get('weak').training.undo.disabled`,ctx),true);
+vm.runInContext(`message({type:'personal_label_error',input_ids:['weak'],action:'undo',text:'暂不能撤销'})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('weak').training.savedId`,ctx),'lux-id');
+vm.runInContext(`inputRows.get('weak').training.undo.onclick();message({type:'personal_unlabelled',input_ids:['weak'],restored:[{input_id:'weak',speaker:{object_id:'lux-id',label:'lux',status:'provisional',method:'jev_attribution'}}]})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('weak').training.savedId`,ctx),'');
+assert.equal(vm.runInContext(`inputRows.get('weak').training.undo.hidden`,ctx),true);
+assert.match(vm.runInContext(`inputRows.get('weak').who.textContent`,ctx),/lux\[JEV可能\]/);
+assert.equal(vm.runInContext(`inputRows.get('weak').training.pick.value`,ctx),'lux-id');
+console.log('Weak evidence: default training candidate, explicit uncertainty, score gap and undo passed');
+
+vm.runInContext(`message({type:'timeline',input_id:'auto-row',start_ms:25000,end_ms:28000,text:'自动收录',voiceprint_candidates:[
+{object_id:'lux-id',label:'lux',score:.555},{object_id:'lg-id',label:'luguang',score:.20}],speaker:{label:'声音归属待定',track_id:'A'}});
+message({type:'personal_auto_labelled',input_ids:['auto-row'],object_id:'lux-id',label:'lux',score:.555});`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('auto-row').training.button.textContent`,ctx),'✓ 已自动加入');
+assert.equal(vm.runInContext(`inputRows.get('auto-row').training.undo.hidden`,ctx),false);
+assert.equal(vm.runInContext(`inputRows.get('auto-row').who.textContent`,ctx),'归属待定：');
+vm.runInContext(`message({type:'identity_final',input_id:'auto-row',jev_status:'completed',certainty:'可能',speaker:{object_id:'lux-id',label:'lux',status:'provisional',method:'jev_attribution'},voice_initial:{label:'声音归属待定'}})`,ctx);
+assert.match(vm.runInContext(`inputRows.get('auto-row').who.textContent`,ctx),/lux\[JEV可能\]/);
+vm.runInContext(`inputRows.get('auto-row').training.undo.onclick();message({type:'personal_unlabelled',input_ids:['auto-row'],restored:[{input_id:'auto-row',speaker:{},identity_unchanged:true}]})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('auto-row').training.button.textContent`,ctx),'加入训练');
+assert.match(vm.runInContext(`inputRows.get('auto-row').who.textContent`,ctx),/lux\[JEV可能\]/);
+console.log('Automatic training data: persisted check, independent attribution and reversible collection passed');
+
+vm.runInContext(`message({type:'timeline',input_id:'mlp-output',start_ms:29000,end_ms:29500,text:'个人模型输出',
+speaker:{object_id:'pending',label:'声音归属待定',track_id:'A'},voiceprint_candidates:[{object_id:'lux-id',label:'lux',score:.15}],
+personal_prediction:{status:'uncertain',matched:'',ranking:[{object_id:'lux-id',label:'lux',score:.72,threshold:.8},{object_id:'lg-id',label:'luguang',score:.12,threshold:.9}]}})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('mlp-output').personalPrediction.element.textContent`,ctx),'MLP：lux 0.720 · luguang 0.120');
+assert.match(vm.runInContext(`inputRows.get('mlp-output').personalPrediction.element.title`,ctx),/lux模型门槛 0.800.*luguang模型门槛 0.900/);
+vm.runInContext(`inputRows.get('mlp-output').training.pick.value='lg-id';inputRows.get('mlp-output').training.pick.onchange()`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('mlp-output').personalPrediction.element.textContent`,ctx),'MLP：lux 0.720 · luguang 0.120');
+assert.equal(vm.runInContext(`personalPredictionText({status:'skipped_identified',ranking:[]})`,ctx),'MLP：本句已有归属，未调用');
+assert.equal(vm.runInContext(`personalPredictionText({status:'no_ready_models',ranking:[]})`,ctx),'MLP：暂无适用模型');
+assert.equal(vm.runInContext(`personalPredictionText({status:'timeout',ranking:[]})`,ctx),'MLP：本次计算超时');
+console.log('Personal MLP display: named outputs below threshold, stable snapshots and explicit missing-result states passed');
+for(const source of ['人工','自述','声纹','MLP','JEV','综合','未知'])for(const state of ['确定','可能','待定']){
+  const caption=vm.runInContext(`identityCaption({label:'这是一个非常长的测试人物名字😀abcdefghijk',source:${JSON.stringify(source)},state:${JSON.stringify(state)},score:.936})+'：'`,ctx);
+  assert.ok(Array.from(caption).length<=20,caption);
+}
+assert.equal(vm.runInContext(`identityCaption({label:'luguang',source:'MLP',state:'可能',score:.936})`,ctx),'luguang[MLP可能0.94]');
+assert.equal(vm.runInContext(`identityCaption({label:'qf',source:'综合',state:'确定',score:1})`,ctx),'qf[综合确定]');
+vm.runInContext(`trainingPeople=[{object_id:'lux-id',label:'lux'},{object_id:'lg-id',label:'luguang'},{object_id:'qf-id',label:'qf'}];
+message({type:'timeline',input_id:'preferred-mlp',start_ms:31000,end_ms:32000,text:'这个意思吧',speaker:{object_id:'unknown',label:'声音归属待定',status:'unknown',method:'unassigned_audio',track_id:'v'},voiceprint_candidates:[{object_id:'lg-id',label:'luguang',score:.265},{object_id:'qf-id',label:'qf',score:.226}],personal_prediction:{ranking:[{object_id:'qf-id',label:'qf',score:1,threshold:.8,verified:false},{object_id:'lg-id',label:'luguang',score:0,threshold:.8,verified:false}]},identity_comparison:{state:'conflict',mlp_priority:true,voice:{object_id:'lg-id',label:'luguang',score:.265},mlp:{object_id:'qf-id',label:'qf',score:1}},identity_display:{label:'qf',source:'MLP',state:'可能',score:1,reason:'优先候选，尚未确认'}});
+message({type:'identity_final',input_id:'preferred-mlp',jev_status:'completed',certainty:'不确定',speaker:{object_id:'unknown',label:'声音归属待定',status:'unknown',method:'unassigned_audio'},voice_initial:{label:'声音归属待定'},identity_display:{label:'qf',source:'MLP',state:'可能',score:1,reason:'优先候选，尚未确认'}});`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').who.textContent`,ctx),'qf[MLP可能1.00]：');
+assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').training.pick.value`,ctx),'lg-id');
+assert.match(vm.runInContext(`inputRows.get('preferred-mlp').who.title`,ctx),/尚未确认/);
+assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').identityDetails.hidden`,ctx),true);
+vm.runInContext(`inputRows.get('preferred-mlp').who.onclick()`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').identityDetails.hidden`,ctx),false);
+assert.match(vm.runInContext(`inputRows.get('preferred-mlp').identityDetails.textContent`,ctx),/第一名：luguang 0.265.*第二名：qf 0.226.*差距：0.039/);
+assert.match(vm.runInContext(`inputRows.get('preferred-mlp').identityDetails.textContent`,ctx),/MLP首名领先次名：1.000000/);
+assert.match(vm.runInContext(`inputRows.get('preferred-mlp').identityDetails.textContent`,ctx),/JEV：不确定/);
+vm.runInContext(`inputRows.get('preferred-mlp').who.onkeydown({key:'Enter',preventDefault(){}})`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').identityDetails.hidden`,ctx),true);
+assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').who.ariaExpanded`,ctx),'false');
+
+vm.runInContext(`message({type:'timeline',input_id:'joint-conflict',start_ms:29000,end_ms:30000,text:'分歧测试',speaker:{object_id:'unknown',label:'声音归属待定',track_id:'x'},identity_comparison:{state:'conflict',voice:{label:'lux',score:.223},mlp:{label:'陆广',score:.999}}});`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('joint-conflict').identityConflict.className`,ctx),'identity-conflict');
+assert.match(vm.runInContext(`inputRows.get('joint-conflict').identityConflict.textContent`,ctx),/声纹与MLP排名不一致：lux 0.223 \/ 陆广 0.999/);
+vm.runInContext(`message({type:'timeline',input_id:'tv-other',start_ms:30000,end_ms:31000,text:'电视声音',speaker:{object_id:'unknown-tv',label:'声音归属待定',track_id:'tv'}});
+  message({type:'personal_labelled',input_ids:['tv-other'],object_id:'__negative_other__',label:'其他（仅反例）',negative_only:true,samples:1});`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('tv-other').training.pick.value`,ctx),'__negative_other__');
+assert.equal(vm.runInContext(`inputRows.get('tv-other').training.train.disabled`,ctx),true);
+assert.equal(vm.runInContext(`inputRows.get('tv-other').training.undo.hidden`,ctx),false);
+assert.equal(vm.runInContext(`inputRows.get('tv-other').who.textContent`,ctx),'归属待定：');
+assert.equal(vm.runInContext(`personalPredictionText({ranking:[{label:'lux',score:.9,verified:false}]})`,ctx),'MLP：lux 0.900（试用）');
+
 // Exercise the actual text-submit handler with an older server's NDJSON events.
 (async()=>{
+  await Promise.resolve();await Promise.resolve();
+  const contextRequests=[];
+  ctx.fetch=async(url,options)=>{contextRequests.push({url,body:options?.body});return {ok:true};};
+  vm.runInContext(`$('include-unplayed').checked=true`,ctx);
+  await vm.runInContext(`$('include-unplayed').onchange()`,ctx);
+  assert.equal(contextRequests[0].url,'/api/voice-context');
+  assert.deepEqual(JSON.parse(contextRequests[0].body),{include_unplayed:true});
+  assert.match(node('voice-context-status').textContent,/已保存/);
+  vm.runInContext(`trainingPeople=[{object_id:'lux-id',label:'lux'},{object_id:'lg-id',label:'luguang'}];refreshTrainingLabel(inputRows.get('auto-row'))`,ctx);
+  const trainingRequests=[];
+  ctx.fetch=async(url,options)=>{trainingRequests.push({url,body:options?.body});return {ok:true,json:async()=>options?.method==='POST'?{queued:true}:{targets:[{object_id:'lux-id',status:'collecting',detail:'校准样本不足'}]}};};
+  await vm.runInContext(`inputRows.get('auto-row').training.train.onclick()`,ctx);
+  assert.deepEqual(JSON.parse(trainingRequests[0].body),{action:'train',object_id:'lux-id',select_target:true});
+  assert.equal(vm.runInContext(`trainingRuns.get('lux-id').running`,ctx),false);
+  assert.equal(vm.runInContext(`trainingRuns.get('lux-id').detail`,ctx),'尚未开始训练，缺少正例或反例');
+  vm.runInContext(`trainingPeople=[{object_id:'lux-id',label:'lux'},{object_id:'lg-id',label:'luguang'}];refreshTrainingLabel(inputRows.get('auto-row'))`,ctx);
+  ctx.fetch=async(url,options)=>({ok:true,json:async()=>options?.method==='POST'?{queued:true}:{targets:[{
+    object_id:'lux-id',status:'collecting',progress:{positive:19,positive_sessions:1,negative_manual:0,negative_public:720,
+      counts:{train:{positive:0,negative:504},calibration:{positive:0,negative:180},validation:{positive:18,negative:36}},
+      minimum:{train:{positive:12,negative:24},calibration:{positive:4,negative:12},validation:{positive:4,negative:12}}}
+  }]}});
+  await vm.runInContext(`inputRows.get('auto-row').training.train.onclick()`,ctx);
+  assert.equal(vm.runInContext(`trainingRuns.get('lux-id').detail`,ctx),'尚未开始训练：本人 19 条，反例 720 条（至少各一条有效录音）');
+  assert.match(vm.runInContext(`inputRows.get('auto-row').training.trainStatus.title`,ctx),/本人 1 次会话.*人工标定其他人 0 条.*公开背景 720 条/);
+  console.log('Train once: immediate request for selected person and meaningful final status passed');
   ctx.TextDecoder=TextDecoder;
   const events=[{type:'accepted'},{type:'flow_phase',stage:'jev'},{type:'model_notice',text:'JEV：正在调用 DeepSeek'},{type:'error',message:'The read operation timed out'}];
   const states=[];let index=0;
@@ -202,3 +342,12 @@ console.log('Model timeline: complete stage history, bottom clamp and narrow lay
   assert.match(vm.runInContext('latestModelInput.modelUi.extra.children.at(-1).textContent',ctx),/read operation timed out/);
   console.log('Text stream: live stage, calling notice and timeout failure passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});
+
+assert.match(vm.runInContext(`personalPredictionText({overlap:true,ranking:[{label:'lux',score:.97}]})`,ctx),/MLP（重叠参考）：lux 0.970/);
+
+vm.runInContext(`message({type:'personal_prediction',input_id:'preferred-mlp',identity_display:{label:'qf',source:'MLP',state:'可能',score:.987,reason:'后台已补回'},personal_prediction:{status:'uncertain',ranking:[{label:'qf',object_id:'qf-id',score:.987,verified:false}]},identity_comparison:{state:'mlp_only',mlp_high:true}})`,ctx);
+assert.match(vm.runInContext(`inputRows.get('preferred-mlp').personalPrediction.element.textContent`,ctx),/qf 0.987/);
+assert.match(vm.runInContext(`inputRows.get('preferred-mlp').identityDetails.textContent`,ctx),/0.987000/);
+assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').identityConflict.hidden`,ctx),true);
+
+assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').who.textContent`,ctx),'qf[MLP可能0.99]：');

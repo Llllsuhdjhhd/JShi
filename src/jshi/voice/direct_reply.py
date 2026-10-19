@@ -11,7 +11,7 @@ class DirectReplyState:
         self.portrait_cache = {}
         self.recent = deque(maxlen=8)
 
-    def prime(self, subject, result):
+    def prime(self, subject, result, *, include_reply=True):
         current = result.current_state
         if not current.speaker or not current.speaker.object_id:
             return
@@ -48,7 +48,7 @@ class DirectReplyState:
             if len(self.people) > 64:
                 self.people.pop(next(iter(self.people)))
             self.recent.append({'subject':subject, 'object_id':oid, 'input':current.input_text[:200],
-                                'reply':result.response_plan.verbal_text()[:200]})
+                                'reply':result.response_plan.verbal_text()[:200] if include_reply else ''})
 
     def context(self, subject, object_ids):
         object_ids = tuple(object_ids)
@@ -59,11 +59,12 @@ class DirectReplyState:
                 'person': self.people.get((subject, ids[0])) if ready else None,
                 'recent':[r for r in self.recent if ready and r['subject']==subject and r['object_id']==ids[0]][-4:]}
 
-    def accept(self, subject, oid, text, reply):
+    def accept(self, subject, oid, text, reply, *, include_reply=True):
         if not self.context(subject, [oid])['allowed']:
             return False
         with self.lock:
-            self.recent.append({'subject':subject,'object_id':oid,'input':text[:200],'reply':reply[:200]})
+            self.recent.append({'subject':subject,'object_id':oid,'input':text[:200],
+                                'reply':reply[:200] if include_reply else ''})
         return True
 
     def portraits(self, subject, object_ids, *, cutoff_ms=None):

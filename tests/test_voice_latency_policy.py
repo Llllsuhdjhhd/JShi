@@ -28,7 +28,7 @@ def test_overlapping_batch_is_not_dropped_or_used_to_confirm_identity():
             assert payload['input']['lines'][0]['overlap'] is True
             assert payload['input']['lines'][0]['p']=='unknown'
             assert 'candidates' not in payload['input']['lines'][0]
-            return ModelResponse(text=json.dumps({'items':[{'i':1,'person':'unknown','certainty':'unknown','why':'重叠声音身份不能确认'}],'level':1,'recall_memory':False}),model='fake')
+            return ModelResponse(text=json.dumps({'items':[{'i':1,'person':'unknown','certainty':'unknown','why':'重叠声音身份不能确认'}],'level':1,'recall_memory':False,'control':'redirect'}),model='fake')
     judge=Judge()
     batch=[{'n':1,'text':'匠石为什么没有回应','who':'P1','candidates':[{'who':'P1','score':.9}]}]
     result=VoiceJEV(judge).decide_batch('stone',batch,[],{'state':'playing'},overlap=True)
@@ -195,9 +195,10 @@ def test_voice_collection_limit_can_be_configured_without_api_key(monkeypatch):
         VoiceConfig.from_env(asr='local', tts='local')
 
 
-def test_unresolved_segment_labels_are_not_assumed_to_identify_one_voice():
-    for track in ('pending-0', 'unidentified-1000', 'overlap-2000-0'):
-        assert VoiceConversation.speech_group_key(Transcript('测试',track,0,1000,True)) is None
+def test_unresolved_segment_labels_only_isolate_activity_clock():
+    for track in ('pending-0', 'unidentified-1000'):
+        assert VoiceConversation.speech_group_key(Transcript('测试',track,0,1000,True)) == ('provisional',track)
+    assert VoiceConversation.speech_group_key(Transcript('测试','overlap-2000-0',0,1000,True)) is None
 
 
 def test_same_acoustic_identity_partial_continuation_survives_track_change(process):
@@ -285,3 +286,42 @@ def test_invalid_prompt_routing_not_reported_as_successful_jev():
                 'items': [{'i': 1, 'person': 'unknown', 'certainty': 'unknown', 'to': 'yes', 'keep': 'related'}]}))
     result = VoiceJEV(Model()).decide_batch('stone', [{'n': 1, 'text': '你好'}], [], {})
     assert not result.judged and result.model_error and not result.main_prompt_hint
+
+
+@pytest.mark.parametrize('track', ['pending-user', 'unidentified-user'])
+def test_other_provisional_track_does_not_extend_short_question(process, track):
+    entered = Event()
+    class Main(Model):
+        def generate(self, request):
+            if '匠石，你听得到吗' in request.input_text:
+                entered.set()
+            return super().generate(request)
+    process.cognition = Main()
+    async def run():
+        async def send(message): pass
+        c = VoiceConversation(process, 'stone', FakeCloud(), send,
+            input_pause_s=.08, input_max_batch_s=.8)
+        stop = asyncio.Event()
+        async def media():
+            while not stop.is_set():
+                await c.accept(Transcript('新闻还在继续播', 'pending-media', 3000, 4000, False,
+                    identity_uncertain=True))
+                await asyncio.sleep(.01)
+        task = None
+        try:
+            await c.accept(Transcript('匠石，你听得到吗', track, 0, 2000, True,
+                identity_uncertain=True))
+            task = asyncio.create_task(media())
+            assert await asyncio.to_thread(entered.wait, 1.5)
+            assert not task.done()
+            record=next(iter(c.input_records.values()))
+            assert record['collection_trigger'] == 'pause'
+            assert record['group_ready_at']-record['worker_started_at'] < .45
+            assert c.speech_group_key(Transcript('话',track,0,1,True,identity_uncertain=True)) == ('provisional',track)
+        finally:
+            stop.set()
+            if task: await task
+            await asyncio.wait_for(c.queue.join(), 2)
+            await asyncio.wait_for(c.turn_queue.join(), 2)
+            await c.close()
+    asyncio.run(run())

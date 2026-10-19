@@ -16,7 +16,8 @@ from tests.test_voice import process, FakeCloud
 class Local:
     speakers = None
     def reset_session(self): pass
-    def feed(self, pcm):
+    def feed(self, pcm, final=False):
+        if not pcm: return ()
         return (Transcript("你好", "A", 0, 2000, True),)
 
 
@@ -46,7 +47,8 @@ def test_comparison_websocket_saves_labeled_audio_and_returns_real_report(proces
         speakers=None
         def __init__(self): self.size=0
         def reset_session(self): self.size=0
-        def feed(self, pcm):
+        def feed(self, pcm, final=False):
+            if not pcm: return ()
             self.size += len(pcm)
             if self.size==160000:return (Transcript('登记音频','A',0,5000,True),)
             if self.size==224000:return (Transcript('独立测试音频','A',5000,7000,True),)

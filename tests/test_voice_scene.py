@@ -34,7 +34,8 @@ def test_unknown_greeting_can_enter_main_flow(process):
     class Gate:
         name='test'
         def generate(self,request):
-            assert '都不是忽略或拒绝进入主流程的理由' in request.system_extra
+            from jshi.voice.jev_prompts import ENTRY_INSTRUCTION
+            assert request.system_extra.startswith(ENTRY_INSTRUCTION)
             return ModelResponse(text='{"action":"respond","reason":"向匠石打招呼"}',model='test')
     async def run():
         async def send(m):pass
@@ -450,7 +451,7 @@ def test_next_cognition_reads_pending_events_while_write_is_running(process):
             release.set()
             second = process.cognition.requests[-1].persona_user_text
             assert '尚未整理的输入输出' in second and '第一句' in second
-            assert '上午去古镇' in second
+            assert '上午去古镇' not in second  # Default: unplayed plans are absent from model context.
             assert '第二句接着说' in second
         finally:
             release.set()

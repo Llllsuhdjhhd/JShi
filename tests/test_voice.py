@@ -212,6 +212,23 @@ def test_voiceprint_hit_with_high_confidence_is_recognized(process):
     assert trusted.status == "recognized" and trusted.method == "voiceprint_match"
 
 
+def test_local_confirmation_threshold_is_source_specific_and_rechecks_cached_hits(process):
+    local_id = 'local:model:lowered'
+    process.profiles.add_carrier('lux-id', CarrierEntry('voiceprint', local_id))
+    process.profiles.add_carrier('lux-id', CarrierEntry('voiceprint', 'volc:cloud'))
+    ids = VoiceIdentities(process.profiles, 'stone', 'session')
+    options = {'voiceprint_id': local_id, 'confidence': .424, 'cluster_id': 'known-lux'}
+    recognized = ids.resolve('same-track', **options, local_confirmation_threshold=.33)
+    assert recognized.method == 'voiceprint_match' and recognized.object_id == 'lux-id'
+    # A runtime increase cannot fall back to the previously recognized cluster.
+    weak = ids.resolve('same-track', **options, local_confirmation_threshold=.50)
+    assert weak.status == 'unknown' and not weak.voiceprint_id
+    assert ids.resolve('same-track', **options, local_confirmation_threshold=.33).status == 'recognized'
+    assert ids.resolve('uncertain', **options, local_confirmation_threshold=.33, uncertain=True).status == 'unknown'
+    assert ids.resolve('tentative', **options, local_confirmation_threshold=.33, tentative=True).status == 'unknown'
+    assert ids.resolve('cloud', voiceprint_id='cloud', confidence=.424, local_confirmation_threshold=.33).status != 'recognized'
+
+
 def test_delivery_only_acknowledges_played_and_discards_stale():
     tracker = DeliveryTracker()
     d = tracker.begin("第一句。第二句。", "lux")
@@ -273,7 +290,7 @@ def test_cloud_requests_keep_multispeaker_and_identity_modes_separate():
     multi = VolcVoice(VoiceConfig("secret"), None)
     req = multi.asr_request()["request"]
     assert req["enable_speaker_info"] and req["show_utterances"]
-    assert req["ssd_version"] == "200" and req["end_window_size"] == 500
+    assert req["ssd_version"] == "200" and req["end_window_size"] == 800
     assert "ssd_mode" not in req
     single = VolcVoice(VoiceConfig("secret", identity_mode="voiceprint", voiceprint_group="family"),None)
     assert single.asr_request()["request"]["ssd_mode"] == 2
@@ -331,12 +348,12 @@ def test_program_only_binds_explicit_self_introductions(text, expected):
     assert explicit_name(text) == expected
 
 
-def test_jev_explicit_stop_and_unknown_backchannel():
+def test_jev_unavailable_does_not_infer_stop_from_words():
     class Broken:
         def generate(self,req):
-            raise AssertionError("should not call model for stop")
+            raise RuntimeError("model unavailable")
     jev = VoiceJEV(Broken())
-    assert jev.decide("stone","停一下",{},{}).action == "stop"
+    assert jev.decide("stone","停一下",{},{}).action != "stop"
     d = {"object_id":"lux","state":"paused"}
     assert VoiceJEV().decide("stone","嗯",{"object_id":"lux","status":"recognized"},d).action == "resume"
     assert VoiceJEV().decide("stone","嗯",{"status":"unknown"},d).action == "resume"
@@ -435,7 +452,9 @@ def test_streaming_synthesis_not_held_up_by_write_zone_and_stop_is_immediate(pro
         process.write_zone = Writer()
         messages=[]
         async def send(payload): messages.append(payload)
-        c=VoiceConversation(process,"stone",FakeCloud(),send)
+        from tests.test_voice_control import ScriptedControl
+        c=VoiceConversation(process,"stone",FakeCloud(),send,jev=VoiceJEV(ScriptedControl("redirect","stop")))
+        c.person_reviewer=None
         try:
             await c.accept(Transcript("你好","A",0,2000,True))
             await asyncio.wait_for(asyncio.to_thread(entered.wait),4)
@@ -467,7 +486,9 @@ def test_late_cognition_callback_after_stop_is_suppressed(process):
         process.cognition=SlowModel()
         messages=[]
         async def send(payload): messages.append(payload)
-        c=VoiceConversation(process,"stone",FakeCloud(),send)
+        from tests.test_voice_control import ScriptedControl
+        c=VoiceConversation(process,"stone",FakeCloud(),send,jev=VoiceJEV(ScriptedControl("redirect","stop")))
+        c.person_reviewer=None
         try:
             await c.accept(Transcript("你好","A",0,2000,True))
             await asyncio.wait_for(asyncio.to_thread(entered.wait),4)

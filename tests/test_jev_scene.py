@@ -143,7 +143,7 @@ def test_first_stage_is_compact_and_only_selects_prompt():
         def generate(self, req):
             self.req = req
             payload = json.loads(req.input_text)
-            assert set(payload) == {'input', 'scene', 'now', 'short_chat', 'waiting'}
+            assert set(payload) == {'input', 'scene', 'now', 'short_chat', 'waiting', 'conversation', 'playback'}
             assert payload['short_chat']['allowed'] is False
             assert payload['input']['unwritten'][0]['text'] == '要我帮你查天气吗？'
             assert 'long-internal-input-id' not in req.input_text
@@ -151,7 +151,7 @@ def test_first_stage_is_compact_and_only_selects_prompt():
             assert payload['input']['lines'][0]['name'] == 'lux'
             schema = json.loads(req.system_extra.split('Schema：')[1])
             assert 'tool_needed' not in schema['properties']
-            assert set(schema['properties']) == {'items', 'level', 'recall_memory', 'main_image', 'route', 'reply', 'waiting_reply'}
+            assert set(schema['properties']) == {'items', 'level', 'recall_memory', 'main_image', 'control', 'route', 'reply', 'waiting_reply'}
             assert set(schema['properties']['items']['items']['properties']) == {'i','person','certainty','why'}
             return ModelResponse(model='gate', text=json.dumps({'level':1, 'recall_memory':False,
                 'items':[{'i':1,'person':'P1','certainty':'confirmed','why':'本句声纹明确，无具体冲突'}]}))

@@ -1,5 +1,6 @@
 """CPU streaming recognition and speaker embeddings; no cloud audio upload."""
 from __future__ import annotations
+from contextlib import nullcontext
 
 import base64
 import hashlib
@@ -714,8 +715,11 @@ class LocalASR:
                 text = refined.result.text.strip()
             text = clean_asr_text(text)
             if text:
-                track, vpid, confidence = self.speakers.identify_timed(audio, start_ms=start, end_ms=end) if self.speakers else (f"unidentified-{start}", "", None)
-                output.append(Transcript(text, track, start, end, True, voiceprint_id=vpid, confidence=confidence, speaker_cluster_id=track if self.speakers and not track.startswith('unidentified-') else '', identity_tentative=bool(self.speakers and not vpid and not track.startswith('unidentified-') and getattr(self.speakers, 'last_match', {}).get('tentative', True))))
+                with getattr(self.speakers, 'lock', nullcontext()):
+                    track, vpid, confidence = self.speakers.identify_timed(audio, start_ms=start, end_ms=end) if self.speakers else (f"unidentified-{start}", "", None)
+                    match = dict(getattr(self.speakers, 'last_match', {}))
+                    note = json.dumps(match, ensure_ascii=False) if self.speakers else ''
+                output.append(Transcript(text, track, start, end, True, voiceprint_id=vpid, confidence=confidence, speaker_cluster_id=track if self.speakers and not track.startswith('unidentified-') else '', identity_tentative=bool(self.speakers and not vpid and not track.startswith('unidentified-') and match.get('tentative', True)), identity_note=note))
         elif (text or self.last_text) and text != self.last_text:
             if self.speakers and self.diarizer is None and self.segment_samples >= 24000 and self.early_speaker is None:
                 self.early_speaker = self.speakers.identify(np.concatenate(self.samples))

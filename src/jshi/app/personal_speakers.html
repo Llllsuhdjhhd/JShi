@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>个人声音学习 · 匠石</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f7f9fc;color:#29354a;font:14px/1.7 system-ui,sans-serif}main{max-width:1000px;margin:32px auto;padding:0 20px 48px}h1{font-size:24px}h2{font-size:17px;margin:0 0 12px}section{background:white;border:1px solid #e2e7ef;border-radius:14px;padding:20px;margin:16px 0}label{display:inline-flex;gap:8px;align-items:center;margin:6px 14px 6px 0}input,select,button{font:inherit;border:1px solid #dbe2ed;border-radius:7px;padding:7px 10px;max-width:100%}input[type=number]{width:100px}button{background:#eef3fc;color:#245fba;cursor:pointer;margin:4px}button:disabled{opacity:.5;cursor:default}.muted{color:#778398;font-size:12px}#notice{white-space:pre-wrap;padding:10px;color:#31577c;position:sticky;top:0;background:#f7f9fc;z-index:1}table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:9px 8px;text-align:left;border-bottom:1px solid #edf0f5;vertical-align:top}.scroll{overflow:auto}.detail{max-width:420px;white-space:pre-wrap}.badge{color:#34836a}.empty{color:#8692a5;padding:14px}a{color:#356bbb}.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}@media(max-width:600px){main{padding:0 12px}section{padding:14px}}
+</style>
+<main><a href="/">返回对话</a><h1>个人声音学习</h1>
+<p>为熟悉的人学习声音。原声纹判断可靠时沿用原结果，判断不清时才启用个人模型。</p>
+<div id="notice" role="status">正在读取…</div>
+<section><h2>人物与预算</h2><form id="settings">
+<label><input id="enabled" type="checkbox">启用辅助识别和自动学习</label>
+<label>最多学习 <input id="budget" type="number" min="1" max="200">人</label>
+<label>新增 <input id="batch" type="number" min="1" max="10000">条后尝试训练</label>
+<label>自动收录声纹分数至少 <input id="auto-score" type="number" min="0" max="1" step="0.01"></label>
+<label>领先第二名至少 <input id="auto-margin" type="number" min="0" max="1" step="0.01"></label>
+<button>保存设置</button></form>
+<div class="toolbar"><select id="person" aria-label="选择学习人物"></select><button id="add">加入学习并固定保留</button><button id="refresh">刷新</button></div>
+<p class="muted">人工固定人物占用预算；后续匠石自动选人时会保留这些名额。加入学习后先积累样本，模型验证通过才参与识别。</p>
+<p class="muted" id="background-count">正在读取背景反例…</p>
+<div class="scroll"><table><thead><tr><th>人物</th><th>样本</th><th>状态与验证</th><th>操作</th></tr></thead><tbody id="targets"></tbody></table></div>
+</section>
+<section><h2>标注已有录音</h2><p>也可以在对话页选择声音，使用“标注并保存训练声音”。这不要求原声纹登记成功。</p>
+<form id="upload"><label>人物 <select id="upload-person"></select></label>
+<label>同次录音组 <input id="recording-group" required maxlength="100" placeholder="例如：10月18日午间录音"></label>
+<label>录音文件 <input id="audio" type="file" accept="audio/*" multiple required></label>
+<button id="upload-button">保存人工标注</button></form>
+<p class="muted">每条 0.2–30 秒、单人声音。来自同一次录音的文件请填写相同录音组，优先按真实录音组评估；条件不足时会明确标为试用。其他声音只作反例，不代表同一人。长语音最多分三段处理。更短的声音能否提取有效特征需实际验证。</p>
+</section>
+<section><h2>最近保存的声音</h2><p class="muted">这里只显示最近100条。纠正归属或删除样本后，旧模型继续输出参考分数，等待新版训练；旧版不会直接确认姓名。</p><div class="scroll"><table><thead><tr><th>人物与来源</th><th>时长</th><th>保存时间</th><th>纠正或删除</th></tr></thead><tbody id="samples"></tbody></table></div></section>
+<details><summary>训练与发布规则</summary><p class="muted">二分类区分“本人”和“其他人”。其他人的本地录音只接受用户明确标注；公开语料单独作为背景反例。按原始会话／录音组划分训练、校准和独立验证，同一公开说话人固定在一组。自动标注的本人录音只参与训练；校准和独立验证使用人工确认的本人、其他人及公开背景反例。有正反例即可训练；会话条件不足时按原始录音留出评估，或先训练试用，不假称跨会话独立验证。自动训练默认每新增10条触发；手动可立即训练。试用模型输出参考分数，不自动确认身份。保留上一版本。页面中的误认和召回只代表这批留出录音，不代表实际环境的准确率。</p></details>
+</main>
+<script>
+const $=id=>document.getElementById(id);let state=null,busy=false;
+const names={collecting:'尚未开始训练：缺少正例或反例',queued:'等待训练',preparing:'准备数据',training:'后台训练中',ready:'已训练',rejected:'本次验证未通过',error:'本次训练失败'};
+function options(select,people,value){select.replaceChildren(new Option('选择人物',''));for(const p of people)select.add(new Option(p.label,p.object_id));if(people.some(p=>p.object_id===value))select.value=value;}
+function cell(row,text){const c=document.createElement('td');c.textContent=text;row.append(c);return c;}
+function button(parent,label,fn){const b=document.createElement('button');b.textContent=label;b.type='button';b.onclick=()=>run(fn);parent.append(b);return b;}
+async function post(body){const r=await fetch('/api/personal-speakers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw Error(await r.text());return r.json();}
+async function run(fn){if(busy)return;busy=true;try{await fn();await refresh(false);}catch(e){$('notice').textContent=e.message;}finally{busy=false;}}
+async function refresh(initial=false){const r=await fetch('/api/personal-speakers',{cache:'no-store'});if(!r.ok)throw Error(await r.text());state=await r.json();if(!state.available){$('notice').textContent=state.detail;return;}render(initial);}
+function render(initial){
+ const people=state.people;for(const id of ['person','upload-person'])options($(id),people,$(id).value);
+ $('upload-person').add(new Option('其他（电视／电子设备，仅反例）','__negative_other__'));
+ if(initial){$('enabled').checked=state.settings.enabled;$('budget').value=state.settings.budget;$('batch').value=state.settings.batch_samples;$('auto-score').value=state.settings.auto_score;$('auto-margin').value=state.settings.auto_margin;}
+ const label=oid=>oid==='__negative_other__'?'其他（仅反例）':people.find(p=>p.object_id===oid)?.label||'已移除人物';$('targets').replaceChildren();
+ const bg=state.background||{};$('background-count').textContent='公开背景反例：'+(bg.clips||0)+' 条、'+(bg.speakers||0)+' 位公开说话人。其他人的本地录音只接受用户明确标注，不使用“可能”或自动归属作为反例。';
+ for(const t of state.targets){const row=document.createElement('tr');cell(row,t.label+(t.pinned?' · 固定':''));
+ const counts=state.counts.filter(c=>c.object_id===t.object_id);cell(row,counts.map(c=>(c.source==='manual'?'人工':'自动')+' '+c.clips+' 条').join('，')||'尚无样本');
+ const status=cell(row,(t.status==='ready'&&t.active?.verified===false?'已训练 · 试用，验证有限':names[t.status]||t.status)+(t.available?(t.reference_only?' · 旧版参考可用':' · 可用'):' · 暂不可用'));status.className='detail';
+ const detail=document.createElement('div');detail.className='muted';detail.textContent=t.detail||'';status.append(detail);
+ if(t.progress){const p=t.progress,progress=document.createElement('div');progress.className='muted';progress.textContent='本人 '+p.positive+' 条／'+p.positive_sessions+' 次会话；其他人明确标注 '+p.negative_manual+' 条；公开反例 '+p.negative_public+' 条；电视／设备反例 '+(p.negative_device||0)+' 条（本地 '+(p.negative_device_local||0)+'，公开 '+(p.negative_device_public||0)+'；已计入前述反例）。\n'+['train','calibration','validation'].map((name,i)=>['训练','校准','留出验证'][i]+'：本人 '+p.counts[name].positive+'，反例 '+p.counts[name].negative).join('；');status.append(progress);}
+ if(t.active){const v=t.active.validation,m=document.createElement('div');m.className='muted';const lengths={under_1s:'不足1秒', '1_to_3s':'1至3秒', '3s_plus':'3秒以上'},covered=Object.entries(t.active.duration_reports||{}).filter(([k,v])=>t.active.verified===false||v.enabled).map(([k])=>lengths[k]).join('、');m.textContent='当前版本 '+new Date(t.active.created*1000).toLocaleString()+'；留出本人 '+v.positive+' 条／他人 '+v.negative+' 条，召回 '+(v.recall==null?'未评估':(v.recall*100).toFixed(1)+'%')+'，误认 '+(v.false_accept==null?'未评估':(v.false_accept*100).toFixed(1)+'%')+'；'+(t.active.verified===false?'试用分数适用时长：':'验证可用时长：')+(covered||'尚不足');status.append(m);}
+ const actions=cell(row,'');button(actions,'尝试训练',async()=>{const r=await post({action:'train',object_id:t.object_id});$('notice').textContent=r.queued?'已排队；后台训练或检查样本，可继续对话。':'该人物已有训练任务，或学习已暂停。';});
+ button(actions,t.pinned?'取消固定':'固定保留',()=>post({action:'target',object_id:t.object_id,pinned:!t.pinned}));
+ if(t.previous)button(actions,'回退上一版',async()=>{await post({action:'rollback',object_id:t.object_id});$('notice').textContent='已切换到上一版；标签已更新时仅作参考。';});
+ button(actions,'移出学习',()=>post({action:'target',object_id:t.object_id,selected:false}));$('targets').append(row);}
+ if(!state.targets.length){const row=document.createElement('tr');cell(row,'尚未选择人物。请先在上方加入一个学习目标。').colSpan=4;$('targets').append(row);}
+ $('samples').replaceChildren();for(const s of state.samples){const row=document.createElement('tr');cell(row,label(s.object_id)+' · '+(s.source==='manual'?'人工':'原声纹自动'));cell(row,s.seconds.toFixed(2)+' 秒');cell(row,new Date(s.created*1000).toLocaleString());const actions=cell(row,''),pick=document.createElement('select');options(pick,people,s.object_id);pick.add(new Option('其他（仅反例）','__negative_other__'));if(s.object_id==='__negative_other__')pick.value=s.object_id;actions.append(pick);button(actions,'纠正',async()=>{if(!pick.value)throw Error('请选择正确人物');await post({action:'label',sample_id:s.id,object_id:pick.value});$('notice').textContent='已保存人工归属，请对受影响人物重新尝试训练。';});button(actions,'删除',()=>post({action:'delete',sample_id:s.id}));$('samples').append(row);}
+ if(state.last_problem)$('notice').textContent=state.last_problem;else if(initial)$('notice').textContent='已读取；训练和识别结果会自动刷新。';
+}
+$('settings').onsubmit=e=>{e.preventDefault();run(async()=>{await post({action:'settings',settings:{enabled:$('enabled').checked,budget:Number($('budget').value),batch_samples:Number($('batch').value),auto_score:Number($('auto-score').value),auto_margin:Number($('auto-margin').value)}});$('notice').textContent='设置已保存。';});};
+$('add').onclick=()=>run(async()=>{if(!$('person').value)throw Error('先选择人物');await post({action:'target',object_id:$('person').value});$('notice').textContent='已加入学习，等待人工标注或可靠声纹样本。';});
+$('refresh').onclick=()=>run(()=>refresh(true));
+async function pcmFromFile(file){const bytes=await file.arrayBuffer(),context=new AudioContext();let decoded;try{decoded=await context.decodeAudioData(bytes.slice(0));}finally{await context.close();}if(decoded.duration<.2||decoded.duration>30)throw Error(file.name+'：录音须为0.2–30秒');const offline=new OfflineAudioContext(1,Math.ceil(decoded.duration*16000),16000),source=offline.createBufferSource();source.buffer=decoded;source.connect(offline.destination);source.start();const rendered=await offline.startRendering(),floats=rendered.getChannelData(0),pcm=new Int16Array(floats.length);for(let i=0;i<floats.length;i++)pcm[i]=Math.round(Math.max(-1,Math.min(1,floats[i]))*32767);const view=new Uint8Array(pcm.buffer);let binary='';for(let i=0;i<view.length;i+=8192)binary+=String.fromCharCode(...view.subarray(i,i+8192));const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');return {pcm:btoa(binary),input_id:hash};}
+$('upload').onsubmit=e=>{e.preventDefault();run(async()=>{const oid=$('upload-person').value,group=$('recording-group').value.trim();if(!oid||!group)throw Error('请选择人物并填写同次录音组');$('upload-button').disabled=true;try{for(const file of $('audio').files){$('notice').textContent='正在保存 '+file.name;await post({action:'sample',object_id:oid,session_id:'upload:'+group,...await pcmFromFile(file)});}$('notice').textContent='人工标注已保存；特征暂不可提取时仍保留原录音。';}finally{$('upload-button').disabled=false;}});};
+refresh(true).catch(e=>$('notice').textContent=e.message);setInterval(()=>{if(!document.hidden&&!busy)refresh(false).catch(e=>$('notice').textContent=e.message);},5000);
+</script></html>

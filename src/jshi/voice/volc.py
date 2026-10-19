@@ -67,6 +67,8 @@ class Transcript:
     identity_note: str = ""
     identity_uncertain: bool = False
     identity_tentative: bool = False  # session continuity, not a fresh named match
+    replaces: tuple[tuple[int, int], ...] = ()  # corrected audio ranges, not new speech
+    audio_kind: str = 'original'  # original, mixed, or separately extracted source
 
 
 class TranscriptAssembler:
@@ -75,6 +77,7 @@ class TranscriptAssembler:
         self.seen: set[tuple] = set()
         self.ranges: list[tuple[int, int, str]] = []
         self.expired_before_ms = 0
+        self.final_texts: dict[tuple[int, int], str] = {}
 
     @staticmethod
     def covered(start: int, end: int, ranges) -> bool:
@@ -119,21 +122,32 @@ class TranscriptAssembler:
                 # Unknown or absent speaker id must not bind successive people.
                 track = sid if sid and sid not in {"-1", "unknown"} else f"unidentified-{start}"
                 final = u.get("definite") is True
-                if end > start and (end <= self.expired_before_ms or self.covered(start, end, committed)):
+                if end > start and end <= self.expired_before_ms:
                     continue
-                # Final text is immutable. A later speaker-label revision must
-                # not deliver the same timed words as another conversation turn.
                 key = (start, end, text)
                 if final and key in self.seen:
                     continue
+                replaces = ()
+                if end > start and self.covered(start, end, committed):
+                    if not final:
+                        continue
+                    if (start, end) not in self.final_texts:
+                        continue  # history regrouping can span different people; never reassign it
+                    replaces = ((start, end),)
+                    prior = ''.join(self.final_texts[k] for k in replaces)
+                    if not replaces or ''.join(prior.split()) == ''.join(text.split()):
+                        continue  # only speaker labels / history grouping changed
                 overlap = bool(u.get("overlap", additions.get("overlap", False))) or any(
                     a < end and start < b and other != track for a, b, other in self.ranges)
                 # Only registered ids supplied by voiceprint mode can be used as
                 # permanent identity evidence. Diarization numbers are never ids.
                 vpid = sid if self.identity_mode == "voiceprint" and sid and sid not in {"-1", "unknown"} else ""
-                outputs.append(Transcript(text, track, start, end, final, overlap, vpid))
+                outputs.append(Transcript(text, track, start, end, final, overlap, vpid, replaces=replaces))
                 if final:
                     self.seen.add(key)
+                    for old in replaces:
+                        self.final_texts.pop(old, None)
+                    self.final_texts[start, end] = text
                     self.ranges.append((start, end, track))
         # Session ASR frames repeat the history; bound bookkeeping by time.
         if self.seen:
@@ -141,6 +155,7 @@ class TranscriptAssembler:
             self.expired_before_ms = cutoff
             self.seen = {k for k in self.seen if k[1] >= cutoff}
             self.ranges = [r for r in self.ranges if r[1] >= cutoff]
+            self.final_texts = {k: v for k, v in self.final_texts.items() if k[1] >= cutoff}
         return tuple(replace(t, overlap=True) if any(
             other.track_id != t.track_id and other.start_ms < t.end_ms and t.start_ms < other.end_ms
             for other in outputs) else t for t in outputs)
@@ -161,6 +176,9 @@ class VolcVoice:
         request = {"model_name": "bigmodel", "enable_nonstream": True,
                    "show_utterances": True, "enable_speaker_info": True,
                    "enable_ddc": False, "end_window_size": self.config.end_window_ms}
+        if self.config.asr_hotwords:
+            request['corpus'] = {'context': json.dumps({'hotwords': [
+                {'word': word} for word in self.config.asr_hotwords]}, ensure_ascii=False)}
         if self.config.identity_mode == "voiceprint":
             request.update(ssd_mode=2, voiceprints=[{"id": "", "group_id": self.config.voiceprint_group}])
         else:
@@ -177,6 +195,51 @@ class VolcVoice:
             headers=headers, heartbeat=20, max_msg_size=4 * 1024 * 1024)
         await ws.send_bytes(pack_asr(json.dumps(self.asr_request()).encode()))
         return ws
+
+    async def transcribe_source(self, pcm):
+        """Decode one extracted source; never copy the mixed stream's text."""
+        import asyncio
+        from aiohttp import WSMsgType
+        headers = self.headers(self.config.asr_resource)
+        headers['X-Api-Connect-Id'] = str(uuid4())
+        ws = await self.http.ws_connect(
+            'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async',
+            headers=headers, heartbeat=20, max_msg_size=4*1024*1024)
+        try:
+            body = self.asr_request()
+            for key in ('ssd_mode', 'ssd_version', 'voiceprints'):
+                body['request'].pop(key, None)
+            body['request']['enable_speaker_info'] = False
+            await ws.send_bytes(pack_asr(json.dumps(body).encode()))
+            async def send_audio():
+                for offset in range(0, len(pcm), 6400):
+                    await ws.send_bytes(pack_asr(pcm[offset:offset+6400], audio=True))
+                await ws.send_bytes(pack_asr(b'', audio=True, final=True))
+            sender = asyncio.create_task(send_audio())
+            assembler, outputs, complete = TranscriptAssembler(), {}, False
+            try:
+                async for message in ws:
+                    if message.type != WSMsgType.BINARY:
+                        if message.type in {WSMsgType.ERROR, WSMsgType.CLOSED, WSMsgType.CLOSE}:
+                            break
+                        continue
+                    payload, final = unpack_asr(message.data)
+                    for t in assembler.accept(payload):
+                        if t.final:
+                            outputs[(t.start_ms, t.end_ms)] = t
+                    if final:
+                        complete = True
+                        break
+                await sender
+                if not complete:
+                    raise RuntimeError('分离音轨转写未正常完成')
+                return sorted(outputs.values(), key=lambda t: (t.start_ms, t.end_ms))
+            finally:
+                if not sender.done():
+                    sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+        finally:
+            await ws.close()
 
     def tts_request(self, text: str) -> dict:
         t = self.config.template
