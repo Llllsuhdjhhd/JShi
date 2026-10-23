@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from .volc import TranscriptAssembler
+from .transcripts import TranscriptAssembler
 
 
 class DeepgramASR:

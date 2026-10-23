@@ -10,7 +10,7 @@ _RECORD_KEYS = {
     'clock_offset', 'source_time',
 }
 _MEDIA_KEYS = {'reference', 'frame', 'description_frame'}
-_WALL_MS = {'at', 'at_ms', 'received_ms', 'captured_start_ms', 'captured_end_ms'}
+_WALL_MS = {'at', 'at_ms', 'scene_at', 'received_ms', 'captured_start_ms', 'captured_end_ms'}
 _WALL_SECONDS = {
     'captured', 'completed', 'described_at', 'captured_at', 'received_at', 'source_time',
     'observed_at', 'completed_at', 'description_at',

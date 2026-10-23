@@ -12,7 +12,7 @@ from threading import RLock
 from time import perf_counter
 from uuid import uuid4
 
-from .local import LocalSpeakers, cosine, voiceprint_score
+from .speakers import LocalSpeakers, cosine, voiceprint_score
 
 
 def calibrate(genuine, impostor):

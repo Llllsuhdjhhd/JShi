@@ -29,11 +29,12 @@ class Gate:
             'level':3,'recall_memory':False,'main_image':'omit','route':'main','reply':''}))
 
 
-def test_defaults_are_twelve_seconds_or_twenty_characters(monkeypatch):
-    for key in ('JSHI_VOICE_INPUT_MAX_BATCH_MS','JSHI_VOICE_INPUT_BATCH_CHARS'):
+def test_legacy_collection_config_remains_readable(monkeypatch):
+    for key in ('JSHI_VOICE_INPUT_MAX_BATCH_MS','JSHI_VOICE_INPUT_BATCH_CHARS','JSHI_VOICE_END_WINDOW_MS'):
         monkeypatch.delenv(key,raising=False)
     config=VoiceConfig.from_env(asr='local',tts='local')
     assert config.input_max_batch_s==12 and config.input_batch_chars==20
+    assert config.end_window_ms == 500
     monkeypatch.setenv('JSHI_VOICE_INPUT_BATCH_CHARS','0')
     assert VoiceConfig.from_env(asr='local',tts='local').input_batch_chars==0
     with pytest.raises(ValueError):VoiceConfig('',input_batch_chars=-1)
@@ -54,78 +55,73 @@ def test_empty_input_does_not_start_or_extend_timer(process):
     asyncio.run(run())
 
 
-def test_continuous_fragments_dispatch_at_twenty_without_truncation(process):
+def test_short_final_dispatches_without_waiting_for_configured_pause(process):
     async def run():
-        async def send(m):pass
-        gate=Gate()
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate),input_pause_s=.5)
+        entered = asyncio.Event()
+        class Conversation(VoiceConversation):
+            async def _judge(self, *args, **kwargs):
+                entered.set()
+                return await super()._judge(*args, **kwargs)
+        async def send(m): pass
+        c = Conversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate()),
+                         input_pause_s=10, input_max_batch_s=12, input_batch_chars=10000)
         try:
-            await c.accept(Transcript('一二三四五六七八九十','A',0,100,True))
-            await asyncio.sleep(.02)
-            assert not gate.batches
-            await c.accept(Transcript('甲乙丙丁戊己庚辛壬癸更多内容','A',100,200,True))
-            await asyncio.wait_for(c.queue.join(),.5)
-            assert len(gate.batches)==1 and len(gate.batches[0])==2
-            assert gate.batches[0][1]['text'].endswith('更多内容')
-            assert all(row['collection_trigger']=='chars' for row in c.input_records.values())
-            assert c.last_jev is not None
-        finally:await c.close()
+            await c.accept(Transcript('你好', 'A', 0, 100, True))
+            await asyncio.wait_for(entered.wait(), .5)
+            await asyncio.wait_for(c.queue.join(), 1)
+            assert next(iter(c.input_records.values()))['collection_trigger'] == 'ready'
+        finally:
+            await c.close()
     asyncio.run(run())
 
 
-def test_pause_and_backlogged_boundary_reset_collection(process):
+def test_already_available_fragments_are_one_batch_without_truncation(process):
     async def run():
-        async def send(m):pass
-        gate=Gate()
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate),
-                            input_pause_s=.03,input_batch_chars=0)
-        # Queue both before the worker runs, simulating an earlier slow call.
+        async def send(m): pass
+        gate = Gate()
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate))
         try:
-            await c.accept(Transcript('前段','A',0,100,True))
-            c.speech_input_at[('track','A')]-=.1
-            await c.accept(Transcript('后段','A',2000,2100,True))
-            await asyncio.wait_for(c.queue.join(),1)
-            await asyncio.wait_for(c.turn_queue.join(),2)
-            assert gate.batches and all(len(rows)==1 for rows in gate.batches)
-            assert c.input_carry is None and c.input_idle.is_set()
-            assert len(c.scene)==2
-        finally:await c.close()
+            await c.accept_batch([Transcript('前半内容', 'A', 0, 100, True),
+                                  Transcript('后半内容完整保留', 'B', 100, 200, True)])
+            await asyncio.wait_for(c.queue.join(), 1)
+            assert len(gate.batches) == 1 and len(gate.batches[0]) == 2
+            assert gate.batches[0][1]['text'] == '后半内容完整保留'
+            assert all(row['collection_trigger'] == 'ready' for row in c.input_records.values())
+        finally:
+            await c.close()
     asyncio.run(run())
 
 
-def test_time_limit_is_started_by_text_not_idle_and_not_extended_by_partials(process):
+def test_later_final_is_a_new_batch_and_partials_do_not_hold_ready_text(process):
     async def run():
-        async def send(m):pass
-        gate=Gate()
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate),
-                            input_pause_s=.5,input_max_batch_s=.08,input_batch_chars=0)
+        async def send(m): pass
+        gate = Gate()
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate), input_pause_s=10)
         try:
-            await asyncio.sleep(.12)
-            assert not gate.batches
-            await c.accept(Transcript('开头内容','A',0,100,True))
-            for _ in range(12):
-                await c.accept(Transcript('仍在说话','A',100,200,False))
-                await asyncio.sleep(.01)
-            await asyncio.wait_for(c.queue.join(),1)
-            assert len(gate.batches)==1
-            assert next(iter(c.input_records.values()))['collection_trigger']=='time'
-        finally:await c.close()
+            await c.accept(Transcript('开头内容', 'A', 0, 100, True))
+            await c.accept(Transcript('仍在说话', 'A', 100, 200, False))
+            await asyncio.wait_for(c.queue.join(), 1)
+            assert len(gate.batches) == 1 and gate.batches[0][0]['text'] == '开头内容'
+            await c.accept(Transcript('后续最终文字', 'A', 100, 300, True))
+            await asyncio.wait_for(c.queue.join(), 1)
+            assert len(gate.batches) == 2 and gate.batches[1][0]['text'] == '后续最终文字'
+        finally:
+            await c.close()
     asyncio.run(run())
 
 
-def test_backlog_within_same_original_window_is_not_called_fragment_by_fragment(process):
+def test_asr_batch_remains_atomic_while_recording_yields(process):
     async def run():
-        async def send(m):pass
-        gate=Gate()
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate),
-                            input_pause_s=.5,input_max_batch_s=.1,input_batch_chars=20)
+        gate = Gate()
+        async def send(m):
+            await asyncio.sleep(.002)  # browser/archive operations may yield
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate))
         try:
-            await c.accept(Transcript('前半内容','A',0,100,True))
-            await c.accept(Transcript('后半内容','A',100,200,True))
-            for row in c.input_records.values():row['at']-=1
-            await asyncio.wait_for(c.queue.join(),1)
-            assert len(gate.batches)==1 and len(gate.batches[0])==2
-        finally:await c.close()
+            await c.accept_batch([Transcript(str(i), str(i), i*100, (i+1)*100, True) for i in range(4)])
+            await asyncio.wait_for(c.queue.join(), 2)
+            assert len(gate.batches) == 1 and len(gate.batches[0]) == 4
+        finally:
+            await c.close()
     asyncio.run(run())
 
 

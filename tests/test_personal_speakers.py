@@ -409,7 +409,8 @@ def test_actual_personal_model_outputs_reach_the_input_row(process, tmp_path, ov
             await c.accept(Transcript('本句调用个人模型', 'unidentified-A', 0, 500, True, overlap=overlap))
             await asyncio.wait_for(c.queue.join(), 3)
             event = next(m for m in sent if m['type'] == 'timeline')
-            prediction = event['personal_prediction']
+            prediction = [m for m in sent if m['type'] == 'personal_prediction'
+                          and m['input_id'] == event['input_id']][-1]['personal_prediction']
             assert prediction['status'] == 'matched'
             assert prediction['matched'] == ('' if overlap else 'lux-id')
             assert prediction['overlap'] is overlap
@@ -467,7 +468,8 @@ def test_recomputed_voiceprint_ranking_reaches_ui_without_confirming_identity(pr
             await asyncio.wait_for(c.queue.join(), 3)
             event = next(e for e in events if e['type'] == 'timeline')
             assert event['identity_note'] == ''
-            assert event['voiceprint_candidates'] == [
+            update = next(e for e in events if e['type'] == 'voiceprint_candidates')
+            assert update['input_id'] == event['input_id'] and update['candidates'] == [
                 {'object_id': 'lux-id', 'label': 'lux', 'score': .127, 'source': 'voiceprint'}]
             assert event['speaker']['status'] != 'recognized'
             assert event['speaker']['object_id'] != 'lux-id'

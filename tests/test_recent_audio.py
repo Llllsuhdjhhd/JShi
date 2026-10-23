@@ -73,7 +73,21 @@ def test_disk_failure_does_not_break_live_memory_audio(tmp_path,monkeypatch):
     monkeypatch.setattr(archive,'append',fail)
     source=SessionAudio(archive=archive)
     source.append(pcm())
+    archive.flush()
     assert source.archive_error and source.segment(0,1000)==pcm()
+
+
+def test_slow_disk_does_not_hold_up_live_microphone_audio(tmp_path,monkeypatch):
+    import time
+    archive=RecentAudio(tmp_path)
+    write=archive.append
+    def slow(*a):time.sleep(.5);write(*a)
+    monkeypatch.setattr(archive,'append',slow)
+    source=SessionAudio(archive=archive)
+    started=time.perf_counter()
+    for _ in range(10):source.append(b'\x01\x02'*1600)
+    assert time.perf_counter()-started < .2
+    assert archive.segment(source.capture_id,0,1000)==b'\x01\x02'*16000
 
 
 def test_stop_close_and_new_app_keep_audio_available_in_api(process):
@@ -84,7 +98,7 @@ def test_stop_close_and_new_app_keep_audio_available_in_api(process):
         c=VoiceConversation(process,'stone',FakeCloud(),send,sample_source=source)
         await c.accept(Transcript('真的吗','t',500,1500,True))
         iid=next(iter(c.input_records))
-        await c.stop();await c.close()
+        await c.stop();await c.close();archive.flush()
         async with TestClient(TestServer(create_app(process,'stone',VoiceConfig('')))) as client:
             listing=await (await client.get('/api/recent-audio')).json()
             assert listing['inputs'][0]['input_id']==iid and listing['inputs'][0]['audio_available']

@@ -66,15 +66,14 @@ def test_anonymous_voice_survives_cloud_track_changes_then_gets_a_name(process):
     assert ids.associated(other).object_id != named.object_id
 
 
-def test_unfinished_sentence_waits_for_continuation(process):
+def test_fragments_from_same_returned_batch_collect_together(process):
     async def run():
         async def send(m): pass
         c = VoiceConversation(process, 'stone', FakeCloud(), send, input_pause_s=.04)
         try:
-            await c.accept(Transcript('还有一种问题是', 'A', 0, 2000, True))
-            await asyncio.sleep(.2)
-            assert not process.cognition.requests
-            await c.accept(Transcript('怎么把声纹接上名字', 'A', 2500, 4000, True))
+            await c.accept_batch((
+                Transcript('还有一种问题是', 'A', 0, 2000, True),
+                Transcript('怎么把声纹接上名字', 'A', 2500, 4000, True)))
             await asyncio.wait_for(c.queue.join(), 1)
             await asyncio.wait_for(c.turn_queue.join(), 2)
             assert len(process.cognition.requests) == 1
@@ -217,22 +216,27 @@ def test_busy_main_collects_multiple_batches_for_one_next_model_call(process, st
     asyncio.run(run())
 
 
-def test_short_pause_and_partial_continuation_form_one_input(process):
+def test_partial_continuation_does_not_delay_completed_input(process):
+    from jshi.voice.jev import VoiceJEV
+    from tests.test_voice_window import Gate
     async def run():
+        gate = Gate()
         async def send(m): pass
-        c=VoiceConversation(process,'stone',FakeCloud(),send,input_pause_s=.12)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate),input_pause_s=.12)
         try:
             await c.accept(Transcript('你好','A',0,1000,True))
             await asyncio.sleep(.08)
             await c.accept(Transcript('我想','A',1000,1500,False))
             await asyncio.sleep(.08)
-            assert not process.cognition.requests
+            await asyncio.wait_for(c.queue.join(), 1)
+            await asyncio.wait_for(c.turn_queue.join(), 2)
+            assert process.cognition.requests
             await c.accept(Transcript('我想问一件事','A',1000,2400,True))
             await asyncio.wait_for(c.queue.join(),1)
             await asyncio.wait_for(c.turn_queue.join(),2)
-            assert len(process.cognition.requests)==1
+            assert len(gate.batches) == 2
             assert '你好' in process.cognition.requests[0].input_text
-            assert '我想问一件事' in process.cognition.requests[0].input_text
+            assert gate.batches[-1][0]['text'] == '我想问一件事'
         finally: await c.close()
     asyncio.run(run())
 

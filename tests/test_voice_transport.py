@@ -21,6 +21,33 @@ class Local:
         return (Transcript("你好", "A", 0, 2000, True),)
 
 
+def test_qwen_backend_status_and_websocket_use_segment_pipeline(process, monkeypatch):
+    class Qwen(Local):
+        backend = 'qwen'
+    monkeypatch.setattr('jshi.app.voice.VolcVoice', lambda config, http: FakeCloud())
+    async def run():
+        config = VoiceConfig('', asr_backend='qwen', tts_backend='local')
+        async with TestClient(TestServer(create_app(process, 'stone', config,
+                local=Qwen(), local_tts=FakeCloud()))) as client:
+            status = await (await client.get('/status')).json()
+            assert status['asr'] == 'qwen' and status['qwen_available']
+            assert not status['local_available'] and not status['online_available']
+            assert set(status['asr_backends']) == {'local', 'qwen', 'online', 'deepgram'}
+            origin = {'Origin': str(client.make_url('/')).rstrip('/')}
+            async with client.ws_connect('/voice', headers=origin) as ws:
+                ready = await ws.receive_json()
+                assert ready['type'] == 'ready' and 'Qwen3-ASR' in ready['asr']
+                await ws.send_bytes(b'\0\0' * 1600)
+                while True:
+                    event = await asyncio.wait_for(ws.receive_json(), 4)
+                    if event['type'] == 'transcript':
+                        assert event['final']
+                        break
+            with pytest.raises(aiohttp.WSServerHandshakeError):
+                await client.ws_connect('/voice?asr=local', headers=origin)
+    asyncio.run(run())
+
+
 def test_matching_slider_websocket_applies_and_rejects_invalid_values(process, monkeypatch, tmp_path):
     from jshi.voice.local import LocalSpeakers
     speakers=LocalSpeakers(None,'model',tmp_path/'prints.json',process.profiles)

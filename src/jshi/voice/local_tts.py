@@ -9,7 +9,7 @@ import re
 from threading import Event, Lock
 
 from jshi.voice.config import VoiceConfig
-from jshi.voice.local import TTS_NAME
+from jshi.voice.model_assets import TTS_NAME
 
 
 class LocalTTS:

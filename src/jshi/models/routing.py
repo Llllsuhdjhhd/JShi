@@ -8,7 +8,9 @@ from threading import RLock
 from urllib.error import HTTPError
 from urllib.error import URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from jshi.models.http_pool import urlopen
 
 from .base import ModelResponse
 from .prompt import build_system, build_user

@@ -62,8 +62,9 @@ class SpeakerAudioPreparer:
     Separation is transactional: all sources are transcribed or the original
     inputs remain. No source receives a copy of a mixed transcript.
     """
-    def __init__(self, separator=None, transcribe=None, *, timeout_s=30):
+    def __init__(self, separator=None, transcribe=None, *, timeout_s=30, transcribe_many=None):
         self.separator, self.transcribe, self.timeout_s = separator, transcribe, timeout_s
+        self.transcribe_many = transcribe_many
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='jshi-separation')
         self.pending = None
 
@@ -75,7 +76,7 @@ class SpeakerAudioPreparer:
             return original_sources(batch, audio)
         if not self.separator:
             return original_sources(batch, audio)
-        if not self.transcribe:
+        if not self.transcribe and not self.transcribe_many:
             raise ValueError('分离音轨缺少独立转写接口，保留原始混合输入')
         start, end = min(t.start_ms for t in batch), max(t.end_ms for t in batch)
         if end-start > 30000:
@@ -93,11 +94,16 @@ class SpeakerAudioPreparer:
             if len({s.track for s in sources}) != len(sources):
                 raise ValueError('分离模型返回重复的说话人编号')
             output, scope = [], uuid4().hex[:12]
-            # Bound ASR concurrency and preserve all N sources, including N=1.
             for source in sources:
                 if len(source.pcm) != len(pcm):
                     raise ValueError('分离音轨长度不一致')
-                utterances = await self.transcribe(source.pcm)
+            if self.transcribe_many:
+                decoded_sources = await self.transcribe_many([source.pcm for source in sources])
+                if len(decoded_sources) != len(sources):
+                    raise ValueError('音轨批转写数量与原始音轨不一致')
+            else:
+                decoded_sources = [await self.transcribe(source.pcm) for source in sources]
+            for source, utterances in zip(sources, decoded_sources):
                 decoded = 0
                 for u in utterances:
                     if not u.final or not u.text.strip():

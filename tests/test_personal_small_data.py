@@ -115,7 +115,7 @@ def test_trial_model_outputs_scores_and_retraining_keeps_backup(process,tmp_path
             try:
                 await c.accept(Transcript('试用分数展示','unidentified-trial',0,500,True))
                 await asyncio.wait_for(c.queue.join(),3)
-                event=next(m for m in sent if m['type']=='timeline')
+                event=[m for m in sent if m['type']=='personal_prediction'][-1]
                 assert event['personal_prediction']['ranking'][0]['verified'] is False
                 assert not event['personal_prediction']['matched']
                 evidence=[r for e in c.jev_scene_store.snapshot()['events']

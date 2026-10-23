@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from jshi.models.http_pool import urlopen
 
 logger = logging.getLogger(__name__)
 

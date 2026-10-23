@@ -1,0 +1,65 @@
+"""Audio-only segmentation, overlap detection and speaker evidence. No transcription."""
+from __future__ import annotations
+from contextlib import nullcontext
+import json
+from types import SimpleNamespace
+
+from .contracts import SpeechSegment
+
+
+class SpeakerAnalyzer:
+    def __init__(self, engine, speakers, *, build_engine=None, model=''):
+        self.engine, self.speakers = engine, speakers
+        self.engines = {model: engine} if model else {}
+        self.build_engine = build_engine
+
+    def use(self, model, speakers):
+        """Segment clustering and identity matching must share one embedding space."""
+        if self.build_engine is not None and model not in self.engines:
+            self.engines[model] = self.build_engine(model)
+        self.engine = self.engines.get(model, self.engine)
+        self.speakers = speakers
+
+    def analyze(self, samples, offset_ms):
+        original = self.engine.process(samples).sort_by_start_time()
+        spans = []
+        for span in original:
+            mixed = any(other.speaker != span.speaker and min(span.end,other.end)-max(span.start,other.start)>.05 for other in original)
+            # Keep continuous speech intact. Independent decoding of every small
+            # same-speaker span loses words and leaves too little voice evidence.
+            if spans and not mixed and not spans[-1].mixed and spans[-1].speaker == span.speaker and 0 <= span.start - spans[-1].end <= .3:
+                spans[-1].end = max(spans[-1].end, span.end)
+            else:
+                spans.append(SimpleNamespace(start=span.start, end=span.end, speaker=span.speaker, mixed=mixed))
+        output = []
+        for i, span in enumerate(spans):
+            start = max(0, int(span.start * 16000))
+            end = min(len(samples), int(span.end * 16000))
+            if end <= start:
+                continue
+            overlap = any(j != i and span.speaker != other.speaker and min(span.end, other.end) - max(span.start, other.start) > .05
+                          for j, other in enumerate(spans))
+            audio = samples[start:end]
+            if overlap:
+                # Mixed source audio cannot safely enroll or identify a person.
+                track, vpid, confidence = f"overlap-{offset_ms}-{i}", "", None
+                match = {'reason': '声音重叠，不据此确认姓名'}
+                note = json.dumps(match, ensure_ascii=False)
+            elif self.speakers is None:
+                track, vpid, confidence = f'unidentified-{offset_ms + start // 16}', '', None
+                match, note = {}, ''
+            else:
+                with getattr(self.speakers, 'lock', nullcontext()):
+                    if hasattr(self.speakers, 'identify_timed'):
+                        track, vpid, confidence = self.speakers.identify_timed(audio, source_track=str(span.speaker),
+                            start_ms=offset_ms + start // 16, end_ms=offset_ms + end // 16)
+                    else:
+                        track, vpid, confidence = self.speakers.identify(audio)
+                    match = dict(getattr(self.speakers, 'last_match', {}))
+                    note = json.dumps(match, ensure_ascii=False)
+            output.append(SpeechSegment(audio, track, offset_ms + start // 16, offset_ms + end // 16,
+                                     overlap, vpid, confidence,
+                                     speaker_cluster_id=track if not overlap and not track.startswith('unidentified-') else '',
+                                     identity_tentative=not overlap and not vpid and not track.startswith('unidentified-')
+                                         and match.get('tentative', True), identity_note=note))
+        return tuple(output)

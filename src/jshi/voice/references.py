@@ -48,8 +48,14 @@ def references(entry):
 
 
 def score(vector, entry):
-    rows = [row for row in references(entry) if len(row['embedding']) == len(vector)]
-    values = [similarity(vector, row['embedding']) for row in rows]
+    return score_rows(vector, references(entry))
+
+
+def score_rows(vector, rows):
+    """Score against rows already returned by references(): unit, deduplicated."""
+    rows = [row for row in rows if len(row['embedding']) == len(vector)]
+    probe = unit(vector)
+    values = [sum(x*y for x, y in zip(probe, row['embedding'])) if probe else -1.0 for row in rows]
     weight = sum(row['quality'] for row in rows)
     mean = sum(value*row['quality'] for value, row in zip(values, rows))/weight if weight else -1.0
     return {'score': mean, 'reference_count': len(rows),

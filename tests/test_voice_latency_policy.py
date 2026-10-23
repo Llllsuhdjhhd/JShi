@@ -163,22 +163,19 @@ def test_other_track_partial_speech_does_not_extend_completed_speaker_wait(proce
     asyncio.run(run())
 
 
-def test_unfinished_anchor_still_waits_despite_other_completed_speech(process):
+def test_word_ending_does_not_hold_batch_with_other_speech(process):
     async def run():
         async def send(message): pass
         c = VoiceConversation(process, 'stone', FakeCloud(), send, input_pause_s=.04)
         try:
-            await c.accept(Transcript('还有一种问题是', 'A', 0, 2000, True))
-            await asyncio.sleep(.02)
-            await c.accept(Transcript('旁人说一句完整的话', 'B', 2100, 2900, True))
-            await asyncio.sleep(.2)
-            assert not process.cognition.requests
-            await c.accept(Transcript('怎么把声音接上名字', 'A', 3000, 4500, True))
+            await c.accept_batch((
+                Transcript('还有一种问题是', 'A', 0, 2000, True),
+                Transcript('旁人说一句完整的话', 'B', 2100, 2900, True)))
             await asyncio.wait_for(c.queue.join(), 1)
             await asyncio.wait_for(c.turn_queue.join(), 2)
             assert len(process.cognition.requests) == 1
             assert all(text in process.cognition.requests[0].input_text for text in (
-                '还有一种问题是', '旁人说一句完整的话', '怎么把声音接上名字'))
+                '还有一种问题是', '旁人说一句完整的话'))
         finally:
             await c.close()
     asyncio.run(run())
@@ -202,20 +199,24 @@ def test_unresolved_segment_labels_only_isolate_activity_clock():
 
 
 def test_same_acoustic_identity_partial_continuation_survives_track_change(process):
+    from tests.test_voice_window import Gate
     async def run():
+        gate = Gate()
         async def send(message): pass
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, input_pause_s=.12)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate), input_pause_s=.12)
         try:
             await c.accept(Transcript('你好', 'A', 0, 1000, True, voiceprint_id='same-voice'))
             await asyncio.sleep(.08)
             await c.accept(Transcript('我想', 'B', 1100, 1800, False, voiceprint_id='same-voice'))
             await asyncio.sleep(.08)
-            assert not process.cognition.requests
+            await asyncio.wait_for(c.queue.join(), 1)
+            await asyncio.wait_for(c.turn_queue.join(), 2)
+            assert process.cognition.requests
             await c.accept(Transcript('我想问一件事', 'B', 1100, 2500, True, voiceprint_id='same-voice'))
             await asyncio.wait_for(c.queue.join(), 1)
             await asyncio.wait_for(c.turn_queue.join(), 2)
-            assert len(process.cognition.requests) == 1
-            assert '我想问一件事' in process.cognition.requests[0].input_text
+            assert len(gate.batches) == 2
+            assert gate.batches[-1][0]['text'] == '我想问一件事'
         finally:
             await c.close()
     asyncio.run(run())
@@ -230,8 +231,8 @@ def test_safety_batch_boundary_is_not_reported_as_end_of_expression(process):
             await c.accept(Transcript('说到这里', 'A', 0, 2000, True))
             await asyncio.wait_for(c.queue.join(), 1)
             await asyncio.wait_for(c.turn_queue.join(), 2)
-            assert c.last_debug['timing']['voice']['jev_calls'][-1]['collection_complete'] is False
-            assert '不能据此认为表达已经结束' in process.cognition.requests[0].input_text
+            assert c.last_debug['timing']['voice']['jev_calls'][-1]['collection_complete'] is None
+            assert '不能据此认为表达已经结束' not in process.cognition.requests[0].input_text
         finally:
             await c.close()
     asyncio.run(run())
@@ -315,7 +316,7 @@ def test_other_provisional_track_does_not_extend_short_question(process, track):
             assert await asyncio.to_thread(entered.wait, 1.5)
             assert not task.done()
             record=next(iter(c.input_records.values()))
-            assert record['collection_trigger'] == 'pause'
+            assert record['collection_trigger'] == 'ready'
             assert record['group_ready_at']-record['worker_started_at'] < .45
             assert c.speech_group_key(Transcript('话',track,0,1,True,identity_uncertain=True)) == ('provisional',track)
         finally:

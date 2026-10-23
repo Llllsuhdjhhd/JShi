@@ -35,7 +35,7 @@ def test_hotwords_serialized_inside_real_asr_first_packet(monkeypatch):
     monkeypatch.setenv('JSHI_VOICE_ASR_HOTWORDS', '匠石，MLP,声纹;匠石')
     config = VoiceConfig.from_env(asr='local', tts='local')
     req = VolcVoice(config,None).asr_request()['request']
-    assert req['end_window_size'] == 800 and req['enable_nonstream']
+    assert req['end_window_size'] == 500 and req['enable_nonstream']
     assert json.loads(req['corpus']['context']) == {'hotwords': [
         {'word':'匠石'}, {'word':'MLP'}, {'word':'声纹'}]}
     monkeypatch.setenv('JSHI_VOICE_ASR_HOTWORDS', '')

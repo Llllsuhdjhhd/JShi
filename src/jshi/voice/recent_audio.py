@@ -1,13 +1,14 @@
 """Bounded, durable microphone audio and per-input diagnostic evidence."""
 from __future__ import annotations
 
+import atexit
 import hashlib
 import io
 import json
 from pathlib import Path
 import sqlite3
-from threading import RLock
-from time import time
+from threading import Condition, RLock, Thread
+from time import sleep, time
 import wave
 from contextlib import contextmanager
 
@@ -22,6 +23,10 @@ class RecentAudio:
         self.hours, self.max_bytes = hours, max_bytes
         self.lock = RLock()
         self._last_prune = 0
+        self._pending = []
+        self._writing = False
+        self._queued = Condition()
+        self._writer = None
         with self._db() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS chunks(
@@ -69,10 +74,49 @@ class RecentAudio:
         if time()-self._last_prune >= 30:
             self.prune()
 
+    def enqueue(self, capture, offset, pcm, on_error=None):
+        """Queue live microphone audio; the receive loop must never wait on disk."""
+        if len(pcm) % 2:
+            raise ValueError('音频保存需要16位PCM')
+        with self._queued:
+            last = self._pending[-1] if self._pending else None
+            if last and last[0] == capture and last[1]+len(last[2]) == offset and last[3] == on_error:
+                last[2].extend(pcm)
+            else:
+                self._pending.append((capture, offset, bytearray(pcm), on_error))
+            if self._writer is None:
+                self._writer = Thread(target=self._write_pending, name='jshi-recent-audio', daemon=True)
+                self._writer.start()
+                atexit.register(self.flush)
+            self._queued.notify_all()
+
+    def _write_pending(self):
+        while True:
+            with self._queued:
+                while not self._pending:
+                    self._queued.wait()
+            sleep(.25)  # Gather several 100 ms frames into one commit.
+            with self._queued:
+                batch, self._pending, self._writing = self._pending, [], True
+            for capture, offset, pcm, on_error in batch:
+                try:
+                    self.append(capture, offset, bytes(pcm))
+                except (OSError, sqlite3.Error) as exc:
+                    if on_error:
+                        on_error(str(exc))
+            with self._queued:
+                self._writing = False
+                self._queued.notify_all()
+
+    def flush(self, timeout=5.0):
+        with self._queued:
+            return self._queued.wait_for(lambda: not self._pending and not self._writing, timeout)
+
     def segment(self,capture,start_ms,end_ms):
         begin,end = int(start_ms)*32,int(end_ms)*32
         if begin < 0 or end <= begin:
             return None
+        self.flush()
         with self.lock, self._db() as db:
             chunks = db.execute('SELECT start,size FROM chunks WHERE capture=? AND start<? AND start+size>? '
                                 'ORDER BY start',(capture,end,begin)).fetchall()
@@ -146,11 +190,13 @@ class RecentAudio:
         return output.getvalue()
 
     def continuous(self,limit=20):
+        self.flush()
         with self.lock,self._db() as db:
             return [dict(zip(('capture','start','size','updated'),r)) for r in db.execute(
                 'SELECT capture,start,size,updated FROM chunks ORDER BY updated DESC LIMIT ?',(limit,))]
 
     def stream_wav(self,capture,start):
+        self.flush()
         with self.lock,self._db() as db:
             row=db.execute('SELECT size FROM chunks WHERE capture=? AND start=? AND updated>=?',
                 (capture,start,time()-self.hours*3600)).fetchone()

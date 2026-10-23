@@ -102,7 +102,7 @@ def test_scene_writer_marks_omissions_and_never_silently_truncates_large_event(t
     model = Model()
     scene, _ = JEVSceneWriter(model).run('stone', snap, 'B1  旧参考' + '字' * 4000 + '\nB2  最新完整参考')
     assert model.data['window']['omitted_events'] == 1
-    assert model.data['input_output'] == [{'text': '等一下，先别继续', 'at': 2}]
+    assert model.data['input_output'] == [{'text': '等一下，先别继续', 'at': round(2-model.data['now'])}]
     assert model.data['main_scene'] == 'B2  最新完整参考'
     assert store.commit(snap, scene)
     archive = json.loads(store.path.with_suffix('.archive.jsonl').read_text(encoding='utf-8'))
@@ -151,7 +151,7 @@ def test_first_stage_is_compact_and_only_selects_prompt():
             assert payload['input']['lines'][0]['name'] == 'lux'
             schema = json.loads(req.system_extra.split('Schema：')[1])
             assert 'tool_needed' not in schema['properties']
-            assert set(schema['properties']) == {'items', 'level', 'recall_memory', 'main_image', 'control', 'route', 'reply', 'waiting_reply'}
+            assert set(schema['properties']) == {'items', 'level', 'recall_memory', 'main_image', 'utterance_complete', 'control', 'route', 'reply', 'waiting_reply'}
             assert set(schema['properties']['items']['items']['properties']) == {'i','person','certainty','why'}
             return ModelResponse(model='gate', text=json.dumps({'level':1, 'recall_memory':False,
                 'items':[{'i':1,'person':'P1','certainty':'confirmed','why':'本句声纹明确，无具体冲突'}]}))

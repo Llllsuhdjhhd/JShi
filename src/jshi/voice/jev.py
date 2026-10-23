@@ -114,6 +114,7 @@ class BatchDecision:
     direct_reply: str = ""
     waiting_reply: str = ""
     control: str = ""  # keep / stop / redirect; independent of identity and routing.
+    utterance_complete: str = "uncertain"  # Explicit expression completeness, not action.
 
     @property
     def front_choice(self):
@@ -286,6 +287,7 @@ class VoiceJEV:
 
     def decide_batch(self, subject_id: str, batch: list, context: list, delivery: dict, *, overlap: bool = False, on_request=None) -> BatchDecision:
         result = self._decide_batch(subject_id, batch, context, delivery, overlap=overlap, on_request=on_request)
+        result = self.enforce_completeness(result)
         bound = {row['n']: self._selected_text(row) for row in batch if self._selected_text(row)}
         if not bound:
             return result
@@ -295,9 +297,19 @@ class VoiceJEV:
             reason='用户选择人物，文字直接对匠石说', evidence_relation='user_selected')
             if item.n in bound else item for item in result.items)
         # An idle text message is already a submitted request, even if entry routing fails.
-        if len(bound) == len(batch) and result.control != 'stop' and delivery.get('state') not in {'thinking', 'playing', 'paused', 'queued'}:
+        if len(bound) == len(batch) and result.control != 'stop' and result.utterance_complete != 'incomplete' and delivery.get('state') not in {'thinking', 'playing', 'paused', 'queued'}:
             result = replace(result, action='respond', control='redirect', judged=True)
         return replace(result, items=items)
+
+    @staticmethod
+    def enforce_completeness(result):
+        """An explicit unfinished expression cannot open a new response, even if routing conflicts."""
+        if result.utterance_complete == 'incomplete':
+            stopped = result.control == 'stop' or result.action == 'stop'
+            return replace(result, control='stop' if stopped else 'keep',
+                action='stop' if stopped else 'ignore', direct_reply='', waiting_reply='',
+                reason=result.reason if stopped else 'JEV判断表达未完，等待后续接续')
+        return result
 
     def _decide_batch(self, subject_id: str, batch: list, context: list, delivery: dict, *, overlap: bool = False, on_request=None) -> BatchDecision:
         """一次判断整批。旧的单条 action JSON 仍接受，便于已有调用。"""
@@ -420,11 +432,12 @@ class VoiceJEV:
             "level": {"type": "integer", "enum": [1, 2, 3]},
             "recall_memory": {"type":"boolean"},
             "main_image": {"enum":["omit", "include"]},
+            "utterance_complete": {"enum": ["complete", "incomplete", "uncertain"]},
             "control": {"enum": ["keep", "stop", "redirect"]},
             "route": {"enum":["main", "self_reply"] if delivery.get('short_chat', {}).get('allowed') is True else ["main"]},
             "reply": {"type":"string", "maxLength":160 if delivery.get('short_chat', {}).get('allowed') is True else 0},
             "waiting_reply": {"type":"string", "maxLength":16}},
-            "required": ["items", "level", "recall_memory", "main_image", "control", "route", "reply"], "additionalProperties": False}
+            "required": ["items", "level", "recall_memory", "main_image", "utterance_complete", "control", "route", "reply"], "additionalProperties": False}
         request = ModelRequest(purpose="voice_jev", input_text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             subject_state=SubjectState(subject_id, "匠石", "快速入口判断"),
             system_extra=ENTRY_INSTRUCTION + "\nJSON Schema：" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
@@ -447,6 +460,8 @@ class VoiceJEV:
                         result = replace(result, routing_error='JEV档位或回忆开关缺失/无效；保留人物终审，回退完整档且不追加历史召回')
                 else:
                     result = self._from_items(data["items"], batch, rules.claimed_name, needs_main_review=data.get("needs_main_review") is True)
+                completeness = data.get("utterance_complete")
+                result = replace(result, utterance_complete=completeness if completeness in ("complete", "incomplete", "uncertain") else "uncertain")
                 control = data.get("control")
                 active = delivery.get("state") in {"thinking", "playing", "paused", "queued"}
                 if control in {'keep', 'stop', 'redirect'}:
@@ -464,6 +479,7 @@ class VoiceJEV:
                     result = replace(result, routing_error='本轮没有直接回答许可；保留人物终审，交主认知')
                 if (modern and data.get('route') == 'self_reply' and delivery.get('short_chat', {}).get('allowed') is True
                         and control not in {'keep', 'stop'}
+                        and result.utterance_complete != 'incomplete'
                         and not overlap and not any(row.get('source') == 'visual_environment' for row in batch)
                         and hint.get('level') == 3 and hint.get('recall_memory') is False
                         and hint.get('main_image', 'omit') == 'omit'
@@ -478,6 +494,7 @@ class VoiceJEV:
                 budget = waiting.get('levels', {}).get(f"L{hint.get('level')}", {}) if modern else {}
                 if (modern and data.get('route') == 'main' and waiting.get('allowed') is True
                         and not overlap and not result.routing_error and result.judged
+                        and result.utterance_complete != 'incomplete'
                         and not any(row.get('source') == 'visual_environment' for row in batch)
                         and budget.get('expected_seconds', 0) >= 2
                         and isinstance(brief, str) and 0 < len(brief.strip()) <= min(16, budget.get('max_chars', 0))):

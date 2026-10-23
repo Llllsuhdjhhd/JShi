@@ -46,6 +46,26 @@ def test_all_sources_get_their_own_audio_text_and_original_timestamps():
     asyncio.run(run())
 
 
+def test_separated_audio_is_submitted_as_one_complete_batch():
+    class Separator:
+        def separate(self, pcm):
+            return [SpeakerSource(str(i), bytes([i, 0]) * (len(pcm)//2)) for i in (1, 2, 3)]
+    calls = []
+    async def transcribe_many(pcms):
+        calls.append(pcms)
+        return [[Transcript(str(pcm[0]), 'unused', 0, 1000, True)] for pcm in pcms]
+    async def run():
+        audio = SessionAudio(); audio.append(b'\0\0' * 16000)
+        preparer = SpeakerAudioPreparer(Separator(), transcribe_many=transcribe_many)
+        try:
+            rows = await preparer.prepare([Transcript('mixed', 'a', 0, 1000, True, overlap=True)], audio)
+            assert len(calls) == 1 and len(calls[0]) == 3
+            assert [(t.text, pcm[0]) for t, pcm, _ in rows] == [('1', 1), ('2', 2), ('3', 3)]
+        finally:
+            preparer.close()
+    asyncio.run(run())
+
+
 def test_separation_failure_never_partially_replaces_originals(process):
     class Separator:
         def separate(self, pcm):

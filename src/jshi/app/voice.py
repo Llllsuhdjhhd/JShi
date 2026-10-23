@@ -6,6 +6,7 @@ import hashlib
 import base64
 import json
 import logging
+import os
 import re
 from time import monotonic, time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +22,7 @@ from jshi.models import ResponseItem, ResponsePlan
 from jshi.recognition import ObjectProfile, new_object_id
 from jshi.subject.domain import HistoryKind, HistoryRecord
 from jshi.voice.config import VoiceConfig
+from jshi.voice.backends import ASR_BACKENDS, describe_asr
 from jshi.voice.attention import ConversationAttention
 from jshi.voice.audio_buffer import SessionAudio
 from jshi.voice.delivery import DeliveryTracker
@@ -45,7 +47,8 @@ async def bounded_online_match(audio, transcript, speakers, executor, pending, t
     except Exception:
         logging.getLogger(__name__).exception('Online voice identity failed; transcript retained')
         return replace(transcript, identity_uncertain=True, identity_note='声纹比对失败，本句声音归属待定'), pending
-from jshi.voice.volc import Transcript, TranscriptAssembler, VolcVoice, pack_asr, unpack_asr
+from jshi.voice.contracts import Transcript
+from jshi.voice.volc import VolcVoice
 
 
 class VoiceConversation:
@@ -71,6 +74,8 @@ class VoiceConversation:
         self.local_speakers = local_speakers
         self.sample_source = sample_source
         self.input_records = {}
+        self.asr_timings = {}
+        self.jev_pending_inputs = {}
         self.sample_bytes = 0
         self.annotations = {}
         self.personal_label_lock = asyncio.Lock()
@@ -85,9 +90,11 @@ class VoiceConversation:
         from jshi.voice.wait_ack import wait_timing
         self.wait_ack_timing = wait_timing(process)
         self.timeout_s = timeout_s
+        # Legacy constructor settings remain accepted, but no longer govern collection.
         self.input_max_batch_s = max(.01, float(input_max_batch_s))
         self.input_batch_chars = max(0, int(input_batch_chars))
         self.input_carry = None
+        self.accepting_batch = asyncio.Lock()
         self._last_jev_notice = 0.0
         self.input_pause_s = input_pause_s
         self.last_input_at = 0.0
@@ -99,6 +106,10 @@ class VoiceConversation:
         self.input_idle = asyncio.Event()
         self.input_idle.set()
         self.queue = asyncio.Queue(maxsize=64)
+        # Displayed speech groups awaiting entry judgment, in arrival order.
+        self.judge_pending = deque()
+        self.judge_ready = asyncio.Event()
+        self.judging = False
         self.turn_queue = asyncio.Queue(maxsize=64)
         self.epoch = 0
         self.closed = False
@@ -112,7 +123,10 @@ class VoiceConversation:
         self.reply_epochs = {}
         self.tool_handling = {}
         self.turn_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-voice-turn")
-        self.jev_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-voice-jev")
+        # A second worker lets a fresh batch start while a timed-out call is still finishing.
+        self.jev_workers = 2
+        self.jev_executor = ThreadPoolExecutor(max_workers=self.jev_workers, thread_name_prefix="jshi-voice-jev")
+        self.jev_running = set()
         self.write_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-voice-write")
         self.code_owner = {}
         self.code_labels = {}
@@ -153,6 +167,8 @@ class VoiceConversation:
         self.write_worker = asyncio.create_task(self._writes())
         self.jev_future = None
         self.active_turn = None
+        self.session_started_at_ms = time() * 1000
+        self.last_settled_at_ms = self.session_started_at_ms
         self.scene = deque(maxlen=24)
         self.pending_plans = deque(maxlen=32)
         self.turn_sequence = 0
@@ -163,15 +179,19 @@ class VoiceConversation:
         self.pending_rename = None
         self.unreported_jev = []
         self.worker = asyncio.create_task(self._work())
+        self.judge_worker = asyncio.create_task(self._judge_work())
         self.turn_worker = asyncio.create_task(self._turns())
         executor = getattr(process, 'reflection_executor', None)
         self._reflection_token = executor.start(subject_id, lambda: (
             self.closed or self.pending_voice or self.active_turn is not None
             or not self.turn_queue.empty() or not self.queue.empty()
+            or self.judging or bool(self.judge_pending)
             or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}
         )) if executor else None
 
     async def emit(self, kind: str, **payload) -> None:
+        if kind == 'flow_phase':
+            payload.setdefault('at_ms', time() * 1000)
         if not self.closed and not self.output_disconnected:
             try:
                 await self.send({"type": kind, **payload})
@@ -179,6 +199,22 @@ class VoiceConversation:
                 # The close handler still owns task/executor cleanup. Suppress
                 # further browser writes during that close-handler race.
                 self.output_disconnected = True
+
+    def stamp_pipeline(self, iid, **times):
+        row = self.input_records.get(iid)
+        if row is None:
+            return {}
+        clock = row.setdefault('pipeline', {})
+        for key, value in times.items():
+            if value is not None:
+                clock[key] = value
+        return clock
+
+    async def publish_pipeline(self, iids):
+        for iid in iids:
+            row = self.input_records.get(iid)
+            if row and row.get('pipeline'):
+                await self.emit('pipeline_clock', input_id=iid, pipeline=dict(row['pipeline']))
 
     def resolve_speaker(self, transcript):
         return self.identities.resolve(transcript.track_id, voiceprint_id=transcript.voiceprint_id,
@@ -560,10 +596,15 @@ class VoiceConversation:
                                        identity_note='文字输入；人物由用户选择，不是声纹确认')
             self.scene.append(utterance)
             self.input_records[iid] = {'pcm': None, 'received_at_ms': at, 'at': monotonic()}
+            self.stamp_pipeline(iid,
+                previous_settled_at_ms=self.last_settled_at_ms,
+                session_started_at_ms=self.session_started_at_ms,
+                asr_returned_at_ms=at, text_sent_at_ms=at)
             while len(self.input_records) > 128:
                 old = next(iter(self.input_records))
                 self.sample_bytes -= len(self.input_records.pop(old).get('pcm') or b'')
-            await self.emit('typed_input', text=text, label=profile.label, input_id=iid)
+            await self.emit('typed_input', text=text, label=profile.label, input_id=iid,
+                            pipeline=dict(self.input_records[iid].get('pipeline') or {}))
             envelope = InputEnvelope(session_id=self.session_id, source='web_text',
                 parts=(InputPart('text', text),), speaker=evidence, input_id=iid,
                 start_ms=start, end_ms=start,
@@ -581,6 +622,7 @@ class VoiceConversation:
                     await self.stop('semantic_' + control)
                 self._capture_jev_inputs(current, items)
                 await self._publish_attribution(current, items, record)
+                self._update_jev_continuation(current, record)
                 if control in {'keep', 'stop'}:
                     return
                 if not record.get('judged'):
@@ -659,6 +701,7 @@ class VoiceConversation:
         except OSError:
             logging.getLogger(__name__).exception('Playback stopped but shared dialogue could not be saved')
         if reason in {'explicit stop', 'connection closed'}:
+            self.jev_pending_inputs.clear()
             while not self.queue.empty():
                 discarded = self.queue.get_nowait()
                 try:
@@ -670,6 +713,17 @@ class VoiceConversation:
             if self.input_carry is not None:
                 self.input_carry = None
                 self.queue.task_done()
+            while self.judge_pending:
+                group = self.judge_pending.popleft()
+                for utterance in group['current']:
+                    try:
+                        self.dialogue.input(self.subject_id, utterance.input_id, utterance.text,
+                                            self.display_speaker(utterance.speaker), time()*1000)
+                    except OSError:
+                        logging.getLogger(__name__).exception('Stopped input could not be saved')
+                for _ in range(group['queued']):
+                    self.queue.task_done()
+            self._refresh_input_idle()
             self.pending_voice = False
             while not self.turn_queue.empty():
                 self.turn_queue.get_nowait()
@@ -707,9 +761,13 @@ class VoiceConversation:
                 await self.emit("speaker", **asdict(evidence), jev_status="pending")
             return
         # Bound queue growth without discarding an already accepted input.
-        if self.queue.full():
-            await self.emit("notice", text="待处理的发言较多，请稍候。")
-            return
+        # Waiting here only needs a free display slot; do not drop finished speech.
+        noticed_backpressure = False
+        while self.queue.full():
+            if not noticed_backpressure:
+                noticed_backpressure = True
+                await self.emit("notice", text="待处理的发言较多，正在赶上，请稍候。")
+            await asyncio.sleep(0.05)
         iid = uuid4().hex
         transcript = replace(transcript, input_id=iid)
         pcm = self.sample_source.segment(transcript.start_ms, transcript.end_ms) if self.sample_source else None
@@ -722,6 +780,17 @@ class VoiceConversation:
             'online_identity_ms':online_identity_ms,
             'gap_before':gap_before, 'asr_lag_ms': lag,
             'received_at_ms':asr_received_at_ms if asr_received_at_ms is not None else time() * 1000}
+        origin = self.sample_source.started_at_ms if self.sample_source else None
+        self.stamp_pipeline(iid,
+            previous_settled_at_ms=self.last_settled_at_ms,
+            session_started_at_ms=self.session_started_at_ms,
+            asr_returned_at_ms=self.input_records[iid]['received_at_ms'],
+            speech_start_at_ms=(origin + transcript.start_ms) if origin is not None else None,
+            speech_end_at_ms=(origin + transcript.end_ms) if origin is not None else None)
+        timing = self.asr_timings.pop((transcript.start_ms, transcript.end_ms, transcript.track_id), {})
+        if timing:
+            self.input_records[iid]['asr_timing'] = timing
+            await self.save_voice_latency(iid, 'asr_returned')
         self.sample_bytes += len(pcm or b'')
         while len(self.input_records) > 128 or self.sample_bytes > 16 * 1024 * 1024:
             old = next(iter(self.input_records))
@@ -743,6 +812,77 @@ class VoiceConversation:
                 logging.getLogger(__name__).exception('Recent input audio indexing failed')
                 await self.emit('notice',text='本句录音保存失败；当前对话继续。')
         await self.queue.put(transcript)
+
+    async def accept_batch(self, transcripts):
+        """Record one already-returned ASR batch before the worker drains it."""
+        transcripts = tuple(transcripts)
+        size = self.queue.maxsize or max(1,len(transcripts))
+        for offset in range(0,len(transcripts),size):
+            chunk = transcripts[offset:offset+size]
+            # Deferred turns may release more rows than a single ASR window.
+            # Apply backpressure before taking the drain lock; never drop rows
+            # or deadlock the worker by waiting for space while holding it.
+            # Wait only until the display worker frees slots. queue.join() also waits
+            # for entry judgment, which blocked continuous speech for tens of seconds.
+            while self.queue.maxsize and self.queue.qsize()+len(chunk) > self.queue.maxsize:
+                await asyncio.sleep(0.05)
+            async with self.accepting_batch:
+                for transcript in chunk:
+                    await self.accept(transcript)
+
+    def note_asr_timings(self, transcripts, timings):
+        for transcript, timing in zip(transcripts, timings):
+            if transcript.final:
+                self.asr_timings[(transcript.start_ms, transcript.end_ms, transcript.track_id)] = timing
+        while len(self.asr_timings) > 128:
+            self.asr_timings.pop(next(iter(self.asr_timings)))
+
+    async def turn_analysis(self, previews, decisions, timings=()):
+        from jshi.voice.latency import append_latency
+        payload = {'stage':'turn_analysis','session_id':self.session_id,
+            'at_ms':time()*1000,'decisions':decisions,
+            'ranges':[[t.start_ms,t.end_ms] for t in previews],
+            'preview_timings':[{'audio_to_preview_ms':round((monotonic()-t['_detected_mono'])*1000,1)
+                if t.get('_detected_mono') is not None else None,
+                'analysis_batch_ms':t.get('analysis_batch_ms'),
+                'transcription_batch_ms':t.get('transcription_batch_ms')} for t in timings]}
+        try:
+            await asyncio.to_thread(append_latency, self.process.repository.path.parent/'voice_latency.jsonl', payload)
+        except OSError:
+            logging.getLogger(__name__).exception('Turn analysis log could not be saved')
+        await self.emit('turn_analysis', text='\n'.join(t.text for t in previews), decisions=decisions)
+
+    async def save_voice_latency(self, iid, stage, **values):
+        from jshi.voice.latency import append_latency, public_timing
+        row = self.input_records.get(iid)
+        if row is None:
+            return
+        timing = row.setdefault('asr_timing', {})
+        timing.update(values)
+        result = public_timing(timing)
+        result.update(stage=stage, input_id=iid, session_id=self.session_id,
+            subject_id=self.subject_id, at_ms=time()*1000)
+        try:
+            await asyncio.to_thread(append_latency, self.process.repository.path.parent/'voice_latency.jsonl', result)
+        except OSError:
+            logging.getLogger(__name__).exception('Voice latency log could not be saved')
+        return result
+
+    async def transcript_displayed(self, iid, render_ms=None):
+        from jshi.voice.latency import elapsed_ms
+        row = self.input_records.get(iid)
+        if not row or 'text_sent_mono' not in row or row.get('display_acknowledged'):
+            return
+        row['display_acknowledged'] = True
+        timing = row.get('asr_timing', {})
+        result = await self.save_voice_latency(iid, 'browser_display_ack',
+            text_send_to_display_ack_upper_ms=elapsed_ms(monotonic(), row['text_sent_mono']),
+            detected_to_display_ack_upper_ms=elapsed_ms(monotonic(), timing.get('_detected_mono')),
+            audio_end_received_to_display_ack_upper_ms=elapsed_ms(monotonic(), timing.get('_audio_end_received_mono')),
+            browser_render_ms=round(render_ms, 1) if isinstance(render_ms, (int, float)) and not isinstance(render_ms, bool) and 0 <= render_ms <= 60000 else None)
+        self.stamp_pipeline(iid, display_ack_at_ms=time()*1000)
+        await self._archive_update(iid, voice_latency=result, pipeline=row.get('pipeline'))
+        await self.emit('voice_latency', input_id=iid, timing=result, pipeline=dict(row.get('pipeline') or {}))
 
     async def _archive_update(self,iid,**values):
         if self.sample_source and getattr(self.sample_source,'archive',None):
@@ -820,22 +960,6 @@ class VoiceConversation:
         if not transcript.overlap and transcript.track_id and not transcript.track_id.startswith('overlap-'):
             return ('provisional', transcript.track_id)
         return None
-
-    @staticmethod
-    def unfinished(text):
-        # Conservative mid-turn cue at the JEV/main boundary (not a full parser).
-        # Longer fixed tails + 变成了 / 那种 / 的那种…; do not flag common complete
-        # short-reply tokens (一些/这个/那个/还有/所以/变成) as incomplete endings.
-        raw = text.strip()
-        text = raw.rstrip('，。！？,.!?… ')
-        if text.endswith(('还有一种问题是', '问题是', '就是说', '比如说', '比方说', '然后', '因为', '如果', '但是', '的话', '不需要', '我想', '我觉得', '变成了', '那种')):
-            return True
-        if re.search(r'的那种\w{0,8}$', text):
-            return True
-        # Shortness alone does not establish an unfinished expression:
-        # questions like 在忙什么 and complete requests like 我想问一件事
-        # must not acquire a four-second hold merely for lacking punctuation.
-        return text == '那我回来'
 
     def assign_code(self, object_id: str, label: str) -> str:
         if not object_id:
@@ -1015,6 +1139,7 @@ class VoiceConversation:
                             on_request=lambda req: self.process._record_step_input(req, self.person_reviewer.model,
                                 subject_id=self.subject_id, activity_id=review_id))
                         snapshot['material_window'] = model_snapshot.get('material_window', {})
+                        snapshot['discard_history'] = model_snapshot.get('discard_history', [])
                         return result
                     started = monotonic()
                     self._last_scene_attempt = started
@@ -1251,6 +1376,11 @@ class VoiceConversation:
             job = await self.write_queue.get()
             try:
                 await self.emit('write_started')
+                write_ids = list(self.input_records)[-8:]
+                at = time()*1000
+                for iid in write_ids:
+                    self.stamp_pipeline(iid, write_started_at_ms=at)
+                await self.publish_pipeline(write_ids)
                 wrote = await asyncio.get_running_loop().run_in_executor(self.write_executor, job)
                 if wrote is False:
                     self.failed_write_jobs.append(job)
@@ -1258,6 +1388,10 @@ class VoiceConversation:
                     await self.emit("write_failed")
                 elif wrote is True:
                     self.failed_write_jobs.clear()
+                    done = time()*1000
+                    for iid in write_ids:
+                        self.stamp_pipeline(iid, write_completed_at_ms=done)
+                    await self.publish_pipeline(write_ids)
                     await self.emit("write_completed")
             except Exception:
                 self.failed_write_jobs.append(job)
@@ -1329,7 +1463,11 @@ class VoiceConversation:
             else:
                 pending.append(previous)
         self.turn_queue.put_nowait((self.merge_envelopes([*pending, envelope]), self.epoch))
+        queued_at_ms = time()*1000
+        for u in envelope.current_utterances:
+            self.stamp_pipeline(u.input_id, queued_at_ms=queued_at_ms)
         asyncio.create_task(self.emit('flow_phase', lane='input', stage='queued'))
+        asyncio.create_task(self.publish_pipeline(u.input_id for u in envelope.current_utterances if u.input_id))
         for _ in range(drained):
             self.turn_queue.task_done()
 
@@ -1462,9 +1600,44 @@ class VoiceConversation:
         current_ids = {u.input_id for u in utterances}
         cutoff = min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=time()*1000)
         _, context = self.jev_scene_store.view(cutoff, current_ids)
+        # Explicit JEV holds must survive background scene summarization. Preserve
+        # original wording and attribution; do not concatenate different speakers.
+        max_age_ms = float(os.getenv('JSHI_JEV_CONTEXT_IDLE_SECONDS', '300'))*1000
+        self.jev_pending_inputs = {iid:u for iid,u in self.jev_pending_inputs.items()
+            if u.received_at_ms is not None and cutoff-u.received_at_ms <= max_age_ms}
+        present = current_ids | {r.get('input_id') for r in context}
+        for iid, u in self.jev_pending_inputs.items():
+            if iid not in present and u.received_at_ms <= cutoff:
+                context.append({'input_id':iid, 'text':u.text, 'at':u.received_at_ms,
+                    'p':self.assign_code(u.speaker.object_id,u.speaker.label)
+                        if u.speaker.method != 'unassigned_audio' else 'unknown',
+                    'track':u.speaker.track_id,'basis':u.speaker.method,
+                    'entry_status':'pending_continuation'})
+        context.sort(key=lambda r:r.get('at') or 0)
         from jshi.voice.jev_scene import recent_episode
         heard = recent_episode(list(self.played_history), cutoff)
         return context, "\n".join(r["text"] for r in heard)
+
+    def _hold_jev_inputs(self, utterances):
+        for u in utterances:
+            self.jev_pending_inputs[u.input_id] = u
+        while len(self.jev_pending_inputs) > 32 or sum(len(u.text) for u in self.jev_pending_inputs.values()) > 8000:
+            self.jev_pending_inputs.pop(next(iter(self.jev_pending_inputs)))
+
+    def _update_jev_continuation(self, utterances, record):
+        """Completeness owns retention; control owns actions. Old responses stay compatible."""
+        status = record.get('utterance_complete', 'uncertain')
+        if record.get('control') == 'stop':
+            self.jev_pending_inputs.clear()
+        elif status == 'complete':
+            self._consume_jev_inputs(utterances)
+        elif status in {'incomplete', 'uncertain'}:
+            self._hold_jev_inputs(utterances)
+
+    def _consume_jev_inputs(self, utterances):
+        owners = {u.speaker.object_id for u in utterances if u.speaker.method != 'unassigned_audio'}
+        self.jev_pending_inputs = {iid:u for iid,u in self.jev_pending_inputs.items()
+            if u.speaker.object_id not in owners}
 
     def _apply_attribution(self, utterances, items, *, persist=True):
         updated = []
@@ -1577,9 +1750,8 @@ class VoiceConversation:
             'candidate_only':True, **row} for oid,row in portraits.items()]
         trigger = self.input_records.get(utterances[-1].input_id, {}).get('collection_trigger', '') if utterances else ''
         result['collection'] = {'trigger':trigger,
-            'expression_complete':(trigger == 'pause') if trigger else None,
-            'chars':sum(ch.isalnum() for u in utterances for ch in u.text),
-            'max_seconds':self.input_max_batch_s, 'char_threshold':self.input_batch_chars}
+            'expression_complete':None if trigger in {'', 'ready'} else trigger == 'pause',
+            'chars':sum(ch.isalnum() for u in utterances for ch in u.text)}
         return result
 
     async def _judge(self, utterances, speaker, overlap, envelope=None) -> tuple[InterruptDecision, dict, tuple]:
@@ -1611,7 +1783,7 @@ class VoiceConversation:
         from jshi.voice.wait_ack import model_key
         delivery['waiting'] = self.wait_ack_timing.guidance(model_key(self.process),
             allowed=state == 'completed' and not overlap and not self.pending_voice and not self.output_disconnected
-                    and not any(self.unfinished(u.text) for u in utterances))
+                    )
         if delivery['short_chat']['allowed']:
             delivery['short_chat']['person_code'] = self.assign_code(speaker.object_id, speaker.label)
         if envelope is None:
@@ -1655,10 +1827,12 @@ class VoiceConversation:
         if not batch:
             batch = [{'n': 1, 'text': envelope.text, 'who': 'unknown', 'at': time()*1000, 'source': envelope.source, 'voice_evidence': {'strength':'unavailable','basis':'非声音观察'}}]
         started = monotonic()
+        jev_started_at_ms = time()*1000
         await self.emit('flow_phase', lane='input', stage='jev')
         for u in utterances:
             if u.input_id in self.input_records:
                 self.input_records[u.input_id]['jev_started_at'] = started
+                self.stamp_pipeline(u.input_id, jev_started_at_ms=jev_started_at_ms)
         for row, utterance in zip(batch, utterances):
             row['overlap'] = utterance.overlap
         path, timed_out = "model", False
@@ -1677,29 +1851,32 @@ class VoiceConversation:
                                     relevance="unrelated") for item in batch)
             return BatchDecision(action, hold_reason, items, "", False, model_error=reason)
 
-        if self.jev_future is not None and not self.jev_future.done():
+        self.jev_running = {f for f in self.jev_running if not f.done()}
+        loop = asyncio.get_running_loop()
+
+        def run():
+            if hasattr(self.jev, "decide_batch"):
+                if isinstance(self.jev, VoiceJEV) and type(self.jev).decide_batch is VoiceJEV.decide_batch:
+                    return self.jev.decide_batch(self.subject_id, batch, context, delivery,
+                                                 overlap=overlap, on_request=capture_request)
+                return self.jev.decide_batch(self.subject_id, batch, context, delivery, overlap=overlap)
+            legacy_delivery = self._single_jev_context(delivery, context, utterances, cutoff)
+            decision = self.jev.decide(self.subject_id, "\n".join(item["text"] for item in batch),
+                                       asdict(speaker), legacy_delivery, overlap=overlap)
+            return VoiceJEV()._from_legacy(decision, batch)
+
+        if len(self.jev_running) >= self.jev_workers:
             path = "rule"
             result = open_batch("上一次初判尚未结束")
         else:
-            loop = asyncio.get_running_loop()
-
-            def run():
-                if hasattr(self.jev, "decide_batch"):
-                    if isinstance(self.jev, VoiceJEV) and type(self.jev).decide_batch is VoiceJEV.decide_batch:
-                        return self.jev.decide_batch(self.subject_id, batch, context, delivery,
-                                                     overlap=overlap, on_request=capture_request)
-                    return self.jev.decide_batch(self.subject_id, batch, context, delivery, overlap=overlap)
-                legacy_delivery = self._single_jev_context(delivery, context, utterances, cutoff)
-                decision = self.jev.decide(self.subject_id, "\n".join(item["text"] for item in batch),
-                                           asdict(speaker), legacy_delivery, overlap=overlap)
-                return VoiceJEV()._from_legacy(decision, batch)
-
             self.jev_future = loop.run_in_executor(self.jev_executor, run)
+            self.jev_running.add(self.jev_future)
             try:
                 result = await asyncio.wait_for(asyncio.shield(self.jev_future), self.timeout_s)
             except asyncio.TimeoutError:
                 path, timed_out = "timeout_rule", True
                 result = open_batch("未能初判")
+        result = VoiceJEV.enforce_completeness(result)
         decision = InterruptDecision(result.action, result.reason, result.claimed_name)
         await self.emit('flow_phase', lane='input', stage='judged')
         record = {"ms": round((monotonic() - started) * 1000), "action": decision.action,
@@ -1714,6 +1891,8 @@ class VoiceConversation:
                   "judged": result.judged, "model_error": result.model_error}
         record['routing_error'] = result.routing_error
         record['control'] = result.control
+        record['utterance_complete'] = result.utterance_complete
+        await self.emit('jev_completeness', utterance_complete=result.utterance_complete, control=result.control)
         record['direct_reply'] = result.direct_reply if not timed_out else ''
         record['waiting_reply'] = result.waiting_reply if not timed_out else ''
         record['front_choice'] = result.front_choice if not timed_out else 'main_silent'
@@ -1721,14 +1900,17 @@ class VoiceConversation:
         record['input_parts'] = [asdict(p) for p in envelope.parts]
         self.record('voice_jev_diagnostics', {**record, 'model_raw': result.model_raw,
             'model_error': result.model_error})
+        jev_finished_at_ms = time()*1000
         for u in utterances:
             if u.input_id in self.input_records:
                 self.input_records[u.input_id]['jev_finished_at'] = monotonic()
+                self.stamp_pipeline(u.input_id, jev_finished_at_ms=jev_finished_at_ms)
+        await self.publish_pipeline(u.input_id for u in utterances if u.input_id)
         if (timed_out or result.model_error) and monotonic() - self._last_jev_notice >= 30:
             self._last_jev_notice = monotonic()
             message = ('JEV接口返回402，可能是余额或计费限制；本轮入口判断失败，声音初判和原话仍保留，本轮不开口。'
-                       if '402' in result.model_error else
-                       'JEV未能完成入口判断，已保留原话并等待，本轮不自动回应；这不是人物“不确定”的正常判断。')
+                       if '402' in (result.model_error or '') else
+                       '入口判断超时或失败，本轮不开口；你的话已记下，需要回应可以再说一次。')
             await self.emit('notice', text=message)
         elif result.routing_error and monotonic() - self._last_jev_notice >= 30:
             self._last_jev_notice = monotonic()
@@ -1801,61 +1983,28 @@ class VoiceConversation:
         while True:
             transcript = self.input_carry if self.input_carry is not None else await self.queue.get()
             self.input_carry = None
+            collect_at_ms = time()*1000
             await self.emit('flow_phase', lane='input', stage='collect')
+            if getattr(transcript, 'input_id', None):
+                self.stamp_pipeline(transcript.input_id, collect_at_ms=collect_at_ms)
             worker_started = monotonic()
-            input_epoch = self.epoch
             batch = [transcript]
             queued_count = None
-            collection_started = self.input_records.get(transcript.input_id, {}).get('at', worker_started)
             collection_trigger = 'capacity'
             try:
-                loop = asyncio.get_running_loop()
-                anchor = transcript
-                anchor_key = self.speech_group_key(anchor)
-                expression_complete = False
-                while len(batch) < 64:
-                    # Playback/thinking control uses this same JEV1 request, without
-                    # waiting for the normal speech batch or matching stop words.
-                    if self.active_turn is not None or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}:
-                        while not self.queue.empty() and len(batch) < 64:
-                            batch.append(self.queue.get_nowait())
-                        collection_trigger = 'active_control'
-                        expression_complete = not self.unfinished(batch[-1].text)
-                        break
-                    if self.input_batch_chars and sum(ch.isalnum() for item in batch for ch in item.text) >= self.input_batch_chars:
-                        collection_trigger = 'chars'
-                        break
-                    incomplete = self.unfinished(anchor.text)
-                    pause_s = max(self.input_pause_s, 4.0) if incomplete else self.input_pause_s
-                    deadline = collection_started + max(self.input_max_batch_s, 4.0 if incomplete else 0)
-                    # Track continuity controls batching, not named-person identity.
-                    # Unassigned provisional tracks retain the conservative global clock.
-                    last_at = (self.speech_input_at.get(anchor_key, self.last_input_at)
-                        if anchor_key is not None else self.last_input_at)
-                    remaining = min(deadline - loop.time(), pause_s - (loop.time() - last_at))
-                    if remaining <= 0 and self.queue.empty():
-                        expression_complete = loop.time() - last_at >= pause_s
-                        collection_trigger = 'pause' if expression_complete else 'time'
-                        break
-                    try:
-                        incoming = (self.queue.get_nowait() if not self.queue.empty()
-                                    else await asyncio.wait_for(self.queue.get(), remaining))
-                        incoming_at = self.input_records.get(incoming.input_id, {}).get('at', loop.time())
-                        # Already queued speech across a long silence starts a new
-                        # batch, even if a previous model call delayed the worker.
-                        gap_before = self.input_records.get(incoming.input_id, {}).get('gap_before', 0)
-                        if gap_before >= pause_s or incoming_at - collection_started >= self.input_max_batch_s:
-                            self.input_carry = incoming
-                            expression_complete = gap_before >= pause_s
-                            collection_trigger = 'pause' if expression_complete else 'time'
-                            break
-                        batch.append(incoming)
-                        if (anchor_key is not None and self.speech_group_key(incoming) == anchor_key) or (
-                                anchor_key is None and incoming.track_id == anchor.track_id):
-                            anchor = incoming
-                    except asyncio.TimeoutError:
-                        continue
+                # Drain only material already available. Never wait for a later
+                # transcript, punctuation, character count or a text-idle timer.
+                # An in-flight accept_batch only finishes recording an ASR batch
+                # whose complete results have already arrived.
+                async with self.accepting_batch:
+                    while not self.queue.empty() and len(batch) < 64:
+                        batch.append(self.queue.get_nowait())
+                active_control = self.active_turn is not None or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}
+                collection_trigger = 'active_control' if active_control else 'ready'
+                expression_complete = False if active_control else None
                 queued_count = len(batch)
+                for item in batch:
+                    self.stamp_pipeline(item.input_id, collect_at_ms=collect_at_ms)
                 batch.sort(key=lambda t: (t.start_ms, t.end_ms))
                 if collection_trigger != 'active_control':
                     batch = await self._prepare_speaker_audio(batch)
@@ -1875,6 +2024,31 @@ class VoiceConversation:
                     identity_started = monotonic()
                     evidence = self.resolve_speaker(transcript)
                     self.source_speakers[transcript.input_id] = evidence
+                    # Start personal classifier without blocking the first on-screen text.
+                    evidence = await self.personal_identity(transcript, evidence, wait=False)
+                    received = self.input_records.get(transcript.input_id, {}).get('received_at_ms')
+                    origin = self.sample_source.started_at_ms if self.sample_source else None
+                    utterance = SceneUtterance(transcript.text, evidence, transcript.start_ms, transcript.end_ms, transcript.overlap, transcript.input_id,
+                        origin + transcript.start_ms if origin is not None else None,
+                        origin + transcript.end_ms if origin is not None else None, received, transcript.identity_note)
+                    from jshi.voice.latency import public_timing
+                    input_record['text_sent_mono'] = monotonic()
+                    input_record.setdefault('asr_timing', {})['_text_sent_mono'] = input_record['text_sent_mono']
+                    input_record['asr_timing'].setdefault('_asr_return_mono', input_record['at'])
+                    self.stamp_pipeline(transcript.input_id, text_sent_at_ms=time()*1000,
+                        speech_start_at_ms=utterance.recorded_start_at_ms,
+                        speech_end_at_ms=utterance.recorded_end_at_ms)
+                    # Show text first; identity and candidates refine the same row afterwards.
+                    await self.emit("timeline", **asdict(utterance), voiceprint_candidates=[],
+                                    voice_latency=public_timing(input_record['asr_timing']),
+                                    pipeline=dict(input_record.get('pipeline') or {}),
+                                    identity_display=self.identity_display(transcript.input_id,evidence),
+                                    audio_saved=input_record.get('audio_saved',False),
+                                    identity_comparison=self.identity_comparison(transcript.input_id),
+                                    personal_prediction=self.personal_prediction_view(input_record))
+                    latency = await self.save_voice_latency(transcript.input_id, 'text_sent')
+                    if not input_record.get('display_acknowledged'):
+                        await self._archive_update(transcript.input_id, voice_latency=latency)
                     evidence = await self.personal_identity(transcript, evidence,
                         wait=collection_trigger != 'active_control')
                     answer = self.identities.name_answer(evidence, transcript.text) if not transcript.overlap else ''
@@ -1909,11 +2083,7 @@ class VoiceConversation:
                     if remembered and evidence.label.startswith('未命名访客') and evidence.object_id not in self.remembered_voices:
                         self.remembered_voices.add(evidence.object_id)
                         await self.emit('notice', text=f'{evidence.label} 是内部名，还不知道姓名。声音暂存；自报先记称呼线索，正式关联按人工确认。')
-                    received = self.input_records.get(transcript.input_id, {}).get('received_at_ms')
-                    origin = self.sample_source.started_at_ms if self.sample_source else None
-                    utterance = SceneUtterance(transcript.text, evidence, transcript.start_ms, transcript.end_ms, transcript.overlap, transcript.input_id,
-                        origin + transcript.start_ms if origin is not None else None,
-                        origin + transcript.end_ms if origin is not None else None, received, transcript.identity_note)
+                    utterance = replace(utterance, speaker=evidence)
                     self.note_address(evidence, transcript.text, transcript.input_id)
                     self.note_person_names(evidence, transcript.text, transcript.input_id)
                     input_record["identity_ms"] = round((monotonic() - identity_started) * 1000)
@@ -1982,11 +2152,8 @@ class VoiceConversation:
                         voiceprint_candidates=ui_candidates,identity_note=utterance.identity_note,
                         identity_comparison=self.identity_comparison(transcript.input_id),
                         classifier_result=self.personal_prediction_view(input_record))
-                    await self.emit("timeline", **asdict(utterance), voiceprint_candidates=ui_candidates,
-                                    identity_display=self.identity_display(transcript.input_id,evidence),
-                                    audio_saved=input_record.get('audio_saved',False),
-                                    identity_comparison=self.identity_comparison(transcript.input_id),
-                                    personal_prediction=self.personal_prediction_view(input_record))
+                    await self.emit("voiceprint_candidates", input_id=transcript.input_id,
+                                    candidates=ui_candidates, identity_note=utterance.identity_note)
                     if self.personal_speakers is not None:
                         job = self.personal_speakers.collect_original(input_record.get('pcm'), transcript,
                             self.source_speakers[transcript.input_id], self.session_id, self.local_speakers,
@@ -1996,8 +2163,58 @@ class VoiceConversation:
                             self.background_tasks.add(task)
                             task.add_done_callback(self.background_tasks.discard)
                     await self.emit("speaker", **asdict(evidence), jev_status="pending")
-                if not current:
-                    continue
+                if current:
+                    # Display never waits for the previous group's entry judgment.
+                    # Queue unfinished-task accounting still completes after judgment
+                    # so existing tests can await queue.join(); accept backpressure
+                    # only waits for free display slots, not for that join.
+                    self.judge_pending.append({'current':current, 'track_id':transcript.track_id,
+                        'expression_complete':expression_complete, 'collection_trigger':collection_trigger,
+                        'queued':queued_count})
+                    self.judge_ready.set()
+                    queued_count = 0
+            except Exception as exc:
+                await self.emit("notice", text=f"语音轮次失败：{type(exc).__name__}：{exc}")
+            finally:
+                for _ in range(queued_count if queued_count is not None else len(batch)):
+                    self.queue.task_done()
+                self._refresh_input_idle()
+
+    def _refresh_input_idle(self):
+        if (self.queue.empty() and self.input_carry is None
+                and not self.judge_pending and not self.judging):
+            self.input_idle.set()
+
+    def _take_judge_group(self):
+        """Merge groups displayed while the previous judgment was running."""
+        first = self.judge_pending.popleft()
+        current = list(first['current'])
+        group = dict(first)
+        while self.judge_pending and len(current) + len(self.judge_pending[0]['current']) <= 64:
+            more = self.judge_pending.popleft()
+            current.extend(more['current'])
+            group['queued'] += more['queued']
+            group['track_id'] = more['track_id']
+            if more['collection_trigger'] == 'active_control' or group['collection_trigger'] != 'active_control':
+                group['collection_trigger'] = more['collection_trigger']
+                group['expression_complete'] = more['expression_complete']
+        current.sort(key=lambda u: (u.start_ms, u.end_ms))
+        group['current'] = current
+        return group
+
+    async def _judge_work(self) -> None:
+        while True:
+            await self.judge_ready.wait()
+            if not self.judge_pending:
+                self.judge_ready.clear()
+                continue
+            self.judging = True
+            group = self._take_judge_group()
+            current = group['current']
+            expression_complete = group['expression_complete']
+            collection_trigger = group['collection_trigger']
+            input_epoch = self.epoch
+            try:
                 evidence = current[-1].speaker
                 active = self.delivery.snapshot().get("state") in {"playing", "paused", "queued"} or self.active_turn is not None
                 explicit_stop = any(not u.overlap and VoiceJEV().decide(self.subject_id, u.text, {}, {}).action == 'stop' for u in current)
@@ -2027,7 +2244,10 @@ class VoiceConversation:
                     input_epoch = self.epoch
                     active = busy = False
                 self._capture_jev_inputs(current, items, entry_status='rule' if explicit_stop else None)
+                if jev_calls:
+                    self._update_jev_continuation(current, jev_calls[-1])
                 if control == 'stop':
+                    self.jev_pending_inputs.clear()
                     continue
                 if control == 'keep':
                     self._preserve_background(current)
@@ -2037,7 +2257,7 @@ class VoiceConversation:
                     await self.emit('input_pending', count=len(current))
                 else:
                     self.last_jev = asdict(decision)
-                    self.record("voice_jev", {"input": self.render_input(current, items), "track_id": transcript.track_id, **asdict(decision)})
+                    self.record("voice_jev", {"input": self.render_input(current, items), "track_id": group['track_id'], **asdict(decision)})
                     await self.emit("jev", **asdict(decision))
                 if decision.action in {"resume", "ignore"}:
                     self._preserve_background(current)
@@ -2051,8 +2271,6 @@ class VoiceConversation:
                     await self.emit("notice", text="已停止播放。")
                     continue
                 facts = []
-                if self.unfinished(current[-1].text):
-                    facts.append(f"第 {len(current)} 条话还没说完。")
                 for utterance in current:
                     if utterance.speaker.label.startswith('未命名访客') and utterance.speaker.method != 'unassigned_audio' and utterance.speaker.object_id not in self.identities.name_questions:
                         facts.append(f"{self.display_speaker(utterance.speaker)} 第一次说话，还不知道姓名。")
@@ -2080,10 +2298,12 @@ class VoiceConversation:
             except Exception as exc:
                 await self.emit("notice", text=f"语音轮次失败：{type(exc).__name__}：{exc}")
             finally:
-                for _ in range(queued_count if queued_count is not None else len(batch)):
+                self.judging = False
+                if not self.judge_pending:
+                    self.judge_ready.clear()
+                for _ in range(group['queued']):
                     self.queue.task_done()
-                if self.queue.empty() and self.input_carry is None:
-                    self.input_idle.set()
+                self._refresh_input_idle()
 
     async def _turns(self) -> None:
         while True:
@@ -2104,6 +2324,7 @@ class VoiceConversation:
             epoch = self.epoch
             envelope = self.merge_envelopes(pending)
             self.turn_busy = True
+            current = ()
             try:
                 if epoch != self.epoch:
                     continue
@@ -2130,6 +2351,7 @@ class VoiceConversation:
                         await self.stop('semantic_' + record['control'])
                         epoch = self.epoch
                     self._capture_jev_inputs(current, items)
+                    self._update_jev_continuation(current, record)
                     if record.get('control') == 'stop':
                         continue
                     if record.get('control') == 'keep':
@@ -2157,7 +2379,6 @@ class VoiceConversation:
                     if (direct and current and all(u.speaker.object_id == oid for u in current)
                             and set(call.get('input_ids', ())) == {u.input_id for u in current}
                             and call.get('collection_complete') is not False
-                            and not any(self.unfinished(u.text) for u in current)
                             and self.direct_replies.accept(self.subject_id, oid, '\n'.join(u.text for u in current), direct, include_reply=False)):
                         await self._direct_reply(direct, oid, epoch, envelope, current, call)
                         continue
@@ -2231,6 +2452,11 @@ class VoiceConversation:
             finally:
                 self.turn_busy = False
                 self.active_turn = None
+                self.last_settled_at_ms = time()*1000
+                complete_ids = [u.input_id for u in (current or ()) if getattr(u, 'input_id', None)]
+                for iid in complete_ids:
+                    self.stamp_pipeline(iid, turn_complete_at_ms=self.last_settled_at_ms)
+                await self.publish_pipeline(complete_ids)
                 await self.emit('turn_complete')
                 self.turn_queue.task_done()
 
@@ -2243,6 +2469,9 @@ class VoiceConversation:
         while len(self.reply_input_ids) > 32:
             self.reply_input_ids.pop(next(iter(self.reply_input_ids)))
         began = monotonic()
+        main_started_at_ms = time()*1000
+        for u in envelope.current_utterances:
+            self.stamp_pipeline(u.input_id, main_started_at_ms=main_started_at_ms)
         rows = [self.input_records[u.input_id] for u in envelope.current_utterances if u.input_id in self.input_records]
         calls = [*self.unreported_jev, *envelope.jev_calls]
         self.unreported_jev.clear()
@@ -2331,14 +2560,15 @@ class VoiceConversation:
                     and not self.pending_voice and not envelope.overlap
                     and not self.output_disconnected
                     and self.delivery.snapshot().get('state') not in {'playing', 'paused', 'queued'}
-                    and not any(self.unfinished(u.text) for u in envelope.current_utterances)
                     and self.wait_ack_timing.claim_ack()):
                 ack_key = (epoch, -self.turn_sequence)
+                self.reply_input_ids[ack_key] = [u.input_id for u in envelope.current_utterances]
                 self.voice_timings[ack_key] = (monotonic(), {'route':'waiting_ack'})
                 await self._start_plan((ResponseItem('verbal', brief, (envelope.speaker.object_id,)),),
                                        envelope.speaker.object_id, epoch, ack_key)
                 envelope = replace(envelope, delivery_context=self.delivery.context_note())
                 await self.emit('jev_reply', text=brief, route='waiting_ack', main_called=True, memory_written=False)
+        await self.publish_pipeline(u.input_id for u in envelope.current_utterances if u.input_id)
         await self.emit("thinking", source=envelope.source)
         def phase_ready(stage):
             loop.call_soon_threadsafe(lambda: asyncio.create_task(self.emit('flow_phase',
@@ -2421,6 +2651,7 @@ class VoiceConversation:
             'jev':call, 'timing':{**asdict(timing), 'voice':metrics},
             'response':{'route':'self_reply','reply':text}, 'tool':{'selected_tool_ids':[]}}
         self.debug_history.append(self.last_debug)
+        self.reply_input_ids[activity_id] = [u.input_id for u in current]
         await self._start_plan((ResponseItem('verbal', text, (object_id,)),), object_id, epoch, activity_id)
         await self.emit('jev_reply', text=text, route='self_reply', main_called=False, memory_written=False)
 
@@ -2453,10 +2684,14 @@ class VoiceConversation:
                 self.tool_handling.pop(old, None)
         if self.pending_voice:
             self.delivery.pause()
+        reply_sent_at_ms = time()*1000
+        for iid in self.reply_input_ids.get(turn_key, ()):
+            self.stamp_pipeline(iid, reply_sent_at_ms=reply_sent_at_ms)
         await self.emit("reply", reply_id=d.reply_id, text=text, paused=self.pending_voice,
                         turn_key=list(turn_key),
                         generated_at_ms=self.voice_timings.get(turn_key, (None, {}))[1].get('reply_ready_at_ms'),
                         items=[asdict(i) for i in items])
+        await self.publish_pipeline(self.reply_input_ids.get(turn_key, ()))
         self.record("voice_delivery", self.delivery.snapshot())
         self.attention.engage(t for item in items for t in item.target_ids)
         self.tts_task = asyncio.create_task(self._synthesize(d))
@@ -2593,9 +2828,10 @@ class VoiceConversation:
         self.input_records.clear()
         self.annotations.clear()
         self.worker.cancel()
+        self.judge_worker.cancel()
         self.turn_worker.cancel()
         self.person_review_worker.cancel()
-        await asyncio.gather(self.worker, self.turn_worker, self.person_review_worker, return_exceptions=True)
+        await asyncio.gather(self.worker, self.judge_worker, self.turn_worker, self.person_review_worker, return_exceptions=True)
         if self.input_carry is not None:
             self.input_carry = None
             self.queue.task_done()
@@ -2660,6 +2896,10 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         if personal_speakers is not None:
             await asyncio.to_thread(personal_speakers.close)
     app.on_cleanup.append(close_personal)
+    async def close_local_pipeline(app):
+        if local is not None and hasattr(local, 'close'):
+            await asyncio.to_thread(local.close)
+    app.on_cleanup.append(close_local_pipeline)
 
     async def deliver_environment(environment, decision):
         nonlocal registry_busy, environment_pending
@@ -2717,7 +2957,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                   'direct_reply':result.direct_reply,
                   'waiting_reply':result.waiting_reply,
                   'front_choice':result.front_choice,
-                  'control':result.control,
+                  'control':result.control, 'utterance_complete':result.utterance_complete,
                   'ms':round((jev_finished-jev_started)*1000, 1),
                   'input_prepare_ms':round((prepared-prepare_started)*1000, 1),
                   'prompt_activity_id':'jev-'+envelope.input_id}
@@ -2930,11 +3170,22 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         return {**result, 'summary': await asyncio.to_thread(trials.summary, speakers)}
 
     async def status(request):
-        return web.json_response({"busy": busy, "cleanup_stage": cleanup_stage, "asr": "local" if local is not None else config.asr_backend,
+        from jshi.voice.segmentation import segment_settings
+        return web.json_response({"busy": busy, "cleanup_stage": cleanup_stage, "asr": getattr(local, 'backend', 'local') if local is not None else config.asr_backend,
             'text_scene_writing': text_write_task is not None and not text_write_task.done(),
             'text_scene_write_error': text_write_error,
+            'asr_backends': {name: asdict(spec) for name, spec in ASR_BACKENDS.items()},
+            'speech_policies': {'segment':config.segment_strategy,
+                'silence_ms':segment_settings(config).silence_ms,
+                'max_window_ms':round(config.max_window_s*1000), 'turn':config.turn_strategy,
+                'turn_threshold':config.turn_threshold,
+                'semantic':config.semantic_turn_strategy,
+                'semantic_threshold':config.semantic_turn_threshold,
+                'semantic_timeout_ms':round(config.semantic_turn_timeout_s*1000),
+                'scope':'qwen_local_pipeline'},
             'speaker_models': list(speaker_models or {}),
-            "local_available": local is not None, "online_available": bool(config.api_key),
+            "local_available": local is not None and getattr(local, 'backend', 'local') == 'local',
+            "qwen_available": local is not None and getattr(local, 'backend', '') == 'qwen', "online_available": bool(config.api_key),
             "deepgram_available": bool(config.deepgram_api_key), "vision_available": visual is not None, "voice_active": active_conversation is not None},
             headers={"Cache-Control": "no-store"})
 
@@ -3006,7 +3257,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 try:
                     phase_ready('jev')
                     judged_envelope = await judge_standalone(envelope,
-                        waiting_allowed=streaming and not VoiceConversation.unfinished(text))
+                        waiting_allowed=streaming)
                     entry = dict(judged_envelope.entry_timing)
                     entry['entry_total_ms'] = round((monotonic()-received_mono)*1000, 1)
                     judged_envelope = replace(judged_envelope, entry_timing=entry)
@@ -3116,18 +3367,22 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             raise web.HTTPForbidden(text="voice connection requires same origin")
         if busy or registry_busy:
             raise web.HTTPConflict(text="已有一个语音会话，请先结束它。")
-        backend = request.query.get("asr", "local" if local is not None else config.asr_backend)
-        if backend not in {"local", "online", "deepgram"}:
+        backend = request.query.get("asr", getattr(local, 'backend', 'local') if local is not None else config.asr_backend)
+        if backend not in ASR_BACKENDS:
             raise web.HTTPBadRequest(text="未知语音识别后端")
-        use_local = local if backend == "local" else None
-        if backend == "local" and use_local is None:
-            raise web.HTTPBadRequest(text="本地识别未加载，请用 --asr local 启动")
+        use_local = local if local is not None and backend == getattr(local, 'backend', 'local') else None
+        if backend in {'local', 'qwen'} and use_local is None:
+            raise web.HTTPBadRequest(text=f"识别未加载，请用 --asr {backend} 启动")
         if backend == "online" and not config.api_key:
             raise web.HTTPBadRequest(text="线上识别缺少 JSHI_VOICE_API_KEY，配置后重启服务")
         if backend == 'deepgram' and not config.deepgram_api_key:
             raise web.HTTPBadRequest(text='Deepgram识别缺少JSHI_DEEPGRAM_API_KEY，配置后重启服务')
         if backend == 'deepgram' and config.identity_mode == 'voiceprint':
             raise web.HTTPBadRequest(text='Deepgram请使用diarization模式；云端voiceprint仅用于火山')
+        if backend == 'qwen' and config.identity_mode == 'voiceprint':
+            raise web.HTTPBadRequest(text='Qwen请使用diarization模式；云端voiceprint仅用于火山')
+        if config.separation_backend != 'off' and backend != 'qwen' and not config.api_key:
+            raise web.HTTPBadRequest(text='当前后端分离音轨转写需要JSHI_VOICE_API_KEY')
         busy = True
         cleanup_stage = ""
         ws = web.WebSocketResponse(max_msg_size=128 * 1024, heartbeat=20)
@@ -3137,6 +3392,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         local_executor = None
         local_pump = None
         cloud = None
+        from jshi.voice.capture import PcmCapture
+        capture_source = PcmCapture()
         audio = SessionAudio(archive=recent_audio)
         try:
             await ws.prepare(request)
@@ -3165,8 +3422,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 from jshi.voice.sources import SpeakerAudioPreparer, PyannoteSeparator
                 preparer = SpeakerAudioPreparer(
                     PyannoteSeparator(device=config.separation_device) if config.separation_backend == 'pyannote' else None,
-                    cloud.transcribe_source if config.separation_backend == 'pyannote' else None,
-                    timeout_s=config.separation_timeout_s)
+                    (use_local.refiner.transcribe_source if backend == 'qwen' else cloud.transcribe_source) if config.separation_backend == 'pyannote' else None,
+                    timeout_s=config.separation_timeout_s,
+                    transcribe_many=use_local.refiner.transcribe_sources if backend == 'qwen' and config.separation_backend == 'pyannote' else None)
                 conversation = VoiceConversation(process, subject_id, local_tts or cloud, ws.send_json, jev=jev,
                     timeout_s=config.jev_timeout_s, local_speakers=speakers, input_pause_s=config.input_pause_s, sample_source=audio,
                     candidate_timeout_s=config.candidate_timeout_s, input_max_batch_s=config.input_max_batch_s,
@@ -3183,20 +3441,14 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         if not ws.closed:
                             await conversation.emit('notice', text=f'本地识别失败：{exc}')
                             await ws.close()
-                    local_pump = LocalAudioPump(use_local, local_executor, conversation.accept, local_error)
+                    local_pump = LocalAudioPump(use_local, local_executor, conversation.accept, local_error,
+                        accept_batch=conversation.accept_batch, on_timings=conversation.note_asr_timings,
+                        on_turn_state=conversation.turn_analysis)
                 else:
-                    if backend == 'deepgram':
-                        from jshi.voice.deepgram import DeepgramASR
-                        asr = await DeepgramASR(config,http).open_asr()
-                    else:
-                        asr = await cloud.open_asr()
+                    from jshi.voice.streaming_asr import open_stream
+                    asr = await open_stream(replace(config, asr_backend=backend), http, cloud)
                     if speakers is not None:
                         local_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-cloud-identity")
-                assembler = TranscriptAssembler(identity_mode=config.identity_mode)
-                if backend == 'deepgram':
-                    from jshi.voice.deepgram import DeepgramAssembler
-                    assembler = DeepgramAssembler()
-
                 async def receive():
                     failed = False
                     identity_pending = None
@@ -3206,17 +3458,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         detail_text = f'{type(detail).__name__}: {detail}' if detail is not None else '远端未提供关闭详情'
                         return f"ASR connection closed (code={getattr(asr, 'close_code', None)}, detail={detail_text})"
                     try:
-                        async for message in asr:
-                            if backend == 'deepgram' and message.type == WSMsgType.TEXT:
-                                payload = message.json()
-                                final = payload.get('type') == 'Metadata'
-                            elif backend != 'deepgram' and message.type == WSMsgType.BINARY:
-                                payload, final = unpack_asr(message.data)
-                            elif message.type in {WSMsgType.ERROR, WSMsgType.CLOSED, WSMsgType.CLOSE}:
-                                raise RuntimeError(closed_reason())
-                            else:
-                                continue
-                            for transcript in assembler.accept(payload):
+                        async for transcripts, final in asr.results():
+                            for transcript in transcripts:
                                 received_mono, received_at_ms = monotonic(), time()*1000
                                 if speakers is not None and not transcript.replaces:
                                     transcript, identity_pending = await bounded_online_match(audio, transcript, speakers,
@@ -3251,24 +3494,51 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     match_margin=getattr(speakers, 'margin', None),
                     comparison_available=trial is not None,
                     names=[p.label for p in process.profiles.list() if p.status != 'rejected' and p.source != 'voice_scene'][:100],
-                    asr=("Deepgram中文流式 + 多人时间线" if config.deepgram_diarize else "Deepgram中文流式") if backend == 'deepgram' else ("本地说话人分段 + 整句识别" if use_local and getattr(use_local, "diarizer", None) else ("本地流式 + 整句复核" if use_local and getattr(use_local, "refiner", None) else ("本地小模型流式" if use_local else "火山流式 + 整句复核 + 多人时间线"))),
+                    asr=describe_asr(backend, config, use_local),
                     tts="本地固定音色" if local_tts else ("火山双向流式合成" if config.tts_transport == 'websocket' else "在线 SSE 合成"))
+                intake_lag_reported, audio_clock = False, {}
                 async for message in ws:
                     if message.type == WSMsgType.BINARY:
                         if len(message.data) > 32000 or len(message.data) % 2:
                             raise ValueError("invalid microphone PCM frame")
-                        await asyncio.to_thread(audio.append,message.data)
+                        frame = capture_source.accept(message.data)
+                        audio.append(frame.pcm)
+                        intake_lag_ms = time()*1000 - audio.started_at_ms - (audio.offset+len(audio.data))/32
+                        if intake_lag_ms > 3000 and not intake_lag_reported:
+                            intake_lag_reported = True
+                            logging.getLogger(__name__).warning('microphone intake is %.1f s behind real time', intake_lag_ms/1000)
+                            browser_lag = audio_clock.get('context_lag_ms')
+                            source = ('浏览器的声音采集本身变慢，多半是电脑声音设备或驱动卡顿'
+                                      if isinstance(browser_lag, (int, float)) and browser_lag >= intake_lag_ms*.7
+                                      else '服务端或页面转发变慢')
+                            await conversation.emit('notice', text=f'收音比实际时间慢了约 {intake_lag_ms/1000:.0f} 秒（{source}），识别和显示会随之推迟。')
+                        elif intake_lag_ms < 1000:
+                            intake_lag_reported = False
                         if audio.archive_error and not getattr(audio,'archive_error_reported',False):
                             await conversation.emit('notice',text='录音保存失败：'+audio.archive_error)
                             audio.archive_error_reported=True
                         if use_local is not None:
-                            local_pump.feed(message.data)
+                            local_pump.feed(frame.pcm)
                         else:
-                            await asr.send_bytes(message.data if backend == 'deepgram' else pack_asr(message.data, audio=True))
+                            await asr.send_audio(frame.pcm)
                     elif message.type == WSMsgType.TEXT:
                         payload = message.json()
                         kind = payload.get("type")
-                        if kind == "speech_start":
+                        if kind == 'audio_clock':
+                            row = {'at_ms': round(time()*1000), 'session_id': conversation.session_id,
+                                   'page_lag_ms': payload.get('page_lag_ms'), 'context_lag_ms': payload.get('context_lag_ms'),
+                                   'browser_buffered': payload.get('buffered'),
+                                   'server_lag_ms': round(time()*1000 - audio.started_at_ms - (audio.offset+len(audio.data))/32)
+                                                    if audio.started_at_ms else None}
+                            audio_clock = row
+                            try:
+                                with (process.repository.path.parent/'audio_clock.jsonl').open('a', encoding='utf-8') as stream:
+                                    stream.write(json.dumps(row)+'\n')
+                            except OSError:
+                                logging.getLogger(__name__).exception('Audio clock could not be saved')
+                        elif kind == 'transcript_displayed':
+                            await conversation.transcript_displayed(str(payload.get('input_id', '')), payload.get('render_ms'))
+                        elif kind == "speech_start":
                             pass  # Sound energy alone never interrupts playback.
                         elif kind == "noise":
                             await conversation.noise()
@@ -3340,14 +3610,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                             await conversation.acknowledge(payload)
                         elif kind == "end":
                             if asr is not None:
-                                if backend == 'deepgram':
-                                    await asr.send_json({'type':'CloseStream'})
+                                await asr.finish()
+                                if asr.wait_for_final:
                                     try:
-                                        await asyncio.wait_for(asyncio.shield(receiver),timeout=3)
+                                        await asyncio.wait_for(asyncio.shield(receiver), timeout=3)
                                     except asyncio.TimeoutError:
                                         pass
-                                else:
-                                    await asr.send_bytes(pack_asr(b"", audio=True, final=True))
                             break
                     elif message.type == WSMsgType.ERROR:
                         raise RuntimeError(f"browser connection: {ws.exception()}")
@@ -3455,17 +3723,20 @@ def run_voice(process, identities, args) -> None:
     jev = VoiceJEV(build_model_port(store.profile("voice_jev")))
     local = None
     if config.asr_backend == "local":
-        from jshi.voice.local import build_local
+        from jshi.voice.runtime import build_local
         local = build_local(args.data_dir, process.profiles)
+    elif config.asr_backend == 'qwen':
+        from jshi.voice.runtime import build_qwen
+        local = build_qwen(args.data_dir, process.profiles, config)
     local_tts = None
     if config.tts_backend == "local":
         from jshi.voice.local_tts import build_local_tts
         local_tts = build_local_tts(args.data_dir, config)
     online_speakers = None
     if local is None:
-        from jshi.voice.local import build_speakers
+        from jshi.voice.runtime import build_speakers
         online_speakers = build_speakers(args.data_dir, process.profiles)
-    from jshi.voice.local import build_speakers
+    from jshi.voice.runtime import build_speakers
     model_cache = {}
     primary = online_speakers or (local.speakers if local else None)
     if primary:

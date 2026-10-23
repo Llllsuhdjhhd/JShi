@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from jshi.voice.backends import ASR_BACKENDS
+
 import argparse
 import importlib.util
 import json
@@ -260,7 +262,7 @@ def _parser() -> argparse.ArgumentParser:
 
     visual = commands.add_parser('vision', help='独立环境观察与文字交谈入口')
     visual.add_argument('subject_id')
-    visual.add_argument('--asr', choices=['local','online','deepgram'], default='local')
+    visual.add_argument('--asr', choices=tuple(ASR_BACKENDS), default='local')
     visual.add_argument('--tts', choices=['local','online'], default='online')
     visual.add_argument('--port', type=int, default=8765)
 
@@ -338,11 +340,14 @@ def _parser() -> argparse.ArgumentParser:
     setup.add_argument("--tts", action="store_true", help="同时下载中文合成音色（另约 159 MB）")
     setup.add_argument("--refine", action="store_true", help="增加 SenseVoice 整句识别复核（另约 158 MB）")
     setup.add_argument("--diarize", action="store_true", help="增加说话人分段与时间线（包括整句识别）")
+    setup.add_argument('--vad', action='store_true', help='下载Silero流式人声端点模型')
+    setup.add_argument('--turn', action='store_true', help='下载Smart Turn CPU整句判断模型')
+    setup.add_argument('--semantic-turn', action='store_true', help='下载Namo文本语义整句模型')
     setup.add_argument('--speaker-model', choices=['cam++', 'eres2netv2'], default='cam++', help='选择下载的声纹模型')
     voice = commands.add_parser("voice", help="浏览器语音对话：麦克风输入、电脑扬声器输出")
     voice.add_argument("subject_id", nargs="?", default=None)
     voice.add_argument("--port", type=int, default=8765)
-    voice.add_argument("--asr", choices=["online", "local", "deepgram"], default=None)
+    voice.add_argument("--asr", choices=tuple(ASR_BACKENDS), default=None)
     voice.add_argument("--tts", choices=["online", "local"], default=None)
 
     enroll = commands.add_parser("voice-enroll", help="将已注册对象与在线声纹关联")
@@ -630,8 +635,8 @@ def main() -> None:
     _load_local_env()
     args = _parser().parse_args()
     if args.command == "voice-setup":
-        from jshi.voice.local import setup_models
-        setup_models(args.data_dir, tts=args.tts, refine=args.refine, diarize=args.diarize, speaker_model=args.speaker_model)
+        from jshi.voice.model_assets import setup_models
+        setup_models(args.data_dir, tts=args.tts, refine=args.refine, diarize=args.diarize, vad=args.vad, turn=args.turn, semantic_turn=args.semantic_turn, speaker_model=args.speaker_model)
         return
     # tool 是独立演示：不依赖主体运行时，避免为它构建记忆后端 / 模型端口。
     if args.command == "tool":

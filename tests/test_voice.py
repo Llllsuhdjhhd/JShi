@@ -290,7 +290,7 @@ def test_cloud_requests_keep_multispeaker_and_identity_modes_separate():
     multi = VolcVoice(VoiceConfig("secret"), None)
     req = multi.asr_request()["request"]
     assert req["enable_speaker_info"] and req["show_utterances"]
-    assert req["ssd_version"] == "200" and req["end_window_size"] == 800
+    assert req["ssd_version"] == "200" and req["end_window_size"] == 500
     assert "ssd_mode" not in req
     single = VolcVoice(VoiceConfig("secret", identity_mode="voiceprint", voiceprint_group="family"),None)
     assert single.asr_request()["request"]["ssd_mode"] == 2
