@@ -92,6 +92,6 @@ def test_second_scene_full_request_is_preserved(process):
     rows = process.step_inputs._read()
     call = next(r for r in rows if r.get('purpose') == 'voice_jev_scene')
     user = json.loads(call['user_text'])
-    assert user['input_output'][0]['judgment']['person'] == 'P2'
-    assert user['input_output'][0]['voice']['strength'] == 'weak'
+    assert user['input_output'][0]['identity']['person'] == 'P2'
+    assert user['identity_evidence'][0]['voice']['strength'] == 'weak'
     assert any(r.get('hash') == call['system_hash'] for r in rows)

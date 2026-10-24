@@ -18,7 +18,8 @@ def test_defaults_preserve_full_prompt_and_levels_remove_functions():
     from jshi.style.packs import reply_schema_for
     texts = [reply_instruction_for('smith', prompt_level=i) for i in range(1, 4)]
     assert texts[0] == reply_instruction_for('smith')
-    assert 2000 <= len(texts[2]) <= 3000
+    # Shared continuity and mixed-speaker rules also apply to the short profile.
+    assert 2000 <= len(texts[2]) <= 3500
     assert len(texts[0]) > len(texts[1]) > len(texts[2])
     assert PERSONA_TOOL_NOTE in texts[0]
     for level, text in enumerate(texts[1:], 2):

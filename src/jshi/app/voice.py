@@ -330,8 +330,7 @@ class VoiceConversation:
             self.scene = deque((replace(u, speaker=self.identities.associated(self.annotations.get(u.input_id, u.speaker))) for u in self.scene), maxlen=24)
             self.record('voice_manual_enrollment', {'input_ids': input_ids, 'object_id': evidence.object_id, 'label': evidence.label,
                 'retired_temporary_voice_ids': sorted(retired), **stats})
-            self.jev_scene_store.correct({"basis": "manual_annotation", "p": self.assign_code(evidence.object_id, evidence.label),
-                "text": "用户将选择的声音明确关联为" + evidence.label, "at": time()*1000},
+            self.jev_scene_store.correct(self._scene_correction(input_ids, self.assign_code(evidence.object_id, evidence.label)),
                 codes=self.code_owner, labels=self.code_labels)
             self.unknown_inputs.bind(tuple(input_ids), evidence.object_id)
             if self.personal_speakers is not None:
@@ -413,9 +412,7 @@ class VoiceConversation:
                     self.unknown_inputs.bind((iid,), object_id)
             self.scene = deque((replace(u, speaker=self.annotations.get(u.input_id, u.speaker)) for u in self.scene), maxlen=24)
             if not negative_only:
-                self.jev_scene_store.correct({'basis': 'manual_annotation',
-                    'p': self.assign_code(object_id, profile.label), 'text': '用户将选择的声音明确关联为' + profile.label,
-                    'at': time()*1000}, codes=self.code_owner, labels=self.code_labels)
+                self.jev_scene_store.correct(self._scene_correction(input_ids, self.assign_code(object_id, profile.label)), codes=self.code_owner, labels=self.code_labels)
             self.record('personal_voice_manual_label', {'input_ids': input_ids, 'object_id': object_id,
                                                        'sample_ids': saved})
             await self.emit('personal_labelled', input_ids=input_ids, object_id=object_id,
@@ -444,7 +441,7 @@ class VoiceConversation:
                     before = row.pop('personal_label_before', None)
                     row.pop('personal_auto_saved', None)
                     if before is not None:
-                        manual.append(row)
+                        manual.append(iid)
                         if before['annotation'] is None:
                             self.annotations.pop(iid, None)
                         else:
@@ -459,9 +456,7 @@ class VoiceConversation:
                     restored.append({'input_id': iid, 'speaker': asdict(speaker), 'identity_unchanged': before is None,
                         'identity_display':self.identity_display(iid,speaker)})
                 if manual:
-                    self.jev_scene_store.correct({'basis': 'manual_annotation_undo',
-                        'text': '用户撤销以下语句的人工训练标注，先前标签不再作为人工身份依据：' +
-                                '；'.join(row['transcript'].text[:100] for row in manual), 'at': time()*1000},
+                    self.jev_scene_store.correct(self._scene_correction(manual, undo=True),
                         codes=self.code_owner, labels=self.code_labels)
                 self.record('personal_voice_manual_undo', {'input_ids': input_ids})
                 await self.emit('personal_unlabelled', input_ids=input_ids, restored=restored)
@@ -623,7 +618,7 @@ class VoiceConversation:
                 self._capture_jev_inputs(current, items)
                 await self._publish_attribution(current, items, record)
                 self._update_jev_continuation(current, record)
-                if control in {'keep', 'stop'}:
+                if control == 'stop' or (control == 'keep' and record.get('route') not in {'main', 'self_reply'}):
                     return
                 if not record.get('judged'):
                     self._preserve_background(current)
@@ -1050,6 +1045,28 @@ class VoiceConversation:
                 if time() - row["at"] < 120 and not current_ids.intersection(row["input_ids"])
                 and row["basis_at_ms"] <= cutoff and row.get('completed_at_ms', row['basis_at_ms']) <= cutoff]
 
+    def _scene_correction(self, input_ids, person='', *, undo=False):
+        corrected = []
+        for iid in input_ids:
+            record = self.input_records.get(iid, {})
+            utterance = next((u for u in self.scene if u.input_id == iid), None)
+            original = self.source_speakers.get(iid)
+            transcript = record.get('transcript')
+            if transcript is None:
+                continue
+            speaker = self.annotations.get(iid) or (utterance.speaker if utterance else original)
+            code = person or (self.assign_code(speaker.object_id, speaker.label)
+                if speaker and speaker.status == 'recognized' else 'unknown')
+            corrected.append({'ref': iid, 'text': transcript.text,
+                'at': utterance.received_at_ms if utterance else record.get('asr_returned_at_ms'),
+                'old_person': self.assign_code(original.object_id, original.label)
+                    if original and original.object_id and original.method != 'unassigned_audio' else 'unknown',
+                'person': code})
+        return {'basis': 'manual_annotation_undo' if undo else 'manual_annotation',
+            'p': person or 'unknown', 'scope': 'selected_events_only',
+            'text': '用户撤销所列发言的人工身份依据' if undo else '用户仅确认所列发言属于' + person,
+            'corrected_events': corrected, 'at': time()*1000}
+
     def _preserve_background(self, utterances):
         for u in utterances:
             self.process.note_entry_background(self.subject_id, u)
@@ -1122,6 +1139,7 @@ class VoiceConversation:
                 if not trigger:
                     continue
             try:
+                passes = 0
                 while not self.closed:
                     snapshot = self.jev_scene_store.snapshot()
                     if not snapshot["events"] or self.person_reviewer is None:
@@ -1153,7 +1171,10 @@ class VoiceConversation:
                         "material_window": snapshot.get("material_window", {}),
                         "elapsed_ms": round((monotonic()-started)*1000)})
                     failures = 0
-                    break  # further input is coalesced by the next main/fallback trigger
+                    passes += 1
+                    if accepted and passes < 2 and snapshot.get('material_window', {}).get('deferred_input_ids'):
+                        continue  # Read the next chronological prefix; never skip unread dialogue.
+                    break  # new input is coalesced by the next main/fallback trigger
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1629,7 +1650,9 @@ class VoiceConversation:
         status = record.get('utterance_complete', 'uncertain')
         if record.get('control') == 'stop':
             self.jev_pending_inputs.clear()
-        elif status == 'complete':
+        elif record.get('route') == 'wait':
+            self._hold_jev_inputs(utterances)
+        elif record.get('route') == 'background' or status == 'complete':
             self._consume_jev_inputs(utterances)
         elif status in {'incomplete', 'uncertain'}:
             self._hold_jev_inputs(utterances)
@@ -1884,7 +1907,7 @@ class VoiceConversation:
                   "path": path, "timed_out": timed_out, "reason": decision.reason[:80],
                   "items": [asdict(item) for item in result.items], "needs_main_review": result.needs_main_review,
                   "input_ids": [u.input_id for u in utterances],
-                  "main_prompt_hint": result.main_prompt_hint, "prompt_policy_version": 4,
+                  "main_prompt_hint": result.main_prompt_hint, "prompt_policy_version": 5,
                   "identity_only": bool(result.items) and all(item.identity_only for item in result.items),
                   "prompt_activity_id": prompt_activity_id,
                   "prompt_requested": bool(sent_requests) if type(self.jev) is VoiceJEV else None,
@@ -1895,7 +1918,10 @@ class VoiceConversation:
         await self.emit('jev_completeness', utterance_complete=result.utterance_complete, control=result.control)
         record['direct_reply'] = result.direct_reply if not timed_out else ''
         record['waiting_reply'] = result.waiting_reply if not timed_out else ''
-        record['front_choice'] = result.front_choice if not timed_out else 'main_silent'
+        record['front_choice'] = result.front_choice if not timed_out else 'background'
+        record['route'] = result.route
+        record['decision_reason'] = result.decision_reason
+        record['decision_refs'] = list(result.decision_refs)
         record['visual_snapshot_id'] = envelope.visual_snapshot_id
         record['input_parts'] = [asdict(p) for p in envelope.parts]
         self.record('voice_jev_diagnostics', {**record, 'model_raw': result.model_raw,
@@ -2249,7 +2275,7 @@ class VoiceConversation:
                 if control == 'stop':
                     self.jev_pending_inputs.clear()
                     continue
-                if control == 'keep':
+                if control == 'keep' and record.get('route') not in {'main', 'self_reply'}:
                     self._preserve_background(current)
                     continue
                 self.pending_voice = False
@@ -2354,7 +2380,7 @@ class VoiceConversation:
                     self._update_jev_continuation(current, record)
                     if record.get('control') == 'stop':
                         continue
-                    if record.get('control') == 'keep':
+                    if record.get('control') == 'keep' and record.get('route') not in {'main', 'self_reply'}:
                         self._preserve_background(current)
                         continue
                     if decision.action in {'ignore', 'resume', 'stop'}:
@@ -2956,7 +2982,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                   'input_ids':[envelope.input_id],
                   'direct_reply':result.direct_reply,
                   'waiting_reply':result.waiting_reply,
-                  'front_choice':result.front_choice,
+                  'front_choice':result.front_choice, 'route':result.route,
+                  'decision_reason':result.decision_reason, 'decision_refs':list(result.decision_refs),
                   'control':result.control, 'utterance_complete':result.utterance_complete,
                   'ms':round((jev_finished-jev_started)*1000, 1),
                   'input_prepare_ms':round((prepared-prepare_started)*1000, 1),
@@ -3262,7 +3289,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     entry['entry_total_ms'] = round((monotonic()-received_mono)*1000, 1)
                     judged_envelope = replace(judged_envelope, entry_timing=entry)
                     control = judged_envelope.jev_calls[-1].get('control')
-                    if control in {'keep', 'stop'}:
+                    if control == 'stop' or (control == 'keep' and judged_envelope.jev_calls[-1].get('route') not in {'main', 'self_reply'}):
                         from types import SimpleNamespace
                         from jshi.subject.process import ActivityTiming
                         from jshi.core.contracts import utc_now
