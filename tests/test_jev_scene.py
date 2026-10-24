@@ -71,7 +71,7 @@ def test_background_only_inputs_refresh_scene_without_starting_main(process):
     asyncio.run(run())
 
 
-def test_recent_window_caps_material_and_archives_backlog_without_replaying_it(tmp_path):
+def test_recent_window_defers_unread_backlog_and_consumes_only_read_prefix(tmp_path):
     store = JEVSceneStore(tmp_path / 'scene.json')
     store.append('correction:1', {'text': '人工确认P2是luguang，不是lux', 'at': 1})
     for n in range(40):
@@ -79,15 +79,18 @@ def test_recent_window_caps_material_and_archives_backlog_without_replaying_it(t
     snap = store.snapshot()
     rows, reference = recent_material(snap, '\n'.join(f'B{n}  完整块' + '参考' * 100 for n in range(8)))
     assert snap['material_window']['chars'] <= 3000
-    assert rows[-1]['text'].startswith('第39句')
+    assert not rows[-1]['text'].startswith('第39句')
+    assert snap['material_window']['deferred_input_ids']
     assert rows[0]['text'].startswith('人工确认')
     assert all('完整块' in block for block in reference.splitlines())
     store.append('new-after-snapshot', {'text': '下一轮新话', 'at': 100})
     assert store.commit(snap, '正在进行最新对话。')
-    assert [r['id'] for r in store.snapshot()['events']] == ['new-after-snapshot']
-    archive = json.loads(store.path.with_suffix('.archive.jsonl').read_text(encoding='utf-8'))
-    assert {r['id'] for r in archive['events']} == set(snap['material_window']['archived_input_ids'])
-    assert all(len(r['payload']['text']) > 200 for r in archive['events'])
+    pending = [r['id'] for r in store.snapshot()['events']]
+    assert pending == snap['material_window']['deferred_input_ids'] + ['new-after-snapshot']
+    assert not store.path.with_suffix('.archive.jsonl').exists()
+    processed = set(snap['material_window']['model_input_ids'])
+    assert not processed.intersection(pending)
+
 
 
 def test_scene_writer_marks_omissions_and_never_silently_truncates_large_event(tmp_path):
@@ -100,10 +103,10 @@ def test_scene_writer_marks_omissions_and_never_silently_truncates_large_event(t
     store.append('recent', {'text': '等一下，先别继续', 'at': 2})
     snap = store.snapshot()
     model = Model()
-    scene, _ = JEVSceneWriter(model).run('stone', snap, 'B1  旧参考' + '字' * 4000 + '\nB2  最新完整参考')
+    scene, _ = JEVSceneWriter(model).run('stone', snap, 'B1[2分钟前]  旧参考' + '字' * 4000 + '\nB2[1分钟前]  最新完整参考')
     assert model.data['window']['omitted_events'] == 1
-    assert model.data['input_output'] == [{'text': '等一下，先别继续', 'at': round(2-model.data['now'])}]
-    assert model.data['main_scene'] == 'B2  最新完整参考'
+    assert model.data['input_output'] == [{'ref':'E2', 'text': '等一下，先别继续', 'at': round(2-model.data['now'])}]
+    assert model.data['main_scene'] == 'B2[1分钟前]  最新完整参考'
     assert store.commit(snap, scene)
     archive = json.loads(store.path.with_suffix('.archive.jsonl').read_text(encoding='utf-8'))
     assert archive['events'][0]['payload']['text'] == '不是' + '字' * 5000
@@ -151,7 +154,7 @@ def test_first_stage_is_compact_and_only_selects_prompt():
             assert payload['input']['lines'][0]['name'] == 'lux'
             schema = json.loads(req.system_extra.split('Schema：')[1])
             assert 'tool_needed' not in schema['properties']
-            assert set(schema['properties']) == {'items', 'level', 'recall_memory', 'main_image', 'utterance_complete', 'control', 'route', 'reply', 'waiting_reply'}
+            assert set(schema['properties']) == {'items', 'level', 'recall_memory', 'main_image', 'utterance_complete', 'control', 'route', 'reply', 'waiting_reply', 'decision_reason', 'decision_refs'}
             assert set(schema['properties']['items']['items']['properties']) == {'i','person','certainty','why'}
             return ModelResponse(model='gate', text=json.dumps({'level':1, 'recall_memory':False,
                 'items':[{'i':1,'person':'P1','certainty':'confirmed','why':'本句声纹明确，无具体冲突'}]}))

@@ -115,9 +115,14 @@ class BatchDecision:
     waiting_reply: str = ""
     control: str = ""  # keep / stop / redirect; independent of identity and routing.
     utterance_complete: str = "uncertain"  # Explicit expression completeness, not action.
+    route: str = ""  # background / wait / main / self_reply, independent of control.
+    decision_reason: str = ""
+    decision_refs: tuple[str, ...] = ()
 
     @property
     def front_choice(self):
+        if self.action in {'ignore', 'resume', 'stop'}:
+            return 'stop' if self.action == 'stop' else self.route or 'background'
         if self.direct_reply:
             return 'self_reply'
         if self.waiting_reply:
@@ -298,7 +303,8 @@ class VoiceJEV:
             if item.n in bound else item for item in result.items)
         # An idle text message is already a submitted request, even if entry routing fails.
         if len(bound) == len(batch) and result.control != 'stop' and result.utterance_complete != 'incomplete' and delivery.get('state') not in {'thinking', 'playing', 'paused', 'queued'}:
-            result = replace(result, action='respond', control='redirect', judged=True)
+            result = replace(result, action='respond', control='redirect', judged=True,
+                route=result.route if result.route in {'main', 'self_reply'} else 'main')
         return replace(result, items=items)
 
     @staticmethod
@@ -307,7 +313,7 @@ class VoiceJEV:
         if result.utterance_complete == 'incomplete':
             stopped = result.control == 'stop' or result.action == 'stop'
             return replace(result, control='stop' if stopped else 'keep',
-                action='stop' if stopped else 'ignore', direct_reply='', waiting_reply='',
+                action='stop' if stopped else 'ignore', route='background' if stopped else 'wait', direct_reply='', waiting_reply='',
                 reason=result.reason if stopped else 'JEV判断表达未完，等待后续接续')
         return result
 
@@ -405,10 +411,14 @@ class VoiceJEV:
             if self._selected_text(row):
                 thin['binding'] = {'person': thin['p'], 'certainty': 'confirmed', 'to_jiangshi': 'yes'}
             thin_batch.append(thin)
+        from .scene_material import dialogue_row
         payload = {"input": {"state": delivery.get("state", ""), "names": delivery.get("names_for_jiangshi", ["匠石"]),
-                             "unwritten": context, "lines": thin_batch},
+                             "unwritten": [dialogue_row(row) for row in context], "lines": thin_batch},
                    "scene": delivery.get("jev_scene", ""), "now": delivery.get("now")}
-        payload['conversation'] = delivery.get('conversation', [])
+        for line in thin_batch:
+            line['evidence_ref'] = 'I' + str(line['i'])
+        payload['conversation'] = [{**row, 'evidence_ref': f'C{i}'}
+            for i, row in enumerate(delivery.get('conversation', []), 1)]
         payload['playback'] = {k: delivery[k] for k in ('state', 'spoken', 'pending') if k in delivery}
         if delivery.get('environment'):
             payload['environment'] = delivery['environment']
@@ -434,10 +444,13 @@ class VoiceJEV:
             "main_image": {"enum":["omit", "include"]},
             "utterance_complete": {"enum": ["complete", "incomplete", "uncertain"]},
             "control": {"enum": ["keep", "stop", "redirect"]},
-            "route": {"enum":["main", "self_reply"] if delivery.get('short_chat', {}).get('allowed') is True else ["main"]},
+            "route": {"enum":["background", "wait", "main", "self_reply"] if delivery.get('short_chat', {}).get('allowed') is True else ["background", "wait", "main"]},
+            "decision_reason": {"type":"string", "minLength":1, "maxLength":120},
+            "decision_refs": {"type":"array", "uniqueItems":True, "minItems":1, "maxItems":6,
+                "items":{"type":"string", "enum":[r['evidence_ref'] for r in thin_batch] + [r['evidence_ref'] for r in payload['conversation']]}},
             "reply": {"type":"string", "maxLength":160 if delivery.get('short_chat', {}).get('allowed') is True else 0},
             "waiting_reply": {"type":"string", "maxLength":16}},
-            "required": ["items", "level", "recall_memory", "main_image", "utterance_complete", "control", "route", "reply"], "additionalProperties": False}
+            "required": ["items", "level", "recall_memory", "main_image", "utterance_complete", "control", "route", "reply", "decision_reason", "decision_refs"], "additionalProperties": False}
         request = ModelRequest(purpose="voice_jev", input_text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             subject_state=SubjectState(subject_id, "匠石", "快速入口判断"),
             system_extra=ENTRY_INSTRUCTION + "\nJSON Schema：" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
@@ -474,11 +487,39 @@ class VoiceJEV:
                         routing_error='播放控制无效，本批保留为观察，不中断当前任务')
                 elif not modern and control == "continue" and active and all(r.to_jiangshi == "no" for r in result.items):
                     result = replace(result, action="resume")
+                # New routing separates continuing a task from reviewing a new input.
+                # Missing rationale is accepted only as the historical protocol.
+                reason = data.get('decision_reason')
+                if modern and data.get('route') in {'background', 'wait'} and not (isinstance(reason, str) and reason.strip()):
+                    return replace(result, control='keep', action='ignore', route='background',
+                        model_raw=raw_text, main_prompt_hint=hint, routing_error='新路由缺少交往依据，维持当前任务')
+                if modern and isinstance(reason, str) and reason.strip():
+                    route = data.get('route')
+                    allowed_refs = {r['evidence_ref'] for r in thin_batch} | {r['evidence_ref'] for r in payload['conversation']}
+                    refs = data.get('decision_refs', [])
+                    if (control not in {'keep', 'stop', 'redirect'}
+                            or route not in {'background', 'wait', 'main', 'self_reply'} or len(reason) > 120
+                            or not isinstance(refs, list) or not 1 <= len(refs) <= 6
+                            or any(not isinstance(ref, str) or ref not in allowed_refs for ref in refs)
+                            or len(set(refs)) != len(refs)):
+                        return replace(result, control='keep', action='ignore', route='background',
+                            direct_reply='', waiting_reply='', model_raw=raw_text, main_prompt_hint=hint,
+                            routing_error='JEV交往路由或依据引用无效；保留人物判断并维持当前任务')
+                    if control == 'stop':
+                        action, route = 'stop', 'background'
+                    elif route in {'background', 'wait'}:
+                        # Background and unfinished speech must never cancel a live task.
+                        action, control = 'ignore', 'keep'
+                    else:
+                        action = 'respond'
+                    result = replace(result, action=action, control=control, route=route,
+                        reason=reason.strip(), decision_reason=reason.strip(), decision_refs=tuple(refs),
+                        needs_main_review=route == 'main')
                 direct = data.get('reply', '')
                 if modern and data.get('route') == 'self_reply' and delivery.get('short_chat', {}).get('allowed') is not True:
                     result = replace(result, routing_error='本轮没有直接回答许可；保留人物终审，交主认知')
                 if (modern and data.get('route') == 'self_reply' and delivery.get('short_chat', {}).get('allowed') is True
-                        and control not in {'keep', 'stop'}
+                        and result.control != 'stop' and result.action == 'respond'
                         and result.utterance_complete != 'incomplete'
                         and not overlap and not any(row.get('source') == 'visual_environment' for row in batch)
                         and hint.get('level') == 3 and hint.get('recall_memory') is False
@@ -489,10 +530,13 @@ class VoiceJEV:
                                 for row in result.items)
                         and all(row.speaker_level == '确定' for row in result.items)):
                     result = replace(result, direct_reply=direct.strip(), reason='短时聊天，由JEV我回答')
+                if result.route == 'self_reply' and not result.direct_reply:
+                    result = replace(result, route='main', needs_main_review=True)
                 waiting = delivery.get('waiting', {})
                 brief = data.get('waiting_reply', '')
                 budget = waiting.get('levels', {}).get(f"L{hint.get('level')}", {}) if modern else {}
                 if (modern and data.get('route') == 'main' and waiting.get('allowed') is True
+                        and result.action == 'respond' and result.control != 'keep'
                         and not overlap and not result.routing_error and result.judged
                         and result.utterance_complete != 'incomplete'
                         and not any(row.get('source') == 'visual_environment' for row in batch)

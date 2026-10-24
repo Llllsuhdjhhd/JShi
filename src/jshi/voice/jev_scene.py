@@ -47,6 +47,12 @@ class JEVSceneStore:
             "events": [], "covered": [], "codes": {}, "labels": {},
         }
 
+        # Stable event references survive rolling revisions and process restarts.
+        refs = self.state.setdefault('event_refs', {})
+        old_rows = [r for rev in self.state.get('revisions', []) for r in rev.get('events', [])] + self.state['events']
+        for row in old_rows:
+            refs.setdefault(row['id'], f'E{len(refs)+1}')
+
     def _save(self, state):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(".tmp")
@@ -67,6 +73,7 @@ class JEVSceneStore:
             else:
                 state["sequence"] += 1
                 state["events"].append({"id": event_id, "seq": state["sequence"], "queued_at": time()*1000, "payload": deepcopy(payload)})
+            state.setdefault('event_refs', {}).setdefault(event_id, f"E{len(state.get('event_refs', {}))+1}")
             if codes is not None:
                 state["codes"] = dict(codes)
                 state["labels"] = dict(labels or {})
@@ -172,8 +179,15 @@ class JEVSceneStore:
                 else:
                     rows.extend(revision["events"])
             current = set(current_ids)
-            return scene, [deepcopy(r["payload"]) for r in sorted(rows, key=lambda r:r["seq"])
-                           if r["id"] not in current and r['id'] in episode_ids]
+            def visible(row):
+                result = deepcopy(row['payload'])
+                result['ref'] = self.state['event_refs'].get(row['id'], f"E{row['seq']}")
+                for change in result.get('corrected_events', []):
+                    change['ref'] = self.state['event_refs'].get(change['ref'], 'unknown')
+                return result
+            return scene, [visible(r) for r in sorted(rows, key=lambda r:r['seq'])
+                           if r['id'] not in current and r['id'] in episode_ids]
+
 
     def correct(self, payload, *, codes=None, labels=None):
         """An in-flight writer cannot restore a scene predating manual corrections."""
@@ -192,10 +206,31 @@ class JEVSceneStore:
                 'codes': state['codes'], 'labels': state['labels'], 'reason': 'before_correction'})
             state["generation"] += 1
             state["version"] += 1
-            state["scene"] = ""
-            state["revisions"] = []
+            # Preserve unrelated activities; old identity claims are now provisional.
+            notice = "【人工纠正优先】" + str(payload.get('text', '人物归属已更新'))
+            base = state.get('scene_before_correction', state['scene'])
+            state['scene_before_correction'] = base
+            state["scene"] = notice + "\n【纠正前情境参考，仅相关身份待复核】\n" + base
+            corrected = {r['ref']: r for r in payload.get('corrected_events', []) if r.get('ref')}
+            for event_id in corrected:
+                state['event_refs'].setdefault(event_id, f'E{len(state["event_refs"])+1}')
+            for row in state['events'] + [r for rev in state.get('revisions', []) for r in rev.get('events', [])]:
+                change = corrected.get(row['id'])
+                if change:
+                    row['payload']['p'] = change.get('person', 'unknown')
+                    row['payload']['basis'] = payload.get('basis', 'manual_annotation')
+                    row['payload']['judgment'] = {'person': change.get('person', 'unknown'),
+                        'certainty': 'unknown' if payload.get('basis') == 'manual_annotation_undo' else 'confirmed',
+                        'why': '人工修正本句；仅在指定事件范围生效'}
+            state['revisions'] = [*state.get('revisions', []), {
+                'scene': state['scene'], 'at': time()*1000, 'events': [],
+                'version': state['version'], 'generation': state['generation'] }][-8:]
             self._save(state)
-            self.append("correction:" + str(state["generation"]), payload, codes=codes, labels=labels)
+            changes = payload.get('corrected_events', [])
+            groups = [changes[i:i+6] for i in range(0, len(changes), 6)] or [[]]
+            for i, group in enumerate(groups):
+                part = {**payload, 'corrected_events': group} if changes else payload
+                self.append(f"correction:{state['generation']}:{i}", part, codes=codes, labels=labels)
 
     def commit(self, snapshot, scene):
         if not isinstance(scene, str) or not scene.strip() or len(scene) > 1000:
@@ -203,16 +238,19 @@ class JEVSceneStore:
         with self.lock:
             if (snapshot["version"], snapshot["generation"]) != (self.state["version"], self.state["generation"]):
                 return False
-            ids = {r["id"] for r in snapshot["events"]}
+            window = snapshot.get('material_window')
+            ids = set(window['model_input_ids']) | set(window.get('archived_input_ids', [])) if window else {r['id'] for r in snapshot['events']}
+            consumed = [r for r in snapshot['events'] if r['id'] in ids]
             state = deepcopy(self.state)
             state["scene"] = scene
+            state.pop("scene_before_correction", None)
             state["version"] += 1
             archived = set(snapshot.get("material_window", {}).get("archived_input_ids", []))
             if archived:
                 # Full skipped records remain available for analysis after the
                 # rolling revision cache expires. Failed/stale writes archive nothing.
                 with self.path.with_suffix(".archive.jsonl").open("a", encoding="utf-8") as stream:
-                    stream.write(json.dumps({"version": state["version"], "reason": "recent_material_limit",
+                    stream.write(json.dumps({"version": state["version"], "reason": "oversized_single_event",
                         "events": [r for r in snapshot["events"] if r["id"] in archived]}, ensure_ascii=False) + "\n")
             revisions = state.get("revisions", [])
             # Migrate retained pre-archive revisions before the rolling window drops them.
@@ -221,7 +259,7 @@ class JEVSceneStore:
                     self._archive({**previous, 'version': previous.get('version', self.state['version']-len(revisions)+index+1),
                         'generation': state['generation'], 'codes': snapshot['codes'],
                         'labels': snapshot['labels'], 'reason': 'legacy_revision'})
-            revision = {"scene": scene, "at": time()*1000, "events": snapshot["events"],
+            revision = {"scene": scene, "at": time()*1000, "events": [r for r in consumed if r["id"] not in archived],
                         'version': state['version'], 'generation': state['generation'],
                         "material_window": snapshot.get("material_window", {})}
             self._archive({**revision,
@@ -237,7 +275,7 @@ class JEVSceneStore:
             state['history_migrated'] = True
             revisions.append(revision)
             state["revisions"] = revisions[-8:]
-            state["covered"].extend(r["id"] for r in snapshot["events"])
+            state["covered"].extend(r["id"] for r in consumed)
             state["events"] = [r for r in state["events"] if r["id"] not in ids]
             self._save(state)
             return True
@@ -263,61 +301,62 @@ def scene_refresh_reason(snapshot, *, idle_seconds, pending_seconds, idle_thresh
 
 
 def recent_material(snapshot, main_scene, cap=RECENT_MATERIAL_CHARS):
-    """Bound serialized recent dialogue/reference, preserving whole events/blocks.
+    """Read a chronological prefix of compact dialogue, with separate evidence limits.
 
-    The previous compact JEV scene is separate. Retired backlog is archived by
-    commit, so it cannot trigger a later pass that overwrites a newer scene.
+    Unread ordinary events remain pending. A single overlong event is explicitly
+    archived intact, so it cannot block the queue forever or be silently clipped.
     """
-    selected = []
-    reference = []
-    def size(rows, blocks):
-        return len(json.dumps({"input_output": [r["payload"] for r in rows],
-                               "main_scene": "\n".join(blocks)}, ensure_ascii=False, separators=(",", ":")))
-    events = snapshot["events"]
-    # Reserve only the latest correction and latest confirmation per person;
-    # ordinary recent utterances then fill the remaining space.
-    anchors, seen = [], set()
-    for row in reversed(events):
-        payload = row["payload"]
-        judgment = payload.get("judgment") or {}
-        key = "correction" if row["id"].startswith("correction:") else (
-            judgment.get("person") if judgment.get("certainty") in {"确定", "confirmed"} else None)
-        if key and key not in seen:
-            anchors.append(row)
-            seen.add(key)
-    # The newest event must get the first chance; anchors cannot crowd out
-    # the ongoing conversation with a long list of old confirmed speakers.
-    anchor_size = 0
-    bounded_anchors = []
-    for row in anchors:
-        cost = len(json.dumps(row["payload"], ensure_ascii=False, separators=(",", ":")))
-        if anchor_size + cost <= cap // 3:
-            bounded_anchors.append(row)
-            anchor_size += cost
-    order = events[-1:] + bounded_anchors + list(reversed(events))
-    visited = set()
-    for row in order:
-        if row["id"] in visited:
+    from .scene_material import dialogue_row, identity_evidence, encoded_size, recent_scene_blocks
+    selected, rows, oversized = [], [], []
+    aliases = snapshot.get('event_refs', {})
+    def pack(event):
+        result = {**dialogue_row(event['payload']), 'ref': aliases.get(event['id'], f"E{event['seq']}")}
+        for change in result.get('corrected_events', []):
+            change['ref'] = aliases.get(change['ref'], 'unknown')
+        return result
+    for event in sorted(snapshot['events'], key=lambda r: r['seq']):
+        row = pack(event)
+        if encoded_size([row]) > cap:
+            oversized.append(event['id'])
             continue
-        visited.add(row["id"])
-        if size([*selected, row], []) <= cap:
-            selected.append(row)
-    selected.sort(key=lambda row: row["seq"])
-    # Keep whole chronological scene blocks. Never cut a fact mid-sentence.
-    blocks = re.split(r"\n(?=B\d+(?:\[|\s))", main_scene.strip()) if main_scene.strip() else []
-    for block in reversed(blocks):
-        if size(selected, [block, *reference]) <= cap:
-            reference.insert(0, block)
-    included = {r["id"] for r in selected}
-    omitted = [r for r in events if r["id"] not in included]
-    snapshot["material_window"] = {
-        "cap_chars": cap, "chars": size(selected, reference),
-        "model_input_ids": [r["id"] for r in selected],
-        "archived_input_ids": [r["id"] for r in omitted],
-        "main_scene_chars": len("\n".join(reference)),
-        "omitted_main_scene_blocks": len(blocks) - len(reference),
+        if encoded_size([*rows, row]) > cap:
+            break
+        rows.append(row)
+        selected.append(event)
+    selected_ids = {r['id'] for r in selected}
+    # Evidence is secondary to words and playback. Uncertain cases are considered first.
+    evidence, evidence_chars = [], 0
+    for event in sorted(selected, key=lambda r: (r['payload'].get('judgment', {}).get('certainty') in {'确定', 'confirmed'}, r['seq'])):
+        item = identity_evidence(event['payload'])
+        candidate = {'ref': pack(event)['ref'], **item}
+        if item and encoded_size([*evidence, candidate]) <= 1800:
+            evidence.append(candidate)
+            evidence_chars = encoded_size(evidence)
+    reference, omitted_blocks = recent_scene_blocks(main_scene)
+    context = []
+    for revision in reversed(snapshot.get('revisions', [])):
+        for event in reversed(revision.get('events', [])):
+            if (event['id'] in selected_ids or event['id'] in {r['id'] for r in snapshot['events']}
+                    or pack(event)['ref'] in {r['ref'] for r in context}):
+                continue
+            row = pack(event)
+            if encoded_size(context + [row]) <= 800:
+                context.insert(0, row)
+            if len(context) >= 4:
+                break
+        if len(context) >= 4:
+            break
+    snapshot['identity_evidence'] = evidence
+    snapshot['recent_context'] = context
+    snapshot['material_window'] = {
+        'cap_chars': cap, 'chars': encoded_size(rows),
+        'model_input_ids': [r['id'] for r in selected],
+        'archived_input_ids': oversized,
+        'deferred_input_ids': [r['id'] for r in snapshot['events'] if r['id'] not in selected_ids and r['id'] not in oversized],
+        'evidence_chars': evidence_chars, 'main_scene_chars': len(reference),
+        'omitted_main_scene_blocks': omitted_blocks,
     }
-    return [r["payload"] for r in selected], "\n".join(reference)
+    return rows, reference
 
 
 class JEVSceneWriter:
@@ -335,7 +374,11 @@ class JEVSceneWriter:
         payload = {"now": now_ms, "scene": snapshot["scene"],
             'scene_at': revisions[-1]['at'] if revisions else None,
             "input_output": events, "main_scene": reference,
+            "identity_evidence": snapshot.get('identity_evidence', []),
+            "recent_context": snapshot.get('recent_context', []),
             "window": {"limit": RECENT_MATERIAL_CHARS, "omitted_events": len(snapshot["material_window"]["archived_input_ids"]),
+                       "deferred_events": len(snapshot["material_window"].get("deferred_input_ids", [])),
+                       "evidence_limit": 1800, "reference_limit": 800,
                        "omitted_main_blocks": snapshot["material_window"]["omitted_main_scene_blocks"]},
             "people": {code: snapshot["labels"].get(oid, code) for code, oid in snapshot["codes"].items()}}
         if snapshot.get('history_candidates'):
