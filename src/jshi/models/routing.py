@@ -135,6 +135,9 @@ class ProviderModel:
             result = json.load(response)
         text = self._text(result)
         if not text: raise RuntimeError('模型未返回正文，可能被拦截或输出被截断')
+        if not response_format and not text.lstrip().startswith(('{', '[')):
+            from jshi.simplified import simplify_text
+            text = simplify_text(text)
         usage = result.get('usageMetadata') or result.get('usage') or {}
         finish = (result.get('choices') or [{}])[0].get('finish_reason')
         return ModelResponse(text=text,model=self.name,metadata={'usage':usage,'service':self.service['label'],

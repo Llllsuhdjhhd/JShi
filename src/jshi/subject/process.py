@@ -625,6 +625,17 @@ class SubjectProcess:
         self._code_restore = code_restore
         if envelope is not None and (not envelope.final or envelope.text != text.strip()):
             raise ValueError("only final envelopes with matching text enter cognition")
+        from jshi.simplified import simplify_text
+        simplified = simplify_text(text)
+        if simplified != text:
+            self.repository.add_history(HistoryRecord(subject_id=subject_id, kind=HistoryKind.FACT,
+                event_type='original_text_evidence', content={'source':'experience','text':text}, source_ids=()))
+            text = simplified
+            if envelope is not None:
+                envelope = replace(envelope, parts=tuple(replace(p, text=simplify_text(p.text))
+                    if p.kind == 'text' else p for p in envelope.parts),
+                    utterances=tuple(replace(u,text=simplify_text(u.text)) for u in envelope.utterances),
+                    current_utterances=tuple(replace(u,text=simplify_text(u.text)) for u in envelope.current_utterances))
         clock = StepClock()
         self.last_boot = "否"
         self.last_memory_control = None

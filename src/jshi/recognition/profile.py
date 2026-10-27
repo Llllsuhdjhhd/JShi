@@ -83,6 +83,9 @@ class ObjectProfileRepository:
             )
 
     def create(self, profile: ObjectProfile) -> ObjectProfile:
+        from jshi.simplified import simplify_text
+        profile = replace(profile, label=simplify_text(profile.label),
+                          aliases=tuple(simplify_text(x) for x in profile.aliases))
         with self._connect() as connection:
             connection.execute(
                 """
@@ -170,6 +173,8 @@ class ObjectProfileRepository:
     def rename(self, object_id: str, name: str, *, expected_label: str | None = None, keep_alias: bool = False) -> ObjectProfile:
         """Change a label in place; references, voiceprints and memories keep their id."""
         name = name.strip()
+        from jshi.simplified import simplify_text
+        name = simplify_text(name)
         if not name or len(name) > 40 or any(ord(c) < 32 for c in name):
             raise ValueError('姓名须为 1–40 个可显示字符')
         with self._connect() as connection:

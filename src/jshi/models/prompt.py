@@ -205,6 +205,11 @@ def format_turn_input(label: str, text: str, *, stimulus: str = STIMULUS_SPEECH)
 
 
 def build_system(request: ModelRequest) -> str:
+    from jshi.simplified import LANGUAGE_RULE
+    return _build_system(request) + '\n\n【文字规范】\n' + LANGUAGE_RULE
+
+
+def _build_system(request: ModelRequest) -> str:
     if not _is_cognition(request):
         return _short_system(request)
     parts: list[str] = []

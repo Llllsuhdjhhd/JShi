@@ -640,6 +640,7 @@ class CognitionSkill(Skill[ModelResponse]):
         return parsed
 
     def _fallback(self, raw_text: str) -> ModelResponse:
+        from jshi.simplified import simplify_text
         # 解析失败：区分两种情况。
         # 1) 纯自然语言（没有 JSON 花括号）说明模型只是在用普通话说，当口头回复保底；
         # 2) 空输出或半截 JSON 才静默降级为 think，且单独打标，方便和“模型自己 think”区分。
@@ -655,7 +656,7 @@ class CognitionSkill(Skill[ModelResponse]):
                 response_plan=ResponsePlan(
                     mode="respond",
                     reason="structured_output_failed_but_prose_salvaged",
-                    items=(ResponseItem(channel="verbal", text=raw),),
+                    items=(ResponseItem(channel="verbal", text=simplify_text(raw)),),
                 ),
                 raw_text=raw,
             )

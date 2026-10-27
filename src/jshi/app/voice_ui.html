@@ -16,6 +16,9 @@
   .help-bubble{position:absolute;right:0;top:calc(100% + 9px);z-index:5;width:min(320px,calc(100vw - 40px));background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:0 8px 32px #20283814;color:#626975;font-size:12px;line-height:1.7}
   .help-bubble p{margin:0 0 8px}.help-bubble p:last-child{margin:0}
   .state-row{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;padding:12px 0 14px;margin-bottom:10px;border-bottom:1px solid #f0f1f3}
+  .live-clock{margin-left:auto;display:flex;align-items:center;gap:9px;flex:none;font-variant-numeric:tabular-nums;line-height:1.3}
+  .live-clock svg{width:46px;height:46px;flex:none}.live-clock time{display:block;font:600 19px/1.3 Consolas,monospace;letter-spacing:.02em;color:#354763}
+  .live-clock small{display:block;margin:2px 0 0;font-size:10px;color:var(--muted)}
   .judge-popup>summary{width:auto;height:auto;padding:3px 7px;font-size:11px}.judge-popup .help-bubble{right:auto;left:0}
   .view-toggle{display:grid;place-items:center;padding:7px;margin:0;background:transparent;color:#747b88;border-radius:8px}
   .view-toggle:hover:not(:disabled){background:#f0f2f6;color:#374151}.view-toggle[aria-pressed=true]{background:#edf4ff;color:var(--accent)}
@@ -155,6 +158,17 @@
     <span id="status" role="status" aria-live="polite">尚未连接</span>
     <span id="speaker">说话人待确认</span>
     <details class="help-popup judge-popup"><summary title="查看本次接话判断">接话判断</summary><div class="help-bubble" id="judge">尚无接话判断。</div></details>
+    <div class="live-clock" aria-label="北京时间，含毫秒" title="使用本机系统时钟，按北京时间显示。毫秒读数随屏幕刷新；页面卡住时指针也会停顿。">
+      <svg viewBox="0 0 60 60" aria-hidden="true">
+        <circle cx="30" cy="30" r="28" fill="#f7f9fc" stroke="#dbe3ee"/>
+        <path d="M30 5v5M55 30h-5M30 55v-5M5 30h5" fill="none" stroke="#9aa8bb" stroke-width="2"/>
+        <g id="clock-hour"><path d="M30 30V17" stroke="#354763" stroke-width="3.5" stroke-linecap="round"/></g>
+        <g id="clock-minute"><path d="M30 30V11" stroke="#60748f" stroke-width="2.5" stroke-linecap="round"/></g>
+        <g id="clock-second"><path d="M30 35V7" stroke="#3478f6" stroke-width="1.5" stroke-linecap="round"/></g>
+        <circle cx="30" cy="30" r="2.5" fill="#3478f6"/>
+      </svg>
+      <div><time id="live-clock-time" aria-live="off">--:--:--.---</time><small>北京时间 · 毫秒</small></div>
+    </div>
   </div>
   <p id="layout-empty" class="layout-empty" hidden>对话与检查面板已隐藏，点击右上角图标恢复。</p>
   <div class="workspace" id="workspace"><section class="conversation" id="conversation" aria-label="对话">
@@ -223,6 +237,19 @@
   </aside></div><div id="data-pane" hidden><iframe id="data-frame" title="保存数据与调试工作台"></iframe></div></section></div></main><dialog id="media-view"><button id="close-media" type="button" class="secondary">关闭</button><video id="media-video" muted playsinline hidden></video><img id="media-large" alt="查看聊天图片"><p id="media-caption"></p></dialog>
 <script>
 const $ = id => document.getElementById(id);
+// Read the system clock each frame, so delayed frames never accumulate clock drift.
+let liveClockFrame=0;
+function renderLiveClock(){
+  const now=new Date(Date.now()+8*60*60*1000), ms=now.getUTCMilliseconds();
+  const hours=now.getUTCHours(), minutes=now.getUTCMinutes(), seconds=now.getUTCSeconds()+ms/1000;
+  $('live-clock-time').textContent=[hours,minutes,Math.floor(seconds)].map(n=>String(n).padStart(2,'0')).join(':')+'.'+String(ms).padStart(3,'0');
+  $('clock-hour').setAttribute('transform',`rotate(${(hours%12+minutes/60+seconds/3600)*30} 30 30)`);
+  $('clock-minute').setAttribute('transform',`rotate(${(minutes+seconds/60)*6} 30 30)`);
+  $('clock-second').setAttribute('transform',`rotate(${seconds*6} 30 30)`);
+  liveClockFrame=document.hidden?0:requestAnimationFrame(renderLiveClock);
+}
+document.addEventListener('visibilitychange',()=>{cancelAnimationFrame(liveClockFrame);renderLiveClock();});
+renderLiveClock();
 const messageScroll=$('message-scroll'), jumpLatest=$('jump-latest');
 let followLatest=true, scrollFrame=0, scrollbarDragging=false, dragScrollTop=0, lastAutoScrollTop=null;
 function nearLatest(){return messageScroll.scrollHeight-messageScroll.clientHeight-messageScroll.scrollTop<=48;}
@@ -335,7 +362,7 @@ const phaseNames={collect:'收集发言',prepare:'准备输入材料',jev:'JEV �
 const phaseSteps={collect:['collect','收集发言'],prepare:['prepare','准备材料'],jev:['jev','接话判断'],judged:['jev','接话判断'],queued:['queued','等待主流程'],resolve:['resolve','主引擎开始'],assemble:['assemble','组装材料'],cognition:['main','主认知'],action:['action','行动']};
 const liveStepKeys=new Set(['previous','speech','speechEnd','cut','sent','jev','resolve','main','reply','finished']);
 const pipelineNodes=[['session_started_at_ms','会话开始'],['previous_settled_at_ms','前一轮结束'],['speech_start_at_ms','说话开始'],['speech_end_at_ms','说话结束'],['asr_returned_at_ms','断句完成'],['collect_at_ms','开始收集'],['text_sent_at_ms','文字发出'],['display_ack_at_ms','页面显示'],['jev_started_at_ms','接话判断开始'],['jev_finished_at_ms','接话判断结束'],['queued_at_ms','进入主流程队列'],['main_started_at_ms','主引擎开始'],['reply_sent_at_ms','回复发出'],['turn_complete_at_ms','本轮完成'],['write_started_at_ms','记忆整理开始'],['write_completed_at_ms','记忆整理结束']];
-function wallClock(ms){return Number.isFinite(ms)?new Date(ms).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'';}
+function wallClock(ms){return Number.isFinite(ms)?new Date(ms).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,fractionalSecondDigits:3}):'';}
 const replyRows=new Map(), actionRows=new Map();
 function actionKey(key){return JSON.stringify(key||[]);}
 function showActions(actions,after=null){
@@ -815,7 +842,7 @@ function message(m) {
   if(m.type==='model_status'){modelCallStatus(m);return;}
   if(m.type==='typed_input'){
     let p;
-    if(pendingTyped&&pendingTyped.text===m.text){pendingTyped.badge.textContent='已接收';p=pendingTyped.row;pendingTyped=null;textSending=false;$('send-text').disabled=false;}
+    if(pendingTyped&&(pendingTyped.text===m.text||pendingTyped.text===m.original_text)){pendingTyped.badge.textContent='已接收';p=pendingTyped.row;const body=p.querySelector('.message-body');if(body)body.textContent=m.label+'（文字）：'+m.text;pendingTyped=null;textSending=false;$('send-text').disabled=false;}
     else {p=log(m.label+'（文字）：'+m.text,'input');typedDetails(p,m.label);}
     bindPipelineRow(p,m.input_id,m.pipeline);$('text-status').textContent='已进入当前对话，等待主流程处理。';return;}
   if(m.type==='typed_error'){if(pendingTyped){pendingTyped.badge.textContent='未发送：'+m.text;pendingTyped.badge.classList.add('failed');if(!$('typed').value)$('typed').value=pendingTyped.text;pendingTyped=null;}textSending=false;$('send-text').disabled=false;$('text-status').textContent=m.text;return;}

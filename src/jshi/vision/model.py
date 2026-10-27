@@ -72,6 +72,8 @@ class VisionModel:
             payload['response_format'] = {'type': 'json_object'}
         if self.config.model.startswith('deepseek'):
             payload['thinking'] = {'type': 'disabled'}
+        from jshi.simplified import LANGUAGE_RULE
+        payload['messages'][0]['content'][0]['text'] += '\n' + LANGUAGE_RULE
         result = self.transport(payload)
         choice = result['choices'][0]
         text = choice['message']['content']
@@ -79,4 +81,13 @@ class VisionModel:
             raise ValueError('视觉模型未返回有效描述（finish_reason='+str(choice.get('finish_reason', 'unknown'))+'）')
         if choice.get('finish_reason') == 'length':
             raise ValueError('视觉描述被输出长度限制截断，保留已有环境信息')
+        from jshi.simplified import simplify_text, simplify_data
+        if structured:
+            # Keep malformed raw output unchanged so validation still diagnoses it.
+            try:
+                text = json.dumps(simplify_data(json.loads(text)), ensure_ascii=False)
+            except ValueError:
+                pass
+        else:
+            text = simplify_text(text)
         return text.strip()[:6000]

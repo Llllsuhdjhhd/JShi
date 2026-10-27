@@ -570,6 +570,12 @@ class VoiceConversation:
     async def typed(self, text, object_id='') -> None:
         """Text from the voice page speaks as the current person, and can correct a name."""
         text = str(text or '').strip()
+        original_text = text
+        from jshi.simplified import simplify_text
+        simplified = simplify_text(text)
+        if simplified != text:
+            self.record('original_text_evidence', {'source': 'typed', 'text': text})
+            text = simplified
         if not text or len(text) > 2000 or any(ord(c) < 32 and c not in '\n\t' for c in text):
             await self.emit('typed_error' if object_id else 'notice', text='请输入 1–2000 个字。')
             return
@@ -598,7 +604,7 @@ class VoiceConversation:
             while len(self.input_records) > 128:
                 old = next(iter(self.input_records))
                 self.sample_bytes -= len(self.input_records.pop(old).get('pcm') or b'')
-            await self.emit('typed_input', text=text, label=profile.label, input_id=iid,
+            await self.emit('typed_input', text=text, original_text=original_text, label=profile.label, input_id=iid,
                             pipeline=dict(self.input_records[iid].get('pipeline') or {}))
             envelope = InputEnvelope(session_id=self.session_id, source='web_text',
                 parts=(InputPart('text', text),), speaker=evidence, input_id=iid,
@@ -734,6 +740,12 @@ class VoiceConversation:
                 + "；partial_text只表示该句曾开始播放，不知道具体播到哪个字；pending_text尚未播放。")
 
     async def accept(self, transcript, *, asr_received_mono=None, asr_received_at_ms=None, online_identity_ms=0) -> None:
+        from jshi.simplified import simplify_text
+        simplified = simplify_text(transcript.text)
+        if simplified != transcript.text:
+            self.record('original_text_evidence', {'source': 'asr', 'input_id': transcript.input_id,
+                        'start_ms': transcript.start_ms, 'end_ms': transcript.end_ms, 'text': transcript.text})
+            transcript = replace(transcript, text=simplified)
         if transcript.replaces:
             await self._revise_transcript(transcript)
             return
@@ -3426,6 +3438,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         try:
             payload = await request.json()
             text = payload.get('text', '').strip()
+            from jshi.simplified import simplify_text
+            simplified = simplify_text(text)
+            if simplified != text:
+                process.repository.add_history(HistoryRecord(subject_id=subject_id, kind=HistoryKind.FACT,
+                    event_type='original_text_evidence', content={'source':'web_text','text':text}, source_ids=()))
+                text = simplified
             profile = process.profiles.get(payload.get('object_id', ''))
         except (ValueError, AttributeError, TypeError):
             raise web.HTTPBadRequest(text='文字输入格式有误')

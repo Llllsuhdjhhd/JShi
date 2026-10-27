@@ -91,7 +91,8 @@ def parse_json_object(text: str) -> Mapping[str, Any]:
         except (ValueError, json.JSONDecodeError):
             continue
         if isinstance(data, dict):
-            return data
+            from jshi.simplified import simplify_data
+            return simplify_data(data)
     raise SkillError(f"non-JSON skill output: {raw[:120]!r}")
 
 

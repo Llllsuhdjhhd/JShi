@@ -649,8 +649,12 @@ class OpenAICompatibleModel:
         )
         with _urlopen_chat(http_request, timeout=60) as response:
             result = json.loads(response.read().decode("utf-8"))
+        content = result["choices"][0]["message"]["content"]
+        if isinstance(content, str) and not content.lstrip().startswith(('{', '[')):
+            from jshi.simplified import simplify_text
+            content = simplify_text(content)
         return ModelResponse(
-            text=result["choices"][0]["message"]["content"],
+            text=content,
             model=self.name,
             metadata=_provider_usage_metadata(result),
         )

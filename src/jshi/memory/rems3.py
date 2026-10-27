@@ -352,6 +352,7 @@ class Rems3MemoryBackend:
                 config_cls,
             )
         self._semantic_disabled = disable_local_embedding_if_needed(self._pipeline)
+        self._simplified_pending_path = Path(data_dir or '.jshi/rems') / 'simplified-reindex.json'
         self.long_term_experience = None
         self._portrait_refresh = None
         from .portrait_views import PortraitViews
@@ -389,15 +390,35 @@ class Rems3MemoryBackend:
             return
         recall = getattr(self._pipeline, 'recall_pipeline', None)
         provider = getattr(recall, '_embedding', None)
-        if provider is None or type(provider).__name__ != 'SentenceTransformerEmbedding':
+        if provider is not None and type(provider).__name__ == 'SentenceTransformerEmbedding':
+            # Keep startup offline; importing and loading are the observed cold wait.
+            from sentence_transformers import SentenceTransformer
+            with provider._lock:
+                if provider._model is None:
+                    provider._model = SentenceTransformer(provider._model_name, local_files_only=True)
+        self._finish_simplified_reindex()
+
+    def _finish_simplified_reindex(self):
+        """Use this process's sole Qdrant client before opening the voice endpoint."""
+        import json
+        path = self._simplified_pending_path
+        if not path.exists() or self._semantic_disabled:
             return
-        if getattr(provider, '_model', None) is not None:
-            return
-        # Keep startup offline; importing and loading are the observed cold wait.
-        from sentence_transformers import SentenceTransformer
-        with provider._lock:
-            if provider._model is None:
-                provider._model = SentenceTransformer(provider._model_name, local_files_only=True)
+        changed = set(json.loads(path.read_text(encoding='utf-8')))
+        events = self._pipeline.event_repo.list_all(exclude_tombstoned=True)
+        # Event exposes the persisted metadata through domain fields. Index detail
+        # material follows source_events recursively, so include every ancestor.
+        affected = set(changed)
+        while True:
+            ancestors = {event.event_id for event in events
+                         if affected.intersection(event.source_events or ())}
+            if ancestors.issubset(affected):
+                break
+            affected.update(ancestors)
+        for event in events:
+            if event.event_id in affected:
+                self._pipeline.recall_pipeline.index_event(event)
+        path.unlink()
 
     def _to_engine_batch(self, payload: Mapping[str, Any]) -> Any:
         experiences_raw = payload["experiences"]
