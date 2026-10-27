@@ -67,6 +67,7 @@ from jshi.memory import (
     RuleBasedRecallEvaluator,
 )
 from jshi.memorycontrol import InProcessMemoryControl
+from jshi.memory.contracts import RecallRequestContext, RecallCandidateBatch
 from jshi.longtermexperience import LongTermExperiencePort
 from jshi.objects import InProcessObjectSystem, ObjectSystemPort
 from jshi.models import (
@@ -237,6 +238,7 @@ class AssembledCurrentState:
     prompt_modules: tuple[str, ...] = ()
     interaction_scene: str = ""
     visual_snapshot: Mapping | None = None
+    recall_batch: RecallCandidateBatch | None = None
 
 
 @dataclass(frozen=True)
@@ -300,6 +302,14 @@ def _plain_turn_input(text: str) -> str:
     return "\n".join(
         line for line in (text or "").splitlines() if not line.startswith("JEV 初判")
     ).strip()
+
+
+def _recall_context_projection(view: ContextViewState) -> ContextViewState:
+    """Legacy excerpt footers are budgeted separately; never mutate the ledger."""
+    suffix = '\n'.join(f'[回忆 {ref}] {text}' for ref, text in view.recall_excerpts if text)
+    if suffix and view.context_text.endswith(suffix):
+        return replace(view, context_text=view.context_text[:-len(suffix)].rstrip())
+    return view
 
 
 class SubjectProcess:
@@ -461,6 +471,13 @@ class SubjectProcess:
         from jshi.reflection.memory_store import ReflectionMemoryStore
         from jshi.reflection.executor import ReflectionExecutor
         self.reflection_memory = ReflectionMemoryStore(data_dir / 'reflection_memory.sqlite3')
+        from jshi.memory.working_set import RecallWorkingSetStore
+        from jshi.memory.recall_flow import RecallFlow
+        self.recall_flow = RecallFlow(self.memory, self.reflection_memory,
+                                     RecallWorkingSetStore(self.reflection_memory))
+        for source in self.assembler.sources:
+            if isinstance(source, MemorySource):
+                source.recall_flow = self.recall_flow
         if isinstance(self.memory, MemoryShell):
             self.memory.reflection_store = self.reflection_memory
         self.reflection_executor = ReflectionExecutor(
@@ -480,12 +497,16 @@ class SubjectProcess:
         object_id: str | None = None,
         stimulus: str = STIMULUS_SPEECH,
         prompt_profile=None,
+        recall_request: RecallRequestContext | None = None,
+        consume_gap: bool = False,
     ) -> AssembledCurrentState:
         """单一路径组装（只读已有记录）：
         委托组装器收集各装载源，源内去重、生成快照与报告；
         不调用模型、不写长期记录、不再解析对象。
         """
         view = view or self.active_zone.load(subject_id)
+        if recall_request is not None and recall_request.mode == 2:
+            view = _recall_context_projection(view)
         from jshi.core.prompt_profile import PromptProfile
         profile = prompt_profile or PromptProfile()
         assembly_speaker = self._assembly_speaker(speaker, object_id)
@@ -511,9 +532,13 @@ class SubjectProcess:
             tool_entries=tool_entries,
             recall_enabled=profile.recall_memory,
             portrait_budget_chars={1:800, 2:400, 3:200}[profile.level],
+            recall_request=recall_request,
         )
         working_set = self.assembler.assemble(ctx)
-        if gap and profile.recall_memory and not any(r.source == 'memory' and r.error for r in working_set.report):
+        batch = working_set.recall_batch
+        gap_executed = (any(q['query'] == gap and q['status'] in {'completed', 'empty'} for q in batch.query_runs)
+                        if batch is not None else not any(r.source == 'memory' and r.error for r in working_set.report))
+        if consume_gap and gap and profile.recall_memory and gap_executed:
             self.effectiveness.consume_gap(subject_id)
         from jshi.tool.service import format_tool_related
 
@@ -529,6 +554,7 @@ class SubjectProcess:
             active_segment_ids=tuple(view.segment_refs),
             recalled=(),
             fragments=working_set.fragments,
+            recall_batch=batch,
             source_report=working_set.report,
             # 主路径只呈现【工具相关】；裸 tool_input / 热状态标题不再分两路贴。
             tool_input=tool_related,
@@ -755,8 +781,37 @@ class SubjectProcess:
         # 阶段③ 当前状态组装（单一路径，只读已有记录）
         from jshi.core.prompt_profile import select_profile, PromptProfile
         profile = select_profile((u.input_id for u in envelope.current_utterances), envelope.jev_calls) if envelope is not None else PromptProfile()
+        from jshi.core.params import reflection_param
+        activity_id = new_id()
+        recall_request = None
+        if int(reflection_param('RECALL_FLOW_MODE')) >= 1:
+            known = speaker.status == 'confirmed' or bool(envelope and envelope.speaker.method == 'user_selected')
+            scope = tuple(dict.fromkeys((
+                *((speaker.object_id,) if known else ()),
+                *(getattr(speaker, 'mentioned_object_ids', ()) or ()),
+                *self._voice_party_ids,
+            )))
+            if envelope and envelope.current_utterances:
+                multi_actor = len({u.speaker.object_id for u in envelope.current_utterances}) > 1
+                raw_query = '\n'.join(f'{u.speaker.label}：{u.text}' if multi_actor else u.text
+                                      for u in envelope.current_utterances)
+            else:
+                raw_query = '\n'.join(line for line in text.splitlines()
+                                      if not line.startswith('JEV 初判：人物归属见标注')).strip()
+            recall_request = RecallRequestContext(
+                subject_id=subject_id, activity_id=activity_id,
+                session_id=envelope.session_id if envelope and envelope.session_id else 'text',
+                query_text=raw_query, object_ids=scope,
+                interlocutor_object_id=speaker.object_id if known else None,
+                level=self.recall_strategy.get(subject_id).default_level,
+                candidate_limit=int(reflection_param('RECALL_CANDIDATE_LIMIT')),
+                enabled=profile.recall_memory, input_revision=fact.id, created_at=time.time(),
+                mode=int(reflection_param('RECALL_FLOW_MODE')))
+            recall_request = replace(recall_request, selected_limit=self.recall_strategy.get(subject_id).limit)
         current = self.assemble_current_state(
-            subject_id, text, view, speaker=speaker, stimulus=stimulus, prompt_profile=profile
+            subject_id, text, view, speaker=speaker, stimulus=stimulus, prompt_profile=profile,
+            recall_request=recall_request,
+            consume_gap=True,
         )
         # A just-recorded input can be returned by the memory source. It is
         # already in input_items, so don't present it as an additional memory.
@@ -822,8 +877,11 @@ class SubjectProcess:
                     "value_count": len(current.subject_state.salient_values),
                     "commitment_count": len(current.subject_state.commitments),
                     "recalled_event_ids": [
-                        item.event_id for item in current.recalled
+                        f.id.removeprefix('memory:') for f in current.fragments if f.source == 'memory'
                     ],
+                    "recall_run_id": current.recall_batch.request.run_id if current.recall_batch else '',
+                    "recall_status": current.recall_batch.status if current.recall_batch else 'legacy',
+                    "recall_candidates": len(current.recall_batch.candidates) if current.recall_batch else None,
                     "sources": [
                         {
                             "source": report.source,
@@ -834,6 +892,7 @@ class SubjectProcess:
                             "skipped": list(report.skipped_ids),
                             "error": report.error,
                             "elapsed_ms": report.elapsed_ms,
+                            "skipped_reasons": list(report.skipped_reasons),
                         }
                         for report in current.source_report
                     ],
@@ -845,6 +904,7 @@ class SubjectProcess:
         clock.mark("③组装")
         # 阶段④ 活动建立
         activity = Activity(
+            id=activity_id,
             subject_id=subject_id,
             kind=ActivityKind.EXTERNAL,
             trigger=fact.id,
@@ -905,10 +965,11 @@ class SubjectProcess:
         # 流式中途不早开口：等整份 response_plan 齐了，再在写场前把语言+动作合成一条交付，
         # 避免口头先出、动作拖到写场后另起一行。
         verbal_delivered = False
+        silent_operation = bool(envelope and any(call.get('silent_operation') for call in envelope.jev_calls))
 
         def deliver_verbal(value: str) -> None:
             nonlocal verbal_delivered
-            if on_verbal is not None and not verbal_delivered and value.strip():
+            if not silent_operation and on_verbal is not None and not verbal_delivered and value.strip():
                 verbal_delivered = True
                 on_verbal(value)
 
@@ -934,6 +995,8 @@ class SubjectProcess:
                               speaker=self._assembly_speaker(speaker=speaker, object_id=None))
         response = self._apply_visual_associations(subject_id, current, response,
             allowed=action_allowed is None or action_allowed())
+        if silent_operation:
+            response = replace(response, response_plan=replace(response.response_plan, mode='ignore', items=()))
         phase('action')
         deliver_verbal(verbal_text(response.response_plan))
         reply_ready_mono = time.monotonic()
@@ -1103,11 +1166,11 @@ class SubjectProcess:
                               "disposition": "deferred" if response.response_plan.unsaid_text() else "answered",
                               "evidence": response.response_plan.verbal_text(),
                               "work_complete": True} for task_id in consumed)
-        if current.audio_delivery:
+        if current.audio_delivery or silent_operation:
             # Generated text is not yet delivered speech. The voice host can
             # confirm answered items once the player finishes the full reply.
             handling = tuple({**item, "disposition": "deferred", "work_complete": False,
-                              "reason": "awaiting_voice_delivery"}
+                              "reason": "silent_operation_not_delivered" if silent_operation else "awaiting_voice_delivery"}
                              if item.get("disposition") == "answered" else item for item in handling)
         if handling:
             consumed = self.tool_service.handle_results(
@@ -1270,12 +1333,17 @@ class SubjectProcess:
                 RecallTrace(
                     subject_id=subject_id,
                     activity_id=activity_id,
-                    query=query,
+                    query=current.recall_batch.request.query_text if current.recall_batch else query,
                     object_id=object_id,
                     input_segment_id=input_segment_id,
                     level=self.recall_strategy.get(subject_id).default_level,
                     recalled_event_ids=recalled,
                     skipped_ids=skipped,
+                    run_id=current.recall_batch.request.run_id if current.recall_batch else '',
+                    status=current.recall_batch.status if current.recall_batch else 'legacy',
+                    candidate_ids=tuple(i.event_id for i in current.recall_batch.candidates) if current.recall_batch else (),
+                    reused_ids=current.recall_batch.reused_ids if current.recall_batch else (),
+                    elapsed_ms=current.recall_batch.elapsed_ms if current.recall_batch else 0,
                 )
             )
         except Exception:
@@ -1404,7 +1472,9 @@ class SubjectProcess:
                 now=now,
             )
             if line:
-                lines.append(line)
+                if fragment.status not in {'active', ''}:
+                    line = ('（存在冲突）' if fragment.status == 'conflict' else '（待核实）') + line
+                lines.append(f'[M{len(lines) + 1}] ' + line)
         return lines
 
     def _person_experience_lines(
@@ -1906,6 +1976,8 @@ class SubjectProcess:
         with self._write_lock:
             self._reconcile_pending_scene(current.subject_state.subject_id)
             current = replace(current, context_view=self.active_zone.load(current.subject_state.subject_id))
+            if current.recall_batch is not None and current.recall_batch.request.mode == 2:
+                current = replace(current, context_view=_recall_context_projection(current.context_view))
             persona_user_text = (
                 self._persona_user_text(current, boot=False, now=now) if persona_instruction else ""
             )
@@ -1944,6 +2016,20 @@ class SubjectProcess:
         )
         if getattr(self, 'voice_dialogue', None) is not None:
             request = self.voice_dialogue.request(request)
+        visible, reference_map = (), {}
+        if current.recall_batch is not None:
+            from jshi.models.prompt import build_user
+            rendered = build_user(request)
+            shown_codes = set(re.findall(r'(?m)^(?:\[)?(M\d+)(?:\]|[（:\[：])', rendered))
+            memory_fragments = [f for f in current.fragments if f.source == 'memory']
+            reference_map = {f'M{i}': f.id.removeprefix('memory:') for i, f in enumerate(memory_fragments, 1)
+                             if f'M{i}' in shown_codes}
+            visible_ids = set(reference_map.values())
+            visible = tuple(item for item in current.recall_batch.candidates if item.event_id in visible_ids)
+            try:
+                self.recall_flow.record_visible(current.recall_batch, visible)
+            except Exception:
+                logger.exception('recall visibility recording failed')
         self._record_step_input(
             request,
             self.cognition,
@@ -1964,7 +2050,23 @@ class SubjectProcess:
                     "instruction_chars": len(persona_instruction), "user_chars": len(persona_user_text),
                 }))
         from .cancellation import invoke
-        response = invoke(self.cognition, request, on_reply=on_reply)
+        try:
+            response = invoke(self.cognition, request, on_reply=on_reply)
+            from .cancellation import check
+            check()
+        except Exception as exc:
+            if current.recall_batch is not None:
+                try:
+                    self.reflection_memory.fail_run(current.recall_batch.request.run_id, type(exc).__name__)
+                except Exception:
+                    logger.exception('recall failure recording failed')
+            raise
+        if current.recall_batch is not None:
+            try:
+                ratings = self.recall_flow.complete(current.recall_batch, visible, response, reference_map)
+                response = replace(response, memory_ratings=ratings)
+            except Exception:
+                logger.exception('recall working set completion failed')
         if self.vision and media_tokens:
             self._main_images.commit(current.subject_state.subject_id, media_context, media_tokens)
             try:
@@ -2446,7 +2548,8 @@ class SubjectProcess:
             current, working_recalled, activity_id=activity.id, on_reply=on_reply
         )
         try:
-            self.reflection_memory.link_outcome(subject_id, activity.created_at.timestamp(),
+            if current.recall_batch is None:
+                self.reflection_memory.link_outcome(subject_id, activity.created_at.timestamp(),
                 [fragment.id.removeprefix('memory:') for fragment in current.fragments if fragment.source == 'memory'],
                 activity.id, [{'channel': item.channel, 'text': item.text} for item in response.response_plan.items])
         except Exception:
@@ -2502,6 +2605,13 @@ class SubjectProcess:
         )
         updated = self.repository.get_activity(activity.id)
         return updated, marked.final, marked.unknown
+
+    def note_recall_delivery(self, activity_id: str, status: str) -> None:
+        """Transport evidence only; delivery never means the answer was helpful."""
+        try:
+            self.reflection_memory.link_delivery(activity_id, status)
+        except Exception:
+            logger.exception('recall delivery association failed')
 
     def _apply_object_assessment(
         self,
@@ -2686,11 +2796,14 @@ class SubjectProcess:
                 m_counter += 1
                 short_id = f"M{m_counter}"
                 memory_map[short_id] = fragment.id
+                memory_content = fragment.content
+                if fragment.status not in {'active', ''}:
+                    memory_content = ('（存在冲突）' if fragment.status == 'conflict' else '（待核实）') + memory_content
                 items.append(
                     {
                         "id": short_id,
                         "kind": fragment.kind,
-                        "content": fragment.content,
+                        "content": memory_content,
                         "status": fragment.status,
                         "source": "memory",
                         "label": self._object_display(fragment.object_id),

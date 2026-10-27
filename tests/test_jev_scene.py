@@ -1,3 +1,4 @@
+from tests.jev_material_helpers import read_material
 import asyncio
 import json
 from dataclasses import replace
@@ -52,7 +53,7 @@ def test_background_only_inputs_refresh_scene_without_starting_main(process):
     process.person_review_model = Writer()
     async def run():
         async def send(m): pass
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate()), input_pause_s=.01,
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate(), mode='legacy'), input_pause_s=.01,
                               scene_idle_s=0, scene_batch_inputs=2, scene_batch_chars=10000)
         try:
             await c.accept(Transcript('媒体台词一', 'A', 0, 1000, True))
@@ -96,7 +97,7 @@ def test_recent_window_defers_unread_backlog_and_consumes_only_read_prefix(tmp_p
 def test_scene_writer_marks_omissions_and_never_silently_truncates_large_event(tmp_path):
     class Model:
         def generate(self, request):
-            self.data = json.loads(request.input_text)
+            self.data = read_material(request.input_text)
             return ModelResponse(model='fake', text='{"scene":"本轮长材料未载入，不推断已解决。"}')
     store = JEVSceneStore(tmp_path / 'scene.json')
     store.append('large', {'text': '不是' + '字' * 5000, 'at': 1})
@@ -159,7 +160,7 @@ def test_first_stage_is_compact_and_only_selects_prompt():
             return ModelResponse(model='gate', text=json.dumps({'level':1, 'recall_memory':False,
                 'items':[{'i':1,'person':'P1','certainty':'confirmed','why':'本句声纹明确，无具体冲突'}]}))
     model = Model()
-    result = VoiceJEV(model).decide_batch('stone', [{'n':1,'input_id':'long-internal-input-id',
+    result = VoiceJEV(model, mode='legacy').decide_batch('stone', [{'n':1,'input_id':'long-internal-input-id',
         'who':'P1（lux）','text':'要','voice_evidence':{'pick':'P1','strength':'clear'},
         'candidates':[{'who':'P1','score':.5,'source':'voiceprint'}]}],
         [{'p':'匠石','basis':'已播出','text':'要我帮你查天气吗？'}], {'jev_scene':'之前在闲聊','state':'completed'})
@@ -171,7 +172,7 @@ def test_invalid_batch_output_falls_back_without_false_confirmation():
     class Model:
         def generate(self, req):
             return ModelResponse(model='gate', text='{"level":3,"items":[],"control":"pass"}')
-    result = VoiceJEV(Model()).decide_batch('stone', [{'n':1,'text':'匠石你好'}], [], {})
+    result = VoiceJEV(Model(), mode='legacy').decide_batch('stone', [{'n':1,'text':'匠石你好'}], [], {})
     assert not result.judged and result.model_error
     assert result.action == 'ignore' and result.items[0].to_jiangshi == 'no'
     assert not result.main_prompt_hint
@@ -180,12 +181,12 @@ def test_invalid_batch_output_falls_back_without_false_confirmation():
 def test_exact_supplied_display_labels_do_not_discard_whole_batch():
     batch = [dict(n=1, who='P1（lux）', text='你好', voice_evidence={'pick':'P1','strength':'clear'}),
              dict(n=2, who='待定声音', text='好不开心啊', voice_evidence={'pick':'','strength':'unavailable'})]
-    result = VoiceJEV()._from_current([
+    result = VoiceJEV(mode='legacy')._from_current([
         dict(i=1,person='P1（lux）',certainty='confirmed',why='本句声纹明确'),
         dict(i=2,person='待定声音',certainty='unknown',to='maybe',keep='uncertain',why='暂不能确定')], batch, '')
     assert [i.speaker_pick for i in result.items] == ['P1','unknown']
     with pytest.raises(ValueError):
-        VoiceJEV()._from_current([dict(i=1,person='P1（另一人）',certainty='confirmed',to='yes',keep='related')],batch[:1],'')
+        VoiceJEV(mode='legacy')._from_current([dict(i=1,person='P1（另一人）',certainty='confirmed',to='yes',keep='related')],batch[:1],'')
 
 
 def test_short_audio_context_confirmation_reaches_final_identity_and_ui(process):
@@ -199,7 +200,7 @@ def test_short_audio_context_confirmation_reaches_final_identity_and_ui(process)
             u=SceneUtterance('好不开心啊。',initial,0,1410,input_id='short')
             c.source_speakers['short']=initial
             c.candidate_cache['short']=[{'object_id':'lux-id','source':'repeated_short_audio'}]
-            item=VoiceJEV()._from_current([dict(i=1,person=code,certainty='confirmed',to='yes',keep='related',
+            item=VoiceJEV(mode='legacy')._from_current([dict(i=1,person=code,certainty='confirmed',to='yes',keep='related',
                 why='辅助比较lux明显领先，紧接lux的假期感受，无换人线索')],
                 [dict(n=1,who='待定声音',voice_evidence={'pick':'','strength':'unavailable'},candidates=[{'who':code}])],'').items[0]
             final=c._apply_attribution([u],[item])
@@ -290,7 +291,7 @@ def test_scene_completed_after_input_cannot_add_future_context(tmp_path, monkeyp
     assert store.view(35)[0] == '后来才完成的场面'
 
 
-def test_entry_context_drops_old_episode_without_deleting_backlog(tmp_path, monkeypatch):
+def test_entry_context_keeps_uncovered_old_events_without_deleting_backlog(tmp_path, monkeypatch):
     monkeypatch.setenv('JSHI_JEV_CONTEXT_IDLE_SECONDS', '300')
     store = JEVSceneStore(tmp_path/'scene.json')
     now = 1_000_000
@@ -299,7 +300,7 @@ def test_entry_context_drops_old_episode_without_deleting_backlog(tmp_path, monk
     store.append('unknown-time', {'text': '不知何时的旧话'})
     scene, context = store.view(now)
     assert scene == ''
-    assert [r['text'] for r in context] == ['刚才打招呼']
+    assert [r['text'] for r in context] == ['上次问过天气', '刚才打招呼']
     assert len(store.snapshot()['events']) == 3
 
 
@@ -309,7 +310,7 @@ def test_entry_context_preserves_long_continuous_conversation(tmp_path, monkeypa
     for index, timestamp in enumerate((1000, 200_000, 400_000, 600_000)):
         store.append(str(index), {'text': str(index), 'at': timestamp})
     assert len(store.view(601_000)[1]) == 4
-    assert store.view(901_001) == ('', [])
+    assert len(store.view(901_001)[1]) == 4  # idle time cannot mark unread events covered
 
 
 def test_old_scene_is_preserved_but_old_dialogue_is_not_recent(tmp_path, monkeypatch):

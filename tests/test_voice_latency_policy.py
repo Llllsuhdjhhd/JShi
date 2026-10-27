@@ -31,10 +31,10 @@ def test_overlapping_batch_is_not_dropped_or_used_to_confirm_identity():
             return ModelResponse(text=json.dumps({'items':[{'i':1,'person':'unknown','certainty':'unknown','why':'重叠声音身份不能确认'}],'level':1,'recall_memory':False,'control':'redirect'}),model='fake')
     judge=Judge()
     batch=[{'n':1,'text':'匠石为什么没有回应','who':'P1','candidates':[{'who':'P1','score':.9}]}]
-    result=VoiceJEV(judge).decide_batch('stone',batch,[],{'state':'playing'},overlap=True)
+    result=VoiceJEV(judge, mode='legacy').decide_batch('stone',batch,[],{'state':'playing'},overlap=True)
     assert judge.calls==1 and result.action=='respond' and all(i.keep and i.identity_only for i in result.items)
     assert result.items[0].speaker_pick=='unknown'
-    fallback=VoiceJEV().decide_batch('stone',batch,[],{'state':'idle'},overlap=True)
+    fallback=VoiceJEV(mode='legacy').decide_batch('stone',batch,[],{'state':'idle'},overlap=True)
     assert fallback.action=='respond' and all(i.keep for i in fallback.items)
 
 
@@ -74,8 +74,8 @@ def test_failed_jev_keeps_tools_without_speculative_history_search():
 
 
 def test_main_thinking_is_not_playback_for_rule_fallback():
-    assert VoiceJEV().decide('stone', '我再补充一句', {}, {'state': 'thinking'}).action == 'respond'
-    assert VoiceJEV().decide('stone', '我再补充一句', {}, {'state': 'playing'}).action == 'resume'
+    assert VoiceJEV(mode='legacy').decide('stone', '我再补充一句', {}, {'state': 'thinking'}).action == 'respond'
+    assert VoiceJEV(mode='legacy').decide('stone', '我再补充一句', {}, {'state': 'playing'}).action == 'resume'
 
 
 def test_selected_memory_can_finish_after_1_5_seconds(process):
@@ -203,7 +203,7 @@ def test_same_acoustic_identity_partial_continuation_survives_track_change(proce
     async def run():
         gate = Gate()
         async def send(message): pass
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate), input_pause_s=.12)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate, mode='legacy'), input_pause_s=.12)
         try:
             await c.accept(Transcript('你好', 'A', 0, 1000, True, voiceprint_id='same-voice'))
             await asyncio.sleep(.08)
@@ -260,7 +260,7 @@ def test_402_cooldown_preserves_failure_and_resumes_after_interval(monkeypatch, 
             self.calls += 1
             raise HTTPError('https://example.invalid', 402, 'Payment Required', None, None)
     model = Model()
-    gate = VoiceJEV(model)
+    gate = VoiceJEV(model, mode='legacy')
     batch = [{'n': 1, 'text': '你好'}]
     first = gate.decide_batch('stone', batch, [], {})
     cooled = gate.decide_batch('stone', batch, [], {})
@@ -285,7 +285,7 @@ def test_invalid_prompt_routing_not_reported_as_successful_jev():
         def generate(self, request):
             return ModelResponse(model='fake', text=json.dumps({'level': 9, 'recall_memory': False,
                 'items': [{'i': 1, 'person': 'unknown', 'certainty': 'unknown', 'to': 'yes', 'keep': 'related'}]}))
-    result = VoiceJEV(Model()).decide_batch('stone', [{'n': 1, 'text': '你好'}], [], {})
+    result = VoiceJEV(Model(), mode='legacy').decide_batch('stone', [{'n': 1, 'text': '你好'}], [], {})
     assert not result.judged and result.model_error and not result.main_prompt_hint
 
 

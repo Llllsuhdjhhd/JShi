@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
 from time import perf_counter
 
 from jshi.attention import ChancePort, PlaceholderChance
 from jshi.core import Provenance, SubjectState, params
 from jshi.experienceledger import ContextViewState
+from jshi.memory.contracts import RecallCandidateBatch
 
 from .port import (
     AssemblyContext,
@@ -16,7 +17,7 @@ from .port import (
     SourceLoadReport,
 )
 
-_PROTECTED_SOURCES = frozenset({"identity", "object", "activity"})
+_PROTECTED_SOURCES = frozenset({"identity", "object"})
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class AssembledWorkingSet:
     personal_items: tuple[object, ...] = ()
     report: tuple[SourceLoadReport, ...] = ()
     tool_input: str = ""
+    recall_batch: RecallCandidateBatch | None = None
 
 
 class CurrentStateAssembler:
@@ -56,6 +58,8 @@ class CurrentStateAssembler:
         errors: dict[str, str] = {}
         skipped_by_source: dict[str, list[str]] = {}
         timings = {}
+        recall_batch = None
+        reasons: dict[str, list[tuple[str, str]]] = {}
         for source in self.sources:
             started = perf_counter()
             try:
@@ -64,6 +68,8 @@ class CurrentStateAssembler:
                 if source.name == "personal":
                     personal_raw.extend(result.raw_items)
                 skipped_by_source[source.name] = list(result.skipped_ids)
+                if result.recall_batch is not None:
+                    recall_batch = result.recall_batch
             except Exception as exc:  # 失败隔离：单源失败不影响组装
                 errors[source.name] = str(exc)
                 skipped_by_source.setdefault(source.name, [])
@@ -72,7 +78,12 @@ class CurrentStateAssembler:
 
         deduped: dict[tuple[str, str], AssemblyFragment] = {}
         for fragment in collected:
-            deduped.setdefault((fragment.source, fragment.id), fragment)
+            key = ('recall', fragment.id) if fragment.source == 'memory' or fragment.kind == 'recall_excerpt' else (fragment.source, fragment.id)
+            if key in deduped:
+                skipped_by_source.setdefault(fragment.source, []).append(fragment.id)
+                reasons.setdefault(fragment.source, []).append((fragment.id, 'duplicate'))
+            else:
+                deduped[key] = fragment
         fragments = tuple(deduped.values())
 
         # 魔法书默认：非保护片段 1500 字（回忆 + 普通价值）。缺省即生效，仍可显式覆盖。
@@ -95,9 +106,10 @@ class CurrentStateAssembler:
         tool_frags: list[AssemblyFragment] = []
         ordinary_frags: list[AssemblyFragment] = []
         for fragment in fragments:
-            if fragment.always or fragment.source in _PROTECTED_SOURCES:
+            if (fragment.always or fragment.source in _PROTECTED_SOURCES
+                    or (fragment.source == 'activity' and fragment.kind != 'recall_excerpt')):
                 protected_frags.append(fragment)
-            elif fragment.source in {"person_experience", "person_portrait", "memory", "manual_history"}:
+            elif fragment.source in {"person_experience", "person_portrait", "memory", "manual_history"} or fragment.kind == 'recall_excerpt':
                 memory_frags.append(fragment)
             elif fragment.source == "tool":
                 tool_frags.append(fragment)
@@ -106,13 +118,33 @@ class CurrentStateAssembler:
 
         kept: list[AssemblyFragment] = list(protected_frags)
         budget_left = limit or 0
+        selected_memory_count = 0
         for fragment in (*memory_frags, *ordinary_frags):
-            if budget_left <= 0:
+            if (fragment.source == 'memory' and ctx.recall_request is not None
+                    and ctx.recall_request.selected_limit is not None
+                    and selected_memory_count >= max(0, ctx.recall_request.selected_limit)):
+                skipped_by_source.setdefault(fragment.source, []).append(fragment.id)
+                reasons.setdefault(fragment.source, []).append((fragment.id, 'selected_limit'))
+                continue
+            if len(fragment.content) > budget_left and fragment.alternatives:
+                fitting = [text for text in fragment.alternatives if text.strip() and len(text) <= budget_left]
+                if fitting:
+                    fragment = replace(fragment, content=max(fitting, key=len),
+                                       alternatives=tuple(text for text in fragment.alternatives if len(text) <= budget_left))
+            if budget_left <= 0 or max(len(fragment.content), 1) > budget_left:
                 skipped_by_source.setdefault(fragment.source, []).append(
                     fragment.id
                 )
+                reasons.setdefault(fragment.source, []).append((fragment.id, 'budget'))
                 continue
+            if fragment.alternatives or fragment.portrait_levels:
+                cap = len(fragment.content)
+                fragment = replace(fragment,
+                    alternatives=tuple(text for text in fragment.alternatives if len(text) <= cap),
+                    portrait_levels=tuple((key, text) for key, text in fragment.portrait_levels if len(text) <= cap))
             kept.append(fragment)
+            if fragment.source == 'memory':
+                selected_memory_count += 1
             budget_left -= max(len(fragment.content), 1)
         kept_fragments = tuple(kept)
         tool_input = "\n".join(
@@ -136,6 +168,7 @@ class CurrentStateAssembler:
                 budget=limit or 0,
                 error=errors.get(source.name),
                 elapsed_ms=timings.get(source.name, 0.0),
+                skipped_reasons=tuple(reasons.get(source.name, ())),
             )
             for source in self.sources
         )
@@ -149,6 +182,7 @@ class CurrentStateAssembler:
             personal_items=tuple(personal_raw),
             report=reports,
             tool_input=tool_input,
+            recall_batch=recall_batch,
         )
         return self.chance.apply("assemble", working_set)
 

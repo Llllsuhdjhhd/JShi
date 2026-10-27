@@ -426,6 +426,18 @@ ZONE_FLUSH_CONSTRAINT = ParamConstraint(
 
 # 回忆自省：容量按 UTF-8 正文字节计，不含 SQLite 索引/页开销。
 REFLECTION_DEFAULTS = {
+    # 0=legacy, 1=shadow selection, 2=active recall flow.
+    "RECALL_FLOW_MODE": (2, 0, 2, "int"),
+    "RECALL_CANDIDATE_LIMIT": (12, 1, 60, "int"),
+    "RECALL_CANDIDATE_CHARS": (24000, 1000, 100000, "int"),
+    "RECALL_QUERY_LIMIT": (3, 1, 5, "int"),
+    "RECALL_EVALUATION_WINDOW_SECONDS": (300, 10, 3600, "int"),
+    "RECALL_OUTCOME_WAIT_SECONDS": (300, 30, 3600, "int"),
+    "RECALL_WORKING_ENABLED": (1, 0, 1, "int"),
+    "RECALL_FEEDBACK_ENABLED": (1, 0, 1, "int"),
+    "RECALL_WORKING_TTL_SECONDS": (1800, 30, 86400, "int"),
+    "RECALL_WORKING_ITEMS": (24, 1, 100, "int"),
+    "RECALL_REUSE_SIMILARITY": (0.35, 0.05, 1, "float"),
     "REFLECTION_INTERVAL_SECONDS": (600, 1, 86400, "int"),
     "REFLECTION_IDLE_SECONDS": (30, 0, 3600, "int"),
     "REFLECTION_POLL_SECONDS": (2, 0.1, 60, "float"),

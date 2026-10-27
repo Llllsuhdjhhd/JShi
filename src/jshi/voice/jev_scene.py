@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import hashlib
 import math
 import os
 import re
@@ -63,8 +64,22 @@ class JEVSceneStore:
     def append(self, event_id, payload, *, codes=None, labels=None):
         with self.lock:
             state = deepcopy(self.state)
+            fingerprint = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            previous = state.setdefault('event_fingerprints', {}).get(event_id)
             if event_id in state["covered"]:
-                return
+                if previous == fingerprint:
+                    return
+                state['covered'].remove(event_id)
+                state['generation'] += 1
+            if event_id in state.get('archived_unread', []):
+                if previous == fingerprint:
+                    return
+                state['archived_unread'].remove(event_id)
+                state['generation'] += 1
+            state['event_fingerprints'][event_id] = fingerprint
+            if previous != fingerprint:
+                versions = state.setdefault('event_versions', {})
+                versions[event_id] = versions.get(event_id, 0) + 1
             existing = next((r for r in state["events"] if r["id"] == event_id), None)
             if existing:
                 if existing["payload"] != payload:
@@ -165,28 +180,37 @@ class JEVSceneStore:
                 return None
             return deepcopy(found)
 
-    def view(self, cutoff_ms, current_ids=()):
-        """An input cannot inherit a scene written using later playback/events."""
+    def material_view(self, cutoff_ms, current_ids=()):
+        """Read scene and uncovered events atomically; age never implies coverage."""
         with self.lock:
-            scene = ""
-            rows = list(self.state["events"])
-            revisions = self.state.get("revisions", [])
-            episode = recent_episode(rows + [r for revision in revisions for r in revision['events']], cutoff_ms)
-            episode_ids = {r['id'] for r in episode}
-            for revision in revisions:
-                if revision["at"] <= cutoff_ms:
-                    scene = revision["scene"]
+            scene, version = '', 0
+            rows = list(self.state['events'])
+            for revision in self.state.get('revisions', []):
+                if revision['at'] <= cutoff_ms:
+                    scene, version = revision['scene'], revision.get('version', 0)
                 else:
-                    rows.extend(revision["events"])
-            current = set(current_ids)
-            def visible(row):
+                    rows.extend(revision['events'])
+            current, seen, visible = set(current_ids), set(), []
+            for row in sorted(rows, key=lambda r: r['seq'], reverse=True):
+                if row['id'] in current or row['id'] in seen:
+                    continue
+                at = row['payload'].get('at')
+                timestamp = at if type(at) in (int, float) and math.isfinite(at) and at > 0 else row.get('queued_at')
+                if timestamp is None or timestamp > cutoff_ms:
+                    continue
+                seen.add(row['id'])
                 result = deepcopy(row['payload'])
                 result['ref'] = self.state['event_refs'].get(row['id'], f"E{row['seq']}")
                 for change in result.get('corrected_events', []):
                     change['ref'] = self.state['event_refs'].get(change['ref'], 'unknown')
-                return result
-            return scene, [visible(r) for r in sorted(rows, key=lambda r:r['seq'])
-                           if r['id'] not in current and r['id'] in episode_ids]
+                visible.append(result)
+            return {'scene': scene, 'events': list(reversed(visible)), 'version': version,
+                    'generation': self.state['generation'],
+                    'archived_unread_count': len(self.state.get('archived_unread', []))}
+
+    def view(self, cutoff_ms, current_ids=()):
+        material = self.material_view(cutoff_ms, current_ids)
+        return material['scene'], material['events']
 
 
     def correct(self, payload, *, codes=None, labels=None):
@@ -261,7 +285,8 @@ class JEVSceneStore:
                         'labels': snapshot['labels'], 'reason': 'legacy_revision'})
             revision = {"scene": scene, "at": time()*1000, "events": [r for r in consumed if r["id"] not in archived],
                         'version': state['version'], 'generation': state['generation'],
-                        "material_window": snapshot.get("material_window", {})}
+                        "material_window": snapshot.get("material_window", {}),
+                        "covered_versions": {r["id"]: snapshot.get("event_versions", {}).get(r["id"], 1) for r in consumed if r["id"] not in archived}}
             self._archive({**revision,
                 'codes': snapshot['codes'], 'labels': snapshot['labels'], 'reason': 'scene_update'})
             discarded = [snapshot.get('history_lookup', {}).get(h) for h in snapshot.get('discard_history', [])]
@@ -275,13 +300,17 @@ class JEVSceneStore:
             state['history_migrated'] = True
             revisions.append(revision)
             state["revisions"] = revisions[-8:]
-            state["covered"].extend(r["id"] for r in consumed)
+            understood = [r['id'] for r in consumed if r['id'] not in archived]
+            state['covered'] = list(dict.fromkeys([*state['covered'], *understood]))
+            state['archived_unread'] = list(dict.fromkeys([*state.get('archived_unread', []), *archived]))
+            state.setdefault('covered_versions', {}).update({
+                event_id: state.get('event_versions', {}).get(event_id, 1) for event_id in understood})
             state["events"] = [r for r in state["events"] if r["id"] not in ids]
             self._save(state)
             return True
 
 
-SCENE_SCHEMA = {"type": "object", "properties": {"scene": {"type": "string", "maxLength": 1000}},
+SCENE_SCHEMA = {"type": "object", "properties": {"scene": {"type": "string", "minLength": 1, "maxLength": 1000}},
                 "required": ["scene"], "additionalProperties": False}
 
 RECENT_MATERIAL_CHARS = 3000
@@ -366,7 +395,8 @@ class JEVSceneWriter:
 
     def run(self, subject_id, snapshot, main_scene, *, on_request=None, history_reference=None):
         if monotonic() < self._unavailable_until:
-            raise RuntimeError('JEV片场接口计费或认证失败；60秒冷却期间保留待办')
+            from .jev_errors import JEVCooldownError
+            raise JEVCooldownError('JEV片场接口计费或认证失败；60秒冷却期间保留待办')
         # Internal long IDs and progress belong to the store, never to the prompt.
         events, reference = recent_material(snapshot, main_scene)
         now_ms = time()*1000
@@ -395,12 +425,20 @@ class JEVSceneWriter:
             payload['history_reference'] = {'scene': history_reference['scene'], 'at': history_reference['at'],
                 'scope': 'historical_only'}
         from .jev_input import compact_jev_input
-        user = json.dumps(compact_jev_input(payload), ensure_ascii=False, separators=(",", ":"))
+        from .jev_material import blocks
+        material = compact_jev_input(payload)
+        user = blocks([('上一版当前现场', {'scene': material['scene'], 'scene_at': material['scene_at']} if material['scene'] else None),
+            ('本批新事件', material['input_output']), ('前序依据', material['recent_context']),
+            ('人物依据', material['identity_evidence']), ('主认知参考', material['main_scene']),
+            ('人物映射', material['people']), ('历史候选', material.get('history_candidates')),
+            ('历史参考', material.get('history_reference')),
+            ('材料范围', {'now': material['now'], 'time_basis': material.get('time_basis'), **material['window']})])
         schema = deepcopy(SCENE_SCHEMA)
         history_codes = [row['h'] for row in snapshot.get('history_candidates', [])]
-        if history_codes:
-            schema['properties']['discard_history'] = {'type': 'array', 'uniqueItems': True,
-                'maxItems': len(history_codes), 'items': {'type': 'string', 'enum': history_codes}}
+        # The instruction allows an empty array even without history candidates.
+        schema['properties']['discard_history'] = {'type': 'array', 'uniqueItems': True,
+            'maxItems': len(history_codes),
+            'items': {'type': 'string', **({'enum': history_codes} if history_codes else {})}}
         request = ModelRequest(purpose="voice_jev_scene", input_text=user, persona_user_text=user,
             subject_state=SubjectState(subject_id, "匠石", "整理JEV片场"),
             system_extra=SCENE_INSTRUCTION + "\nJSON Schema：" + json.dumps(schema, ensure_ascii=False))
@@ -409,11 +447,18 @@ class JEVSceneWriter:
         try:
             raw = self.model.generate(request).text
         except Exception as exc:
-            if getattr(exc, 'code', None) in {401, 402, 403}:
+            from .jev_errors import failure_details
+            snapshot['failure'] = failure_details(exc, 'model_call')
+            if (getattr(exc, 'status', None) or getattr(exc, 'code', None)) in {401, 402, 403}:
                 self._unavailable_until = monotonic() + 60
             raise
         snapshot["model_raw"] = raw
-        data = parse_json_object(raw)
+        try:
+            data = parse_json_object(raw)
+        except Exception as exc:
+            from .jev_errors import failure_details
+            snapshot['failure'] = failure_details(exc, 'output_json')
+            raise
         scene = data.get("scene")
         if not isinstance(scene, str) or not scene.strip() or len(scene) > 1000:
             raise ValueError("JEV片场无效或超过1000字符；待办保持未处理")
@@ -421,5 +466,7 @@ class JEVSceneWriter:
         if (not isinstance(discarded, list) or any(not isinstance(h, str) or h not in history_codes for h in discarded)
                 or len(discarded) != len(set(discarded))):
             raise ValueError('片场历史删除引用非法')
+        from .jev_serial import validate
+        validate(data, schema)
         snapshot['discard_history'] = discarded
         return scene, raw

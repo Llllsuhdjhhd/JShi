@@ -104,6 +104,8 @@ class ModelRequest:
     processing_modes: tuple[str, ...] = ("interaction",)
     input_parts: tuple[Mapping[str, Any], ...] = ()
     input_items: tuple[Mapping[str, Any], ...] = ()
+    # Explicit output contract; ordinary text requests leave this disabled.
+    json_output: bool = False
 
 
 @dataclass(frozen=True)
@@ -218,7 +220,7 @@ class MemoryRating:
 
     ref: str
     relevance: str = "unrelated"
-    helps_understanding: int = 0
+    helps_understanding: int | None = None  # Unknown is distinct from an explicit zero.
     used_in_reply: str = "unused"
     misleading: bool = False
     redundant: bool = False
@@ -551,6 +553,14 @@ def model_thinking_fields(
     return {"thinking": {"type": "enabled"}, "reasoning_effort": e}
 
 
+def deepseek_json_output(request: ModelRequest, model: str) -> bool:
+    """DeepSeek Chat JSON mode is a transport constraint, not a schema guarantee."""
+    return str(model).lower().startswith('deepseek') and (request.json_output or bool(request.persona_schema) or request.purpose in {
+        'voice_jev', 'voice_jev_entry', 'voice_jev_prepare', 'voice_jev_scene',
+        'voice_person_review',
+    })
+
+
 def _chat_payload(
     model: str,
     request: ModelRequest,
@@ -580,6 +590,11 @@ def _chat_payload(
                 content.append({'type':'text', 'text':image['label']+'（关联历史事件的照片，以照片时间为准）'})
             content.append({'type':'image_url', 'image_url':{'url':image['image_url']}})
         body['messages'][1]['content'] = content
+    if deepseek_json_output(request, model):
+        response_format = response_format or 'json_object'
+        # Keep existing budgets for other skills, especially thinking requests.
+        if request.purpose.startswith('voice_jev'):
+            max_tokens = max_tokens or 8192
     if max_tokens:
         body["max_tokens"] = max_tokens
     if response_format:

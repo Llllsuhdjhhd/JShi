@@ -47,7 +47,7 @@ def test_v0_033_batch_unavailable_does_not_fail_open_to_respond(state, expected)
     """Gold for v0_033-style unavailable: ignore/wait (or resume while playing), never respond."""
     batch = [{'n': 1, 'text': '匠石你在吗', 'who': 'unknown'}]
     delivery = {'state': state} if state else {}
-    result = VoiceJEV(BrokenJEV()).decide_batch('stone', batch, [], delivery)
+    result = VoiceJEV(BrokenJEV(), mode='legacy').decide_batch('stone', batch, [], delivery)
     assert result.action == expected
     assert not result.judged and result.model_error
     assert result.items[0].to_jiangshi == 'no' and not result.items[0].keep
@@ -55,7 +55,7 @@ def test_v0_033_batch_unavailable_does_not_fail_open_to_respond(state, expected)
 
 @pytest.mark.parametrize('model_cls', [GarbageASRModel, InvalidSchemaModel])
 def test_v0_042_043_asr_garbage_and_invalid_jev_wait_instead_of_respond(model_cls):
-    result = VoiceJEV(model_cls()).decide_batch(
+    result = VoiceJEV(model_cls(), mode='legacy').decide_batch(
         'stone', [{'n': 1, 'text': 'T THE WEST LIN AND THE ELEPANT'}], [], {'state': 'completed'})
     assert result.action == 'ignore'
     assert not result.judged and result.model_error
@@ -73,7 +73,7 @@ def test_402_cooldown_also_holds_without_respond(monkeypatch):
             self.calls += 1
             raise HTTPError('https://example.invalid', 402, 'Payment Required', None, None)
 
-    gate = VoiceJEV(Model())
+    gate = VoiceJEV(Model(), mode='legacy')
     batch = [{'n': 1, 'text': '你好'}]
     first = gate.decide_batch('stone', batch, [], {'state': 'completed'})
     cooled = gate.decide_batch('stone', batch, [], {'state': 'completed'})
@@ -85,8 +85,8 @@ def test_402_cooldown_also_holds_without_respond(monkeypatch):
 
 def test_single_decide_unavailable_matches_batch_hold_policy():
     broken = BrokenJEV()
-    assert VoiceJEV(broken).decide('stone', '旁人说话', {}, {'state': 'playing'}).action == 'resume'
-    assert VoiceJEV(broken).decide('stone', '旁人说话', {}, {'state': 'completed'}).action == 'ignore'
+    assert VoiceJEV(broken, mode='legacy').decide('stone', '旁人说话', {}, {'state': 'playing'}).action == 'resume'
+    assert VoiceJEV(broken, mode='legacy').decide('stone', '旁人说话', {}, {'state': 'completed'}).action == 'ignore'
 
 
 def test_successful_entry_still_reaches_respond_for_should_answer_recall():
@@ -97,7 +97,7 @@ def test_successful_entry_still_reaches_respond_for_should_answer_recall():
                 'items': [{'i': 1, 'person': 'P1', 'certainty': 'confirmed', 'why': '明确对匠石提问'}],
                 'level': 2, 'recall_memory': False, 'main_image': 'omit', 'route': 'main', 'reply': ''}))
 
-    result = VoiceJEV(Judge()).decide_batch(
+    result = VoiceJEV(Judge(), mode='legacy').decide_batch(
         'stone', [{'n': 1, 'text': '匠石，今天天气怎么样？', 'who': 'P1（lux）',
                    'voice_evidence': {'pick': 'P1', 'strength': 'clear'},
                    'candidates': [{'who': 'P1', 'score': .8}]}],
@@ -114,7 +114,7 @@ def test_conversation_unavailable_does_not_enqueue_main_turn(process):
             messages.append(message)
 
         c = VoiceConversation(process, 'stone', FakeCloud(), send,
-                              jev=VoiceJEV(BrokenJEV()), input_pause_s=.01)
+                              jev=VoiceJEV(BrokenJEV(), mode='legacy'), input_pause_s=.01)
         turns = []
         c.enqueue_turn = lambda envelope: turns.append(envelope)  # type: ignore[method-assign]
         try:

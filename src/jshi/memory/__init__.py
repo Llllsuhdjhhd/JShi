@@ -1,4 +1,6 @@
 from .contracts import (
+    RecallRequestContext,
+    RecallCandidateBatch,
     BackendIngestResult,
     MemoryBatch,
     MemoryExperience,
@@ -23,6 +25,8 @@ from .shell import MemoryShell
 from .strategy import RecallStrategy, RecallStrategyStore
 
 __all__ = [
+    "RecallRequestContext",
+    "RecallCandidateBatch",
     "BackendIngestResult",
     "InProcessHistoryMemory",
     "InProcessMemoryBackend",

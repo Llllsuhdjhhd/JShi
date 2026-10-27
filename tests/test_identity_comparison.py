@@ -51,7 +51,7 @@ def test_trial_scores_reach_jev_as_separate_evidence_and_allow_semantic_confirma
             c.candidate_cache['clip']=[{'object_id':'lux-id','label':'lux','score':.223,'source':'voiceprint'}]
             u=SceneUtterance('真的吗',SpeakerEvidence('A','input:clip','声音归属待定','unknown','unassigned_audio'),0,800,input_id='clip')
             model=Model();batch=c._jev_batch([u])
-            decision=VoiceJEV(model).decide_batch('stone',batch,[],{'state':'idle','jev_scene':'lux正在与匠石对话'})
+            decision=VoiceJEV(model, mode='legacy').decide_batch('stone',batch,[],{'state':'idle','jev_scene':'lux正在与匠石对话'})
             assert decision.judged and decision.items[0].speaker_level=='确定'
             final=c._apply_attribution([u],decision.items)
             assert final[0].speaker.object_id=='lux-id' and final[0].speaker.status=='recognized'

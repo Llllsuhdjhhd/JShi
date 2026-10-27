@@ -374,7 +374,7 @@ def test_visual_packet_uses_existing_jev_schema():
             return ModelResponse(text=json.dumps({'items':[{'i':1,'person':'unknown','certainty':'unknown','why':'observation'}],'level':2,'recall_memory':False}), model='fake')
     model=Judge()
     envelope=InputEnvelope('test','visual_environment',(InputPart('text','有人进入'),),SpeakerEvidence('visual',method='visual_scene'))
-    result=VoiceJEV(model).decide_envelope('stone',envelope,{'state':'completed','jev_scene':'recent scene'})
+    result=VoiceJEV(model, mode='legacy').decide_envelope('stone',envelope,{'state':'completed','jev_scene':'recent scene'})
     assert model.request.purpose=='voice_jev'
     data=json.loads(model.request.input_text)
     assert data['input']['envelope']['source']=='visual_environment'
@@ -523,9 +523,13 @@ def test_background_speech_and_slow_vision_do_not_starve_direct_question(store, 
         def generate(self, request):
             from jshi.models import ModelResponse
             lines = json.loads(request.input_text)['input']['lines']
+            direct = any('匠石，你听得到吗' in row['text'] for row in lines)
             return ModelResponse(text=json.dumps({'items':[
                 {'i':row['i'],'person':'unknown','certainty':'unknown','why':'测试声音，无身份依据'}
-                for row in lines], 'level':3, 'recall_memory':False}),model=self.name)
+                for row in lines], 'level':3, 'recall_memory':False,
+                'control':'redirect' if direct else 'keep', 'route':'main' if direct else 'background',
+                'decision_reason':'明确提问' if direct else '背景台词',
+                'decision_refs':[f"I{lines[0]['i']}"]}),model=self.name)
     service = VisionService(store, store.config, SlowVision(), Detector())
     process.vision, process.cognition = service, Main()
     noise = ['我已经', 'J', 'T THE WEST', '作业做好了吗', '嗯']
@@ -533,7 +537,7 @@ def test_background_speech_and_slow_vision_do_not_starve_direct_question(store, 
         messages = []
         async def send(message): messages.append(message)
         c = VoiceConversation(process, 'stone', FakeCloud(), send,
-            jev=VoiceJEV(Judge()), input_pause_s=.02, input_max_batch_s=.05)
+            jev=VoiceJEV(Judge(), mode='legacy'), input_pause_s=.02, input_max_batch_s=.05)
         stop = asyncio.Event()
         async def produce():
             i = 0
@@ -717,7 +721,7 @@ def test_optional_image_reaches_shared_jev_as_image_block(store):
     model=Judge()
     try:
         e=pack_input(InputEnvelope('test','photo',(InputPart('text','观察'),),SpeakerEvidence('photo',method='visual_scene')),service,'stone')
-        VoiceJEV(model).decide_envelope('stone',e,{'state':'completed'},vision=service)
+        VoiceJEV(model, mode='legacy').decide_envelope('stone',e,{'state':'completed'},vision=service)
         assert 'base64' not in model.request.input_text
         body=json.loads(_chat_payload('test',model.request))
         content=body['messages'][1]['content']

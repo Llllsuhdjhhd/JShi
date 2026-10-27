@@ -34,12 +34,12 @@ def test_unknown_greeting_can_enter_main_flow(process):
     class Gate:
         name='test'
         def generate(self,request):
-            from jshi.voice.jev_prompts import ENTRY_INSTRUCTION
+            from jshi.voice.jev_prompts import LEGACY_ENTRY_INSTRUCTION as ENTRY_INSTRUCTION
             assert request.system_extra.startswith(ENTRY_INSTRUCTION)
             return ModelResponse(text='{"action":"respond","reason":"向匠石打招呼"}',model='test')
     async def run():
         async def send(m):pass
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(Gate()),input_pause_s=.02)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(Gate(), mode='legacy'),input_pause_s=.02)
         try:
             await c.accept(Transcript('匠石你好','0',0,2000,True,identity_uncertain=True))
             await asyncio.wait_for(c.queue.join(),1)
@@ -123,7 +123,7 @@ def test_jev_background_gate_records_scene_without_main_call(process, state):
     async def run():
         gate=Gate()
         async def send(m): pass
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate),input_pause_s=.02)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate, mode='legacy'),input_pause_s=.02)
         if state=='playing':
             reply=c.delivery.begin('正在说的内容。','lux-id')
             c.delivery.acknowledge(reply.reply_id,0,'started')
@@ -222,7 +222,7 @@ def test_partial_continuation_does_not_delay_completed_input(process):
     async def run():
         gate = Gate()
         async def send(m): pass
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate),input_pause_s=.12)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate, mode='legacy'),input_pause_s=.12)
         try:
             await c.accept(Transcript('你好','A',0,1000,True))
             await asyncio.sleep(.08)
@@ -410,7 +410,7 @@ def test_low_probability_line_stays_in_the_scene_but_not_the_main_input(process)
             return ModelResponse(text='{"items":[{"n":1,"to_jiangshi":"no","relevance":"unrelated","score":0.1,"reason":"旁人"},{"n":2,"to_jiangshi":"yes","score":0.9,"reason":"点名"}]}', model='test')
     async def run():
         async def send(m): pass
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate()), input_pause_s=.05)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate(), mode='legacy'), input_pause_s=.05)
         try:
             await c.accept(Transcript('你先去吃饭', 'A', 0, 1000, True))
             await c.accept(Transcript('匠石明天怎么安排', 'A', 1200, 2500, True))

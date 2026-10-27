@@ -85,7 +85,7 @@ class WriteZoneSkill(Skill[ModelResponse]):
         return _to_write_response(data, model=self.model_tag)
 
     def run(self, request: ModelRequest) -> ModelResponse:
-        req = replace(request, system_extra=self.system_extra(request))
+        req = replace(request, system_extra=self.system_extra(request), json_output=True)
         raw = self._model.generate(req)
         raw_text = raw.text or ""
         try:

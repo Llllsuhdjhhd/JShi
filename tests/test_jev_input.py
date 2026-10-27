@@ -66,7 +66,7 @@ def test_compact_text_keeps_original_multimodal_transport_and_output_identity():
               'speaker': {'object_id': 'OBJ-' + 'b' * 32, 'method': 'user_selected', 'label': 'lux'},
               'parts': [{'kind': 'image', 'reference': 'c' * 32, 'image_url': 'data:image/jpeg;base64,photo'}]}
     original = copy.deepcopy(packed)
-    result = VoiceJEV(model).decide_batch('stone', [
+    result = VoiceJEV(model, mode='legacy').decide_batch('stone', [
         {'n': 7, 'who': 'P1', 'source': 'web_text', 'text': '你好', 'at': 1000.25}], [],
         {'now': 1100.75, 'envelope': packed})
     data = json.loads(model.request.input_text)

@@ -256,7 +256,7 @@ class VoiceConversation:
                 for r in calls:
                     system, user = prompts.get(r.get('system_hash'), '记录已清理'), r.get('user_text', '')
                     sections.extend(re.findall(r'^【([^\n】]+)】\s*$', system + '\n' + user, re.M))
-                    if purpose != 'all' and r.get('purpose') != purpose:
+                    if purpose != 'all' and r.get('purpose') != purpose and not (purpose == 'voice_jev' and r.get('purpose') in {'voice_jev_entry', 'voice_jev_prepare'}):
                         continue
                     if part == 'all': body = 'system\n' + system + '\nuser\n' + user
                     elif part == 'system': body = system
@@ -607,18 +607,18 @@ class VoiceConversation:
             if self.active_turn is not None or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}:
                 input_epoch = self.epoch
                 decision, record, items = await self._judge((utterance,), evidence, False, envelope)
-                if input_epoch != self.epoch:
+                if input_epoch != self.epoch and record.get("applied_epoch") != self.epoch:
                     return
                 current = tuple(self._apply_attribution((utterance,), items))
                 control = record.get('control')
                 if not control and decision.action == 'stop':
                     control = 'stop'  # Semantic result from a legacy compatible model.
-                if control in {'stop', 'redirect'}:
+                if control in {'stop', 'redirect'} and not record.get('control_applied'):
                     await self.stop('semantic_' + control)
                 self._capture_jev_inputs(current, items)
                 await self._publish_attribution(current, items, record)
                 self._update_jev_continuation(current, record)
-                if control == 'stop' or (control == 'keep' and record.get('route') not in {'main', 'self_reply'}):
+                if (control == 'stop' and not record.get('silent_operation')) or (control == 'keep' and record.get('route') not in {'main', 'self_reply'}):
                     return
                 if not record.get('judged'):
                     self._preserve_background(current)
@@ -995,7 +995,7 @@ class VoiceConversation:
             kept.append(f"{index}. {self.display_speaker(utterance.speaker, hint)}：{utterance.text}")
         lines = list(kept)
         if any(item.identity_only for item in items):
-            lines.append('JEV 初判：仅终审人物；对话指向及是否回应由主认知判断。')
+            lines.append('JEV 初判：人物归属见标注；主认知结合交往材料决定是否及如何回应。')
         if items:
             yes = [str(item.n) for item in items if item.to_jiangshi == "yes"]
             maybe = [str(item.n) for item in items if item.to_jiangshi == "maybe"]
@@ -1648,6 +1648,16 @@ class VoiceConversation:
     def _update_jev_continuation(self, utterances, record):
         """Completeness owns retention; control owns actions. Old responses stay compatible."""
         status = record.get('utterance_complete', 'uncertain')
+        if record.get('entry_route'):
+            pending = set(record.get('pending_refs', []))
+            process = set(record.get('process_refs', []))
+            if record.get('control') == 'stop':
+                self.jev_pending_inputs.clear()
+            for n, u in enumerate(utterances, 1):
+                if f'I{n}' not in pending and (f'I{n}' in process or record.get('route') == 'background'):
+                    self._consume_jev_inputs((u,))
+            self._hold_jev_inputs(tuple(u for n, u in enumerate(utterances, 1) if f'I{n}' in pending))
+            return
         if record.get('control') == 'stop':
             self.jev_pending_inputs.clear()
         elif record.get('route') == 'wait':
@@ -1784,6 +1794,14 @@ class VoiceConversation:
         if self.active_turn and (not snapshot or snapshot.get("state") in {"completed", "stopped", "failed"}):
             snapshot = self.active_turn
         context, spoken = self._jev_context(utterances)
+        material = self.jev_scene_store.material_view(
+            min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=time()*1000),
+            {u.input_id for u in utterances})
+        # Held half-sentences may already be summarized, so retain those separately.
+        held = [r for r in context if r.get('entry_status') == 'pending_continuation']
+        context = list(material['events'])
+        present = {r.get('input_id') for r in context}
+        context.extend(r for r in held if r.get('input_id') not in present)
         names = ["匠石"]
         if hasattr(self.process.profiles, "all_terms"):
             names.extend(term for term in self.process.profiles.all_terms("calls_subject") if term not in names)
@@ -1794,8 +1812,9 @@ class VoiceConversation:
                     "pending": (snapshot or {}).get("pending_text", "")[:200], "names_for_jiangshi": names,
                     "attention": self.attention.hint(speaker, overlap=overlap),
                     "short_chat": self.direct_replies.context(self.subject_id, [u.speaker.object_id for u in utterances]),
-                    "jev_scene": self.jev_scene_store.view(
-                        min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=time()*1000))[0],
+                    "jev_scene": material['scene'],
+                    "jev_material_scope": {k: material[k] for k in ('version', 'generation', 'archived_unread_count')},
+                    "people": {p: self.code_labels.get(oid, p) for p, oid in self.code_owner.items()},
                     "now": time()*1000}
         if self.active_turn is not None and state == 'completed':
             delivery['state'] = 'thinking'
@@ -1849,6 +1868,9 @@ class VoiceConversation:
                 row.update(who='unknown', candidates=[], voice_evidence={'strength':'unavailable','basis':'视觉观察，无声音身份'})
         if not batch:
             batch = [{'n': 1, 'text': envelope.text, 'who': 'unknown', 'at': time()*1000, 'source': envelope.source, 'voice_evidence': {'strength':'unavailable','basis':'非声音观察'}}]
+        from jshi.voice.jev_material import task_context
+        delivery['task_context'] = await asyncio.to_thread(task_context, self.process, self.subject_id,
+            [u.speaker for u in utterances], code_of=lambda oid: self.assign_code(oid, self.code_labels.get(oid, '')))
         started = monotonic()
         jev_started_at_ms = time()*1000
         await self.emit('flow_phase', lane='input', stage='jev')
@@ -1877,11 +1899,41 @@ class VoiceConversation:
         self.jev_running = {f for f in self.jev_running if not f.done()}
         loop = asyncio.get_running_loop()
 
+        validity = {'epoch': self.epoch, 'generation': material['generation'], 'expired': False}
+        entry_result = None
+
+        def same_sources():
+            for utterance in utterances:
+                source = self.input_records.get(utterance.input_id, {})
+                latest = source.get('transcript')
+                if source.get('superseded_by') or (latest is not None and latest.text != utterance.text):
+                    return False
+            return True
+
+        def is_current():
+            return (same_sources() and not validity['expired'] and not self.closed and self.epoch == validity['epoch']
+                    and self.jev_scene_store.state['generation'] == validity['generation'])
+
+        async def apply_entry(result):
+            nonlocal entry_result
+            if not is_current():
+                return False
+            entry_result = result
+            if result.control in {'stop', 'redirect'}:
+                await self.stop('semantic_' + result.control)
+                validity['epoch'] = self.epoch
+                entry_result = replace(result, control_applied=True, applied_epoch=self.epoch)
+                return self.epoch
+            return None
+
+        def on_entry(result):
+            return asyncio.run_coroutine_threadsafe(apply_entry(result), loop).result()
+
         def run():
             if hasattr(self.jev, "decide_batch"):
                 if isinstance(self.jev, VoiceJEV) and type(self.jev).decide_batch is VoiceJEV.decide_batch:
                     return self.jev.decide_batch(self.subject_id, batch, context, delivery,
-                                                 overlap=overlap, on_request=capture_request)
+                                                 overlap=overlap, on_request=capture_request, on_entry=on_entry, is_current=is_current)
                 return self.jev.decide_batch(self.subject_id, batch, context, delivery, overlap=overlap)
             legacy_delivery = self._single_jev_context(delivery, context, utterances, cutoff)
             decision = self.jev.decide(self.subject_id, "\n".join(item["text"] for item in batch),
@@ -1895,10 +1947,22 @@ class VoiceConversation:
             self.jev_future = loop.run_in_executor(self.jev_executor, run)
             self.jev_running.add(self.jev_future)
             try:
-                result = await asyncio.wait_for(asyncio.shield(self.jev_future), self.timeout_s)
+                limit = self.timeout_s * (2 if getattr(self.jev, 'mode', 'legacy') in {'split', 'serial'} else 1)
+                result = await asyncio.wait_for(asyncio.shield(self.jev_future), limit)
             except asyncio.TimeoutError:
                 path, timed_out = "timeout_rule", True
-                result = open_batch("未能初判")
+                validity['expired'] = True
+                if entry_result is not None:
+                    result = replace(entry_result, action='stop' if entry_result.control == 'stop' else 'ignore',
+                        route='background', direct_reply='', waiting_reply='', model_error='JEV1_2超时，保留入口判断')
+                else:
+                    result = open_batch("未能初判")
+        if (not same_sources() or self.closed or self.epoch != validity['epoch']
+                or self.jev_scene_store.state['generation'] != validity['generation']):
+            result = replace(result, action='ignore', control='keep', route='background',
+                             direct_reply='', waiting_reply='', items=(), judged=False,
+                             routing_error=result.routing_error or 'JEV结果过期，不提交回应')
+        validity['expired'] = True
         result = VoiceJEV.enforce_completeness(result)
         decision = InterruptDecision(result.action, result.reason, result.claimed_name)
         await self.emit('flow_phase', lane='input', stage='judged')
@@ -1907,12 +1971,20 @@ class VoiceConversation:
                   "path": path, "timed_out": timed_out, "reason": decision.reason[:80],
                   "items": [asdict(item) for item in result.items], "needs_main_review": result.needs_main_review,
                   "input_ids": [u.input_id for u in utterances],
-                  "main_prompt_hint": result.main_prompt_hint, "prompt_policy_version": 5,
+                  "main_prompt_hint": result.main_prompt_hint, "prompt_policy_version": 6,
                   "identity_only": bool(result.items) and all(item.identity_only for item in result.items),
                   "prompt_activity_id": prompt_activity_id,
                   "prompt_requested": bool(sent_requests) if type(self.jev) is VoiceJEV else None,
                   "judged": result.judged, "model_error": result.model_error}
+        record.update(entry_route=result.entry_route, interaction=result.interaction,
+                      process_refs=list(result.process_refs), pending_refs=list(result.pending_refs),
+                      stages=list(result.stage_records), control_applied=result.control_applied,
+                      applied_epoch=result.applied_epoch, silent_operation=result.silent_operation,
+                      mode=result.stage_records[0]['mode'] if result.stage_records else getattr(self.jev, 'mode', 'legacy'))
         record['routing_error'] = result.routing_error
+        failed_stage = next((s for s in reversed(result.stage_records) if s.get('status') == 'failed'), {})
+        record['failure_kind'] = 'timeout' if timed_out else failed_stage.get('error_kind', 'unclassified' if result.model_error else '')
+        record['failure_stage'] = failed_stage.get('stage', '')
         record['control'] = result.control
         record['utterance_complete'] = result.utterance_complete
         await self.emit('jev_completeness', utterance_complete=result.utterance_complete, control=result.control)
@@ -1934,9 +2006,12 @@ class VoiceConversation:
         await self.publish_pipeline(u.input_id for u in utterances if u.input_id)
         if (timed_out or result.model_error) and monotonic() - self._last_jev_notice >= 30:
             self._last_jev_notice = monotonic()
-            message = ('JEV接口返回402，可能是余额或计费限制；本轮入口判断失败，声音初判和原话仍保留，本轮不开口。'
-                       if '402' in (result.model_error or '') else
-                       '入口判断超时或失败，本轮不开口；你的话已记下，需要回应可以再说一次。')
+            categories = {'billing':'计费失败', 'authentication':'认证或权限失败', 'rate_limit':'限流',
+                          'timeout':'超时', 'transport':'网络连接失败', 'provider_http':'服务请求失败',
+                          'output_json':'JSON解析失败', 'output_schema':'输出格式不符合约定',
+                          'routing':'路由校验失败', 'stale':'材料已过期', 'cooldown':'接口冷却中'}
+            message = ('入口判断'+categories.get(record['failure_kind'], '失败')+
+                       '；本轮不开口，原话与诊断记录已保留。')
             await self.emit('notice', text=message)
         elif result.routing_error and monotonic() - self._last_jev_notice >= 30:
             self._last_jev_notice = monotonic()
@@ -2251,8 +2326,8 @@ class VoiceConversation:
                     decision = InterruptDecision('stop', 'explicit stop')
                 else:
                     decision, record, items = await self._judge(current, evidence, any(u.overlap for u in current))
-                    if input_epoch != self.epoch:
-                        continue  # A stop arrived while this old batch was being judged.
+                    if input_epoch != self.epoch and record.get("applied_epoch") != self.epoch:
+                        continue  # A newer control invalidated this batch.
                     record['collection_complete'] = expression_complete
                     record['collection_trigger'] = collection_trigger
                     record['collected_chars'] = sum(ch.isalnum() for u in current for ch in u.text)
@@ -2265,19 +2340,22 @@ class VoiceConversation:
                 # Publish only after entry judgment/rule completion. Background
                 # snapshots must never race ahead of this batch's first JEV.
                 control = jev_calls[-1].get('control') if jev_calls else ''
-                if control in {'stop', 'redirect'}:
+                if control in {'stop', 'redirect'} and not record.get('control_applied'):
                     await self.stop('semantic_' + control)
                     input_epoch = self.epoch
                     active = busy = False
                 self._capture_jev_inputs(current, items, entry_status='rule' if explicit_stop else None)
                 if jev_calls:
                     self._update_jev_continuation(current, jev_calls[-1])
-                if control == 'stop':
+                if control == 'stop' and not record.get('silent_operation'):
                     self.jev_pending_inputs.clear()
                     continue
                 if control == 'keep' and record.get('route') not in {'main', 'self_reply'}:
                     self._preserve_background(current)
                     continue
+                if record.get('control_applied'):
+                    input_epoch = self.epoch
+                    active = busy = False
                 self.pending_voice = False
                 if busy:
                     await self.emit('input_pending', count=len(current))
@@ -2365,6 +2443,10 @@ class VoiceConversation:
                 items = ()
                 if envelope.deferred_interrupt:
                     decision, record, items = await self._judge(current, envelope.speaker, envelope.overlap, envelope)
+                    if record.get('applied_epoch') is not None:
+                        if record['applied_epoch'] != self.epoch:
+                            continue
+                        epoch = self.epoch
                     current = tuple(self._apply_attribution(list(current), items, persist=not bool(record.get('direct_reply'))))
                     await self._publish_attribution(current, items, record)
                     envelope = replace(envelope, jev_calls=(*envelope.jev_calls, record),
@@ -2373,12 +2455,12 @@ class VoiceConversation:
                     await self.emit('jev', **asdict(decision))
                     self.last_jev = asdict(decision)
                     self.record('voice_jev', {'input': self.render_input(current, items), **asdict(decision)})
-                    if record.get('control') in {'stop', 'redirect'}:
+                    if record.get('control') in {'stop', 'redirect'} and not record.get('control_applied'):
                         await self.stop('semantic_' + record['control'])
                         epoch = self.epoch
                     self._capture_jev_inputs(current, items)
                     self._update_jev_continuation(current, record)
-                    if record.get('control') == 'stop':
+                    if record.get('control') == 'stop' and not record.get('silent_operation'):
                         continue
                     if record.get('control') == 'keep' and record.get('route') not in {'main', 'self_reply'}:
                         self._preserve_background(current)
@@ -2547,6 +2629,9 @@ class VoiceConversation:
             nonlocal emitted
             if emitted or epoch != self.epoch or self.closed:
                 return
+            if any(c.get('silent_operation') for c in envelope.jev_calls):
+                emitted = True
+                return
             emitted = True
             actions = [i.text for i in plan.items if i.channel == 'embodied' and i.text.strip() and i.text.strip() != '无动作']
             if actions and epoch == self.epoch and not self.closed:
@@ -2617,6 +2702,9 @@ class VoiceConversation:
             return result, self.process.last_model_response, result.selected_tool_ids
 
         result, response, selected = await loop.run_in_executor(self.turn_executor, experience)
+        metrics['recall_activity_id'] = result.activity.id
+        if metrics.get('recall_delivery_status'):
+            self.process.note_recall_delivery(result.activity.id, metrics['recall_delivery_status'])
         self.direct_replies.prime(self.subject_id, result, include_reply=False)
         job = self.process.take_deferred_write()
         if job is not None:
@@ -2782,7 +2870,7 @@ class VoiceConversation:
                     if measured:
                         self.jev_scene_store.append(f"played:{d.reply_id}:{payload['segment']}",
                             {'p':'匠石', 'text':d.texts[int(payload['segment'])],
-                             'basis':'JEV回复已播出', 'at':time()*1000})
+                             'basis':'等待接话已播出' if measured[1].get('route') == 'waiting_ack' else 'JEV回复已播出', 'at':time()*1000})
                         self.process.note_scene_delivery(self.subject_id,
                             f"played:{d.reply_id}:{payload['segment']}",
                             '（播放器确认已播出）匠石：' + d.texts[int(payload['segment'])])
@@ -2790,6 +2878,12 @@ class VoiceConversation:
                 return
             if payload.get("phase") == "completed":
                 d = self.delivery.current
+                key = self.reply_epochs.get(d.reply_id)
+                recall_metrics = self.voice_timings.get(key, (None, {}))[1]
+                status = 'played' if d.state == 'completed' else 'partially_played'
+                recall_metrics['recall_delivery_status'] = status
+                if recall_metrics.get('recall_activity_id'):
+                    self.process.note_recall_delivery(recall_metrics['recall_activity_id'], status)
                 targets = d.targets[int(payload['segment'])] if d.targets else (d.object_id,)
                 self.process.note_scene_delivery(
                     self.subject_id, f"played:{d.reply_id}:{payload['segment']}",
@@ -2906,6 +3000,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     text_write_task = None
     pending_text_write = None
     text_write_error = ''
+    from jshi.voice.jev_scene import JEVSceneStore, JEVSceneWriter
+    text_jev_store = JEVSceneStore(process.repository.path.parent / 'jev_scenes' /
+        hashlib.sha256(subject_id.encode()).hexdigest()[:16] / 'text-entry.json')
+    text_jev_task = None
+    text_jev_error = ''
+    text_jev_writer = None
     active_conversation = None
     model_notice_sink = None
     model_status_sink = None
@@ -2952,17 +3052,26 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             registry_busy = True
             try:
                 envelope = await judge_standalone(envelope)
-                await asyncio.to_thread(process.experience, subject_id, envelope.text, envelope=envelope,
-                    processing_modes=('environment',), defer_write=True)
-                schedule_text_scene()
+                if envelope.jev_calls[-1].get('route') not in {'background', 'wait'}:
+                    await asyncio.to_thread(process.experience, subject_id, envelope.text, envelope=envelope,
+                        processing_modes=('environment',), defer_write=True)
+                    schedule_text_scene()
             finally:
                 registry_busy = False
 
     async def judge_standalone(envelope, *, waiting_allowed=False):
         from jshi.voice.jev_scene import JEVSceneStore
         import hashlib
-        scene_store = JEVSceneStore(process.repository.path.parent / 'jev_scenes' / hashlib.sha256(subject_id.encode()).hexdigest()[:16] / 'text-entry.json')
-        scene, unwritten = scene_store.view(time()*1000)
+        scene_store = text_jev_store
+        saved = scene_store.snapshot()
+        codes, labels = dict(saved['codes']), dict(saved['labels'])
+        selected_code = next((p for p, oid in codes.items() if oid == envelope.speaker.object_id), '')
+        if not selected_code and envelope.speaker.method == 'user_selected':
+            selected_code = f'P{max([int(p[1:]) for p in codes if p[1:].isdigit()] or [0])+1}'
+            codes[selected_code] = envelope.speaker.object_id
+            labels[envelope.speaker.object_id] = envelope.speaker.label
+        material = scene_store.material_view(time()*1000)
+        scene, unwritten = material['scene'], material['events']
         prepare_started = monotonic()
         envelope = await asyncio.to_thread(pack_input, envelope, visual, subject_id)
         prepared = monotonic()
@@ -2971,11 +3080,18 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             process._record_step_input(request, judge.model, subject_id=subject_id, activity_id='jev-'+envelope.input_id)
         jev_started = monotonic()
         from jshi.voice.wait_ack import wait_timing, model_key
+        from jshi.voice.jev_material import task_context
+        tasks = await asyncio.to_thread(task_context, process, subject_id, [envelope.speaker])
+        generation = material['generation']
         result = await asyncio.to_thread(judge.decide_envelope, subject_id, envelope,
             {'state':'completed', 'jev_scene':scene, 'unwritten':unwritten, 'now':time()*1000,
              'conversation':dialogue.recent(subject_id, exclude={envelope.input_id}),
+             'task_context':tasks, 'selected_person_code':selected_code or 'P1',
+             'people':{p:labels.get(oid,p) for p,oid in codes.items()}, 'jev_material_scope':{k:material[k] for k in ('version','generation','archived_unread_count')},
              'waiting':wait_timing(process).guidance(model_key(process), allowed=waiting_allowed, mode='text'),
-             'short_chat':text_direct_replies.context(subject_id, [envelope.speaker.object_id])}, vision=visual, on_request=capture)
+             'short_chat':{**text_direct_replies.context(subject_id, [envelope.speaker.object_id]),
+                           'person_code':selected_code or 'unknown'}}, vision=visual, on_request=capture,
+            is_current=lambda: scene_store.state['generation'] == generation)
         jev_finished = monotonic()
         record = {'main_prompt_hint':result.main_prompt_hint, 'judged':result.judged,
                   'model_error':result.model_error, 'items':[asdict(i) for i in result.items],
@@ -2985,18 +3101,93 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                   'front_choice':result.front_choice, 'route':result.route,
                   'decision_reason':result.decision_reason, 'decision_refs':list(result.decision_refs),
                   'control':result.control, 'utterance_complete':result.utterance_complete,
+                  'entry_route':result.entry_route,'process_refs':list(result.process_refs),'pending_refs':list(result.pending_refs),
+                  'interaction':result.interaction,'stages':list(result.stage_records),'silent_operation':result.silent_operation,
+                  'mode':getattr(judge,'mode','legacy'),
                   'ms':round((jev_finished-jev_started)*1000, 1),
                   'input_prepare_ms':round((prepared-prepare_started)*1000, 1),
                   'prompt_activity_id':'jev-'+envelope.input_id}
+        failures = [s for s in result.stage_records if s.get('status') == 'failed']
+        failure = failures[-1] if failures else {}
+        record['failure_kind'] = failure.get('error_kind', 'unclassified' if result.model_error else '')
+        record['failure_stage'] = failure.get('stage', '')
+        # An explicitly attributed text is a direct request even if the gate fails.
+        # Preserve a valid stop and reject stale evidence rather than overriding it.
+        fallback = bool(result.model_error and envelope.speaker.method == 'user_selected'
+                        and result.control != 'stop' and record['failure_kind'] != 'stale')
+        record['fallback_to_main'] = fallback
+        record['gate_route'] = result.route
+        if fallback:
+            record.update(route='main', direct_reply='', waiting_reply='',
+                          main_prompt_hint=None, control='keep')
+        process.repository.add_history(HistoryRecord(subject_id=subject_id, kind=HistoryKind.FACT,
+            event_type='text_jev_diagnostics', content={'input': envelope.text,
+                'input_id': envelope.input_id, **record}, source_ids=()))
+        if result.model_error and not fallback:
+            # Failure is never reported as a successful background/control decision.
+            raise RuntimeError('入口判断失败（'+record['failure_kind']+'）：'+result.model_error)
         dialogue.input(subject_id, envelope.input_id, envelope.text, envelope.speaker.label)
+        judgment = result.items[0] if result.items else None
         scene_store.append(envelope.input_id, {'text':envelope.text, 'at':time()*1000,
-                                              'source':envelope.source, 'basis':'统一输入信封'})
+            'p': selected_code or 'unknown', 'source':envelope.source, 'basis':'统一输入信封',
+            'entry_status':'completed' if result.judged else 'failed',
+            'judgment': {'person':judgment.speaker_pick,'certainty':judgment.speaker_level,
+                         'why':judgment.speaker_reason} if judgment else {}}, codes=codes, labels=labels)
+        schedule_text_jev()
         utterance = SceneUtterance(envelope.text, envelope.speaker, 0, 0, input_id=envelope.input_id,
                                     received_at_ms=time()*1000, identity_note='统一信封来源：'+envelope.source)
         entry = dict(envelope.entry_timing)
-        entry.update(input_prepare_ms=record['input_prepare_ms'], jev_ms=record['ms'])
+        entry.update(input_prepare_ms=record['input_prepare_ms'], jev_ms=record['ms'],
+                     jev_fallback=fallback, jev_failure_kind=record['failure_kind'])
         return replace(envelope, jev_calls=(record,), current_utterances=(utterance,), entry_timing=entry,
                        delivery_context=dialogue.note(subject_id, exclude={envelope.input_id}))
+
+    async def flush_text_jev():
+        nonlocal text_jev_error, text_jev_writer
+        model = getattr(process, 'person_review_model', None) or getattr(jev, 'model', None)
+        if text_jev_writer is None:
+            text_jev_writer = JEVSceneWriter(model)
+        text_jev_writer.model = model
+        writer = text_jev_writer
+        for _ in range(4):
+            snapshot = text_jev_store.snapshot()
+            if not snapshot['events']:
+                return
+            prompt_activity_id = 'jev-scene-text-'+uuid4().hex
+            try:
+                main_reference = await asyncio.to_thread(process.person_review_scene, subject_id)
+                main_scene = main_reference.get('committed_scene', '')
+                scene, _ = await asyncio.to_thread(writer.run, subject_id, snapshot, main_scene,
+                    on_request=lambda request: process._record_step_input(request, model,
+                        subject_id=subject_id, activity_id=prompt_activity_id))
+                accepted = await asyncio.to_thread(text_jev_store.commit, snapshot, scene)
+                text_jev_error = '' if accepted else '片场结果过期，事件保留'
+            except Exception as exc:
+                text_jev_error = str(exc)
+                from jshi.voice.jev_errors import failure_details
+                failure = snapshot.get('failure') or failure_details(exc, 'output_schema' if isinstance(exc, ValueError) else 'internal')
+                process.repository.add_history(HistoryRecord(subject_id=subject_id, kind=HistoryKind.FACT,
+                    event_type='text_jev_scene_failure', content={**failure,
+                        'prompt_activity_id': prompt_activity_id,
+                        'model_raw_chars': len(snapshot.get('model_raw', '')),
+                        'model_raw': snapshot.get('model_raw', '')[:16000],
+                        'snapshot_version': snapshot['version'], 'generation': snapshot['generation']}, source_ids=()))
+                logging.getLogger(__name__).exception('Text JEV2 scene update failed; events retained')
+                return
+
+    def schedule_text_jev():
+        nonlocal text_jev_task
+        model = getattr(process, 'person_review_model', None) or getattr(jev, 'model', None)
+        if model is not None and getattr(jev, 'mode', 'split') != 'legacy' and (text_jev_task is None or text_jev_task.done()):
+            text_jev_task = asyncio.create_task(flush_text_jev())
+
+    def record_text_jev_delivery(result, incoming):
+        if getattr(jev, 'mode', 'split') == 'legacy' or not result.response_plan.verbal_text().strip():
+            return
+        text_jev_store.append('text-response:'+incoming.input_id,
+            {'p':'匠石', 'text':result.response_plan.verbal_text(), 'at':time()*1000,
+             'basis':'文字回应已安排发送，未确认页面显示或阅读'})
+        schedule_text_jev()
 
     async def flush_text_scene():
         nonlocal pending_text_write, text_write_error
@@ -3021,6 +3212,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             text_write_task = asyncio.create_task(flush_text_scene())
 
     async def finish_text_writes(app):
+        if text_jev_task is not None:
+            await asyncio.shield(text_jev_task)
         if text_write_task is not None:
             await asyncio.shield(text_write_task)
 
@@ -3201,6 +3394,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         return web.json_response({"busy": busy, "cleanup_stage": cleanup_stage, "asr": getattr(local, 'backend', 'local') if local is not None else config.asr_backend,
             'text_scene_writing': text_write_task is not None and not text_write_task.done(),
             'text_scene_write_error': text_write_error,
+            'text_jev_writing': text_jev_task is not None and not text_jev_task.done(),
+            'text_jev_error': text_jev_error,
             'asr_backends': {name: asdict(spec) for name, spec in ASR_BACKENDS.items()},
             'speech_policies': {'segment':config.segment_strategy,
                 'silence_ms':segment_settings(config).silence_ms,
@@ -3289,7 +3484,13 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     entry['entry_total_ms'] = round((monotonic()-received_mono)*1000, 1)
                     judged_envelope = replace(judged_envelope, entry_timing=entry)
                     control = judged_envelope.jev_calls[-1].get('control')
-                    if control == 'stop' or (control == 'keep' and judged_envelope.jev_calls[-1].get('route') not in {'main', 'self_reply'}):
+                    call = judged_envelope.jev_calls[-1]
+                    if call.get('fallback_to_main') and streaming:
+                        events.put_nowait({'type':'jev_fallback', 'failure_kind':call['failure_kind'],
+                                           'failure_stage':call['failure_stage']})
+                    if (judged_envelope.jev_calls[-1].get('route') in {'background', 'wait'}
+                            or (control == 'stop' and not judged_envelope.jev_calls[-1].get('silent_operation'))
+                            or (control == 'keep' and judged_envelope.jev_calls[-1].get('route') not in {'main', 'self_reply'})):
                         from types import SimpleNamespace
                         from jshi.subject.process import ActivityTiming
                         from jshi.core.contracts import utc_now
@@ -3353,11 +3554,13 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                             break
                         await response.write((json.dumps(event,ensure_ascii=False)+'\n').encode())
                     result = await asyncio.shield(job)
+                    record_text_jev_delivery(result, envelope)
                     event = {'type':'complete','reply':result.response_plan.verbal_text(),
                         'actions':[i.text for i in result.response_plan.items if i.channel=='embodied' and i.text.strip() and i.text.strip()!='无动作'],
                         'mode':result.response_plan.mode,'label':profile.label,
                         'scene_write':'none' if getattr(result,'route','main') in {'self_reply','control'} else 'background',
                         'route':getattr(result,'route','main'),
+                        'jev_fallback':bool(result.timing and result.timing.end_to_end.get('jev_fallback')),
                         'activity_id':str(getattr(result,'activity_id','')),
                         'timing':asdict(result.timing) if result.timing else None}
                     await response.write((json.dumps(event,ensure_ascii=False,default=str)+'\n').encode())
@@ -3375,10 +3578,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             except asyncio.CancelledError:
                 await job  # Keep the shared process reserved until its writes finish.
                 raise
+            record_text_jev_delivery(result, envelope)
             reply = result.action_text or ''
             return web.json_response({'reply': reply, 'mode': result.response_plan.mode,
                 'scene_write': 'none' if getattr(result,'route','main') in {'self_reply','control'} else 'background',
                 'route':getattr(result,'route','main'),
+                'jev_fallback':bool(result.timing and result.timing.end_to_end.get('jev_fallback')),
                 'timing': asdict(result.timing) if result.timing else None,
                 'label': profile.label, 'activity_id': str(getattr(result, 'activity_id', ''))},
                 headers={'Cache-Control': 'no-store'})

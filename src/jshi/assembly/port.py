@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Mapping, Protocol, Sequence
 
 from jshi.experienceledger import ContextViewState
+from jshi.memory.contracts import RecallRequestContext, RecallCandidateBatch
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class AssemblyContext:
     tool_entries: tuple[Mapping[str, Any], ...] | None = None
     recall_enabled: bool = True
     portrait_budget_chars: int = 800
+    recall_request: RecallRequestContext | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class AssemblyFragment:
     variant: str = ""
     alternatives: tuple[str, ...] = ()  # Existing complete dossier summaries, short to long views.
     portrait_levels: tuple[tuple[str, str], ...] = ()
+    recall_run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,7 @@ class LoadResult:
     fragments: tuple[AssemblyFragment, ...] = ()
     raw_items: tuple[object, ...] = ()
     skipped_ids: tuple[str, ...] = ()
+    recall_batch: RecallCandidateBatch | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,7 @@ class SourceLoadReport:
     budget: int = 0
     error: str | None = None
     elapsed_ms: float = 0.0
+    skipped_reasons: tuple[tuple[str, str], ...] = ()
 
 
 class AssemblySourcePort(Protocol):

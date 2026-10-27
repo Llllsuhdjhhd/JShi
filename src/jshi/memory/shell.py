@@ -45,18 +45,19 @@ class MemoryShell:
         interlocutor_object_id: str | None = None,
         level: int = 1,
         anchor_event_ids: tuple[str, ...] = (),
+        _candidate_mode: bool = False,
     ) -> Sequence[RecalledFragment]:
         context_object = interlocutor_object_id or object_id
         store = self.reflection_store
         adjustments = {}
-        if store is not None:
+        if store is not None and (not _candidate_mode or param('RECALL_FEEDBACK_ENABLED')):
             try:
-                adjustments = store.adjustments(subject_id, query, context_object)
+                adjustments = store.adjustments(subject_id, query, context_object, object_ids=object_ids)
             except Exception:
                 logging.getLogger(__name__).exception('reflection feedback read failed')
         positive = tuple(key for key, value in adjustments.items() if value > 0)
         expanded = limit
-        if adjustments and limit is not None and limit > 0:
+        if adjustments and not _candidate_mode and limit is not None and limit > 0:
             expanded = limit * int(param('REFLECTION_CANDIDATE_MULTIPLIER'))
         fragments = tuple(self._backend.recall(
             subject_id,
@@ -85,11 +86,19 @@ class MemoryShell:
                     # 在旧经历之间留少量新认识的位置，避免全放尾部后被组装预算裁掉。
                     for index, insight in enumerate(insights):
                         result.insert(min(len(result), 2 + index * max(1, int(1 / float(param('REFLECTION_RECALL_RATIO'))))), insight)
-                if not getattr(self._reflection_local, 'internal', False):
+                if not _candidate_mode and not getattr(self._reflection_local, 'internal', False):
                     store.observe(subject_id, query, context_object, fragments)
             except Exception:
                 logging.getLogger(__name__).exception('reflection recall enrichment failed')
         return tuple(result)
+
+    def recall_candidates(self, request):
+        """One bounded pool. Expansion belongs to the caller, never multiplies twice."""
+        return self.recall(request.subject_id, request.query_text,
+                           object_ids=request.object_ids,
+                           interlocutor_object_id=request.interlocutor_object_id,
+                           level=request.level, limit=request.candidate_limit,
+                           _candidate_mode=True)
 
     def memory_bytes(self, subject_id: str) -> int:
         fn = getattr(self._backend, 'memory_bytes', None)

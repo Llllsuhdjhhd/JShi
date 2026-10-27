@@ -118,6 +118,14 @@ class BatchDecision:
     route: str = ""  # background / wait / main / self_reply, independent of control.
     decision_reason: str = ""
     decision_refs: tuple[str, ...] = ()
+    interaction: str = "uncertain"
+    process_refs: tuple[str, ...] = ()
+    pending_refs: tuple[str, ...] = ()
+    entry_route: str = ""
+    stage_records: tuple[dict, ...] = ()
+    control_applied: bool = False
+    applied_epoch: int | None = None
+    silent_operation: bool = False
 
     @property
     def front_choice(self):
@@ -142,8 +150,11 @@ def explicit_name(text: str) -> str:
 
 class VoiceJEV:
     def __init__(self, model=None, *, budget_s: float = JEV_GATE_BUDGET_S,
-                 fallback_models=None, fallback_reserve_s: float = JEV_GATE_FALLBACK_RESERVE_S) -> None:
+                 fallback_models=None, fallback_reserve_s: float = JEV_GATE_FALLBACK_RESERVE_S, mode=None) -> None:
         self.model = model
+        self.mode = mode or os.getenv("JSHI_JEV_MODE", "split")
+        if self.mode not in {"split", "combined", "legacy", "serial"}:
+            raise ValueError("JSHI_JEV_MODE must be split, combined or legacy")
         self.budget_s = float(budget_s)
         self.fallback_models = (list(fallback_models) if fallback_models is not None
                                 else default_jev_fallback_models())
@@ -233,19 +244,20 @@ class VoiceJEV:
                 return try_fallback(exc)
             raise
 
-    def decide_envelope(self, subject_id, envelope, delivery, *, vision=None, on_request=None):
+    def decide_envelope(self, subject_id, envelope, delivery, *, vision=None, on_request=None, is_current=None):
         from jshi.core.inputpack import packet
         delivery = {**delivery, 'envelope': packet(envelope, vision, subject_id)}
+        selected_code = delivery.get('selected_person_code', 'P1')
         lines = envelope.current_utterances
         batch = [{'n': i, 'text': u.text, 'at': u.received_at_ms,
-                  'who': 'P1' if u.speaker.method == 'user_selected' else 'unknown', 'source': envelope.source, 'speaker': {'method': u.speaker.method},
+                  'who': selected_code if u.speaker.method == 'user_selected' else 'unknown', 'source': envelope.source, 'speaker': {'method': u.speaker.method},
                   'voice_evidence': {'strength': 'unavailable', 'basis': u.identity_note}}
                  for i, u in enumerate(lines, 1)]
         if not batch:
-            batch = [{'n': 1, 'text': envelope.text, 'who': 'P1' if envelope.speaker.method == 'user_selected' else 'unknown', 'at': delivery.get('now'),
+            batch = [{'n': 1, 'text': envelope.text, 'who': selected_code if envelope.speaker.method == 'user_selected' else 'unknown', 'at': delivery.get('now'),
                       'source': envelope.source, 'speaker': {'method': envelope.speaker.method},
                       'voice_evidence': {'strength': 'unavailable', 'basis': '非声音输入，无声纹证据'}}]
-        return self.decide_batch(subject_id, batch, delivery.get('unwritten', []), delivery, overlap=envelope.overlap, on_request=on_request)
+        return self.decide_batch(subject_id, batch, delivery.get('unwritten', []), delivery, overlap=envelope.overlap, on_request=on_request, is_current=is_current)
 
     def decide(self, subject_id: str, text: str, speaker: dict, delivery: dict, *, overlap: bool = False, on_request=None) -> InterruptDecision:
         normalized = text.strip().rstrip("。！!，,？?").strip()
@@ -290,7 +302,11 @@ class VoiceJEV:
                        and (row.get('speaker') or {}).get('method') == 'user_selected'
                        and re.fullmatch(r'P\d+', who)) else ''
 
-    def decide_batch(self, subject_id: str, batch: list, context: list, delivery: dict, *, overlap: bool = False, on_request=None) -> BatchDecision:
+    def decide_batch(self, subject_id: str, batch: list, context: list, delivery: dict, *, overlap: bool = False, on_request=None, on_entry=None, is_current=None) -> BatchDecision:
+        if self.mode != 'legacy' and self.model is not None and any(str(r.get('text', '')).strip() for r in batch):
+            from .jev_serial import decide_serial
+            return decide_serial(self, subject_id, batch, context, delivery, overlap=overlap,
+                                 on_request=on_request, on_entry=on_entry, is_current=is_current)
         result = self._decide_batch(subject_id, batch, context, delivery, overlap=overlap, on_request=on_request)
         result = self.enforce_completeness(result)
         bound = {row['n']: self._selected_text(row) for row in batch if self._selected_text(row)}
@@ -341,95 +357,8 @@ class VoiceJEV:
             action, reason = self._unavailable_hold(delivery, batch_reason='JEV接口暂不可用')
             return BatchDecision(action, reason, self._items_for(batch, 'no', '入口判断失败'),
                                  model_error=self._unavailable_error + '；60秒冷却期间不重复请求')
-        from .jev_prompts import ENTRY_INSTRUCTION
-        thin_batch = []
-        for row in batch:
-            who = str(row.get("who") or "")
-            code = who.split("（", 1)[0]
-            thin = {"i": row["n"], "p": code if re.fullmatch(r"P\d+", code) else "unknown", "at": row.get("at", row.get("at_ms")),
-                    "text": row["text"], "voice": dict(row.get("voice_evidence") or {})}
-            if '临时声音连续性' in str(thin['voice'].get('basis','')):
-                thin['identity'] = 'unresolved'
-                thin['continuity'] = {**thin['voice'], 'scope':'continuity_only'}
-                thin['voice'] = {'pick':'', 'strength':'weak', 'basis':'本句候选比较见candidates；程序未确认实名'}
-            if thin["p"] != "unknown" and who != code:
-                thin["name"] = who[len(code):].strip("（）")
-            if "track" in row:
-                thin["track"] = row["track"]
-            candidates = [{"p": c["who"],
-                           ("classification_score" if c.get('source') == 'personal_classifier' else "similarity"):
-                               round(c["score"], 3) if isinstance(c.get("score"), (int, float)) else None,
-                           "source": c.get("source", "voice"), "names": c.get("names", [])}
-                          for c in row.get("candidates", [])]
-            for packed,original in zip(candidates,row.get('candidates',[])):
-                if packed['source']=='personal_classifier':
-                    packed['validation']='limited' if original.get('verified') is False else 'cross_session'
-                    if isinstance(original.get('threshold'),(int,float)):
-                        packed['threshold']=round(original['threshold'],3)
-            if row.get('joint_evidence'):
-                thin['joint_evidence']=row['joint_evidence']
-            if candidates:
-                thin["candidates"] = candidates
-                ranked = sorted((c for c in candidates if isinstance(c.get('similarity'),(int,float))),key=lambda c:c['similarity'],reverse=True)
-                if ranked:
-                    thin['voice_ranking'] = {'first':ranked[0]['p'], 'similarity':ranked[0]['similarity']}
-                    if len(ranked)>1:
-                        thin['voice_ranking'].update(second=ranked[1]['p'],gap=round(ranked[0]['similarity']-ranked[1]['similarity'],3))
-                recent = [r for r in context if isinstance(r, dict) and r.get('p') in {c['p'] for c in candidates}
-                          and r.get('status') == 'recognized' and isinstance(r.get('at'), (int,float))
-                          and isinstance(thin['at'], (int,float)) and 0 <= thin['at'] - r['at'] <= 30000]
-                if recent:
-                    r = max(recent, key=lambda v:v['at'])
-                    thin['recent_confirmed'] = {'p':r['p'], 'gap_ms':round(thin['at']-r['at']),
-                        'same_track':bool(r.get('track') and r.get('track') == thin.get('track'))}
-            # Weak / unresolved / unidentified: attach same-track cluster continuity
-            # so JEV can keep one speaker without inventing a new recognized person.
-            voice_strength = str((thin.get('voice') or {}).get('strength')
-                                 or (row.get('voice_evidence') or {}).get('strength') or '')
-            needs_cluster = (thin.get('identity') == 'unresolved'
-                             or voice_strength in {'weak', 'unavailable'})
-            if needs_cluster and thin.get('track') and isinstance(thin.get('at'), (int, float)):
-                same_cluster = [r for r in context if isinstance(r, dict)
-                                and r.get('track') and r.get('track') == thin['track']
-                                and isinstance(r.get('at'), (int, float))
-                                and 0 <= thin['at'] - r['at'] <= 30000]
-                if same_cluster:
-                    prior = max(same_cluster, key=lambda v: v['at'])
-                    cont = dict(thin.get('continuity') or {'scope': 'continuity_only'})
-                    cont.update(same_cluster=True, prior_p=prior.get('p'),
-                                gap_ms=round(thin['at'] - prior['at']))
-                    judgment = prior.get('judgment') if isinstance(prior.get('judgment'), dict) else {}
-                    if judgment.get('person') and judgment['person'] not in {'', 'unknown', 'new'}:
-                        cont['prior_judgment'] = judgment['person']
-                    thin['continuity'] = cont
-            if row.get("short_voice_hint"):
-                thin["short_voice_hint"] = "同一短句重复拼接，辅助比较，不是新增证据"
-            if row.get('source'):
-                thin['source'] = row['source']
-            if row.get('overlap'):
-                thin['overlap'] = True
-            if self._selected_text(row):
-                thin['binding'] = {'person': thin['p'], 'certainty': 'confirmed', 'to_jiangshi': 'yes'}
-            thin_batch.append(thin)
-        from .scene_material import dialogue_row
-        payload = {"input": {"state": delivery.get("state", ""), "names": delivery.get("names_for_jiangshi", ["匠石"]),
-                             "unwritten": [dialogue_row(row) for row in context], "lines": thin_batch},
-                   "scene": delivery.get("jev_scene", ""), "now": delivery.get("now")}
-        for line in thin_batch:
-            line['evidence_ref'] = 'I' + str(line['i'])
-        payload['conversation'] = [{**row, 'evidence_ref': f'C{i}'}
-            for i, row in enumerate(delivery.get('conversation', []), 1)]
-        payload['playback'] = {k: delivery[k] for k in ('state', 'spoken', 'pending') if k in delivery}
-        if delivery.get('environment'):
-            payload['environment'] = delivery['environment']
-        payload['short_chat'] = delivery.get('short_chat', {'allowed':False})
-        payload['waiting'] = delivery.get('waiting', {'allowed':False})
-        packed = delivery.get('envelope')
-        if packed:
-            payload['input']['envelope'] = {**packed, 'parts':[
-                {k:v for k,v in p.items() if k != 'image_url'} for p in packed.get('parts', ())]}
-        from .jev_input import compact_jev_input
-        payload = compact_jev_input(payload)
+        from .jev_prompts import LEGACY_ENTRY_INSTRUCTION as ENTRY_INSTRUCTION
+        thin_batch, payload, packed = self._build_material(batch, context, delivery)
         schema = {"type": "object", "properties": {
             "items": {"type": "array", "items": {"type": "object", "properties": {
                 "i": {"type": "integer", "enum": [row['n'] for row in batch]}, "person": {"type": "string", "enum": sorted({"unknown", *[
@@ -550,12 +479,106 @@ class VoiceJEV:
                 return replace(self._from_legacy(InterruptDecision(action, str(data.get("reason", ""))[:200], rules.claimed_name), batch), model_raw=raw_text)
             raise ValueError("invalid JEV batch")
         except Exception as exc:
-            if getattr(exc, 'code', None) in {401, 402, 403}:
+            status = getattr(exc, 'status', None) or getattr(exc, 'code', None)
+            if status in {401, 402, 403}:
                 self._unavailable_until = monotonic() + 60
-                self._unavailable_error = f'{type(exc).__name__}: HTTP {exc.code}'
+                self._unavailable_error = f'{type(exc).__name__}: HTTP {status}'
             action, reason = self._unavailable_hold(delivery, batch_reason='未能初判')
             return BatchDecision(action, reason, self._items_for(batch, "no", "未能初判"), rules.claimed_name, False,
                 model_raw=raw_text, model_error=f"{type(exc).__name__}: {exc}")
+
+    def _build_material(self, batch, context, delivery):
+        thin_batch = []
+        for row in batch:
+            who = str(row.get("who") or "")
+            code = who.split("（", 1)[0]
+            thin = {"i": row["n"], "p": code if re.fullmatch(r"P\d+", code) else "unknown", "at": row.get("at", row.get("at_ms")),
+                    "text": row["text"], "voice": dict(row.get("voice_evidence") or {})}
+            if '临时声音连续性' in str(thin['voice'].get('basis','')):
+                thin['identity'] = 'unresolved'
+                thin['continuity'] = {**thin['voice'], 'scope':'continuity_only'}
+                thin['voice'] = {'pick':'', 'strength':'weak', 'basis':'本句候选比较见candidates；程序未确认实名'}
+            if thin["p"] != "unknown" and who != code:
+                thin["name"] = who[len(code):].strip("（）")
+            if "track" in row:
+                thin["track"] = row["track"]
+            candidates = [{"p": c["who"],
+                           ("classification_score" if c.get('source') == 'personal_classifier' else "similarity"):
+                               round(c["score"], 3) if isinstance(c.get("score"), (int, float)) else None,
+                           "source": c.get("source", "voice"), "names": c.get("names", [])}
+                          for c in row.get("candidates", [])]
+            for packed,original in zip(candidates,row.get('candidates',[])):
+                if packed['source']=='personal_classifier':
+                    packed['validation']='limited' if original.get('verified') is False else 'cross_session'
+                    if isinstance(original.get('threshold'),(int,float)):
+                        packed['threshold']=round(original['threshold'],3)
+            if row.get('joint_evidence'):
+                thin['joint_evidence']=row['joint_evidence']
+            if candidates:
+                thin["candidates"] = candidates
+                ranked = sorted((c for c in candidates if isinstance(c.get('similarity'),(int,float))),key=lambda c:c['similarity'],reverse=True)
+                if ranked:
+                    thin['voice_ranking'] = {'first':ranked[0]['p'], 'similarity':ranked[0]['similarity']}
+                    if len(ranked)>1:
+                        thin['voice_ranking'].update(second=ranked[1]['p'],gap=round(ranked[0]['similarity']-ranked[1]['similarity'],3))
+                recent = [r for r in context if isinstance(r, dict) and r.get('p') in {c['p'] for c in candidates}
+                          and r.get('status') == 'recognized' and isinstance(r.get('at'), (int,float))
+                          and isinstance(thin['at'], (int,float)) and 0 <= thin['at'] - r['at'] <= 30000]
+                if recent:
+                    r = max(recent, key=lambda v:v['at'])
+                    thin['recent_confirmed'] = {'p':r['p'], 'gap_ms':round(thin['at']-r['at']),
+                        'same_track':bool(r.get('track') and r.get('track') == thin.get('track'))}
+            # Weak / unresolved / unidentified: attach same-track cluster continuity
+            # so JEV can keep one speaker without inventing a new recognized person.
+            voice_strength = str((thin.get('voice') or {}).get('strength')
+                                 or (row.get('voice_evidence') or {}).get('strength') or '')
+            needs_cluster = (thin.get('identity') == 'unresolved'
+                             or voice_strength in {'weak', 'unavailable'})
+            if needs_cluster and thin.get('track') and isinstance(thin.get('at'), (int, float)):
+                same_cluster = [r for r in context if isinstance(r, dict)
+                                and r.get('track') and r.get('track') == thin['track']
+                                and isinstance(r.get('at'), (int, float))
+                                and 0 <= thin['at'] - r['at'] <= 30000]
+                if same_cluster:
+                    prior = max(same_cluster, key=lambda v: v['at'])
+                    cont = dict(thin.get('continuity') or {'scope': 'continuity_only'})
+                    cont.update(same_cluster=True, prior_p=prior.get('p'),
+                                gap_ms=round(thin['at'] - prior['at']))
+                    judgment = prior.get('judgment') if isinstance(prior.get('judgment'), dict) else {}
+                    if judgment.get('person') and judgment['person'] not in {'', 'unknown', 'new'}:
+                        cont['prior_judgment'] = judgment['person']
+                    thin['continuity'] = cont
+            if row.get("short_voice_hint"):
+                thin["short_voice_hint"] = "同一短句重复拼接，辅助比较，不是新增证据"
+            if row.get('source'):
+                thin['source'] = row['source']
+            if row.get('overlap'):
+                thin['overlap'] = True
+            if self._selected_text(row):
+                thin['binding'] = {'person': thin['p'], 'certainty': 'confirmed', 'to_jiangshi': 'yes'}
+            thin_batch.append(thin)
+        from .scene_material import dialogue_row
+        payload = {"input": {"state": delivery.get("state", ""), "names": delivery.get("names_for_jiangshi", ["匠石"]),
+                             "unwritten": [dialogue_row(row) for row in context], "lines": thin_batch},
+                   "scene": delivery.get("jev_scene", ""), "now": delivery.get("now")}
+        for line in thin_batch:
+            line['evidence_ref'] = 'I' + str(line['i'])
+        payload['conversation'] = [{**row, 'evidence_ref': f'C{i}'}
+            for i, row in enumerate(delivery.get('conversation', []), 1)]
+        payload['playback'] = {k: delivery[k] for k in ('state', 'spoken', 'pending') if k in delivery}
+        if delivery.get('environment'):
+            payload['environment'] = delivery['environment']
+        payload['short_chat'] = delivery.get('short_chat', {'allowed':False})
+        payload['waiting'] = delivery.get('waiting', {'allowed':False})
+        packed = delivery.get('envelope')
+        if packed:
+            payload['input']['envelope'] = {**packed, 'parts':[
+                {k:v for k,v in p.items() if k != 'image_url'} for p in packed.get('parts', ())]}
+        from .jev_input import compact_jev_input
+        if delivery.get("task_context"):
+            payload["task_context"] = delivery["task_context"]
+        payload = compact_jev_input(payload)
+        return thin_batch, payload, packed
 
     @staticmethod
     def _unavailable_hold(delivery: dict | None, *, batch_reason: str = '') -> tuple[str, str]:

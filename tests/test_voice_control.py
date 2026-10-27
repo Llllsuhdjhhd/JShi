@@ -120,7 +120,7 @@ def test_stop_reaches_player_even_if_dialogue_disk_write_fails(process,monkeypat
 ])
 def test_semantic_control_uses_one_model_call_without_keyword_override(utterance,control):
     model = ScriptedControl(control)
-    result = VoiceJEV(model).decide_batch('s',[{'n':1,'text':utterance}],[],{'state':'playing'})
+    result = VoiceJEV(model, mode='legacy').decide_batch('s',[{'n':1,'text':utterance}],[],{'state':'playing'})
     assert result.control == control and result.judged
     assert len(model.requests) == 1
     assert result.items[0].speaker_pick == 'unknown'  # Unknown identity does not prevent stopping.
@@ -144,7 +144,7 @@ def test_standalone_text_jev_question_is_shared_with_main(process):
     reply_state(process).prime('stone',first)
     model=ScriptedControl({'route':'self_reply','reply':'你要哪个城市的天气？'},'redirect','keep')
     async def run():
-        async with TestClient(TestServer(create_app(process,'stone',VoiceConfig(''),jev=VoiceJEV(model)))) as client:
+        async with TestClient(TestServer(create_app(process,'stone',VoiceConfig(''),jev=VoiceJEV(model, mode='legacy')))) as client:
             headers={'Origin':str(client.make_url('')).rstrip('/')}
             response=await client.post('/text-input',headers=headers,json={'object_id':'lux-id','text':'天气怎么样？'})
             assert (await response.json())['route']=='self_reply'
@@ -197,7 +197,7 @@ def test_jev_weather_question_reaches_following_main_context_after_playback(proc
     async def run():
         sent=[]
         async def send(message):sent.append(message)
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(model),scene_idle_s=60)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(model, mode='legacy'),scene_idle_s=60)
         c.person_reviewer=None
         try:
             before=len(process.cognition.requests)
@@ -238,7 +238,7 @@ def test_control_while_thinking_does_not_wait_for_old_model_or_revive_it(process
     async def run():
         sent=[]
         async def send(message):sent.append(message)
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(model),scene_idle_s=60)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(model, mode='legacy'),scene_idle_s=60)
         c.person_reviewer=None
         try:
             await c.typed('先回答第一个问题','lux-id')

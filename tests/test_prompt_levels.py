@@ -130,7 +130,7 @@ def test_jev_hint_reaches_real_main_request_and_pending_writer(process):
     async def run():
         async def send(message):
             pass
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate()), input_pause_s=.02)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate(), mode='legacy'), input_pause_s=.02)
         try:
             await c.accept(Transcript('匠石你好', 'A', 0, 2000, True))
             await asyncio.wait_for(c.queue.join(), 2)

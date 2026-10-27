@@ -178,14 +178,15 @@ def _parse_memory_ratings(data: Mapping[str, Any]) -> MemoryRatings:
         if fit not in _OBJECT_FIT:
             fit = "none"
         try:
-            helps = int(item.get("helps_understanding", 0) or 0)
+            raw_helps = item.get("helps_understanding")
+            helps = int(raw_helps) if raw_helps is not None and not isinstance(raw_helps, bool) else None
         except (TypeError, ValueError):
-            helps = 0
+            helps = None
         items.append(
             MemoryRating(
                 ref=ref,
                 relevance=relevance,
-                helps_understanding=min(max(helps, 0), 2),
+                helps_understanding=min(max(helps, 0), 2) if helps is not None else None,
                 used_in_reply=used,
                 misleading=bool(item.get("misleading", False)),
                 redundant=bool(item.get("redundant", False)),
@@ -554,7 +555,7 @@ class CognitionSkill(Skill[ModelResponse]):
         return _to_model_response(data, model=self.model_tag)
 
     def run(self, request: ModelRequest) -> ModelResponse:
-        req = replace(request, system_extra=self.system_extra(request))
+        req = replace(request, system_extra=self.system_extra(request), json_output=True)
         raw = self._model.generate(req)
         raw_text = raw.text or ""
         try:
@@ -605,7 +606,7 @@ class CognitionSkill(Skill[ModelResponse]):
         model = self._model
         if not hasattr(model, "generate_stream"):
             return self.run(request)
-        req = replace(request, system_extra=self.system_extra(request))
+        req = replace(request, system_extra=self.system_extra(request), json_output=True)
         raw: list[str] = []
 
         def _capture(chunks: Any) -> Any:

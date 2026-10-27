@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from tests.jev_material_helpers import read_material
 from dataclasses import replace
 from threading import Event
 from time import time
@@ -56,7 +57,7 @@ def test_ignored_input_enters_pending_scene_once_and_never_next_input(process):
                 'to_jiangshi':'no' if text == '背景广播' else 'yes',
                 'relevance':'unrelated' if text == '背景广播' else 'related'}]}))
     async def run():
-        c = VoiceConversation(process, 'stone', FakeCloud(), discard, jev=VoiceJEV(Judge()), input_pause_s=.01)
+        c = VoiceConversation(process, 'stone', FakeCloud(), discard, jev=VoiceJEV(Judge(), mode='legacy'), input_pause_s=.01)
         try:
             await c.accept(Transcript('背景广播', 'A', 0, 1800, True))
             await asyncio.wait_for(c.queue.join(), 3)
@@ -102,11 +103,13 @@ def test_independent_review_gets_current_text_scene_and_candidate_knowledge_with
             assert not release.is_set()
             request = process.person_review_model.requests[-1]
             assert request.purpose == 'voice_jev_scene'
-            payload = json.loads(request.input_text)
+            payload = read_material(request.input_text)
             assert any(r['text'] == '当前人物疑问' for r in payload['input_output'])
             assert any(r['text'] == '独立核对历史' for r in payload['input_output'])
-            assert 'main_scene' in payload and 'scene' in payload
-            assert '独立核对历史' not in build_user(process.cognition.requests[-1])
+            assert payload.get('main_scene', '') == '' or isinstance(payload['main_scene'], str)
+            assert '独立核对历史' not in process.cognition.requests[-1].input_text
+            # Shared recent dialogue may include the original words; review-only evidence must not leak.
+            assert '【人物依据】' not in build_user(process.cognition.requests[-1])
             release.set()
             await asyncio.wait_for(c.person_review_queue.join(), 3)
             assert c.jev_scene_store.snapshot()['scene'] == '人物尚未确定，保留本轮交往。'

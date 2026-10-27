@@ -29,6 +29,6 @@ def test_jev_parse_fallback_preserves_raw_output_and_error():
     class Model:
         def generate(self, request):
             return ModelResponse(model='test', text='invalid response')
-    result = VoiceJEV(Model()).decide_batch('stone', [{'n': 1, 'text': '这是什么情况？'}], [], {})
+    result = VoiceJEV(Model(), mode='legacy').decide_batch('stone', [{'n': 1, 'text': '这是什么情况？'}], [], {})
     assert not result.judged and result.action == 'ignore' and result.items[0].to_jiangshi == 'no'
     assert result.model_raw == 'invalid response' and result.model_error

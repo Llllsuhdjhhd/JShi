@@ -33,7 +33,7 @@ class Gate:
 @pytest.mark.parametrize('state', ['completed', 'playing', 'thinking'])
 def test_keep_task_can_still_route_uncertain_identity_to_main(state):
     gate = Gate()
-    result = VoiceJEV(gate).decide_batch('stone', [{'n': 1, 'text': '对钱很感兴趣嘛。哼。'}], [],
+    result = VoiceJEV(gate, mode='legacy').decide_batch('stone', [{'n': 1, 'text': '对钱很感兴趣嘛。哼。'}], [],
         {'state': state, 'conversation': [{'who': '匠石', 'text': '十五万指哪一笔？', 'at': 1000}]})
     assert result.action == 'respond' and result.route == 'main' and result.control == 'keep'
     assert result.needs_main_review and result.items[0].speaker_pick == 'unknown'
@@ -42,15 +42,15 @@ def test_keep_task_can_still_route_uncertain_identity_to_main(state):
 
 @pytest.mark.parametrize('route', ['background', 'wait'])
 def test_background_and_wait_cannot_cancel_current_task(route):
-    result = VoiceJEV(Gate(route, 'redirect')).decide_batch('stone', [{'n': 1, 'text': '我把葱吃掉'}], [], {'state': 'playing'})
+    result = VoiceJEV(Gate(route, 'redirect'), mode='legacy').decide_batch('stone', [{'n': 1, 'text': '我把葱吃掉'}], [], {'state': 'playing'})
     assert result.control == 'keep' and result.action == 'ignore' and result.route == route
     assert result.front_choice == route
 
 
 def test_unfinished_expression_still_waits_and_stop_still_stops():
-    result = VoiceJEV(Gate(complete='incomplete')).decide_batch('stone', [{'n': 1, 'text': '如果明天'}], [], {})
+    result = VoiceJEV(Gate(complete='incomplete'), mode='legacy').decide_batch('stone', [{'n': 1, 'text': '如果明天'}], [], {})
     assert result.route == 'wait' and result.action == 'ignore'
-    result = VoiceJEV(Gate(control='stop', complete='incomplete')).decide_batch('stone', [{'n': 1, 'text': '先停，我要'}], [], {})
+    result = VoiceJEV(Gate(control='stop', complete='incomplete'), mode='legacy').decide_batch('stone', [{'n': 1, 'text': '先停，我要'}], [], {})
     assert result.control == 'stop' and result.action == 'stop'
 
 
@@ -111,7 +111,7 @@ def test_invalid_routing_reference_preserves_identity_and_does_not_interrupt():
             raw = json.loads(super().generate(request).text)
             raw['decision_refs'] = ['C999']
             return ModelResponse(model='fake', text=json.dumps(raw))
-    result = VoiceJEV(Invalid()).decide_batch('stone', [{'n':1, 'text':'你说呢'}], [], {'state':'playing'})
+    result = VoiceJEV(Invalid(), mode='legacy').decide_batch('stone', [{'n':1, 'text':'你说呢'}], [], {'state':'playing'})
     assert result.judged and result.items[0].speaker_pick == 'unknown'
     assert result.control == 'keep' and result.route == 'background' and result.routing_error
 
@@ -144,7 +144,7 @@ def test_voice_keep_main_reaches_cognition_without_cancelling_task(process, play
     async def run():
         async def send(message):
             pass
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate()), input_pause_s=.01)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate(), mode='legacy'), input_pause_s=.01)
         try:
             old = c.delivery.begin('旧任务仍在播放。', 'lux-id') if playing else None
             if old:

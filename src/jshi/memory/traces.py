@@ -27,6 +27,11 @@ class RecallTrace:
     level: int = 1
     recalled_event_ids: tuple[str, ...] = ()
     skipped_ids: tuple[str, ...] = ()
+    run_id: str = ""
+    status: str = "legacy"
+    candidate_ids: tuple[str, ...] = ()
+    reused_ids: tuple[str, ...] = ()
+    elapsed_ms: float = 0.0
     created_at: datetime = field(default_factory=_utc_now)
 
     def to_json(self) -> dict[str, Any]:
@@ -39,6 +44,11 @@ class RecallTrace:
             "level": self.level,
             "recalled_event_ids": list(self.recalled_event_ids),
             "skipped_ids": list(self.skipped_ids),
+            "run_id": self.run_id,
+            "status": self.status,
+            "candidate_ids": list(self.candidate_ids),
+            "reused_ids": list(self.reused_ids),
+            "elapsed_ms": self.elapsed_ms,
             "created_at": _iso(self.created_at),
         }
 

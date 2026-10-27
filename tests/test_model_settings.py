@@ -247,13 +247,13 @@ def test_qwen_free_tier_error_is_specific_and_safe(monkeypatch):
 
 def test_global_low_keeps_entry_jev_non_thinking_across_restart(tmp_path):
     from jshi.voice.jev import VoiceJEV
-    settings=ModelSettings(tmp_path,process(tmp_path),VoiceJEV(EchoModel()))
+    settings=ModelSettings(tmp_path,process(tmp_path),VoiceJEV(EchoModel(), mode='legacy'))
     settings.services['deepseek']=services()['deepseek']
     profile={'effort':'low','choices':[{'service':'deepseek','model':'deepseek-v4-flash'}]}
     settings.save({'name':'all','profile':profile})
     assert settings.routes['cognition'].chain[0].effort=='low'
     assert settings.routes['voice_jev'].chain[0].effort=='off'
-    restored=ModelSettings(tmp_path,process(tmp_path),VoiceJEV(EchoModel()))
+    restored=ModelSettings(tmp_path,process(tmp_path),VoiceJEV(EchoModel(), mode='legacy'))
     assert restored.routes['voice_jev'].chain[0].effort=='off'
 
 

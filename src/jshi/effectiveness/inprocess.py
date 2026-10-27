@@ -6,6 +6,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
 
 from jshi.memory.strategy import RecallStrategyStore
 from jshi.models import MemoryRatings
@@ -18,6 +19,7 @@ from .examples import (
     candidate_from_ratings,
     features_from_rows,
     read_examples,
+    write_examples,
 )
 from .memory_analyzer import (
     ANALYZER_NAME,
@@ -46,6 +48,7 @@ class InProcessEffectiveness:
         suggestions_path: Path | str | None = None,
         evaluator: MemoryQualityEvaluator | None = None,
     ) -> None:
+        self._record_lock = RLock()
         self.ratings = ratings or JsonlRatingStore()
         self.strategy = strategy or RecallStrategyStore()
         self._reports_path = Path(reports_path) if reports_path is not None else None
@@ -72,17 +75,18 @@ class InProcessEffectiveness:
     ) -> None:
         if not ratings.has_content():
             return
-        self.ratings.append(row_from_ratings(subject_id, activity_id, ratings))
-        if self._candidate_path is not None:
-            self._write_candidate(subject_id, activity_id, ratings)
+        with self._record_lock:
+            self.ratings.append(row_from_ratings(subject_id, activity_id, ratings))
+            if self._candidate_path is not None:
+                self._write_candidate(subject_id, activity_id, ratings)
 
     def _write_candidate(
         self, subject_id: str, activity_id: str, ratings: MemoryRatings
     ) -> None:
         example = candidate_from_ratings(subject_id, activity_id, ratings)
-        self._candidate_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._candidate_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(example.to_dict(), ensure_ascii=False) + "\n")
+        existing = [item for item in read_examples(self._candidate_path)
+                    if not (item.subject_id == subject_id and item.context.get('activity_id') == activity_id)]
+        write_examples(self._candidate_path, (*existing, example))
 
     def pending_gap_query(self, subject_id: str) -> str:
         row = self.ratings.pending_gap(subject_id)
@@ -101,7 +105,8 @@ class InProcessEffectiveness:
 
     def run_due(self, subject_id: str) -> None:
         try:
-            self._run(subject_id)
+            with self._record_lock:
+                self._run(subject_id)
         except Exception:
             logger.exception("effectiveness run_due failed")
 

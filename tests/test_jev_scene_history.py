@@ -1,3 +1,4 @@
+from tests.jev_material_helpers import read_material
 import json
 
 import pytest
@@ -9,7 +10,7 @@ from jshi.voice.jev_scene import JEVSceneStore, JEVSceneWriter
 class Writer:
     def generate(self, request):
         self.request = request
-        self.data = json.loads(request.input_text)
+        self.data = read_material(request.input_text)
         return ModelResponse(model='fake', text='{"scene":"【当前情境】lux发来问候，未明确接续旧话题。"}')
 
 

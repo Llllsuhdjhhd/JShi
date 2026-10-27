@@ -75,7 +75,7 @@ def test_ratings_are_written_to_jsonl(tmp_path):
     rows = store.list("stone")
     assert len(rows) == 1
     assert rows[0].coverage == "thin"
-    assert rows[0].items[0]["ref"] == "memory:a"
+    assert rows[0].items == []  # The model invented a reference that was never shown.
 
 
 def test_analyzer_lowers_level_on_unrelated(tmp_path):

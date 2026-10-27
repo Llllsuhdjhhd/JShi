@@ -178,7 +178,7 @@ def test_releasing_large_deferred_batch_uses_backpressure_without_dropping(proce
     from tests.test_voice_window import Gate
     async def run():
         async def send(m):await asyncio.sleep(0)
-        gate=Gate();c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate))
+        gate=Gate();c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate, mode='legacy'))
         # Workers await self.queue dynamically; keep the queue object but reduce capacity.
         c.queue._maxsize=2
         try:
