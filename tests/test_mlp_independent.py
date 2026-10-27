@@ -25,7 +25,7 @@ def test_mlp_runs_during_stop_without_delaying_control_and_publishes_late_scores
         audio=SessionAudio();audio.append(b'\x01\x00'*16000)
         models=Models()
         c=VoiceConversation(process,'stone',FakeCloud(),send,sample_source=audio,
-            personal_speakers=models,jev=VoiceJEV(ScriptedControl('stop')))
+            personal_speakers=models,jev=VoiceJEV(ScriptedControl('stop'), mode='legacy'))
         c.person_reviewer=None
         try:
             c.active_turn={'state':'thinking'}

@@ -5,11 +5,13 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime
+from dataclasses import replace
 
 from jshi.core.params import introspection_enabled, reflection_param as param
 from jshi.models import ModelRequest
 from jshi.skill.base import SkillError
-from .memory_store import dump
+from .memory_store import dump, similarity
 from .thoughts import RecallEvaluationThought, RecallReprocessingThought, PressureComparisonThought
 
 logger = logging.getLogger(__name__)
@@ -149,47 +151,137 @@ class ReflectionExecutor:
             state = SubjectState(subject_id=subject, identity_summary='', current_stance='',
                                  provenance=Provenance(source='introspection'))
         request = ModelRequest(purpose='introspection', input_text=text, subject_state=state)
+        record = getattr(self.process, '_record_step_input', None)
+        if callable(record):
+            record(replace(request, system_extra=self.skills[mode].system_extra(request)), self.model,
+                   subject_id=subject, activity_id=getattr(self, '_record_activity_id', '') or 'reflection-' + str(time.time_ns()))
         result = self.skills[mode].run(request)
         # 已开始的模型请求无法强行取消；新输入到来则不继续后续处理。
         self.checkpoint()
         return result
 
-    def materials(self, subject, task):
+    def materials(self, subject, task, *, reprocess=False):
         items = json.loads(task['payload'])
         # 内部认识不能作为回忆再加工的种子，阻止递归复制。
-        items = [item for item in items if item.get('kind') != 'reflection_insight']
+        if reprocess:
+            items = [item for item in items if item.get('kind') != 'reflection_insight']
         selected = []
         size = 0
         budget = int(param('REFLECTION_CONTEXT_CHARS')) // 2
         for item in items:
             length = len(dump(item))
             if size + length > budget:
-                break
+                continue
             selected.append(item)
             size += length
         from jshi.reflection.scene import segment_text
         segments = self.process.activity_ledger.list_experiences(subject)
+        scope = set(json.loads(task.get('scope', '[]')))
         after = [segment_text(s) for s in segments
-                 if s.occurred_at.timestamp() >= task['created']]
+                 if task['created'] <= s.occurred_at.timestamp() <= task['created'] + float(param('RECALL_EVALUATION_WINDOW_SECONDS'))
+                 and (not task.get('run_id') or task.get('activity_id') in s.source_ids
+                      or (s.actor_object_id in scope and similarity(task['query'], s.text_raw or '') >= 0.2))]
         outcome = '\n'.join(after)[:budget // 2]
         return {'question': task['query'], 'events': selected, 'subsequent_exchange': outcome,
                 'main_cognition': json.loads(task.get('outcome', '{}')),
                 'note': '返回的候选不等于主认知真正使用；缺少结果证据时只评价相关性。'}
 
     def evaluate(self, subject, task):
+        self._record_activity_id = task.get('activity_id') or 'reflection-' + str(task['id'])
         materials = self.materials(subject, task)
-        answer = self.ask('evaluate', subject, materials)
+        payload, references = self.compact_materials(materials) if task.get('run_id') else (materials, {})
+        answer = self.ask('evaluate', subject, payload)
+        if task.get('run_id'):
+            answer['feedback'] = [dict(item, event_id=references[item['event_id']])
+                                  for item in answer['feedback'] if isinstance(item, dict)
+                                  and item.get('event_id') in references]
         visible = {item['event_id'] for item in materials['events']}
         self.store.save_feedback(task, [r for r in answer['feedback'] if isinstance(r, dict)], visible)
-        self.store.finish_stage(task['id'], 'reprocess')
+        self.store.save_evaluation(task, answer, visible)
+        reprocess = (answer.get('needs_reprocess') is True and bool(str(answer.get('reprocess_reason', '')).strip())
+                     and bool(materials['events'])) if task.get('run_id') else True
+        self.store.finish_stage(task['id'], 'reprocess' if reprocess else 'done')
+        if task.get('run_id'):
+            self.export_ratings(subject, task, answer, visible)
         self.audit(subject, 'recall_evaluation', {'observation': task['id'], 'visible_ids': sorted(visible), **answer})
 
+    @staticmethod
+    def compact_materials(materials):
+        """Only semantic evidence and request-local references reach the evaluator."""
+        references = {f'E{i}': item['event_id'] for i, item in enumerate(materials['events'], 1)}
+        reverse = {value: key for key, value in references.items()}
+        events = []
+        actors = {}
+        for code, item in zip(references, materials['events']):
+            stamp = item.get('occurred_at')
+            if stamp:
+                try:
+                    when = datetime.fromisoformat(str(stamp))
+                    stamp = when.strftime('%Y-%m-%d %H:%M %z')
+                except ValueError:
+                    stamp = None
+            actor_ids = tuple(dict.fromkeys((
+                *((item['object_id'],) if item.get('object_id') else ()),
+                *(item.get('interlocutor_object_ids') or ()),
+            )))
+            for ident in actor_ids:
+                actors.setdefault(ident, f'P{len(actors) + 1}')
+            events.append({'event_id': code, 'content': item.get('content') or item.get('text', ''),
+                           'kind': item.get('kind', ''), 'occurred_at': stamp,
+                           'actors': [actors[ident] for ident in actor_ids],
+                           'query_object_role': item.get('query_object_role'),
+                           'validity': item.get('validity', 'active')})
+        outcome = materials['main_cognition']
+        ratings = outcome.get('main_ratings') or {}
+        compact_ratings = [dict(item, ref=reverse[item['ref']]) for item in ratings.get('items', ())
+                           if item.get('ref') in reverse]
+        payload = dict(materials, events=events, main_cognition={
+            'visible': [reverse[ident] for ident in outcome.get('model_visible_ids', ()) if ident in reverse],
+            'planned_response': outcome.get('planned_response', []),
+            'response_status': outcome.get('response_status', 'unknown'),
+            'delivery_status': outcome.get('delivery_status', 'unknown'),
+            'usage': compact_ratings, 'coverage': ratings.get('coverage', 'unknown')})
+        return payload, references
+
+    def export_ratings(self, subject, task, answer, reviewed):
+        """One per-activity projection for quality analysis, never an independent score."""
+        from jshi.models import MemoryRating, MemoryRatings
+        outcome = json.loads(task.get('outcome', '{}'))
+        main = outcome.get('main_ratings') or {}
+        visible = set(outcome.get('model_visible_ids', ()))
+        ratings = {item['ref']: MemoryRating(**item) for item in main.get('items', ())
+                   if item.get('ref') in visible}
+        for item in answer.get('feedback', ()):
+            ident = item.get('event_id')
+            if ident not in visible or ident not in reviewed or ident in ratings:
+                continue
+            judgment = item.get('judgment')
+            if judgment not in {'helpful', 'irrelevant', 'misleading'}:
+                continue
+            ratings[ident] = MemoryRating(ref=ident,
+                relevance='related' if judgment == 'helpful' else 'unrelated' if judgment == 'irrelevant' else 'partial',
+                misleading=judgment == 'misleading')
+        coverage = main.get('coverage') or answer.get('coverage', '')
+        if coverage == 'unknown':
+            coverage = ''
+        value = MemoryRatings(items=tuple(ratings.values()), coverage=coverage,
+                              gap_query=main.get('gap_query') or answer.get('gap_query', ''))
+        effectiveness = getattr(self.process, 'effectiveness', None)
+        if effectiveness is not None and value.has_content():
+            effectiveness.record_ratings(subject, task['activity_id'], value)
+
     def reprocess(self, subject, task):
-        materials = self.materials(subject, task)
+        self._record_activity_id = task.get('activity_id') or 'reflection-' + str(task['id'])
+        materials = self.materials(subject, task, reprocess=True)
         if not materials['events']:
             self.store.finish_stage(task['id'], 'done')
             return
-        answer = self.ask('reprocess', subject, materials)
+        payload, references = self.compact_materials(materials) if task.get('run_id') else (materials, {})
+        answer = self.ask('reprocess', subject, payload)
+        if references:
+            answer['candidates'] = [dict(item, source_ids=[references[ref] for ref in item.get('source_ids', ())])
+                                    for item in answer['candidates'] if isinstance(item, dict)
+                                    and item.get('source_ids') and all(ref in references for ref in item['source_ids'])]
         ids = self.store.add_candidates(subject, [r for r in answer['candidates'] if isinstance(r, dict)],
                                        {r['event_id'] for r in materials['events']}, task['object_id'])
         self.store.set_candidates(task['id'], ids)

@@ -215,7 +215,7 @@ def test_independent_text_shows_waiting_ack_before_main_reply(process, monkeypat
                 'level':1,'recall_memory':False,'main_image':'omit',
                 'route':'main','reply':'','waiting_reply':'嗯，我想一下。'}))
     async def run():
-        app = create_app(process, 'stone', VoiceConfig(api_key=''), jev=VoiceJEV(Gate()))
+        app = create_app(process, 'stone', VoiceConfig(api_key=''), jev=VoiceJEV(Gate(), mode='legacy'))
         async with TestClient(TestServer(app)) as client:
             origin = str(client.make_url('')).rstrip('/')
             response = await client.post('/text-input', headers={

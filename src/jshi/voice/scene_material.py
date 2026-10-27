@@ -28,9 +28,8 @@ def identity_evidence(payload):
         result['joint'] = {k: joint[k] for k in ('state', 'voice_reliable', 'mlp_high', 'mlp_priority') if k in joint}
     candidates = []
     for item in payload.get('candidates', ()):
-        keys = ('p', 'similarity', 'classification_score', 'source', 'verified', 'threshold')
-        candidates.append({k: round(v, 3) if type(v) is float else v
-                           for k, v in item.items() if k in keys and v is not None})
+        from .jev_material import support_evidence
+        candidates.append(support_evidence(item))
     if candidates:
         result['candidates'] = candidates
     why = (payload.get('judgment') or {}).get('why')
@@ -52,7 +51,7 @@ def recent_scene_blocks(main_scene, cap=800):
         if age:
             label = age[1]
             minutes = re.fullmatch(r'(\d+)分钟前', label)
-            if not ('秒前' in label or label in {'刚才', '现在'} or minutes and int(minutes[1]) <= 5):
+            if not ('秒前' in label or label in {'刚才', '现在'} or minutes):
                 continue
         # Strip only the known host observation header, never user utterances.
         def observation(match):

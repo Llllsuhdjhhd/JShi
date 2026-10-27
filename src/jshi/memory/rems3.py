@@ -195,6 +195,8 @@ def from_recalled_fragments(raw: Sequence[Any] | None) -> tuple[RecalledFragment
                 source_ids=_as_tuple(getattr(item, "source_ids", ())),
                 score=float(getattr(item, "score", 0.0) or 0.0),
                 occurred_at=occurred_at,
+                validity=getattr(item, 'validity', 'active'),
+                supersedes=_as_tuple(getattr(item, 'supersedes', ())),
             )
         )
     return tuple(fragments)

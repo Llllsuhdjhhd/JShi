@@ -15,6 +15,12 @@
   display.onchange=()=>window.dispatchEvent(new CustomEvent('jshi-model-info',{detail:display.checked}));
   displayLabel.append(display,document.createTextNode(' 默认展开对话中的模型调用信息'));form.append(displayLabel);
   form.append(el('p','当前模型：'+row.current));
+  const jevMode=el('select');jevMode.append(new Option('两段串行：先判断入口，按需准备回应','split'),new Option('单次合并：一次完成入口与回应准备','combined'));
+  jevMode.value=state.jev_mode==='combined'?'combined':'split';
+  const jevLabel=el('label','JEV1处理方式');jevLabel.append(jevMode);form.append(jevLabel);
+  const modeSave=el('button','保存JEV1处理方式');modeSave.onclick=async()=>{
+   modeSave.disabled=true;try{state=await request({jev_mode:jevMode.value});render();status.textContent='已保存，后续输入使用所选处理方式。';}catch(e){status.textContent=e.message;}finally{modeSave.disabled=false;}
+  };form.append(modeSave);
   const select=el('select');select.append(new Option('沿用启动配置',''));
   for(const [service,s] of Object.entries(state.services))for(const model of s.models)select.append(new Option(model+' · '+s.label,service+'|'+model));
   const profile=state.global_profile||row.profile,choice=profile.choices?.[0];
@@ -43,7 +49,7 @@
    try{
     const value=values();
     if(value&&!state.services[value.service].has_key&&!key.value.trim())throw Error('请先在API Key栏粘贴密钥');
-    const data={name:'all',profile:{effort:effort.value,choices:value?[value]:[]}};
+    const data={name:'all',jev_mode:jevMode.value,profile:{effort:effort.value,choices:value?[value]:[]}};
     if(value)data.services={[value.service]:{endpoint:endpoint.value.trim(),api_key:key.value.trim()}};
     state=await request(data);render();status.textContent='已保存，后续所有用途统一使用 '+(value?.model||'启动配置')+'。';
    }catch(e){status.textContent=e.message;}finally{save.disabled=false;}

@@ -170,7 +170,7 @@ def test_candidate_worker_does_not_block_entry_and_playback_feedback_reaches_jev
         model = Capture()
         async def send(_): pass
         conversation = VoiceConversation(process,'stone',FakeCloud(),send,local_speakers=bank,
-                                         sample_source=audio,input_pause_s=0,jev=VoiceJEV(model))
+                                         sample_source=audio,input_pause_s=0,jev=VoiceJEV(model, mode='legacy'))
         try:
             conversation.interaction_feedback.played('prior',0,'怎么称呼你？',['lux-id'],['old-input'])
             from time import time

@@ -41,7 +41,7 @@ class ShortChatModel:
     (True, {'items':[{'i':1,'person':'P1','certainty':'tentative','why':'还不确定'}]}, 'web_text', False, ''),
 ])
 def test_short_reply_requires_ready_person_and_minimal_route(ready, changes, source, overlap, expected):
-    result = VoiceJEV(ShortChatModel(**changes)).decide_batch('stone',
+    result = VoiceJEV(ShortChatModel(**changes), mode='legacy').decide_batch('stone',
         [{'n':1, 'text':'你好', 'who':'P1', 'source':source}], [],
         {'short_chat':{'allowed':ready}}, overlap=overlap)
     assert result.direct_reply == expected
@@ -70,7 +70,7 @@ def test_loaded_materials_are_ephemeral_scoped_and_reused_across_sessions(proces
 def test_web_first_turn_main_then_short_reply_skips_main_and_memory(process, streaming):
     model = ShortChatModel()
     async def run():
-        async with TestClient(TestServer(create_app(process, 'stone', VoiceConfig(api_key=''), jev=VoiceJEV(model)))) as client:
+        async with TestClient(TestServer(create_app(process, 'stone', VoiceConfig(api_key=''), jev=VoiceJEV(model, mode='legacy')))) as client:
             headers = {'Origin':str(client.make_url('')).rstrip('/')}
             first = await client.post('/text-input', headers=headers, json={'text':'你好','object_id':'lux-id'})
             assert first.status == 200, await first.text()
@@ -127,7 +127,7 @@ def test_voice_short_reply_and_playback_do_not_write_memories(process, source):
     async def run():
         sent = []
         async def send(message): sent.append(message)
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(ShortChatModel()),
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(ShortChatModel(), mode='legacy'),
                               scene_idle_s=60, input_pause_s=.01)
         try:
             if source == 'microphone_live':

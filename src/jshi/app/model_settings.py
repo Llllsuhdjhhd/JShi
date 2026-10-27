@@ -37,6 +37,8 @@ class ModelSettings:
     def __init__(self, root, process, jev, on_paid=None, on_status=None):
         self.path = Path(root)/'model_settings.local.json'
         self.lock = RLock()
+        self.jev = jev
+        self.jev_mode = getattr(jev, 'mode', 'split')
         self.routes = {}
         for name, port in [('cognition',process.cognition),('write_zone',process.write_zone)]:
             if hasattr(port,'_skill'):
@@ -61,14 +63,18 @@ class ModelSettings:
             original = visual.model.transport
             class OriginalVision:
                 name = visual.config.model
-                def chat(self, messages, max_tokens=None):
+                def chat(self, messages, max_tokens=None, *, response_format=None):
                     payload={'model':self.name,'messages':messages,'max_tokens':max_tokens or 1200,'stream':False}
+                    if response_format:
+                        payload['response_format'] = {'type': response_format}
                     result=original(payload)
                     return ModelResponse(text=result['choices'][0]['message']['content'],model=self.name)
             route=RoutedModel(OriginalVision())
             self.routes['vision']=route
             def send(payload):
-                result=route.chat(payload['messages'],payload.get('max_tokens'))
+                options = ({'response_format': payload['response_format']['type']}
+                           if payload.get('response_format') else {})
+                result=route.chat(payload['messages'],payload.get('max_tokens'), **options)
                 return {'choices':[{'message':{'content':result.text}}]}
             visual.model.transport=send
         self.originals = {name:route.chain for name,route in self.routes.items()}
@@ -90,6 +96,11 @@ class ModelSettings:
         self.global_profile = None
         if self.path.exists():
             saved=json.loads(self.path.read_text(encoding='utf8'))
+            self.jev_mode = saved.get('jev_mode', self.jev_mode)
+            if self.jev_mode not in {'split', 'combined', 'legacy', 'serial'}:
+                self.jev_mode = 'split'
+            if self.jev is not None:
+                self.jev.mode = self.jev_mode
             self.services.update(saved.get('services',{}))
             self.profiles=saved.get('profiles',{})
             self.global_profile=saved.get('global_profile')
@@ -111,7 +122,7 @@ class ModelSettings:
                 rows[name]={'label':LABELS[name],'current':route.name,'last':dict(route.last),
                     'profile':self.profiles.get(name,{'choices':[], 'effort':effort})}
             services={k:{field:v for field,v in s.items() if field!='api_key'}|{'has_key':bool(s.get('api_key')),'models':MODELS.get(k,[])} for k,s in self.services.items()}
-            return {'rows':rows,'services':services,'global_profile':self.global_profile}
+            return {'rows':rows,'services':services,'global_profile':self.global_profile, 'jev_mode':self.jev_mode}
 
     def _chain(self, profile, services, purpose=None):
         choices=profile.get('choices',[])
@@ -149,6 +160,9 @@ class ModelSettings:
 
     def save(self, data):
         with self.lock:
+            mode = data.get('jev_mode', self.jev_mode)
+            if mode not in {'split', 'combined', 'legacy', 'serial'}:
+                raise ValueError('JEV1模式无效')
             services={k:dict(v) for k,v in self.services.items()}
             for name,raw in data.get('services',{}).items():
                 if name not in MODELS: raise ValueError('未知服务')
@@ -182,10 +196,13 @@ class ModelSettings:
             elif name and chain is not None: updates[name]=chain
             self.path.parent.mkdir(parents=True,exist_ok=True)
             temp=self.path.with_suffix('.tmp')
-            temp.write_text(json.dumps({'services':services,'profiles':profiles,'global_profile':global_profile},ensure_ascii=False,indent=2),encoding='utf8')
+            temp.write_text(json.dumps({'services':services,'profiles':profiles,'global_profile':global_profile,'jev_mode':mode},ensure_ascii=False,indent=2),encoding='utf8')
             temp.replace(self.path)
             self.services,self.profiles=services,profiles
             self.global_profile=global_profile
+            self.jev_mode = mode
+            if self.jev is not None:
+                self.jev.mode = mode
             for n,models in updates.items(): self.routes[n].replace(models)
             return self.public()
 

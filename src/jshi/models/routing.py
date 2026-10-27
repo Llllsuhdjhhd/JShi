@@ -12,7 +12,7 @@ from urllib.request import Request
 
 from jshi.models.http_pool import urlopen
 
-from .base import ModelResponse
+from .base import ModelResponse, deepseek_json_output
 from .prompt import build_system, build_user
 
 
@@ -35,7 +35,7 @@ class ProviderModel:
         self.max_tokens = max_tokens
         self.timeout = self.DEFAULT_TIMEOUT_S if timeout is None else float(timeout)
 
-    def _payload(self, messages, stream=False, max_tokens=None):
+    def _payload(self, messages, stream=False, max_tokens=None, response_format=None):
         service = self.service
         if service['protocol'] == 'gemini':
             system, contents = [], []
@@ -56,6 +56,8 @@ class ProviderModel:
                         parts.append({'inlineData':{'mimeType':head[5:].split(';')[0], 'data':data}})
                 contents.append({'role':'model' if message['role']=='assistant' else 'user','parts':parts})
             config = {}
+            if response_format == 'json_object':
+                config['responseMimeType'] = 'application/json'
             if self.name.startswith('gemini-3'):
                 if self.effort == 'off':
                     raise ValueError('Gemini 3不支持完全关闭思考，请选最低或轻量')
@@ -73,6 +75,8 @@ class ProviderModel:
             headers = {'x-goog-api-key':service['api_key']}
         else:
             body = {'model':self.name,'messages':messages,'stream':stream}
+            if response_format:
+                body['response_format'] = {'type': response_format}
             if service.get('thinking_style')=='qwen':
                 body['enable_thinking']=self.effort not in {'off','minimal'}
                 if body['enable_thinking']:
@@ -126,13 +130,15 @@ class ProviderModel:
             return ''.join(p.get('text','') for p in (result.get('candidates') or [{}])[0].get('content',{}).get('parts',[]) if not p.get('thought'))
         return (result.get('choices') or [{}])[0].get('message',{}).get('content','')
 
-    def chat(self, messages, max_tokens=None):
-        with self._open(self._payload(messages,max_tokens=max_tokens)) as response:
+    def chat(self, messages, max_tokens=None, *, response_format=None):
+        with self._open(self._payload(messages,max_tokens=max_tokens, response_format=response_format)) as response:
             result = json.load(response)
         text = self._text(result)
         if not text: raise RuntimeError('模型未返回正文，可能被拦截或输出被截断')
         usage = result.get('usageMetadata') or result.get('usage') or {}
-        return ModelResponse(text=text,model=self.name,metadata={'usage':usage,'service':self.service['label']})
+        finish = (result.get('choices') or [{}])[0].get('finish_reason')
+        return ModelResponse(text=text,model=self.name,metadata={'usage':usage,'service':self.service['label'],
+            'finish_reason': finish, 'response_format': response_format})
 
     def _messages(self, request):
         content = [{'type':'text','text':build_user(request)}]
@@ -143,10 +149,17 @@ class ProviderModel:
         return [{'role':'system','content':build_system(request)},{'role':'user','content':content if len(content)>1 else content[0]['text']}]
 
     def generate(self, request):
+        if deepseek_json_output(request, self.name) and self.service['protocol'] != 'gemini':
+            return self.chat(self._messages(request),
+                             max_tokens=self.max_tokens or (8192 if request.purpose.startswith('voice_jev') else None),
+                             response_format='json_object')
         return self.chat(self._messages(request))
 
     def generate_stream(self, request):
-        with self._open(self._payload(self._messages(request),stream=True)) as response:
+        options = ({'response_format': 'json_object',
+                    'max_tokens': self.max_tokens or (8192 if request.purpose.startswith('voice_jev') else None)}
+                   if deepseek_json_output(request, self.name) and self.service['protocol'] != 'gemini' else {})
+        with self._open(self._payload(self._messages(request),stream=True, **options)) as response:
             for line in response:
                 line = line.decode('utf8').strip()
                 if not line.startswith('data:'): continue
@@ -289,14 +302,15 @@ class RoutedModel:
     def _retryable(self, exc):
         return isinstance(exc,ProviderFailure) and exc.retryable or isinstance(exc,(TimeoutError,ConnectionError,URLError))
 
-    def chat(self, messages, max_tokens=None):
+    def chat(self, messages, max_tokens=None, *, response_format=None):
         chain = self._snapshot()
         failed = []
         for index, model in enumerate(chain):
             try:
                 with self._observe(model):
                     self._notify_paid(model)
-                    result = model.chat(messages,max_tokens=max_tokens)
+                    options = {'response_format': response_format} if response_format else {}
+                    result = model.chat(messages,max_tokens=max_tokens, **options)
                 reason = failed[0]['reason'] if failed else ''
                 self._note(model, index, degraded=bool(failed), fallback_reason=reason, failed=failed)
                 return result

@@ -201,7 +201,7 @@ class Skill(ABC, Generic[T]):
 
     def run(self, request: ModelRequest) -> T:
         """执行 skill：把角色/说明并入 system（system_extra），input_text 保持任务。"""
-        req = replace(request, system_extra=self.system_extra(request))
+        req = replace(request, system_extra=self.system_extra(request), json_output=True)
         raw = self._model.generate(req)
         raw_text = raw.text or ""
         try:
@@ -229,7 +229,7 @@ class Skill(ABC, Generic[T]):
         model = self._model
         if not hasattr(model, "generate_stream"):
             return self.run(request)
-        req = replace(request, system_extra=self.system_extra(request))
+        req = replace(request, system_extra=self.system_extra(request), json_output=True)
 
         raw: list[str] = []
 

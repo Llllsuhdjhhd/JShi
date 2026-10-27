@@ -15,7 +15,7 @@ from .ratings import RatingRow
 from .strategy import MemoryRecallStrategy, utc_now
 
 ANALYZER_NAME = "memory_quality"
-ANALYZER_VERSION = "rules-v1"
+ANALYZER_VERSION = "rules-v2"
 MIN_UNANALYZED_ROWS = 8
 REPORT_INTERVAL = timedelta(hours=24)
 UNRELATED_RATIO = 0.5

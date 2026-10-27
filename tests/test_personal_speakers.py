@@ -556,7 +556,7 @@ def test_jev_classification_scores_are_not_voiceprint_similarities(process):
               'voice_evidence': {'pick': 'P1', 'strength': 'clear', 'basis': '个人分类'},
               'candidates': [{'who': 'P1', 'score': .982345, 'source': 'personal_classifier'},
                              {'who': 'P2', 'score': .55, 'source': 'voiceprint'}]}]
-    VoiceJEV(process.cognition).decide_batch('stone', batch, [], {}, on_request=requests.append)
+    VoiceJEV(process.cognition, mode='legacy').decide_batch('stone', batch, [], {}, on_request=requests.append)
     payload = json.loads(requests[0].input_text)
     line = payload['input']['lines'][0]
     first, second = line['candidates']

@@ -21,16 +21,43 @@ class MemoryThought(Skill[dict]):
 class RecallEvaluationThought(MemoryThought):
     name = 'recall_evaluation'
     required = ('feedback',)
-    instruction = """你在评价一次回忆，以当时的问题和后续交流为依据。
+
+    def parse(self, data):
+        value = super().parse(data)
+        value['feedback'] = [item for item in value['feedback'] if isinstance(item, dict)
+                             and isinstance(item.get('event_id'), str)
+                             and isinstance(item.get('judgment'), str)
+                             and item.get('judgment') in {'helpful', 'irrelevant', 'misleading', 'neutral'}
+                             and isinstance(item.get('reason'), str) and item['reason'].strip()]
+        if not isinstance(value.get('coverage'), str) or value['coverage'] not in {'sufficient', 'thin', 'missing', 'unknown'}:
+            value['coverage'] = 'unknown'
+        value['gap_query'] = value.get('gap_query', '') if isinstance(value.get('gap_query', ''), str) else ''
+        value['needs_reprocess'] = value.get('needs_reprocess') is True
+        reason = value.get('reprocess_reason', '')
+        value['reprocess_reason'] = reason.strip() if isinstance(reason, str) else ''
+        return value
+
+    instruction = """用途：评价一次回忆，为后续检索提供有依据的反馈。
+输入：当时的问题、候选事件、主认知实际可见与使用声明、回应交付状态及相关后续交流。事件代号仅在本请求有效。
+目标任务：
 候选相关性、进入上下文、实际使用、确实帮助了结果是不同的事情。没有后续证据时只评相关性，
 不要宣称解决了问题。只能评价材料里有 event_id 的事件，不对没看过的事件评分。
+零结果不自动表示失败；旁聊可能无需回忆，询问旧约定却缺证据才可能有缺口。计划不等于已交付，未引用不等于无用，未知不当成否定。
+只有材料支持纠正旧认识、出现冲突或新的关系线索时才建议再加工；仅仅被召回或不相关不构成新认识。
+输出：
 输出 feedback 数组，每项 event_id、judgment(helpful/irrelevant/misleading/neutral)、reason。
-说明具体贡献或问题，主观判断保留不确定性。遗漏只能在理由中说明，不能编造事件 ID。"""
+说明具体贡献或问题，主观判断保留不确定性。遗漏只能在理由中说明，不能编造事件 ID。
+可补充 coverage(sufficient/thin/missing/unknown)、gap_query、needs_reprocess(布尔)、reprocess_reason；缺乏依据时coverage为unknown，needs_reprocess为false。"""
     schema = {'type': 'object', 'properties': {'feedback': {'type': 'array', 'items': {
         'type': 'object', 'properties': {'event_id': {'type': 'string'},
         'judgment': {'enum': ['helpful', 'irrelevant', 'misleading', 'neutral']},
         'reason': {'type': 'string'}}, 'required': ['event_id', 'judgment', 'reason']}}},
         'required': ['feedback']}
+    schema['properties'].update({
+        'coverage': {'enum': ['sufficient', 'thin', 'missing', 'unknown']},
+        'gap_query': {'type': 'string'}, 'needs_reprocess': {'type': 'boolean'},
+        'reprocess_reason': {'type': 'string'},
+    })
 
 
 class RecallReprocessingThought(MemoryThought):

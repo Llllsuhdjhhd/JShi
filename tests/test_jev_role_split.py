@@ -1,3 +1,4 @@
+from tests.jev_material_helpers import read_material
 import asyncio
 import json
 from threading import Event
@@ -19,7 +20,7 @@ class IdentityGate:
 
 
 def test_identity_protocol_does_not_gate_background_or_playback():
-    gate = VoiceJEV(IdentityGate())
+    gate = VoiceJEV(IdentityGate(), mode='legacy')
     for state in ('completed', 'playing'):
         result = gate.decide_batch('stone', [{'n': 1, 'text': '这把木镐给你'}], [], {'state': state})
         assert result.judged and result.action == 'respond'
@@ -48,7 +49,7 @@ def test_first_judgment_precedes_scene_and_main_receives_context(process):
     async def run():
         sent = []
         async def send(message): sent.append(message)
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(SlowGate()), input_pause_s=.01)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(SlowGate(), mode='legacy'), input_pause_s=.01)
         try:
             from time import time
             c.jev_scene_store.append('old', {'text': '此前两人在交流游戏', 'at': time()*1000 - 1000})
@@ -91,7 +92,7 @@ def test_second_scene_full_request_is_preserved(process):
                process._record_step_input(req, writer.model, subject_id='stone', activity_id='scene-example'))
     rows = process.step_inputs._read()
     call = next(r for r in rows if r.get('purpose') == 'voice_jev_scene')
-    user = json.loads(call['user_text'])
+    user = read_material(call['user_text'])
     assert user['input_output'][0]['identity']['person'] == 'P2'
     assert user['identity_evidence'][0]['voice']['strength'] == 'weak'
     assert any(r.get('hash') == call['system_hash'] for r in rows)

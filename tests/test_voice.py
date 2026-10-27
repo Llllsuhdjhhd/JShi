@@ -352,13 +352,13 @@ def test_jev_unavailable_does_not_infer_stop_from_words():
     class Broken:
         def generate(self,req):
             raise RuntimeError("model unavailable")
-    jev = VoiceJEV(Broken())
+    jev = VoiceJEV(Broken(), mode='legacy')
     assert jev.decide("stone","停一下",{},{}).action != "stop"
     d = {"object_id":"lux","state":"paused"}
-    assert VoiceJEV().decide("stone","嗯",{"object_id":"lux","status":"recognized"},d).action == "resume"
-    assert VoiceJEV().decide("stone","嗯",{"status":"unknown"},d).action == "resume"
-    assert VoiceJEV().decide("stone","我也想去",{},d,overlap=True).action == "resume"
-    assert VoiceJEV().decide("stone","我也想去",{},{} ,overlap=True).action == "ignore"
+    assert VoiceJEV(mode='legacy').decide("stone","嗯",{"object_id":"lux","status":"recognized"},d).action == "resume"
+    assert VoiceJEV(mode='legacy').decide("stone","嗯",{"status":"unknown"},d).action == "resume"
+    assert VoiceJEV(mode='legacy').decide("stone","我也想去",{},d,overlap=True).action == "resume"
+    assert VoiceJEV(mode='legacy').decide("stone","我也想去",{},{} ,overlap=True).action == "ignore"
 
 
 def test_jev_model_failure_keeps_playing_and_other_speaker_needs_judgment():
@@ -369,14 +369,14 @@ def test_jev_model_failure_keeps_playing_and_other_speaker_needs_judgment():
             return ModelResponse(text='{"action":"resume","reason":"旁人交谈"}',model="test")
     judge=Judge()
     d={"object_id":"lux","state":"playing","pending_text":"路线介绍"}
-    assert VoiceJEV(judge).decide("stone","今天你吃饭了吗",{"object_id":"other"},d).action=="resume"
+    assert VoiceJEV(judge, mode='legacy').decide("stone","今天你吃饭了吗",{"object_id":"other"},d).action=="resume"
     assert len(judge.requests)==1
     class Broken:
         def generate(self,req): raise RuntimeError("timeout")
-    assert VoiceJEV(Broken()).decide("stone","等会去哪",{},d).action=="resume"
+    assert VoiceJEV(Broken(), mode='legacy').decide("stone","等会去哪",{},d).action=="resume"
     # Idle / completed: unavailable must wait/ignore, never fail-open into respond.
-    assert VoiceJEV(Broken()).decide("stone","等会去哪",{},{"state":"completed"}).action=="ignore"
-    assert VoiceJEV(Broken()).decide("stone","等会去哪",{},{}).action=="ignore"
+    assert VoiceJEV(Broken(), mode='legacy').decide("stone","等会去哪",{},{"state":"completed"}).action=="ignore"
+    assert VoiceJEV(Broken(), mode='legacy').decide("stone","等会去哪",{},{}).action=="ignore"
 
 
 def test_pending_jev_does_not_pause_audio(process):
@@ -453,7 +453,7 @@ def test_streaming_synthesis_not_held_up_by_write_zone_and_stop_is_immediate(pro
         messages=[]
         async def send(payload): messages.append(payload)
         from tests.test_voice_control import ScriptedControl
-        c=VoiceConversation(process,"stone",FakeCloud(),send,jev=VoiceJEV(ScriptedControl("redirect","stop")))
+        c=VoiceConversation(process,"stone",FakeCloud(),send,jev=VoiceJEV(ScriptedControl("redirect","stop"), mode='legacy'))
         c.person_reviewer=None
         try:
             await c.accept(Transcript("你好","A",0,2000,True))
@@ -487,7 +487,7 @@ def test_late_cognition_callback_after_stop_is_suppressed(process):
         messages=[]
         async def send(payload): messages.append(payload)
         from tests.test_voice_control import ScriptedControl
-        c=VoiceConversation(process,"stone",FakeCloud(),send,jev=VoiceJEV(ScriptedControl("redirect","stop")))
+        c=VoiceConversation(process,"stone",FakeCloud(),send,jev=VoiceJEV(ScriptedControl("redirect","stop"), mode='legacy'))
         c.person_reviewer=None
         try:
             await c.accept(Transcript("你好","A",0,2000,True))

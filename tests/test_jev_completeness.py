@@ -24,7 +24,7 @@ def test_explicit_completeness_and_old_model_compatibility(value, expected):
             if value is not None:
                 data['utterance_complete'] = value
             return ModelResponse(model='fake',text=json.dumps(data))
-    result = VoiceJEV(Model()).decide_batch('stone',[{'n':1,'text':'如果明天下雨'}],[],{})
+    result = VoiceJEV(Model(), mode='legacy').decide_batch('stone',[{'n':1,'text':'如果明天下雨'}],[],{})
     assert result.utterance_complete == expected
     assert result.control == 'keep'
     assert result.judged
@@ -59,7 +59,7 @@ def test_incomplete_does_not_override_explicit_stop():
                 'items':[{'i':1,'person':'unknown','certainty':'unknown','why':'未知'}],
                 'level':1,'recall_memory':False,'main_image':'omit',
                 'utterance_complete':'incomplete','control':'stop','route':'main','reply':''}))
-    result=VoiceJEV(Model()).decide_batch('stone',[{'n':1,'text':'先别说，我还要'}],[],{'state':'playing'})
+    result=VoiceJEV(Model(), mode='legacy').decide_batch('stone',[{'n':1,'text':'先别说，我还要'}],[],{'state':'playing'})
     assert result.utterance_complete == 'incomplete'
     assert result.control == 'stop' and result.action == 'stop'
 
@@ -76,7 +76,7 @@ def test_incomplete_cannot_redirect_even_with_bound_text(source, state):
                 'route':'self_reply','reply':'错误抢答','waiting_reply':'我想一下'}))
     row={'n':1,'text':'如果明天','who':'P1','source':source,
          'speaker':{'method':'user_selected' if source=='web_text' else 'voiceprint'}}
-    result=VoiceJEV(Model()).decide_batch('stone',[row],[],{'state':state,
+    result=VoiceJEV(Model(), mode='legacy').decide_batch('stone',[row],[],{'state':state,
         'short_chat':{'allowed':True,'person_code':'P1'}})
     assert result.utterance_complete == 'incomplete'
     assert result.control == 'keep' and result.action == 'ignore'

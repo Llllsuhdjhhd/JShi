@@ -19,7 +19,7 @@ def test_missing_or_invalid_routing_does_not_discard_valid_identity(routing):
             return ModelResponse(model='test', text=json.dumps({
                 'items': [{'i': 1, 'person': 'P1', 'certainty': 'confirmed', 'why': '声纹明确匹配P1'}],
                 **routing}))
-    result = VoiceJEV(Judge()).decide_batch('stone', [{
+    result = VoiceJEV(Judge(), mode='legacy').decide_batch('stone', [{
         'n': 1, 'who': 'P1（lux）', 'text': '你好',
         'voice_evidence': {'pick': 'P1', 'strength': 'clear'}}], [], {})
     assert result.judged and not result.model_error
@@ -33,7 +33,7 @@ def test_invalid_identity_still_fails_even_when_routing_missing():
         def generate(self, request):
             return ModelResponse(model='test', text=json.dumps({'items': [
                 {'i': 1, 'person': 'P999', 'certainty': 'confirmed', 'why': '错误人选'}]}))
-    result = VoiceJEV(Judge()).decide_batch('stone', [{'n': 1, 'text': '你好'}], [], {})
+    result = VoiceJEV(Judge(), mode='legacy').decide_batch('stone', [{'n': 1, 'text': '你好'}], [], {})
     assert not result.judged and result.model_error
 
 

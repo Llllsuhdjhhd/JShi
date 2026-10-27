@@ -43,7 +43,7 @@ def test_jev_combines_physical_and_semantic_support(physical, semantic, relation
     raw = [{'n': 1, 'to_jiangshi': 'no', 'relevance': 'related', 'speaker': {
         'pick': 'P2' if semantic == 'P2' else 'P1', 'level': '确定', 'score': .8,
         'semantic_pick': semantic, 'semantic_reason': '原话接续', 'evidence_relation': relation}}]
-    decision = VoiceJEV()._from_items(raw, batch, '')
+    decision = VoiceJEV(mode='legacy')._from_items(raw, batch, '')
     item = decision.items[0]
     assert item.voice_pick == physical['pick'] and item.voice_strength == physical['strength']
     assert item.semantic_pick == semantic and item.semantic_reason == '原话接续'
@@ -238,9 +238,9 @@ def test_independent_review_distinguishes_two_unassigned_lines_and_passes_feedba
 
 
 def test_review_request_can_open_related_batch_without_forcing_speech():
-    decision = VoiceJEV()._from_items([{'n': 1, 'to_jiangshi': 'no', 'relevance': 'related'}], [{'n': 1}], '', needs_main_review=True)
+    decision = VoiceJEV(mode='legacy')._from_items([{'n': 1, 'to_jiangshi': 'no', 'relevance': 'related'}], [{'n': 1}], '', needs_main_review=True)
     assert decision.action == 'respond' and decision.needs_main_review
-    decision = VoiceJEV()._from_items([{'n': 1, 'to_jiangshi': 'no', 'relevance': 'unrelated'}], [{'n': 1}], '', needs_main_review=True)
+    decision = VoiceJEV(mode='legacy')._from_items([{'n': 1, 'to_jiangshi': 'no', 'relevance': 'unrelated'}], [{'n': 1}], '', needs_main_review=True)
     assert decision.action == 'ignore'
 
 
@@ -279,7 +279,7 @@ def test_independent_review_stays_advice_and_next_jev_receives_it(process):
     async def run():
         messages = []
         async def send(message): messages.append(message)
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Judge()), input_pause_s=.01)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Judge(), mode='legacy'), input_pause_s=.01)
         try:
             async def finish():
                 await asyncio.wait_for(c.queue.join(), 3)

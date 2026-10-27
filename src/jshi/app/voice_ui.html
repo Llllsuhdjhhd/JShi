@@ -550,6 +550,12 @@ function modelProgress(row,stage,terminal=false,atMs=null){
   ui.progress.textContent='处理状态：'+label;
   modelHistory(row,label);
   const mapped=phaseSteps[stage]||modelStage(label);
+  if(mapped&&phaseSteps[stage]){
+    const end=atMs??Date.now();
+    for(const step of ui.steps.values())if(step.key!==mapped[0]&&!step.calls.size&&step.state==='进行中'){
+      step.state='完成';step.ended=end;
+    }
+  }
   if(mapped)modelStep(row,...mapped,/结束|完成|judged/.test(stage)?'完成':'进行中',null,atMs);
   if(terminal){
     for(const step of ui.steps.values())if(!step.calls.size&&step.state==='进行中'){step.state=stage==='处理失败'?'中断':'完成';step.ended=Date.now();}
@@ -1105,10 +1111,16 @@ $('composer').onsubmit=async event=>{
   if(d.type==='accepted'){badge.textContent='已接收';return;}
   if(d.type==='flow_phase'){phase=phaseNames[d.stage]||d.stage;modelProgress(row,d.stage,false,d.at_ms);return;}
   if(d.type==='model_notice'){modelNotice(row,d.text);return;}
+  if(d.type==='jev_fallback'){
+    const kinds={authentication:'认证或权限',billing:'计费',rate_limit:'限流',timeout:'超时',transport:'网络连接',provider_http:'服务请求',model_call:'模型调用',request_record:'请求记录',cooldown:'接口冷却',output_json:'JSON解析',output_schema:'输出格式',routing:'路由校验',stale:'材料过期',internal:'程序内部',unclassified:'未分类'};
+    const reason=kinds[d.failure_kind]||d.failure_kind;
+    detailLine(extra,'入口判断失败（'+reason+'），已保留文字和所选人物，转交主认知处理。');
+    modelHistory(row,'入口判断失败（'+reason+'），转交主认知');return;
+  }
   if(d.type==='waiting_ack'){log('匠石 → '+(d.label||actor)+'：'+d.text,'reply');phase='匠石正在处理';$('text-status').textContent=phase;return;}
   if(d.reply&&!shown){replyRow=log('匠石 → '+(d.label||actor)+'：'+d.reply,'reply');shown=true;}
   if(d.type==='reply'){phase=shown?'回复已显示，正在完成本轮处理':'正在完成本轮处理';badge.textContent='已接收';$('text-status').textContent=phase;}
-  if(d.type==='complete'){modelProgress(row,'已完成',true);if(d.timing&&timingSummary(d.timing)){modelHistory(row,'服务端耗时：'+timingSummary(d.timing));updateModelPanel(row);}detailLine(extra,(d.route==='self_reply'?'JEV直接回答，未进入主认知。':'已进入主认知。')+(d.timing&&timingSummary(d.timing)?'\n'+timingSummary(d.timing):''));showActions(d.actions,replyRow);complete=true;badge.textContent=d.route==='self_reply'?'JEV 我回答':'已处理';phase=d.route==='self_reply'?'短时聊天，本轮未进入主流程和记忆写入。':(shown?'本轮已完成。':'本轮已完成，未开口（'+d.mode+'）。')+(d.scene_write==='background'?'记忆在后台整理，可继续发送。':'');}
+  if(d.type==='complete'){modelProgress(row,'已完成',true);if(d.timing&&timingSummary(d.timing)){modelHistory(row,'服务端耗时：'+timingSummary(d.timing));updateModelPanel(row);}detailLine(extra,(d.route==='self_reply'?'JEV直接回答，未进入主认知。':d.route==='control'?'入口判断结束，本轮未进入主认知。':d.jev_fallback?'入口判断失败后，已转交主认知处理。':'已进入主认知。')+(d.timing&&timingSummary(d.timing)?'\n'+timingSummary(d.timing):''));showActions(d.actions,replyRow);complete=true;badge.textContent=d.route==='self_reply'?'JEV 我回答':d.route==='control'?'未进入主认知':'已处理';phase=d.route==='self_reply'?'短时聊天，本轮未进入主流程和记忆写入。':(shown?'本轮已完成。':'本轮已完成，未开口（'+d.mode+'）。')+(d.scene_write==='background'?'记忆在后台整理，可继续发送。':'');}
  }
  try{const r=await fetch('/text-input',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/x-ndjson'},body:JSON.stringify({text,object_id})});if(!r.ok)throw Error(await r.text());
   if((r.headers.get('Content-Type')||'').includes('application/x-ndjson')){const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(line.trim())eventReceived(JSON.parse(line));}}buffer+=decoder.decode();if(buffer.trim())eventReceived(JSON.parse(buffer));if(!complete)throw Error('连接中断，未收到处理完成确认');}

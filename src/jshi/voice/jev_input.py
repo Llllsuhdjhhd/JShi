@@ -17,7 +17,7 @@ _WALL_MS = {'at', 'at_ms', 'scene_at', 'received_ms', 'captured_start_ms', 'capt
 _WALL_SECONDS = {
     'captured', 'completed', 'described_at', 'captured_at', 'received_at', 'source_time',
     'observed_at', 'completed_at', 'description_at',
-    'cached_at',
+    'cached_at', 'updated_at',
 }
 _DURATION_MS = {'start_ms', 'end_ms', 'gap_ms'}
 
@@ -48,7 +48,7 @@ def compact_jev_input(payload):
         if key in _MEDIA_KEYS:
             return alias(value, media, 'M')
         if key == 'ref':
-            return value if isinstance(value, str) and re.fullmatch(r'E[0-9]+', value) else alias(value, events, 'R')
+            return value if isinstance(value, str) and re.fullmatch(r'[EQ][0-9]+', value) else alias(value, events, 'R')
         if key in {'track', 'track_id'}:
             return alias(value, tracks, 'T')
         if type(value) in (int, float) and math.isfinite(value):

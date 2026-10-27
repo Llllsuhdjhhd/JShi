@@ -85,7 +85,7 @@ def test_low_voice_candidate_can_be_finally_confirmed_and_select_memory_independ
             return ModelResponse(model='gate',text=json.dumps({'level':3,'recall_memory':False,'control':'pass',
                 'items':[{'i':1,'person':'P2','certainty':'confirmed','to':'maybe','keep':'related',
                           'why':'候选持续领先，近期P2已确认，当前共同活动与接续综合支持'}]}))
-    result=VoiceJEV(Gate()).decide_batch('stone',[
+    result=VoiceJEV(Gate(), mode='legacy').decide_batch('stone',[
         {'n':1,'who':'P22（待定声音3）','track':'7','text':'看小狗在飞。',
          'voice_evidence':{'pick':'P22','strength':'weak'},'candidates':[{'who':'P2','score':.153}]}],
         [{'p':'P2','text':'不美好不简单。','at':1000}],{'jev_scene':'两人在家共同看东西，近期已确认P2。'})
@@ -107,7 +107,7 @@ def test_temporary_voice_group_is_not_presented_as_named_identity():
             assert p['voice_ranking']['first']=='P2'
             assert p['recent_confirmed']=={'p':'P2','gap_ms':3131,'same_track':True}
             return ModelResponse(model='gate',text='{"items":[{"i":1,"person":"P2","certainty":"tentative","to":"no","keep":"related","why":"候选领先且近期确认接续"}],"level":3,"recall_memory":false,"control":"pass"}')
-    result=VoiceJEV(Gate()).decide_batch('stone',[{'n':1,'who':'P22','track':'7','at':4131,
+    result=VoiceJEV(Gate(), mode='legacy').decide_batch('stone',[{'n':1,'who':'P22','track':'7','at':4131,
         'text':'看小狗在飞','voice_evidence':voice,'candidates':[{'who':'P2','score':.153}]}],
         [{'p':'P2','at':1000,'track':'7','status':'recognized','text':'前一句'}],{})
     assert result.items[0].speaker_pick=='P2'
@@ -126,7 +126,7 @@ def test_weak_unidentified_gets_ranking_and_same_cluster_continuity():
             assert p['continuity']['prior_judgment']=='P2'
             assert p['continuity']['gap_ms']==2000
             return ModelResponse(model='gate',text='{"items":[{"i":1,"person":"P2","certainty":"tentative","why":"同轨迹接续且候选领先"}],"level":3,"recall_memory":false,"control":"pass"}')
-    result=VoiceJEV(Gate()).decide_batch('stone',[{'n':1,'who':'unknown','track':'pending-a','at':5000,
+    result=VoiceJEV(Gate(), mode='legacy').decide_batch('stone',[{'n':1,'who':'unknown','track':'pending-a','at':5000,
         'text':'继续说','voice_evidence':voice,
         'candidates':[{'who':'P2','score':.555},{'who':'P3','score':.453}]}],
         [{'p':'P22','at':3000,'track':'pending-a','status':'unknown','text':'上一句',
@@ -137,7 +137,7 @@ def test_weak_unidentified_gets_ranking_and_same_cluster_continuity():
 def test_mirror_jev_consumes_same_cluster_continuity_without_new_recognized():
     from jshi.voice.jev_mirror import MirrorJEV, mirror_identity
     voice={'pick':'','strength':'weak','basis':'本句声纹比较；相似度不是概率','score':.555}
-    result=VoiceJEV(MirrorJEV()).decide_batch('stone',[{'n':1,'who':'P22（待定声音3）','track':'pending-a','at':5000,
+    result=VoiceJEV(MirrorJEV(), mode='legacy').decide_batch('stone',[{'n':1,'who':'P22（待定声音3）','track':'pending-a','at':5000,
         'text':'继续说','voice_evidence':{'pick':'P22','strength':'weak','basis':'临时声音连续性；只认出同一个声音'},
         'candidates':[{'who':'P2','score':.555},{'who':'P3','score':.453}]}],
         [{'p':'P22','at':3000,'track':'pending-a','status':'unknown','text':'上一句',

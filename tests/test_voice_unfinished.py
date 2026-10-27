@@ -17,7 +17,7 @@ def test_former_word_endings_do_not_wait_for_collection_pause(process, text):
             pass
         gate = Gate()
         conversation = VoiceConversation(process, 'stone', FakeCloud(), send,
-            jev=VoiceJEV(gate), input_pause_s=.03, input_batch_chars=0)
+            jev=VoiceJEV(gate, mode='legacy'), input_pause_s=.03, input_batch_chars=0)
         try:
             await conversation.accept(Transcript(text, 'A', 0, 1000, True))
             await asyncio.wait_for(conversation.queue.join(), 1)

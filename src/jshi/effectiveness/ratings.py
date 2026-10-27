@@ -7,10 +7,20 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from functools import wraps
+from threading import RLock
 
 from jshi.models import MemoryRatings
 
 from .port import utc_now
+
+
+def synchronized(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return call
 
 
 def _iso(value: datetime) -> str:
@@ -87,12 +97,23 @@ class JsonlRatingStore:
     """`{data_dir}/memory_ratings.jsonl`；无路径则只留进程内。"""
 
     def __init__(self, path: Path | str | None = None) -> None:
+        self._lock = RLock()
         self._path = Path(path) if path is not None else None
         self._rows: list[RatingRow] = []
         if self._path is not None and self._path.exists():
             self._load()
 
+    @synchronized
     def append(self, row: RatingRow) -> RatingRow:
+        existing = next((item for item in self._rows
+                         if item.subject_id == row.subject_id and item.activity_id == row.activity_id), None)
+        if existing is not None:
+            row.created_at = existing.created_at
+            row.gap_consumed = existing.gap_consumed if row.gap_query == existing.gap_query else False
+            row.analyzed = existing.analyzed
+            self._rows[self._rows.index(existing)] = row
+            self._rewrite()
+            return row
         self._rows.append(row)
         if self._path is not None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,12 +121,14 @@ class JsonlRatingStore:
                 handle.write(json.dumps(row.to_json(), ensure_ascii=False) + "\n")
         return row
 
+    @synchronized
     def list(self, subject_id: str | None = None) -> tuple[RatingRow, ...]:
         rows = self._rows
         if subject_id is not None:
             rows = [row for row in rows if row.subject_id == subject_id]
         return tuple(rows)
 
+    @synchronized
     def pending_gap(self, subject_id: str) -> RatingRow | None:
         pending = [
             row
@@ -118,6 +141,7 @@ class JsonlRatingStore:
             return None
         return max(pending, key=lambda row: row.created_at)
 
+    @synchronized
     def consume_gap(self, subject_id: str) -> None:
         row = self.pending_gap(subject_id)
         if row is None:
@@ -125,6 +149,7 @@ class JsonlRatingStore:
         row.gap_consumed = True
         self._rewrite()
 
+    @synchronized
     def mark_analyzed(self, rows: list[RatingRow]) -> None:
         ids = {(row.subject_id, row.activity_id, _iso(row.created_at)) for row in rows}
         for row in self._rows:
@@ -155,7 +180,10 @@ class JsonlRatingStore:
                     analyzed=bool(payload.get("analyzed", False)),
                 )
             )
-        self._rows = loaded
+        deduped = {}
+        for row in loaded:
+            deduped[(row.subject_id, row.activity_id)] = row
+        self._rows = list(deduped.values())
 
     def _rewrite(self) -> None:
         if self._path is None:

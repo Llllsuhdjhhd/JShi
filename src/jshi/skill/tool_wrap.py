@@ -257,7 +257,7 @@ class ToolWrapSkill(Skill[WrapResult]):
     def _run_with_instruction(
         self, request: ModelRequest, instruction: str
     ) -> WrapResult:
-        req = replace(request, system_extra=_system_extra(instruction, self.schema))
+        req = replace(request, system_extra=_system_extra(instruction, self.schema), json_output=True)
         raw = self._model.generate(req)
         raw_text = raw.text or ""
         try:

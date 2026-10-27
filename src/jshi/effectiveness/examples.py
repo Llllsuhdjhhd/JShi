@@ -22,7 +22,7 @@ from jshi.models import MemoryRatings
 
 from .strategy import MemoryRecallStrategy, utc_now
 
-SCHEMA_VERSION = "ratings-example-v1"
+SCHEMA_VERSION = "ratings-example-v2"
 
 _COVERAGE_DEFAULT = {"": 0.0, "sufficient": 0.2, "thin": 0.6, "missing": 1.0}
 
@@ -40,6 +40,7 @@ class RatingFeatures:
     misleading_ratio: float = 0.0
     redundant_ratio: float = 0.0
     helps_avg: float = 0.0  # 0..2
+    helps_rated_count: int = 0
     coverage: str = ""  # "" | sufficient | thin | missing
     has_gap: bool = False
     precision_failure: float = 0.0  # 0..1：召回里“垃圾/低相关”的强度
@@ -63,6 +64,7 @@ class RatingFeatures:
             misleading_ratio=_f("misleading_ratio"),
             redundant_ratio=_f("redundant_ratio"),
             helps_avg=_f("helps_avg"),
+            helps_rated_count=int(payload.get('helps_rated_count', 0) or 0),
             coverage=str(payload.get("coverage") or ""),
             has_gap=bool(payload.get("has_gap", False)),
             precision_failure=_f("precision_failure"),
@@ -87,12 +89,12 @@ def features_from_ratings(ratings: MemoryRatings) -> RatingFeatures:
     unrelated = sum(1 for item in items if item.relevance == "unrelated")
     misleading = sum(1 for item in items if item.misleading)
     redundant = sum(1 for item in items if item.redundant)
-    helps_sum = sum(int(item.helps_understanding) for item in items)
+    helps = [item.helps_understanding for item in items if item.helps_understanding is not None]
 
     unrelated_ratio = _ratio(unrelated, total)
     misleading_ratio = _ratio(misleading, total)
     redundant_ratio = _ratio(redundant, total)
-    helps_avg = (helps_sum / total) if total else 0.0
+    helps_avg = (sum(helps) / len(helps)) if helps else 0.0
 
     # 复合“失败”信号：各分量 0..1，等权平均。阈值/方向由示例库校准（见 baseline），
     # 这里是统一测量单位，不写死“无关占比过半”这类魔法数。
@@ -101,7 +103,7 @@ def features_from_ratings(ratings: MemoryRatings) -> RatingFeatures:
         misleading_ratio,
         redundant_ratio,
         # 帮助度越低越说明召回无关紧要；无在场回忆时归零，避免虚高。
-        ((2.0 - helps_avg) / 2.0) if total else 0.0,
+        *([((2.0 - helps_avg) / 2.0)] if helps else []),
     )
     coverage_failure = _COVERAGE_DEFAULT[_clean_coverage(ratings.coverage)]
     has_gap = bool((ratings.gap_query or "").strip())
@@ -115,6 +117,7 @@ def features_from_ratings(ratings: MemoryRatings) -> RatingFeatures:
         misleading_ratio=round(misleading_ratio, 4),
         redundant_ratio=round(redundant_ratio, 4),
         helps_avg=round(helps_avg, 4),
+        helps_rated_count=len(helps),
         coverage=_clean_coverage(ratings.coverage),
         has_gap=has_gap,
         precision_failure=round(precision_failure, 4),
@@ -137,7 +140,7 @@ def features_from_rows(rows: Sequence[object]) -> RatingFeatures:
     unrelated = sum(1 for item in items if item.get("relevance") == "unrelated")
     misleading = sum(1 for item in items if item.get("misleading"))
     redundant = sum(1 for item in items if item.get("redundant"))
-    helps = [int(item.get("helps_understanding", 0)) for item in items]
+    helps = [int(item['helps_understanding']) for item in items if item.get('helps_understanding') is not None]
 
     coverages = [_clean_coverage(getattr(row, "coverage", "") or "") for row in rows]
     worst = "missing" if "missing" in coverages else (
@@ -150,12 +153,12 @@ def features_from_rows(rows: Sequence[object]) -> RatingFeatures:
     unrelated_ratio = _ratio(unrelated, total)
     misleading_ratio = _ratio(misleading, total)
     redundant_ratio = _ratio(redundant, total)
-    helps_avg = (sum(helps) / total) if total else 0.0
+    helps_avg = (sum(helps) / len(helps)) if helps else 0.0
     precision_failure = _mean_of(
         unrelated_ratio,
         misleading_ratio,
         redundant_ratio,
-        ((2.0 - helps_avg) / 2.0) if total else 0.0,
+        *([((2.0 - helps_avg) / 2.0)] if helps else []),
     )
     coverage_failure = _COVERAGE_DEFAULT[worst]
     if has_gap:
@@ -168,6 +171,7 @@ def features_from_rows(rows: Sequence[object]) -> RatingFeatures:
         misleading_ratio=round(misleading_ratio, 4),
         redundant_ratio=round(redundant_ratio, 4),
         helps_avg=round(helps_avg, 4),
+        helps_rated_count=len(helps),
         coverage=worst,
         has_gap=has_gap,
         precision_failure=round(precision_failure, 4),
@@ -231,7 +235,13 @@ def read_examples(path: Path | str) -> tuple[RatingExample, ...]:
         if not isinstance(payload, dict):
             continue
         examples.append(example_from_dict(payload))
-    return tuple(examples)
+    # A later background review updates the same activity, not a new sample.
+    deduped = {}
+    for index, example in enumerate(examples):
+        activity = example.context.get('activity_id')
+        key = (example.subject_id, activity) if activity else ('unlinked', index)
+        deduped[key] = example
+    return tuple(deduped.values())
 
 
 def write_examples(path: Path | str, examples: Sequence[RatingExample]) -> None:

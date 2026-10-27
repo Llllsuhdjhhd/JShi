@@ -29,7 +29,7 @@ def test_turn_diagnostics_include_each_actual_jev_prompt(process):
     async def run():
         messages = []
         async def send(message): messages.append(message)
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Judge()), input_pause_s=.01)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Judge(), mode='legacy'), input_pause_s=.01)
         try:
             await c.accept(Transcript('电视解说', 'A', 0, 1800, True))
             await asyncio.wait_for(c.queue.join(), 3)

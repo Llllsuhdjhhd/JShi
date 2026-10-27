@@ -44,7 +44,7 @@ def test_empty_input_does_not_start_or_extend_timer(process):
     async def run():
         async def send(m):pass
         gate=Gate()
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate),input_pause_s=.02)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(gate, mode='legacy'),input_pause_s=.02)
         try:
             for text in ('','  ','…？！'):
                 await c.accept(Transcript(text,'A',0,100,True))
@@ -63,7 +63,7 @@ def test_short_final_dispatches_without_waiting_for_configured_pause(process):
                 entered.set()
                 return await super()._judge(*args, **kwargs)
         async def send(m): pass
-        c = Conversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate()),
+        c = Conversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Gate(), mode='legacy'),
                          input_pause_s=10, input_max_batch_s=12, input_batch_chars=10000)
         try:
             await c.accept(Transcript('你好', 'A', 0, 100, True))
@@ -79,7 +79,7 @@ def test_already_available_fragments_are_one_batch_without_truncation(process):
     async def run():
         async def send(m): pass
         gate = Gate()
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate))
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate, mode='legacy'))
         try:
             await c.accept_batch([Transcript('前半内容', 'A', 0, 100, True),
                                   Transcript('后半内容完整保留', 'B', 100, 200, True)])
@@ -96,7 +96,7 @@ def test_later_final_is_a_new_batch_and_partials_do_not_hold_ready_text(process)
     async def run():
         async def send(m): pass
         gate = Gate()
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate), input_pause_s=10)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate, mode='legacy'), input_pause_s=10)
         try:
             await c.accept(Transcript('开头内容', 'A', 0, 100, True))
             await c.accept(Transcript('仍在说话', 'A', 100, 200, False))
@@ -115,7 +115,7 @@ def test_asr_batch_remains_atomic_while_recording_yields(process):
         gate = Gate()
         async def send(m):
             await asyncio.sleep(.002)  # browser/archive operations may yield
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate))
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(gate, mode='legacy'))
         try:
             await c.accept_batch([Transcript(str(i), str(i), i*100, (i+1)*100, True) for i in range(4)])
             await asyncio.wait_for(c.queue.join(), 2)
@@ -137,7 +137,7 @@ def test_single_request_reuses_context_and_compacts_ids_without_mutating_source(
               'person_portraits':[{'p':'P1','portrait':'已有文字肖像','candidate_only':True,'cached_at':999}],
               'collection':{'trigger':'chars','expression_complete':False,'chars':20},
               'envelope':{'input_id':'not-for-model','parts':[]}}
-    assert VoiceJEV(Model()).decide('stone','我补充一下',speaker,delivery).action=='respond'
+    assert VoiceJEV(Model(), mode='legacy').decide('stone','我补充一下',speaker,delivery).action=='respond'
     payload=json.loads(requests[0].input_text)
     assert payload['speaker']['track_id']=='T1' and 'object_id' not in payload['speaker']
     assert payload['delivery']['scene'][0]['at']==-1000
@@ -148,7 +148,7 @@ def test_single_request_reuses_context_and_compacts_ids_without_mutating_source(
     assert speaker['object_id']=='very-long-internal-person-id' and delivery['scene'][0]['at']==999000
     assert '历史文字肖像' in requests[0].system_extra
     before=len(requests)
-    assert VoiceJEV(Model()).decide('stone','停止',speaker,delivery).action=='respond'
+    assert VoiceJEV(Model(), mode='legacy').decide('stone','停止',speaker,delivery).action=='respond'
     assert len(requests)==before+1
 
 
@@ -191,7 +191,7 @@ def test_cached_portrait_is_scoped_and_single_context_excludes_future_scene(proc
             class Legacy:
                 def __init__(self):
                     self.model=InputModel()
-                    self.inner=VoiceJEV(self.model)
+                    self.inner=VoiceJEV(self.model, mode='legacy')
                 def decide(self,*args,**kwargs):return self.inner.decide(*args,**kwargs)
             c.jev=Legacy()
             await c._judge([u],u.speaker,False)

@@ -136,6 +136,10 @@ class ActivityWindowSource:
             return LoadResult()
         fragments: list[AssemblyFragment] = []
         text = view.context_text or ""
+        if view.recall_excerpts:
+            suffix = '\n'.join(f'[回忆 {ref}] {value}' for ref, value in view.recall_excerpts if value)
+            if suffix and text.endswith(suffix):
+                text = text[:-len(suffix)].rstrip()
         if text:
             fragments.append(
                 AssemblyFragment(
@@ -149,7 +153,7 @@ class ActivityWindowSource:
                     always=True,
                 )
             )
-        for ref, excerpt in view.recall_excerpts:
+        for ref, excerpt in view.recall_excerpts if ctx.recall_request is None or ctx.recall_request.mode == 1 else ():
             fragments.append(
                 AssemblyFragment(
                     source="activity",
@@ -211,11 +215,44 @@ class MemorySource:
 
         self._memory = memory or InProcessHistoryMemory(repository)
         self._profiles = profiles
+        self.recall_flow = None
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
+        if ctx.recall_request is not None and self.recall_flow is not None:
+            legacy = (ctx.context_view.recall_excerpts if ctx.context_view is not None
+                      and ctx.speaker is not None and ctx.context_view.speaker_object_id == ctx.speaker.object_id else ())
+            batch = self.recall_flow.load_candidates(ctx.recall_request, ctx.extra_queries, legacy)
+            if ctx.recall_request.mode == 1:
+                local = getattr(self._memory, '_reflection_local', None)
+                previous = getattr(local, 'internal', False) if local else False
+                try:
+                    if local:
+                        local.internal = True
+                    result = self._load(ctx) if ctx.recall_enabled else LoadResult()
+                    from dataclasses import replace
+                    return replace(result, recall_batch=batch)
+                finally:
+                    if local:
+                        local.internal = previous
+            seen, fragments = set(), []
+            self._absorb(fragments, seen, batch.candidates)
+            from dataclasses import replace
+            return LoadResult(fragments=tuple(replace(f, recall_run_id=batch.request.run_id) for f in fragments),
+                              recall_batch=batch)
         if not ctx.recall_enabled:
             return LoadResult()
-        return self._load(ctx)
+        # Read-only previews/internal assembly must not create a second evaluation run.
+        from jshi.core.params import reflection_param
+        local = getattr(self._memory, '_reflection_local', None)
+        suppress = self.recall_flow is not None and int(reflection_param('RECALL_FLOW_MODE')) >= 1 and local is not None
+        previous = getattr(local, 'internal', False) if local else False
+        try:
+            if suppress:
+                local.internal = True
+            return self._load(ctx)
+        finally:
+            if suppress:
+                local.internal = previous
 
     def _load(self, ctx: AssemblyContext) -> LoadResult:
         seen: set[str] = set()
@@ -273,7 +310,7 @@ class MemorySource:
                     object_id=item.object_id,
                     query_object_role=item.query_object_role,
                     kind=item.kind or "fact",
-                    status="active",
+                    status=getattr(item, 'validity', 'active'),
                     importance=0.5,
                     source_ids=(item.event_id, *item.source_ids),
                     always=False,

@@ -211,7 +211,7 @@ def test_jev_exposes_image_choice_and_rejects_direct_reply_with_image():
             return ModelResponse(model='fake',text=json.dumps({'items':[{'i':1,'person':'P1','certainty':'confirmed','why':'用户绑定'}],
                 'level':3,'recall_memory':False,'main_image':'include','route':'self_reply','reply':'你好'}))
     model=Gate()
-    result=VoiceJEV(model).decide_batch('stone',[{'n':1,'text':'看看新来的客人','who':'P1','source':'web_text'}],[],
+    result=VoiceJEV(model, mode='legacy').decide_batch('stone',[{'n':1,'text':'看看新来的客人','who':'P1','source':'web_text'}],[],
                                      {'short_chat':{'allowed':True,'person_code':'P1'}})
     assert result.main_prompt_hint['main_image']=='include'
     assert not result.direct_reply

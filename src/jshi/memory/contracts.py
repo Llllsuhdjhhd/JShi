@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, TYPE_CHECKING
 from uuid import uuid4
 
 
@@ -12,6 +12,44 @@ def utc_now() -> datetime:
 
 def new_id() -> str:
     return str(uuid4())
+
+
+if TYPE_CHECKING:
+    from .port import RecalledFragment
+
+
+@dataclass(frozen=True)
+class RecallRequestContext:
+    subject_id: str
+    activity_id: str
+    session_id: str
+    query_text: str
+    object_ids: tuple[str, ...] = ()
+    interlocutor_object_id: str | None = None
+    level: int = 1
+    candidate_limit: int = 12
+    enabled: bool = True
+    input_revision: str = ""
+    run_id: str = field(default_factory=new_id)
+    created_at: float = 0.0
+    policy_version: str = "recall-flow-v1"
+    mode: int = 2
+    selected_limit: int | None = None
+
+
+@dataclass(frozen=True)
+class RecallCandidateBatch:
+    request: RecallRequestContext
+    candidates: tuple[RecalledFragment, ...] = ()
+    reused_ids: tuple[str, ...] = ()
+    status: str = "completed"
+    error: str = ""
+    elapsed_ms: float = 0.0
+    base_version: int = 0
+    query_runs: tuple[Mapping[str, object], ...] = ()
+    skipped: tuple[tuple[str, str], ...] = ()
+    truncated: bool = False
+    invalidated_ids: tuple[str, ...] = ()  # Source invalidations survive candidate budgets.
 
 
 @dataclass(frozen=True)
@@ -70,6 +108,8 @@ class BackendIngestResult:
 
 
 __all__ = [
+    "RecallRequestContext",
+    "RecallCandidateBatch",
     "BackendIngestResult",
     "MemoryBatch",
     "MemoryExperience",

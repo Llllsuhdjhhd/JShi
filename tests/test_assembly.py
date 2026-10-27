@@ -201,10 +201,10 @@ def test_working_set_limit_skips_non_resident_only(tmp_path):
         fragment for fragment in ws.fragments
         if fragment.source == "personal" and fragment.kind == "value"
     ]
-    assert len(values) == 1
+    assert len(values) == 0  # A complete value cannot fit into one character.
     assert f"personal:{commitment.id}" in {fragment.id for fragment in ws.fragments}
     report = {item.source: item for item in ws.report}
-    assert len(report["personal"].skipped_ids) == 4
+    assert len(report["personal"].skipped_ids) == 5
 
 
 def repository_personal_item(repository, content, kind):

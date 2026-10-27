@@ -16,6 +16,10 @@ MEMORY_TABLES = {'events': '长期记忆', 'object_portraits': '人物肖像',
     'object_states': '人物状态', 'object_dispositions': '人物倾向',
     'object_memory_entries': '人物记忆', 'person_experience_portraits': '人物经历肖像',
     'recall_traces': '回忆召回 · 后端候选', 'unclosed_events': '待整理记忆 · 未闭合事件'}
+REFLECTION_TABLES = {'observations': '回忆评价 · 候选、可见与使用',
+                    'recall_working_sets': '回忆工作集 · 会话范围',
+                    'recall_working_items': '回忆工作集 · 保留证据',
+                    'feedback': '回忆反馈 · 后续检索参考'}
 FILES = {'tool_work': ('tool_work.jsonl', '工具', '工件 / 工作事项'),
     'tool': ('tool.jsonl', '工具', '工具任务与结果'),
     'tool_metrics': ('tool_metrics.json', '工具', '工具运行指标'),
@@ -48,7 +52,8 @@ class WebData:
     def catalog(self):
         result = []
         for db, tables, group, relative in [('subject', SUBJECT_TABLES, '主流程', 'subject.sqlite3'),
-                ('memory', MEMORY_TABLES, '记忆', 'rems/rems.db')]:
+                ('memory', MEMORY_TABLES, '记忆', 'rems/rems.db'),
+                ('reflection', REFLECTION_TABLES, '记忆', 'reflection_memory.sqlite3')]:
             path = self.subject_path if db == 'subject' else self.root / relative
             available = set()
             if path.is_file():
@@ -111,7 +116,7 @@ class WebData:
                              and r.get('subject_id', self.subject_id) == self.subject_id)
             rendered = []
             for r in calls:
-                if purpose != 'all' and r.get('purpose') != purpose:
+                if purpose != 'all' and r.get('purpose') != purpose and not (purpose == 'voice_jev' and r.get('purpose') in {'voice_jev_entry','voice_jev_prepare'}):
                     continue
                 system, user = r.get('system_text', ''), r.get('user_text', '')
                 sections.extend(re.findall(r'^【([^\n】]+)】\s*$', system+'\n'+user, re.M))
@@ -144,7 +149,8 @@ class WebData:
             source = 'subject:histories'
         if ':' in source:
             db, table = source.split(':')
-            relative = 'subject.sqlite3' if db == 'subject' else 'rems/rems.db'
+            relative = {'subject': 'subject.sqlite3', 'memory': 'rems/rems.db',
+                        'reflection': 'reflection_memory.sqlite3'}[db]
             path = self.subject_path if db == 'subject' else self.root / relative
             if not path.is_file():
                 return {'rows': [], 'total': 0, 'page': page, 'size': size}
@@ -160,6 +166,9 @@ class WebData:
                     conditions.append("event_type IN ('external_input','object_resolved','object_rejected')")
                 if 'subject_id' in columns:
                     conditions.append('subject_id = ?')
+                    args.append(self.subject_id)
+                elif 'subject' in columns:
+                    conditions.append('subject = ?')
                     args.append(self.subject_id)
                 if query:
                     conditions.append('(' + ' OR '.join(f'CAST("{col}" AS TEXT) LIKE ? ESCAPE char(92)' for col in columns) + ')')

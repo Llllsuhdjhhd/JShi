@@ -23,6 +23,13 @@ def similarity(a, b):
     return len(left & right) / max(1, len(left | right))
 
 
+def evaluation_enabled(row):
+    """Legacy observations remain eligible; shadow/disabled runs never feed back."""
+    return (not row['run_id'] or
+            (row['status'] not in {'disabled', 'empty_query'}
+             and json.loads(row['details']).get('mode') != 1))
+
+
 class ReflectionMemoryStore:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -60,6 +67,16 @@ class ReflectionMemoryStore:
             for name, default in (('candidate_ids', '[]'), ('outcome', '{}')):
                 if name not in columns:
                     db.execute(f"ALTER TABLE observations ADD COLUMN {name} TEXT DEFAULT '{default}'")
+            for name, default in (('run_id', ''), ('activity_id', ''), ('status', 'legacy'),
+                                  ('scope', '[]'), ('details', '{}'), ('evaluation', '{}')):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE observations ADD COLUMN {name} TEXT DEFAULT '{default}'")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS recall_run_unique ON observations(run_id) WHERE run_id!=''")
+            db.execute('CREATE TABLE IF NOT EXISTS recall_schema (version INTEGER PRIMARY KEY)')
+            db.execute('INSERT OR IGNORE INTO recall_schema VALUES(1)')
+            feedback_columns = {r['name'] for r in db.execute('PRAGMA table_info(feedback)')}
+            if 'scope' not in feedback_columns:
+                db.execute("ALTER TABLE feedback ADD COLUMN scope TEXT DEFAULT ''")
             insight_columns = {r['name'] for r in db.execute('PRAGMA table_info(insights)')}
             if 'last_used' not in insight_columns:
                 db.execute('ALTER TABLE insights ADD COLUMN last_used REAL DEFAULT 0')
@@ -85,15 +102,108 @@ class ReflectionMemoryStore:
             value['visual_observations'] = []
             items.append(value)
         with self.connect() as db:
+            pending_count = db.execute("SELECT count(*) FROM observations WHERE subject=? AND stage!='done'", (subject,)).fetchone()[0]
+            if pending_count >= int(param('REFLECTION_OBSERVATIONS')):
+                return
             db.execute("INSERT INTO observations(subject,query,object_id,payload,created) VALUES(?,?,?,?,?)",
                        (subject, query, object_id or '', dump(items), time.time()))
-            db.execute("DELETE FROM observations WHERE subject=? AND id NOT IN "
+            db.execute("DELETE FROM observations WHERE subject=? AND stage='done' AND id NOT IN "
                        "(SELECT id FROM observations WHERE subject=? ORDER BY id DESC LIMIT ?)",
                        (subject, subject, int(param('REFLECTION_OBSERVATIONS'))))
 
+    def observe_run(self, batch, visible):
+        """The single authoritative record for new recall runs, including empty runs."""
+        request = batch.request
+        items = []
+        for item in batch.candidates:
+            value = asdict(item)
+            # Keep the actual selected representation; raw originals remain at source.
+            value['text'] = value['content'] = item.content or item.text
+            value['visual_observations'] = []
+            items.append(value)
+        outcome = {'activity_id': request.activity_id,
+                   'model_visible_ids': [item.event_id for item in visible],
+                   'response_status': 'not_generated'}
+        details = {'query_runs': batch.query_runs, 'skipped': batch.skipped,
+                   'invalidated_ids': batch.invalidated_ids,
+                   'candidate_ids': [item.event_id for item in batch.candidates],
+                   'reused_ids': batch.reused_ids, 'elapsed_ms': batch.elapsed_ms,
+                   'truncated': batch.truncated, 'input_revision': request.input_revision,
+                   'policy_version': request.policy_version, 'session_id': request.session_id,
+                   'mode': request.mode}
+        with self.connect() as db:
+            db.execute('INSERT OR IGNORE INTO observations(subject,query,object_id,payload,created,stage,run_id,activity_id,status,scope,details,outcome) '
+                       'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                       (request.subject_id, request.query_text, request.interlocutor_object_id or '',
+                        dump(items), request.created_at or time.time(), 'waiting', request.run_id,
+                        request.activity_id, batch.status, dump(request.object_ids), dump(details), dump(outcome)))
+            # Bounded per subject; completed history is reclaimed before pending work.
+            keep = int(param('REFLECTION_OBSERVATIONS'))
+            db.execute("DELETE FROM observations WHERE subject=? AND stage='done' AND id NOT IN "
+                       '(SELECT id FROM observations WHERE subject=? ORDER BY id DESC LIMIT ?)',
+                       (request.subject_id, request.subject_id, keep))
+
+    def link_run_outcome(self, run_id, plan, ratings):
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM observations WHERE run_id=?', (run_id,)).fetchone()
+            if row is None:
+                return
+            outcome = json.loads(row['outcome'])
+            outcome.update(planned_response=plan, main_ratings=ratings, response_status='planned',
+                           note='回应计划不等于交付；模型使用声明不等于真实有效')
+            stage = 'evaluate' if evaluation_enabled(row) else 'done'
+            pending_count = db.execute("SELECT count(*) FROM observations WHERE subject=? AND stage IN ('evaluate','reprocess','compare')",
+                                       (row['subject'],)).fetchone()[0]
+            if stage == 'evaluate' and pending_count >= int(param('REFLECTION_OBSERVATIONS')):
+                stage = 'done'
+                outcome['evaluation_skipped'] = 'queue_capacity'
+            db.execute('UPDATE observations SET outcome=?,stage=? WHERE run_id=?', (dump(outcome), stage, run_id))
+            for ident in outcome.get('model_visible_ids', ()):
+                if ident.startswith('insight:'):
+                    db.execute('UPDATE insights SET last_used=? WHERE subject=? AND id=?',
+                               (time.time(), row['subject'], ident.removeprefix('insight:')))
+
+    def fail_run(self, run_id, status):
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM observations WHERE run_id=?', (run_id,)).fetchone()
+            if row:
+                outcome = json.loads(row['outcome'])
+                outcome['response_status'] = status
+                stage = 'evaluate' if evaluation_enabled(row) else 'done'
+                db.execute('UPDATE observations SET outcome=?,stage=? WHERE run_id=?', (dump(outcome), stage, run_id))
+
+    def link_delivery(self, activity_id, status):
+        with self.connect() as db:
+            for row in db.execute("SELECT id,outcome FROM observations WHERE activity_id=? AND run_id!=''", (activity_id,)).fetchall():
+                outcome = json.loads(row['outcome'])
+                outcome['delivery_status'] = status
+                db.execute('UPDATE observations SET outcome=? WHERE id=?', (dump(outcome), row['id']))
+
+    def note_working_result(self, run_id, committed):
+        with self.connect() as db:
+            row = db.execute('SELECT outcome FROM observations WHERE run_id=?', (run_id,)).fetchone()
+            if row:
+                outcome = json.loads(row['outcome'])
+                outcome['working_set_committed'] = bool(committed)
+                db.execute('UPDATE observations SET outcome=? WHERE run_id=?', (dump(outcome), run_id))
+
+    def save_evaluation(self, observation, evaluation, reviewed_ids):
+        value = dict(evaluation, reviewed_ids=sorted(reviewed_ids), evaluator_version='recall-evaluation-v2',
+                     evaluated_at=time.time())
+        with self.connect() as db:
+            db.execute('UPDATE observations SET evaluation=? WHERE id=?', (dump(value), observation['id']))
+
     def pending(self, subject):
         with self.connect() as db:
-            row = db.execute("SELECT * FROM observations WHERE subject=? AND stage!='done' ORDER BY id LIMIT 1",
+            # Also retire shadow jobs queued by older versions, at any stage.
+            for row in db.execute("SELECT * FROM observations WHERE subject=? AND stage!='done' AND run_id!=''",
+                                  (subject,)).fetchall():
+                if not evaluation_enabled(row):
+                    db.execute("UPDATE observations SET stage='done' WHERE id=?", (row['id'],))
+            # A crash/cancellation cannot strand a waiting run forever.
+            db.execute("UPDATE observations SET stage='evaluate' WHERE subject=? AND stage='waiting' AND created<?",
+                       (subject, time.time() - float(param('RECALL_OUTCOME_WAIT_SECONDS'))))
+            row = db.execute("SELECT * FROM observations WHERE subject=? AND stage NOT IN ('done','waiting') ORDER BY id LIMIT 1",
                              (subject,)).fetchone()
         return dict(row) if row else None
 
@@ -101,7 +211,7 @@ class ReflectionMemoryStore:
         outcome = {'activity_id': activity_id, 'model_visible_ids': list(visible_ids),
                    'planned_response': plan, 'note': '回应计划不等于已经交付或解决问题'}
         with self.connect() as db:
-            db.execute('UPDATE observations SET outcome=? WHERE subject=? AND created>=? AND stage=?',
+            db.execute("UPDATE observations SET outcome=? WHERE subject=? AND created>=? AND stage=? AND run_id=''",
                        (dump(outcome), subject, since, 'evaluate'))
             for ident in visible_ids:
                 if ident.startswith('insight:'):
@@ -125,24 +235,31 @@ class ReflectionMemoryStore:
                 reason = str(item.get('reason', '')).strip()[:int(param('REFLECTION_ITEM_CHARS'))]
                 if event_id not in visible_ids or effect is None or not reason:
                     continue
-                db.execute('INSERT OR REPLACE INTO feedback VALUES(?,?,?,?,?,?,?,?)',
+                db.execute('INSERT OR REPLACE INTO feedback(subject,observation,event_id,query,object_id,effect,reason,created,scope) VALUES(?,?,?,?,?,?,?,?,?)',
                            (observation['subject'], observation['id'], event_id, observation['query'],
-                            observation['object_id'], effect, reason, now))
+                            observation['object_id'], effect, reason, now, observation.get('scope', '') if observation.get('run_id') else ''))
             db.execute('DELETE FROM feedback WHERE created<?',
                        (now - float(param('REFLECTION_FEEDBACK_DAYS')) * 86400,))
             db.execute('DELETE FROM feedback WHERE subject=? AND rowid NOT IN '
                        '(SELECT rowid FROM feedback WHERE subject=? ORDER BY created DESC LIMIT ?)',
                        (observation['subject'], observation['subject'], int(param('REFLECTION_FEEDBACK_ROWS'))))
 
-    def adjustments(self, subject, query, object_id):
+    def adjustments(self, subject, query, object_id, *, object_ids=()):
         with self.connect() as db:
             rows = db.execute('SELECT * FROM feedback WHERE subject=? AND created>? ORDER BY created DESC LIMIT ?',
                               (subject, time.time() - float(param('REFLECTION_FEEDBACK_DAYS')) * 86400,
                                int(param('REFLECTION_FEEDBACK_ROWS')))).fetchall()
         signals = {}
         for row in rows:
+            if not param('RECALL_FEEDBACK_ENABLED'):
+                break
             if row['object_id'] != (object_id or ''):
                 continue
+            if row['scope']:
+                scope = set(json.loads(row['scope']))
+                expected = set(object_ids) | ({object_id} if object_id else set())
+                if not scope or scope != expected:
+                    continue
             match = similarity(query, row['query'])
             if match < float(param('REFLECTION_FEEDBACK_SIMILARITY')):
                 continue

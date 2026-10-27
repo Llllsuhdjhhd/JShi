@@ -17,10 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
-from .examples import RatingExample, RatingFeatures
+from .examples import RatingExample, RatingFeatures, SCHEMA_VERSION
 from .strategy import MemoryRecallStrategy, utc_now
 
-BASELINE_VERSION = "v1"
+BASELINE_VERSION = "v2"
 
 
 def _classify(v: RatingFeatures) -> str:
@@ -115,8 +115,11 @@ class BaselineStats:
 
 def calibrate(examples: Sequence[RatingExample]) -> BaselineStats | None:
     """用带标注示例求基准。没有可用的“好/差”样本时返回 None（回退启发式）。"""
+    examples = [e for e in examples if e.schema_version == SCHEMA_VERSION and e.quality_label in {'good', 'poor'}]
+    if not examples:
+        return None
     good = [e.features for e in examples if e.quality_label == "good"]
-    poor = [e for e in examples if e.quality_label != "good"]
+    poor = [e for e in examples if e.quality_label == "poor"]
 
     good_scores = [f.quality_score for f in good]
     good_precision = [f.precision_failure for f in good]
@@ -128,7 +131,7 @@ def calibrate(examples: Sequence[RatingExample]) -> BaselineStats | None:
     precision_threshold = _separate_threshold(good_precision, poor_precision)
     coverage_threshold = _separate_threshold(good_coverage, poor_coverage)
     percentiles = {
-        key: _percentile(good_scores or [f.quality_score for f in poor] or [1.0], p)
+        key: _percentile(good_scores or [e.features.quality_score for e in poor] or [1.0], p)
         for key, p in (("p10", 0.10), ("p25", 0.25), ("p50", 0.50), ("p75", 0.75), ("p90", 0.90))
     }
 

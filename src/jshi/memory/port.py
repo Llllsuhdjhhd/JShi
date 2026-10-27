@@ -71,6 +71,8 @@ class RecalledFragment:
     score: float = 0.0
     occurred_at: datetime | None = None
     visual_observations: tuple[dict, ...] = ()
+    validity: str = "active"
+    supersedes: tuple[str, ...] = ()  # Explicit source-backed correction links only.
 
 
 class MemoryPort(Protocol):

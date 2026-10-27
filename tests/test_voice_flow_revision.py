@@ -24,7 +24,7 @@ def test_related_background_kept_unrelated_dropped_and_memory_clean(process):
 
     async def run():
         async def send(message): pass
-        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Judge()), input_pause_s=.02)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Judge(), mode='legacy'), input_pause_s=.02)
         try:
             await c.accept(Transcript('下午博物馆关门', 'A', 0, 1800, True))
             await c.accept(Transcript('匠石，那我们该去哪', 'B', 1900, 3800, True))
@@ -44,7 +44,7 @@ def test_related_background_kept_unrelated_dropped_and_memory_clean(process):
 
 
 def test_only_background_does_not_start_main_and_unknown_relevance_is_kept():
-    jev = VoiceJEV()
+    jev = VoiceJEV(mode='legacy')
     decision = jev._from_items([{'n': 1, 'to_jiangshi': 'no', 'relevance': 'related'}], [{'n': 1}], '')
     assert decision.action == 'ignore' and decision.items[0].keep
     decision = jev._from_items([{'n': 1, 'to_jiangshi': 'no'}, {'n': 2, 'to_jiangshi': 'maybe', 'score': float('nan')}],

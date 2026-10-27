@@ -43,7 +43,7 @@ def test_waiting_reply_requires_main_permission_and_budget(tmp_path):
                 {'i':1,'person':'P1','certainty':'confirmed','why':'已选人物'}],
                 'level':1,'recall_memory':False,'route':'main','reply':'',
                 'waiting_reply':'嗯，我想一下。'}))
-    gate = VoiceJEV(Model())
+    gate = VoiceJEV(Model(), mode='legacy')
     batch = [{'n':1,'who':'P1','text':'匠石，帮我分析一下','source':'web_text'}]
     stats = WaitAckTiming(tmp_path/'wait.json')
     assert gate.decide_batch('s',batch,[],{'waiting':stats.guidance('a',allowed=True)}).waiting_reply
@@ -95,13 +95,13 @@ def test_five_choices_map_to_the_selected_level(tmp_path, level):
     class Gate:
         def generate(self, request):
             schema = json.loads(request.system_extra.split('JSON Schema：')[1])
-            assert schema['properties']['route']['enum'] == ['main']
+            assert schema['properties']['route']['enum'] == ['background', 'wait', 'main']
             return ModelResponse(model='mock', text=json.dumps({'items':[
                 {'i':1,'person':'P1','certainty':'confirmed','why':'用户已选人物'}],
                 'level':level,'recall_memory':False,'main_image':'omit','route':'main',
                 'reply':'','waiting_reply':'我想一下。'}))
     waiting=WaitAckTiming(tmp_path/'stats.json').guidance('m',allowed=True)
-    result=VoiceJEV(Gate()).decide_batch('s',[{'n':1,'who':'P1','text':'请帮我分析','source':'web_text'}],[],{'waiting':waiting})
+    result=VoiceJEV(Gate(), mode='legacy').decide_batch('s',[{'n':1,'who':'P1','text':'请帮我分析','source':'web_text'}],[],{'waiting':waiting})
     assert result.front_choice == f'main_l{level}_ack'
 
 

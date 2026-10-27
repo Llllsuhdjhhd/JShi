@@ -14,19 +14,19 @@ from tests.test_voice_control import ScriptedControl
                                '别说了别说了','先先不要说了不要说了'])
 def test_colloquial_stop_uses_the_semantic_model(text):
     model=ScriptedControl('stop')
-    assert VoiceJEV(model).decide_batch('s',[{'n':1,'text':text}],[],{}).control=='stop'
+    assert VoiceJEV(model, mode='legacy').decide_batch('s',[{'n':1,'text':text}],[],{}).control=='stop'
     assert len(model.requests)==1
 
 
 def test_quoted_stop_is_not_a_stop_command():
-    assert VoiceJEV().decide('s','他说别说啦这句话',{},{}).action!='stop'
+    assert VoiceJEV(mode='legacy').decide('s','他说别说啦这句话',{},{}).action!='stop'
 
 
 def test_stop_bypasses_busy_input_and_invalidates_old_generation(process):
     async def run():
         sent=[]
         async def send(message):sent.append(message)
-        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(ScriptedControl('stop')))
+        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(ScriptedControl('stop'), mode='legacy'))
         c.person_reviewer=None
         try:
             old_epoch=c.epoch
