@@ -152,6 +152,11 @@ class ProviderModel:
         return [{'role':'system','content':build_system(request)},{'role':'user','content':content if len(content)>1 else content[0]['text']}]
 
     def generate(self, request):
+        if getattr(request, 'light_finalize', False):
+            from dataclasses import replace
+            effort = 'low' if self.service['protocol'] == 'gemini' else 'off'
+            return ProviderModel(self.service, self.name, effort, self.max_tokens, self.timeout).generate(
+                replace(request, light_finalize=False))
         if deepseek_json_output(request, self.name) and self.service['protocol'] != 'gemini':
             return self.chat(self._messages(request),
                              max_tokens=self.max_tokens or (8192 if request.purpose.startswith('voice_jev') else None),

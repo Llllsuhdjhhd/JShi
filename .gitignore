@@ -29,6 +29,9 @@ step_inputs.jsonl
 .jshi/model_settings.local.tmp
 **/model_settings.local.json
 **/model_settings.local.tmp
+**/decision_settings.local.json
+**/decision_settings.local.tmp
+**/decision_calls.jsonl*
 logs/
 dist/
 build/

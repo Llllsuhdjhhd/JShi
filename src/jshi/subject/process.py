@@ -239,6 +239,9 @@ class AssembledCurrentState:
     interaction_scene: str = ""
     visual_snapshot: Mapping | None = None
     recall_batch: RecallCandidateBatch | None = None
+    preparation_context: str = ''
+    light_finalize: bool = False
+    on_reconsider: Callable | None = None
 
 
 @dataclass(frozen=True)
@@ -613,6 +616,8 @@ class SubjectProcess:
         object_codes: Mapping[str, str] | None = None,
         processing_modes: Sequence[str] = ("interaction",),
         visual_snapshot=None,
+        preparation_context: str = '',
+        light_finalize: bool = False,
     ) -> SubjectActivityResult:
         def phase(stage):
             from .cancellation import check
@@ -824,6 +829,8 @@ class SubjectProcess:
             recall_request=recall_request,
             consume_gap=True,
         )
+        current = replace(current, preparation_context=preparation_context, light_finalize=light_finalize,
+                          on_reconsider=(lambda: on_phase('reconsider')) if on_phase else None)
         # A just-recorded input can be returned by the memory source. It is
         # already in input_items, so don't present it as an additional memory.
         current = replace(current, fragments=tuple(fragment for fragment in current.fragments
@@ -1998,6 +2005,8 @@ class SubjectProcess:
             extra_context += ({'kind': 'jev_scene', 'content': current.interaction_scene},)
         request = ModelRequest(
             purpose="subject_activity",
+            preparation_context=current.preparation_context,
+            light_finalize=current.light_finalize,
             input_text=current.input_text,
             subject_state=current.subject_state,
             speaker=speaker,
@@ -2062,7 +2071,18 @@ class SubjectProcess:
                 }))
         from .cancellation import invoke
         try:
-            response = invoke(self.cognition, request, on_reply=on_reply)
+            from .preparation import NeedDeep
+            try:
+                response = invoke(self.cognition, request, on_reply=on_reply)
+            except NeedDeep:
+                if not request.light_finalize:
+                    raise
+                if current.on_reconsider:
+                    current.on_reconsider()
+                request = replace(request, preparation_context='', light_finalize=False)
+                self._record_step_input(request, self.cognition,
+                    subject_id=current.subject_state.subject_id, activity_id=activity_id)
+                response = invoke(self.cognition, request, on_reply=on_reply)
             from .cancellation import check
             check()
         except Exception as exc:

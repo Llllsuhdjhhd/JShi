@@ -236,6 +236,9 @@ def _build_system(request: ModelRequest) -> str:
 
 def build_user(request: ModelRequest) -> str:
     body = _build_user_body(request)
+    prepared = getattr(request, 'preparation_context', '')
+    if prepared:
+        body += '\n\n【提前准备·未交付·可推翻】\n' + prepared
     note = getattr(request, "transport_context", "")
     return f"{note}\n\n{body}" if note else body
 

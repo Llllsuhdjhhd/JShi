@@ -558,6 +558,31 @@ class Rems3MemoryBackend:
             for item in fragments
         )
 
+    def prepare_recall(self, subject_id, query, object_id):
+        """Skip facade traces, feedback and reinforcement for provisional work."""
+        from jshi.subject.preparation import fingerprint
+        pipeline = self._pipeline.recall_pipeline
+        if pipeline is None:
+            return (), {}
+        raw = pipeline.recall(subject_id, query, object_ids=(object_id,),
+            interlocutor_object_id=object_id, limit=6, reinforce=False)
+        rows = tuple(from_recalled_fragments(raw))
+        versions = {}
+        for row in rows:
+            event = self._pipeline.event_repo.get(row.event_id)
+            if event is None:
+                return (), {}
+            versions[row.event_id] = fingerprint(event.model_dump(mode='json'))
+        return rows, versions
+
+    def validate_prepared(self, versions):
+        from jshi.subject.preparation import fingerprint
+        for ident, expected in versions.items():
+            event = self._pipeline.event_repo.get(ident)
+            if event is None or fingerprint(event.model_dump(mode='json')) != expected:
+                return False
+        return True
+
     def remember_fact(
         self,
         subject_id: str,

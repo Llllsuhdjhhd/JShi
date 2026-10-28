@@ -19,6 +19,7 @@ class SpeechPipeline:
         self.last_previews = ()
         self.last_preview_timings = []
         self.last_turn_events = []
+        self.pending_previews = ()
 
     @property
     def speakers(self):
@@ -42,6 +43,7 @@ class SpeechPipeline:
         self.last_previews = ()
         if self.turns:
             self.turns.reset()
+        self.pending_previews = ()
         if self.speakers is not None:
             self.speakers.reset_session()
 
@@ -81,6 +83,8 @@ class SpeechPipeline:
                     allow_expiry=not getattr(self.detector, 'speech_active', lambda:False)())
                 rows, self.last_timings = tuple(ready), timings
         finished = monotonic()
+        self.pending_previews = tuple(f.row for pending in self.turns.pending.values()
+                                      for f in pending.fragments) if self.turns else ()
         self.last_timings = [{**t,'_pipeline_return_mono':finished} for t in self.last_timings]
         return rows
 

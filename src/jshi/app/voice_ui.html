@@ -360,6 +360,7 @@ let audioDone = true, mainBusy = false;
 let mainSource='', outcomeHint='', mainStage='';
 const phaseNames={collect:'收集发言',prepare:'准备输入材料',jev:'JEV 判断',judged:'JEV 判断已结束',queued:'等待进入主流程',resolve:'主流程 · 识别对象与落位',assemble:'主流程 · 组装人物、回忆与工具材料',cognition:'主认知 · 模型思考',action:'主流程 · 处理语言与动作'};
 const phaseSteps={collect:['collect','收集发言'],prepare:['prepare','准备材料'],jev:['jev','接话判断'],judged:['jev','接话判断'],queued:['queued','等待主流程'],resolve:['resolve','主引擎开始'],assemble:['assemble','组装材料'],cognition:['main','主认知'],action:['action','行动']};
+phaseNames.reconsider='正在重新考虑';phaseSteps.reconsider=['main','重新考虑'];
 const liveStepKeys=new Set(['previous','speech','speechEnd','cut','sent','jev','resolve','main','reply','finished']);
 const pipelineNodes=[['session_started_at_ms','会话开始'],['previous_settled_at_ms','前一轮结束'],['speech_start_at_ms','说话开始'],['speech_end_at_ms','说话结束'],['asr_returned_at_ms','断句完成'],['collect_at_ms','开始收集'],['text_sent_at_ms','文字发出'],['display_ack_at_ms','页面显示'],['jev_started_at_ms','接话判断开始'],['jev_finished_at_ms','接话判断结束'],['queued_at_ms','进入主流程队列'],['main_started_at_ms','主引擎开始'],['reply_sent_at_ms','回复发出'],['turn_complete_at_ms','本轮完成'],['write_started_at_ms','记忆整理开始'],['write_completed_at_ms','记忆整理结束']];
 function wallClock(ms){return Number.isFinite(ms)?new Date(ms).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,fractionalSecondDigits:3}):'';}

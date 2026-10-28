@@ -106,6 +106,8 @@ class ModelRequest:
     input_items: tuple[Mapping[str, Any], ...] = ()
     # Explicit output contract; ordinary text requests leave this disabled.
     json_output: bool = False
+    preparation_context: str = ''  # Ephemeral, unspoken candidate; full current input remains authoritative.
+    light_finalize: bool = False
 
 
 @dataclass(frozen=True)
@@ -573,6 +575,8 @@ def _chat_payload(
 ) -> bytes:
     """Chat Completions 请求体。思考档位见 ``model_thinking_fields``。"""
     from jshi.models.prompt import build_system, build_user
+    if request.light_finalize and thinking is not None:
+        thinking = 'disabled'
 
     body: dict[str, Any] = {
         "model": model,

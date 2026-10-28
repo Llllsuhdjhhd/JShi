@@ -3,7 +3,7 @@
  const host=document.querySelector('#debug-purpose')?.closest('details')?.parentElement||document.querySelector('.panel')?.parentElement;
  if(!host)return;
  const panel=document.createElement('details');panel.className='panel';
- panel.innerHTML='<summary>全局模型设置</summary><p class="tip">所有用途共用一个模型。选好后保存即可。</p><div class="model-form"></div><p class="model-status" role="status"></p>';
+ panel.innerHTML='<summary>全局模型设置</summary><p class="tip">生成式用途共用一个模型；快速决策模型可独立选择。</p><div class="model-form"></div><p class="model-status" role="status"></p>';
  host.prepend(panel);const status=panel.querySelector('.model-status');let state;
  const el=(tag,text)=>{const n=document.createElement(tag);if(text)n.textContent=text;return n;};
  async function request(data){const r=await fetch('/model-settings',data?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}:{});const value=await r.json();if(!r.ok)throw Error(value.error||'保存未成功');return value;}
@@ -54,6 +54,22 @@
     state=await request(data);render();status.textContent='已保存，后续所有用途统一使用 '+(value?.model||'启动配置')+'。';
    }catch(e){status.textContent=e.message;}finally{save.disabled=false;}
   };form.append(save);
+  const decision=state.decision;
+  if(decision){
+   const box=el('details');box.append(el('summary','快速决策模型（独立选择）'));
+   const provider=el('select');provider.append(new Option('阿里云百炼','bailian'),new Option('TypeSafe Jev','typesafe'));provider.value=decision.provider;
+   const mode=el('select');mode.append(new Option('关闭','off'),new Option('仅观察，不影响对话','shadow'),new Option('参与调度','active'));mode.value=decision.mode;
+   const dmodel=el('input'),url=el('input'),keyenv=el('input');
+   const fields=[['供应商',provider],['运行方式',mode],['模型',dmodel],['完整System One地址',url],['密钥环境变量名',keyenv]];
+   for(const [title,input] of fields){const label=el('label',title);input.style.width='100%';label.append(input);box.append(label);}
+   const dhint=el('p');dhint.className='tip';box.append(dhint);
+   function fillDecision(){const p=decision.providers[provider.value];dmodel.value=p.model;url.value=p.endpoint;keyenv.value=p.api_key_env;dhint.textContent=(p.credential_source==='existing_qwen_settings'?'使用已保存的百炼凭据。':p.has_key?'密钥环境变量已配置。':'未检测到密钥环境变量。')+' 决策接口不生成接话或答案；主认知模型单独选择。';}provider.onchange=fillDecision;fillDecision();
+   const flags={};for(const [name,label] of [['collision','JEV1撞车判断'],['continuation','后续表达影响判断'],['preparation','提前准备与分析（实验）']]){const line=el('label',label),input=el('input');input.type='checkbox';input.checked=decision[name];flags[name]=input;line.prepend(input);box.append(line);}
+   const dsave=el('button','保存决策设置'),test=el('button','测试已保存的决策连接');
+   dsave.onclick=async()=>{dsave.disabled=true;try{const r=await fetch('/model-settings/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:provider.value,mode:mode.value,providers:{[provider.value]:{model:dmodel.value.trim(),endpoint:url.value.trim(),api_key_env:keyenv.value.trim()}},...Object.fromEntries(Object.entries(flags).map(([k,v])=>[k,v.checked]))})});const d=await r.json();if(!r.ok)throw Error(d.error);state.decision=d;render();status.textContent='决策设置已保存；下一次判断生效。';}catch(e){status.textContent=e.message;}finally{dsave.disabled=false;}};
+   test.onclick=async()=>{test.disabled=true;try{const r=await fetch('/model-settings/decision/test',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const d=await r.json();if(!r.ok)throw Error(d.error);status.textContent=d.status+' · '+d.model+' · '+d.elapsed_ms+'毫秒'+(d.reason?' · '+d.reason:'');}catch(e){status.textContent=e.message;}finally{test.disabled=false;}};
+   box.append(dsave,test);form.append(box);
+  }
   const actual=el('details');actual.append(el('summary','实际使用情况'));
   for(const [name,r] of Object.entries(state.rows)){const p=el('p',r.label+'：'+r.current);p.dataset.modelName=name;actual.append(p);}form.append(actual);
  }

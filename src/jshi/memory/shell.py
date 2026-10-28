@@ -100,6 +100,15 @@ class MemoryShell:
                            level=request.level, limit=request.candidate_limit,
                            _candidate_mode=True)
 
+    def prepare_recall(self, subject_id, query, object_id):
+        """Explicit read-only backend capability; never falls back to reinforcing recall."""
+        fn = getattr(self._backend, 'prepare_recall', None)
+        return fn(subject_id, query, object_id) if callable(fn) else ((), {})
+
+    def validate_prepared(self, versions):
+        fn = getattr(self._backend, 'validate_prepared', None)
+        return bool(fn(versions)) if callable(fn) else not versions
+
     def memory_bytes(self, subject_id: str) -> int:
         fn = getattr(self._backend, 'memory_bytes', None)
         return int(fn(subject_id)) if callable(fn) else 0

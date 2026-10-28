@@ -6,12 +6,13 @@ from .latency import AudioReceiptClock, elapsed_ms
 
 
 class LocalAudioPump:
-    def __init__(self, decoder, executor, accept, on_error=None, *, accept_batch=None, on_timings=None, on_turn_state=None):
+    def __init__(self, decoder, executor, accept, on_error=None, *, accept_batch=None, on_timings=None, on_turn_state=None, on_provisional=None):
         self.decoder, self.executor, self.accept = decoder, executor, accept
         self.accept_batch = accept_batch
         self.on_error = on_error
         self.on_timings = on_timings
         self.on_turn_state = on_turn_state
+        self.on_provisional = on_provisional
         self.receipts = AudioReceiptClock()
         self.pending = bytearray()
         self.wake = asyncio.Event()
@@ -35,6 +36,8 @@ class LocalAudioPump:
         loop = asyncio.get_running_loop()
         transcripts = await loop.run_in_executor(
             self.executor, partial(self.decoder.feed, pcm, final=final))
+        if self.on_provisional:
+            self.on_provisional(getattr(self.decoder, 'pending_previews', ()))
         if self.on_turn_state and getattr(self.decoder, 'last_previews', ()):
             await self.on_turn_state(self.decoder.last_previews, getattr(self.decoder, 'last_turn_events', []),
                                      getattr(self.decoder, 'last_preview_timings', []))

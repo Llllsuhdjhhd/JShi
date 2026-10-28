@@ -561,6 +561,9 @@ class CognitionSkill(Skill[ModelResponse]):
         try:
             data = parse_json_object(raw_text)
         except SkillError:
+            if request.light_finalize:
+                from jshi.subject.preparation import NeedDeep
+                raise NeedDeep('轻量收尾格式不完整')
             persona = bool(getattr(request, "persona_schema", None)) and not getattr(
                 request, "boot", False
             )
@@ -576,6 +579,16 @@ class CognitionSkill(Skill[ModelResponse]):
                     object.__setattr__(response, "metadata", meta)
                     return _keep_usage_metadata(response, raw)
             return _keep_usage_metadata(self._fallback(raw_text), raw)
+        if request.light_finalize and data.get('need_deep') is True:
+            from jshi.subject.preparation import NeedDeep
+            raise NeedDeep('需要重新分析')
+        if request.light_finalize:
+            from jshi.models.schema_check import validate
+            from jshi.subject.preparation import NeedDeep
+            try:
+                validate(data, request.persona_schema or self.schema)
+            except (ValueError, TypeError):
+                raise NeedDeep('轻量收尾输出不满足正式格式')
         if getattr(request, "boot", False):
             return _keep_usage_metadata(
                 _boot_to_model_response(data, model=self.model_tag).with_raw(raw_text),
@@ -596,6 +609,8 @@ class CognitionSkill(Skill[ModelResponse]):
         人格 JSON 是 {mode, reply, action, reason}，无 ``response_plan``，故在此单独按
         ``reply`` 字段触发 ``on_reply``，让回复在写场调用（②）之前就交付。
         """
+        if request.light_finalize:
+            return self.run(request)  # No partial candidate can escape before escalation is resolved.
         from jshi.models.base import iter_top_level_json_values
 
         persona = bool(getattr(request, "persona_schema", None)) and not getattr(

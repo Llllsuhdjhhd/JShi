@@ -154,6 +154,11 @@ class Skill(ABC, Generic[T]):
             persona_schema = getattr(request, "persona_schema", None)
             if persona_schema:
                 schema = persona_schema
+        if request is not None and getattr(request, 'light_finalize', False):
+            from jshi.subject.preparation import LIGHT_INSTRUCTION
+            instruction += '\n' + LIGHT_INSTRUCTION
+            schema = {'anyOf': [schema, {'type':'object', 'properties':{'need_deep':{'const':True}},
+                                        'required':['need_deep'], 'additionalProperties':False}]}
         schema_doc = json.dumps(
             schema, ensure_ascii=False, separators=(",", ":")
         )

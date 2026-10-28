@@ -38,6 +38,8 @@ class ModelSettings:
         self.path = Path(root)/'model_settings.local.json'
         self.lock = RLock()
         self.jev = jev
+        from jshi.decision import decision_service
+        self.decision = decision_service(process)
         self.jev_mode = getattr(jev, 'mode', 'split')
         self.routes = {}
         for name, port in [('cognition',process.cognition),('write_zone',process.write_zone)]:
@@ -122,7 +124,8 @@ class ModelSettings:
                 rows[name]={'label':LABELS[name],'current':route.name,'last':dict(route.last),
                     'profile':self.profiles.get(name,{'choices':[], 'effort':effort})}
             services={k:{field:v for field,v in s.items() if field!='api_key'}|{'has_key':bool(s.get('api_key')),'models':MODELS.get(k,[])} for k,s in self.services.items()}
-            return {'rows':rows,'services':services,'global_profile':self.global_profile, 'jev_mode':self.jev_mode}
+            return {'rows':rows,'services':services,'global_profile':self.global_profile, 'jev_mode':self.jev_mode,
+                    'decision': self.decision.public()}
 
     def _chain(self, profile, services, purpose=None):
         choices=profile.get('choices',[])
@@ -227,7 +230,13 @@ def install_model_settings(app, process, jev, on_paid=None, on_status=None):
         if not same_origin(request): raise web.HTTPForbidden()
         try:
             data=await request.json()
-            if request.path.endswith('/test'): result=await asyncio.to_thread(settings.test,data)
+            if request.path.endswith('/decision/test'):
+                outcome = await settings.decision.test()
+                result = {'status': outcome.status, 'model': outcome.model, 'elapsed_ms': outcome.elapsed_ms,
+                          'reason': outcome.reason, 'answers': outcome.answers}
+            elif request.path.endswith('/decision'):
+                result = settings.decision.save(data)
+            elif request.path.endswith('/test'): result=await asyncio.to_thread(settings.test,data)
             else: result=settings.save(data)
             return web.json_response(result)
         except (ValueError,KeyError,TypeError) as exc: return web.json_response({'error':str(exc)},status=400)
@@ -237,6 +246,11 @@ def install_model_settings(app, process, jev, on_paid=None, on_status=None):
     app.router.add_get('/model-settings',read)
     app.router.add_post('/model-settings',change)
     app.router.add_post('/model-settings/test',change)
+    app.router.add_post('/model-settings/decision',change)
+    app.router.add_post('/model-settings/decision/test',change)
+    async def close_decision(app):
+        await settings.decision.close()
+    app.on_cleanup.append(close_decision)
     async def script(request): return web.FileResponse(Path(__file__).with_name('model_settings.js'))
     app.router.add_get('/model_settings.js',script)
     return settings
