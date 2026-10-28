@@ -124,6 +124,8 @@ def test_ready_speech_group_can_start_main_while_more_speech_keeps_arriving(proc
             await asyncio.wait_for(c.turn_queue.join(), 3)
             timing = c.last_debug['timing']['voice']
             assert timing['input_timings']
+            assert timing['speech_to_reaction_ms'] is None
+            assert timing['audio_end_received_to_reaction_ms'] is None
             assert timing['current_jev_ms'] + timing['historical_jev_ms'] == timing['jev_ms']
             await c.close()
     asyncio.run(run())

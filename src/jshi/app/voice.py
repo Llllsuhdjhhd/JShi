@@ -760,6 +760,12 @@ class VoiceConversation:
                 + "；partial_text只表示该句曾开始播放，不知道具体播到哪个字；pending_text尚未播放。")
 
     async def accept(self, transcript, *, asr_received_mono=None, asr_received_at_ms=None, online_identity_ms=0) -> None:
+        # Capture before any emit, queue backpressure or archive I/O.
+        accepted_mono, accepted_wall = monotonic(), time() * 1000
+        receipt = (self.sample_source.receipt_timing(transcript.start_ms, transcript.end_ms)
+                   if transcript.final and self.sample_source and hasattr(self.sample_source, 'receipt_timing') else {})
+        clock_drift = (self.sample_source.clock_drift_ms(now=accepted_mono)
+                       if self.sample_source and hasattr(self.sample_source, 'clock_drift_ms') else None)
         self.feedback.changed()
         from jshi.simplified import simplify_text
         simplified = simplify_text(transcript.text)
@@ -774,7 +780,8 @@ class VoiceConversation:
             await self.emit('transcript', **asdict(transcript))
             return  # No text: do not start or extend the conversational timer.
         speech_key = self.speech_group_key(transcript)
-        received = asr_received_mono if asr_received_mono is not None else asyncio.get_running_loop().time()
+        received = asr_received_mono if asr_received_mono is not None else accepted_mono
+        received_wall = asr_received_at_ms if asr_received_at_ms is not None else accepted_wall
         previous = self.speech_input_at.get(speech_key, self.last_input_at)
         gap_before = max(0, received - previous) if previous else 0
         self.last_input_at = received
@@ -807,18 +814,23 @@ class VoiceConversation:
         self.input_records[iid] = {'transcript': transcript, 'pcm': pcm, 'at': received,
             'online_identity_ms':online_identity_ms,
             'gap_before':gap_before, 'asr_lag_ms': lag,
-            'received_at_ms':asr_received_at_ms if asr_received_at_ms is not None else time() * 1000}
-        origin = self.sample_source.started_at_ms if self.sample_source else None
+            'received_at_ms':received_wall}
+        timing = self.asr_timings.pop((transcript.start_ms, transcript.end_ms, transcript.track_id), {})
+        timing.update({k: v for k, v in receipt.items() if v is not None})
+        timing['_result_ready_mono'] = accepted_mono
+        timing.setdefault('_asr_return_mono', received)
+        self.input_records[iid]['asr_timing'] = timing
         self.stamp_pipeline(iid,
+            timing_version=2,
             previous_settled_at_ms=self.last_settled_at_ms,
             session_started_at_ms=self.session_started_at_ms,
             asr_returned_at_ms=self.input_records[iid]['received_at_ms'],
-            speech_start_at_ms=(origin + transcript.start_ms) if origin is not None else None,
-            speech_end_at_ms=(origin + transcript.end_ms) if origin is not None else None)
-        timing = self.asr_timings.pop((transcript.start_ms, transcript.end_ms, transcript.track_id), {})
-        if timing:
-            self.input_records[iid]['asr_timing'] = timing
-            await self.save_voice_latency(iid, 'asr_returned')
+            result_ready_at_ms=accepted_wall,
+            audio_start_received_at_ms=receipt.get('audio_start_received_at_ms'),
+            audio_end_received_at_ms=receipt.get('audio_end_received_at_ms'),
+            speech_audio_duration_ms=transcript.end_ms-transcript.start_ms,
+            audio_clock_drift_ms=clock_drift)
+        await self.save_voice_latency(iid, 'asr_returned')
         self.sample_bytes += len(pcm or b'')
         while len(self.input_records) > 128 or self.sample_bytes > 16 * 1024 * 1024:
             old = next(iter(self.input_records))
@@ -836,6 +848,7 @@ class VoiceConversation:
                     self.sample_source.capture_id,asdict(transcript),pcm=pcm,
                     received_at_ms=self.input_records[iid]['received_at_ms'])
                 self.input_records[iid]['audio_saved'] = not self.sample_source.archive_error
+                await self._archive_update(iid, pipeline=dict(self.input_records[iid].get('pipeline') or {}))
             except Exception:
                 logging.getLogger(__name__).exception('Recent input audio indexing failed')
                 await self.emit('notice',text='本句录音保存失败；当前对话继续。')
@@ -2174,9 +2187,7 @@ class VoiceConversation:
                     input_record['text_sent_mono'] = monotonic()
                     input_record.setdefault('asr_timing', {})['_text_sent_mono'] = input_record['text_sent_mono']
                     input_record['asr_timing'].setdefault('_asr_return_mono', input_record['at'])
-                    self.stamp_pipeline(transcript.input_id, text_sent_at_ms=time()*1000,
-                        speech_start_at_ms=utterance.recorded_start_at_ms,
-                        speech_end_at_ms=utterance.recorded_end_at_ms)
+                    self.stamp_pipeline(transcript.input_id, text_sent_at_ms=time()*1000)
                     # Show text first; identity and candidates refine the same row afterwards.
                     await self.emit("timeline", **asdict(utterance), voiceprint_candidates=[],
                                     voice_latency=public_timing(input_record['asr_timing']),
@@ -2659,19 +2670,24 @@ class VoiceConversation:
                 'input_prepare_ms': sum(call.get('input_prepare_ms', 0) for call in current_calls),
                 'jev_ms': metrics['current_jev_ms'],
                 'historical_jev_ms': metrics['historical_jev_ms'],
-                'speech_end_at_ms': max((u.recorded_end_at_ms for u in envelope.current_utterances
-                                        if u.recorded_end_at_ms is not None), default=None),
+                'audio_end_received_at_ms': max((r['pipeline']['audio_end_received_at_ms'] for r in rows
+                    if r.get('pipeline', {}).get('audio_end_received_at_ms') is not None), default=None),
             })
         metrics['input_timings'] = [{
             'input_id': u.input_id, 'received_at_ms': r.get('received_at_ms'),
-            'speech_end_at_ms': u.recorded_end_at_ms,
+            'estimated_audio_end_at_ms': u.recorded_end_at_ms,
+            'audio_end_received_at_ms': r.get('pipeline', {}).get('audio_end_received_at_ms'),
             'collection_wait_ms': round(max(0, r.get('group_ready_at', r['at']) - r['at']) * 1000),
             'identity_ms': r.get('identity_ms', 0), 'candidate_ms': r.get('candidate_ms', 0),
             'jev_ms': round(max(0, r.get('jev_finished_at', r['at']) - r.get('jev_started_at', r['at'])) * 1000),
             'ready_queue_wait_ms': round(max(0, began - r.get('ready_at', began)) * 1000),
         } for u in envelope.current_utterances if (r := self.input_records.get(u.input_id)) is not None]
-        metrics['speech_end_at_ms'] = max((u.recorded_end_at_ms for u in envelope.current_utterances
+        metrics['estimated_audio_end_at_ms'] = max((u.recorded_end_at_ms for u in envelope.current_utterances
                                           if u.recorded_end_at_ms is not None), default=None)
+        # All current inputs must have anchors for a complete batch endpoint.
+        audio_ends = [r.get('asr_timing', {}).get('_audio_end_received_mono') for r in rows]
+        audio_end_mono = (max(audio_ends) if len(rows) == len(envelope.current_utterances)
+                          and audio_ends and all(t is not None for t in audio_ends) else None)
         metrics.update({"speech_group_wait_ms": max((round((r.get("group_ready_at", r["at"]) - r["at"]) * 1000) for r in rows), default=0),
             'online_identity_ms':sum(r.get('online_identity_ms',0) for r in rows),
             "input_worker_wait_ms": max((round((r.get("worker_started_at", r["at"]) - r["at"]) * 1000) for r in rows), default=0),
@@ -2706,10 +2722,11 @@ class VoiceConversation:
                 logging.getLogger(__name__).exception('Waiting latency statistics could not be saved')
             metrics['main_start_to_reply_ms'] = metrics['model_to_reply_ms']
             metrics['reply_ready_at_ms'] = time() * 1000
-            metrics['speech_to_reaction_ms'] = (round(max(0, metrics['reply_ready_at_ms'] - metrics['speech_end_at_ms']))
-                                               if metrics['speech_end_at_ms'] is not None else None)
-            metrics['received_to_reaction_ms'] = (round(max(0, metrics['reply_ready_at_ms'] - max(r['received_at_ms'] for r in rows)))
-                                                 if rows else None)
+            from jshi.voice.latency import elapsed_ms
+            reply_mono = monotonic()
+            metrics['speech_to_reaction_ms'] = None  # Acoustic speech-end time is not measured.
+            metrics['audio_end_received_to_reaction_ms'] = elapsed_ms(reply_mono, audio_end_mono)
+            metrics['received_to_reaction_ms'] = elapsed_ms(reply_mono, max((r['at'] for r in rows), default=None))
             # Only enqueue on the event loop. Neither synthesis nor playback
             # blocks cognition or the independent write-zone call.
             valid = {u.speaker.object_id for u in (*envelope.utterances, *envelope.current_utterances)} | {envelope.speaker.object_id}
@@ -3825,23 +3842,19 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     names=[p.label for p in process.profiles.list() if p.status != 'rejected' and p.source != 'voice_scene'][:100],
                     asr=describe_asr(backend, config, use_local),
                     tts="本地固定音色" if local_tts else ("火山双向流式合成" if config.tts_transport == 'websocket' else "在线 SSE 合成"))
-                intake_lag_reported, audio_clock = False, {}
+                intake_lag_reported = False
                 async for message in ws:
                     if message.type == WSMsgType.BINARY:
                         if len(message.data) > 32000 or len(message.data) % 2:
                             raise ValueError("invalid microphone PCM frame")
                         frame = capture_source.accept(message.data)
                         audio.append(frame.pcm)
-                        intake_lag_ms = time()*1000 - audio.started_at_ms - (audio.offset+len(audio.data))/32
-                        if intake_lag_ms > 3000 and not intake_lag_reported:
+                        intake_lag_ms = audio.clock_drift_ms()
+                        if intake_lag_ms is not None and intake_lag_ms > 3000 and not intake_lag_reported:
                             intake_lag_reported = True
-                            logging.getLogger(__name__).warning('microphone intake is %.1f s behind real time', intake_lag_ms/1000)
-                            browser_lag = audio_clock.get('context_lag_ms')
-                            source = ('浏览器的声音采集本身变慢，多半是电脑声音设备或驱动卡顿'
-                                      if isinstance(browser_lag, (int, float)) and browser_lag >= intake_lag_ms*.7
-                                      else '服务端或页面转发变慢')
-                            await conversation.emit('notice', text=f'收音比实际时间慢了约 {intake_lag_ms/1000:.0f} 秒（{source}），识别和显示会随之推迟。')
-                        elif intake_lag_ms < 1000:
+                            logging.getLogger(__name__).warning('cumulative audio clock drift: %.1f s', intake_lag_ms/1000)
+                            await conversation.emit('notice', text=f'音频累计时钟偏差约 {intake_lag_ms/1000:.0f} 秒，可能包含采集暂停或传输停顿；不代表本句等待时间，出字耗时按实际收包记录计算。')
+                        elif intake_lag_ms is not None and intake_lag_ms < 1000:
                             intake_lag_reported = False
                         if audio.archive_error and not getattr(audio,'archive_error_reported',False):
                             await conversation.emit('notice',text='录音保存失败：'+audio.archive_error)
@@ -3857,9 +3870,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                             row = {'at_ms': round(time()*1000), 'session_id': conversation.session_id,
                                    'page_lag_ms': payload.get('page_lag_ms'), 'context_lag_ms': payload.get('context_lag_ms'),
                                    'browser_buffered': payload.get('buffered'),
-                                   'server_lag_ms': round(time()*1000 - audio.started_at_ms - (audio.offset+len(audio.data))/32)
-                                                    if audio.started_at_ms else None}
-                            audio_clock = row
+                                   'audio_clock_drift_ms': audio.clock_drift_ms()}
                             try:
                                 with (process.repository.path.parent/'audio_clock.jsonl').open('a', encoding='utf-8') as stream:
                                     stream.write(json.dumps(row)+'\n')

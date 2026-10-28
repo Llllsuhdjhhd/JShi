@@ -48,6 +48,8 @@ def public_timing(timing, now=None):
         'detected_to_text_sent_ms': elapsed_ms(now, timing.get('_detected_mono')),
         'audio_start_received_to_text_sent_ms': elapsed_ms(now, timing.get('_audio_start_received_mono')),
         'audio_end_received_to_text_sent_ms': elapsed_ms(now, timing.get('_audio_end_received_mono')),
+        'audio_end_received_to_result_ready_ms': elapsed_ms(timing.get('_result_ready_mono'), timing.get('_audio_end_received_mono')),
+        'result_ready_to_text_sent_ms': elapsed_ms(now, timing.get('_result_ready_mono')),
         'asr_return_to_text_sent_ms': elapsed_ms(now, timing.get('_asr_return_mono')),
         'detected_to_asr_return_ms': elapsed_ms(timing.get('_asr_return_mono'), timing.get('_detected_mono')),
     })

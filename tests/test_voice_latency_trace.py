@@ -9,6 +9,7 @@ import numpy as np
 from jshi.app.voice import VoiceConversation
 from jshi.voice.contracts import SpeechSegment, Transcript
 from jshi.voice.latency import AudioReceiptClock, append_latency, public_timing
+from jshi.voice.audio_buffer import SessionAudio
 from jshi.voice.local_input import LocalAudioPump
 from jshi.voice.pipeline import SpeechPipeline
 from jshi.voice.segmentation import SileroSegmenter
@@ -115,6 +116,58 @@ def test_trace_log_rotates(tmp_path):
     append_latency(path, {'stage':'text_sent'})
     assert path.with_suffix('.previous.jsonl').exists()
     assert json.loads(path.read_text())['stage'] == 'text_sent'
+
+
+def test_capture_pause_does_not_become_current_sentence_latency():
+    audio = SessionAudio(seconds=.1)
+    audio.append(b'\1\0' * 1600, received_at_ms=100000, received_mono=100)
+    audio.append(b'\2\0' * 1600, received_at_ms=149200, received_mono=149.2)
+    # Exact endpoint selects the preceding packet, even after a long capture pause.
+    receipt = audio.receipt_timing(100, 200)
+    assert receipt['audio_end_received_at_ms'] == 149200
+    assert audio.receipt_timing(0, 100)['audio_end_received_at_ms'] == 100000
+    assert audio.receipt_timing(200, 201)['audio_end_received_at_ms'] is None
+    timing = public_timing({**receipt, '_result_ready_mono':149.4, '_text_sent_mono':149.5})
+    assert timing['audio_end_received_to_result_ready_ms'] == 200
+    assert timing['audio_end_received_to_text_sent_ms'] == 300
+    assert timing['result_ready_to_text_sent_ms'] == 100
+    assert audio.clock_drift_ms(now=149.2) == 49100
+    assert audio.segment(100, 200) == b'\2\0' * 1600
+    # Evicted arrival anchors cannot be reconstructed from sample count.
+    audio.receipt_wall.packets.clear()
+    audio.receipt_mono.packets.clear()
+    assert audio.receipt_timing(100, 200)['audio_end_received_at_ms'] is None
+
+
+def test_cloud_accept_records_receipt_before_emit_and_keeps_unknown_unknown(process, monkeypatch):
+    async def run():
+        wall = [200.0]
+        monkeypatch.setattr('jshi.app.voice.time', lambda: wall[0])
+        async def send(message):
+            if message['type'] == 'transcript': wall[0] += 10
+        audio = SessionAudio()
+        audio.append(b'\0' * 3200, received_at_ms=150000, received_mono=monotonic()-50)
+        audio.append(b'\0' * 3200, received_at_ms=199800, received_mono=monotonic()-.2)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send, sample_source=audio)
+        try:
+            await c.accept(Transcript('你好', 'A', 100, 200, True))
+            row = next(iter(c.input_records.values()))
+            assert row['received_at_ms'] == 200000  # emit's delay did not move the anchor
+            assert row['pipeline']['audio_end_received_at_ms'] == 199800
+            assert 'speech_end_at_ms' not in row['pipeline']
+            timing = public_timing(row['asr_timing'])
+            assert 0 <= timing['audio_end_received_to_result_ready_ms'] < 2000
+            assert not process.cognition.requests
+        finally:
+            await c.close()
+        c = VoiceConversation(process, 'stone', FakeCloud(), send)
+        try:
+            await c.accept(Transcript('你好', 'A', 0, 100, True))
+            row = next(iter(c.input_records.values()))
+            assert public_timing(row['asr_timing'])['audio_end_received_to_result_ready_ms'] is None
+        finally:
+            await c.close()
+    asyncio.run(run())
 
 
 def test_websocket_timeline_and_display_ack_link_to_same_input(process, monkeypatch):

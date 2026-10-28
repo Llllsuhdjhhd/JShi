@@ -362,7 +362,7 @@ const phaseNames={collect:'收集发言',prepare:'准备输入材料',jev:'JEV �
 const phaseSteps={collect:['collect','收集发言'],prepare:['prepare','准备材料'],jev:['jev','接话判断'],judged:['jev','接话判断'],queued:['queued','等待主流程'],resolve:['resolve','主引擎开始'],assemble:['assemble','组装材料'],cognition:['main','主认知'],action:['action','行动']};
 phaseNames.reconsider='正在重新考虑';phaseSteps.reconsider=['main','重新考虑'];
 const liveStepKeys=new Set(['previous','speech','speechEnd','cut','sent','jev','resolve','main','reply','finished']);
-const pipelineNodes=[['session_started_at_ms','会话开始'],['previous_settled_at_ms','前一轮结束'],['speech_start_at_ms','说话开始'],['speech_end_at_ms','说话结束'],['asr_returned_at_ms','断句完成'],['collect_at_ms','开始收集'],['text_sent_at_ms','文字发出'],['display_ack_at_ms','页面显示'],['jev_started_at_ms','接话判断开始'],['jev_finished_at_ms','接话判断结束'],['queued_at_ms','进入主流程队列'],['main_started_at_ms','主引擎开始'],['reply_sent_at_ms','回复发出'],['turn_complete_at_ms','本轮完成'],['write_started_at_ms','记忆整理开始'],['write_completed_at_ms','记忆整理结束']];
+const pipelineNodes=[['session_started_at_ms','会话开始'],['previous_settled_at_ms','前一轮结束'],['audio_start_received_at_ms','语音起点送达'],['audio_end_received_at_ms','末尾音频送达'],['asr_returned_at_ms','识别结果到达'],['result_ready_at_ms','输入就绪'],['collect_at_ms','开始收集'],['text_sent_at_ms','文字发出'],['display_ack_at_ms','页面显示'],['jev_started_at_ms','接话判断开始'],['jev_finished_at_ms','接话判断结束'],['queued_at_ms','进入主流程队列'],['main_started_at_ms','主引擎开始'],['reply_sent_at_ms','回复发出'],['turn_complete_at_ms','本轮完成'],['write_started_at_ms','记忆整理开始'],['write_completed_at_ms','记忆整理结束']];
 function wallClock(ms){return Number.isFinite(ms)?new Date(ms).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,fractionalSecondDigits:3}):'';}
 const replyRows=new Map(), actionRows=new Map();
 function actionKey(key){return JSON.stringify(key||[]);}
@@ -623,20 +623,23 @@ function modelStep(row,key,label,state,event=null,atMs=null){
   }else if(!step.calls.size){step.state=state;if(state!=='进行中')step.ended=atMs??step.ended??now;}
 }
 function pipelineDetailText(pipe){
-  const rows=pipelineNodes.filter(([k])=>Number.isFinite(pipe?.[k]));
+  const rows=pipelineNodes.filter(([k])=>Number.isFinite(pipe?.[k])).sort((a,b)=>pipe[a[0]]-pipe[b[0]]);
   if(!rows.length)return '';
-  return '流程时刻\n'+rows.map(([k,label],i)=>{
+  return '流程时刻（+ 为距上一节点的间隔）\n'+rows.map(([k,label],i)=>{
     const prev=i?pipe[rows[i-1][0]]:null;
     const gap=Number.isFinite(prev)?'  +'+((pipe[k]-prev)/1000).toFixed(1)+'秒':'';
     return wallClock(pipe[k])+'  '+label+gap;
-  }).join('\n');
+  }).join('\n')+
+    (Number.isFinite(pipe.speech_audio_duration_ms)?'\n音频片段长度：'+(pipe.speech_audio_duration_ms/1000).toFixed(3)+'秒':'')+
+    (Number.isFinite(pipe.audio_clock_drift_ms)?'\n累计音频时钟偏差：'+(pipe.audio_clock_drift_ms/1000).toFixed(1)+'秒（独立诊断，非本句等待）':'')+
+    ((pipe.timing_version===2||pipe.audio_timing_expected||Number.isFinite(pipe.speech_end_at_ms))&&!Number.isFinite(pipe.audio_end_received_at_ms)?'\n缺少末尾音频收包记录，无法还原本句识别延迟':'');
 }
 function applyPipeline(row,pipe){
   if(!row||!pipe)return;
   if(!row.modelUi&&row.p?.modelUi)row.modelUi=row.p.modelUi;
   if(!row.modelUi)return;
   row.modelUi.pipeline={...(row.modelUi.pipeline||{}),...pipe};
-  const map=[['previous_settled_at_ms','previous','前一轮结束'],['speech_start_at_ms','speech','说话开始'],['speech_end_at_ms','speechEnd','说话结束'],['asr_returned_at_ms','cut','断句完成'],['text_sent_at_ms','sent','文字发出'],['jev_started_at_ms','jev','接话判断'],['jev_finished_at_ms','jev','接话判断'],['main_started_at_ms','resolve','主引擎开始'],['reply_sent_at_ms','reply','回复发出'],['turn_complete_at_ms','finished','本轮完成']];
+  const map=[['previous_settled_at_ms','previous','前一轮结束'],['audio_start_received_at_ms','speech','语音起点送达'],['audio_end_received_at_ms','speechEnd','末尾音频送达'],['asr_returned_at_ms','cut','识别结果到达'],['text_sent_at_ms','sent','文字发出'],['jev_started_at_ms','jev','接话判断'],['jev_finished_at_ms','jev','接话判断'],['main_started_at_ms','resolve','主引擎开始'],['reply_sent_at_ms','reply','回复发出'],['turn_complete_at_ms','finished','本轮完成']];
   for(const [k,id,label] of map){
     if(!Number.isFinite(pipe[k]))continue;
     const state=k==='jev_started_at_ms'&&!Number.isFinite(pipe.jev_finished_at_ms)?'进行中':'完成';
@@ -668,7 +671,7 @@ function updateModelPanel(row){
     const time=wallClock(step.at);
     const duration=step.calls.size?[...step.calls.values()].reduce((sum,c)=>sum+(Number.isFinite(c.elapsed_ms)?c.elapsed_ms:((c.ended??Date.now())-c.started)),0):(step.ended??(step.state==='进行中'?Date.now():step.at))-step.at;
     const wait=Number.isFinite(duration)&&duration>0?' · '+(duration/1000).toFixed(1)+'秒':'';
-    return time+'  '+step.label+(['前一轮结束','说话开始','说话结束','断句完成','文字发出','回复发出','收到输入','本轮完成','处理失败'].includes(step.label)?'':' · '+step.state)+wait;
+    return time+'  '+step.label+(['前一轮结束','语音起点送达','末尾音频送达','识别结果到达','文字发出','回复发出','收到输入','本轮完成','处理失败'].includes(step.label)?'':' · '+step.state)+wait;
   }).join('\n');
   if((row.p||row)===latestModelInput){positionModelPanel();if(ui.follow)ui.panel.scrollTop=ui.panel.scrollHeight;}
 }
@@ -734,7 +737,7 @@ function timingSummary(timing){
 }
 function detailLine(extra,text){const line=document.createElement('small');line.className='jev-detail';line.textContent=text;extra.appendChild(line);}
 function voiceLatencyText(t){
-  const fields=[['detected_to_display_ack_upper_ms','检测到语音→文字显示确认（上界）'],['audio_end_received_to_display_ack_upper_ms','末尾音频送达→显示确认（上界）'],['detected_to_text_sent_ms','检测到语音→发出文字'],['audio_start_to_detection_ms','音频送达→起声确认（含积压）'],['audio_end_to_window_ready_ms','末尾音频送达→切段就绪'],['endpoint_backlog_ms','切段时音频处理积压'],['analysis_batch_ms','声音分析（整批）'],['transcription_batch_ms','转写（整批）'],['http_batch_ms','其中：千问请求往返（含服务端排队/推理）'],['asr_request_lock_ms','转写请求排队'],['asr_return_to_text_sent_ms','转写完成→页面文字发出'],['text_send_to_display_ack_upper_ms','发出文字→显示确认（上界）'],['browser_render_ms','浏览器处理至绘制回调'],['pending_audio_ms_at_return','转写返回时待处理音频']];
+  const fields=[['audio_end_received_to_result_ready_ms','末尾音频送达→输入就绪'],['result_ready_to_text_sent_ms','输入就绪→文字发出'],['audio_end_received_to_text_sent_ms','末尾音频送达→文字发出'],['detected_to_display_ack_upper_ms','检测到语音→文字显示确认（上界）'],['audio_end_received_to_display_ack_upper_ms','末尾音频送达→显示确认（上界）'],['detected_to_text_sent_ms','检测到语音→发出文字'],['audio_start_to_detection_ms','音频送达→起声确认（含积压）'],['audio_end_to_window_ready_ms','末尾音频送达→切段就绪'],['endpoint_backlog_ms','切段时音频处理积压'],['analysis_batch_ms','声音分析（整批）'],['transcription_batch_ms','转写（整批）'],['http_batch_ms','其中：千问请求往返（含服务端排队/推理）'],['asr_request_lock_ms','转写请求排队'],['asr_return_to_text_sent_ms','转写结果返回→文字发出（含后续整句等待）'],['text_send_to_display_ack_upper_ms','发出文字→显示确认（上界）'],['browser_render_ms','浏览器处理至绘制回调'],['pending_audio_ms_at_return','转写返回时待处理音频']];
   fields.push(['turn_audio_ms','整句检测（与转写并行）'],['turn_join_wait_ms','转写后额外等待整句结果'],['turn_hold_ms','转写后待接续／放行耗时']);
   fields.push(['turn_semantic_ms','文本语义判断'],['turn_semantic_join_wait_ms','会合时额外等语义结果']);
   return fields.filter(([k])=>Number.isFinite(t?.[k])).map(([k,label])=>label+'：'+(t[k]/1000).toFixed(3)+'秒').join('\n');
@@ -991,7 +994,7 @@ function message(m) {
     speakerLabels.set(m.speaker.object_id,m.speaker.label);
     const time=ms=>Math.floor(ms/60000)+':'+((ms%60000)/1000).toFixed(1).padStart(4,'0');
     const wall=ms=>new Date(ms).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
-    const stamp='会话 +'+time(m.start_ms)+'–'+time(m.end_ms)+(m.recorded_start_at_ms!=null ? ' · 录音约 '+wall(m.recorded_start_at_ms)+'–'+wall(m.recorded_end_at_ms) : ''), p=log('','input',m.received_at_ms),meta=document.createElement('span'),body=document.createElement('span');
+    const stamp='音频 +'+time(m.start_ms)+'–'+time(m.end_ms), p=log('','input',m.received_at_ms),meta=document.createElement('span'),body=document.createElement('span');
     meta.textContent=personLabel(m.speaker.label)+' · 轨迹 '+m.speaker.track_id+(m.overlap ? ' · 声音重叠' : '')+' · 声纹初判，等待 JEV';meta.className='message-meta';meta.title=stamp;
     const who=document.createElement('span');who.className='input-person';who.textContent=displayedSpeaker(m.speaker,'',[],m.identity_display)+'：';who.title=(m.identity_display?.label||m.speaker.label)+'：'+(m.identity_display?.reason||'');body.textContent=m.text;body.className='message-body';p.appendChild(who);p.appendChild(body);
     const {extra,toggle}=inputDetails(p);extra.appendChild(meta);
@@ -1012,7 +1015,7 @@ function message(m) {
       extra.appendChild(button);p.inputId=m.input_id;const row={p,meta,body,button,who,extra,toggle,ranking,jevNote,time:stamp,overlap:m.overlap,voiceprintCandidates:trainingCandidates,identityView:m.identity_display,identityComparison:m.identity_comparison,modelUi:p.modelUi};inputRows.set(m.input_id,row);trainingLabel(row,m.input_id,trainingCandidates,m.personal_prediction,m.identity_comparison);attachIdentityDetails(row,m.input_id);latestInputId=m.input_id;
       const pipelineLine=document.createElement('small');pipelineLine.className='jev-detail';pipelineLine.style.whiteSpace='pre-line';extra.appendChild(pipelineLine);row.pipelineLine=pipelineLine;
       const timing=document.createElement('small');timing.className='jev-detail';timing.style.whiteSpace='pre-line';timing.textContent=voiceLatencyText(m.voice_latency);extra.appendChild(timing);row.voiceLatency=timing;
-      applyPipeline(row,{speech_start_at_ms:m.recorded_start_at_ms,speech_end_at_ms:m.recorded_end_at_ms,asr_returned_at_ms:m.received_at_ms,...(m.pipeline||{})});
+      applyPipeline(row,{audio_timing_expected:true,asr_returned_at_ms:m.received_at_ms,...(m.pipeline||{})});
     }
     p.appendChild(p.modelUi.panel);
     if(m.input_id&&document.visibilityState==='visible')requestAnimationFrame(()=>requestAnimationFrame(()=>{
