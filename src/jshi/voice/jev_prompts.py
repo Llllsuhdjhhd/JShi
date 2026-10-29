@@ -190,3 +190,16 @@ SCENE_INSTRUCTION = r"""【用途】
 只输出Schema允许的JSON，不输出思考过程。
 scene是一份完整更新后的现场字符串，不是追加片段。包括标题、时间和引用在内最多1000字符，不要求写满；优先保留当前关键关系，不为覆盖全部旧事塞满内容。没有实质变化可沿用仍有效内容，但本批已读事件必须参与判断。
 Schema允许时可另给discard_history，仅含本批明确可删的H引用；没有则省略或空数组。不输出回复、实时控制或工具调用。"""
+
+
+def identity_instruction():
+    """Full identity task, sharing rules without a second routing judge."""
+    inputs = ENTRY_INSTRUCTION.split('【输入】\n', 1)[1].split('【目标任务】', 1)[0].strip()
+    identity = ENTRY_INSTRUCTION.split('一、判断谁在说话：', 1)[1].split('二、判断是否在与匠石交往：', 1)[0].strip()
+    return ('【用途】\n你是匠石决策模式的人物核对。只综合判断逐句人物，不选择路由、不生成回复。\n\n【输入】\n'
+            + inputs + '\n\n【目标任务】\n判断谁在说话：' + identity
+            + '\n若发现媒体、远端或人物关系证据可能推翻本批原有交往判断，source_conflict为true；'
+              '姓名unknown本身不算冲突。不重新决定停止、等待或主认知档位。'
+              '\n\n【输出】\n只输出JSON对象，items覆盖每句恰好一次，逐句给i、person、certainty、why；'
+              'person仅允许该句候选或unknown，unknown的certainty必须为unknown。source_conflict为布尔值。'
+              '不输出其他字段。中文自然语言统一使用简体中文，代号原样保留。')

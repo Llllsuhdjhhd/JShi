@@ -18,6 +18,16 @@ def row(text='前段', n=0):
     return SceneUtterance(text,SpeakerEvidence('A','person','甲','recognized'),n*1000,(n+1)*1000,input_id=str(n))
 
 
+def test_main_cognition_material_does_not_reuse_preparation_memory_codes():
+    from types import SimpleNamespace
+    from datetime import datetime, timezone
+    memory = SimpleNamespace(content='旧事', text='', occurred_at=datetime(2026, 10, 28, tzinfo=timezone.utc), event_id='long-id')
+    analysis = PreparedAnalysis('s', 'person', (row(),), 2, {'goal': '暂定'}, memory_rows=(memory,))
+    assert analysis.model_material()['memories'][0]['ref'] == 'R1'
+    spoken = analysis.model_material(include_memories=False)
+    assert set(spoken) == {'prefix', 'preparation'}
+
+
 def test_provisional_analysis_has_no_business_commit_and_no_long_ids():
     seen=[]
     class Model:

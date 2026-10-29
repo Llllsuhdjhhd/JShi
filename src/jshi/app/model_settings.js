@@ -7,6 +7,7 @@
  host.prepend(panel);const status=panel.querySelector('.model-status');let state;
  const el=(tag,text)=>{const n=document.createElement(tag);if(text)n.textContent=text;return n;};
  async function request(data){const r=await fetch('/model-settings',data?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}:{});const value=await r.json();if(!r.ok)throw Error(value.error||'保存未成功');return value;}
+ function showEntryRoute(decision){const r=decision?.entry_last,p=panel.querySelector('[data-entry-route]');if(p)p.textContent=r?.actual?'最近入口实际使用：'+(r.actual==='decision'?'决策模式':'拆分模式')+(r.reason?'；原因：'+({shadow:'仅观察',entry_disabled:'入口决策关闭',unsupported_scope:'本批需要完整判断',host_bridge_unavailable:'此入口尚未连接决策服务',uncertain_or_conflicting:'决策不确定或结果冲突',material_budget:'材料超出入口预算'}[r.reason]||'本批需要完整复核'):''):'最近入口尚无决策模式记录。';}
  function render(){
   const form=panel.querySelector('.model-form');form.replaceChildren();
   const row=state.rows.cognition||Object.values(state.rows)[0];if(!row)return;
@@ -15,8 +16,9 @@
   display.onchange=()=>window.dispatchEvent(new CustomEvent('jshi-model-info',{detail:display.checked}));
   displayLabel.append(display,document.createTextNode(' 默认展开对话中的模型调用信息'));form.append(displayLabel);
   form.append(el('p','当前模型：'+row.current));
-  const jevMode=el('select');jevMode.append(new Option('两段串行：先判断入口，按需准备回应','split'),new Option('单次合并：一次完成入口与回应准备','combined'));
-  jevMode.value=state.jev_mode==='combined'?'combined':'split';
+  const jevMode=el('select');jevMode.append(new Option('两段串行：先判断入口，按需准备回应','split'),new Option('单次合并：一次完成入口与回应准备','combined'),new Option('决策模型：入口决策，按需准备回应','decision'));
+  jevMode.value=['combined','decision'].includes(state.jev_mode)?state.jev_mode:'split';
+  form.append(el('p','决策模式需快速决策设置为参与调度；关闭或仅观察时实际执行拆分模式。复杂输入或判断失败可单批回退。页面文字只在决策模式下进入撞车判断。'));
   const jevLabel=el('label','JEV1处理方式');jevLabel.append(jevMode);form.append(jevLabel);
   const modeSave=el('button','保存JEV1处理方式');modeSave.onclick=async()=>{
    modeSave.disabled=true;try{state=await request({jev_mode:jevMode.value});render();status.textContent='已保存，后续输入使用所选处理方式。';}catch(e){status.textContent=e.message;}finally{modeSave.disabled=false;}
@@ -64,15 +66,16 @@
    for(const [title,input] of fields){const label=el('label',title);input.style.width='100%';label.append(input);box.append(label);}
    const dhint=el('p');dhint.className='tip';box.append(dhint);
    function fillDecision(){const p=decision.providers[provider.value];dmodel.value=p.model;url.value=p.endpoint;keyenv.value=p.api_key_env;dhint.textContent=(p.credential_source==='existing_qwen_settings'?'使用已保存的百炼凭据。':p.has_key?'密钥环境变量已配置。':'未检测到密钥环境变量。')+' 决策接口不生成接话或答案；主认知模型单独选择。';}provider.onchange=fillDecision;fillDecision();
-   const flags={};for(const [name,label] of [['collision','JEV1撞车判断'],['continuation','后续表达影响判断'],['preparation','提前准备与分析（实验）']]){const line=el('label',label),input=el('input');input.type='checkbox';input.checked=decision[name];flags[name]=input;line.prepend(input);box.append(line);}
+   const flags={};for(const [name,label] of [['entry','决策模式入口判断'],['collision','JEV1撞车判断'],['continuation','后续表达影响判断'],['preparation','提前准备与分析（实验，仅本地识别的未完长句）']]){const line=el('label',label),input=el('input');input.type='checkbox';input.checked=decision[name];flags[name]=input;line.prepend(input);box.append(line);}
    const dsave=el('button','保存决策设置'),test=el('button','测试已保存的决策连接');
    dsave.onclick=async()=>{dsave.disabled=true;try{const r=await fetch('/model-settings/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:provider.value,mode:mode.value,providers:{[provider.value]:{model:dmodel.value.trim(),endpoint:url.value.trim(),api_key_env:keyenv.value.trim()}},...Object.fromEntries(Object.entries(flags).map(([k,v])=>[k,v.checked]))})});const d=await r.json();if(!r.ok)throw Error(d.error);state.decision=d;render();status.textContent='决策设置已保存；下一次判断生效。';}catch(e){status.textContent=e.message;}finally{dsave.disabled=false;}};
    test.onclick=async()=>{test.disabled=true;try{const r=await fetch('/model-settings/decision/test',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const d=await r.json();if(!r.ok)throw Error(d.error);status.textContent=d.status+' · '+d.model+' · '+d.elapsed_ms+'毫秒'+(d.reason?' · '+d.reason:'');}catch(e){status.textContent=e.message;}finally{test.disabled=false;}};
    box.append(dsave,test);form.append(box);
   }
+  const route=el('p');route.dataset.entryRoute='true';form.append(route);showEntryRoute(state.decision);
   const actual=el('details');actual.append(el('summary','实际使用情况'));
   for(const [name,r] of Object.entries(state.rows)){const p=el('p',r.label+'：'+r.current);p.dataset.modelName=name;actual.append(p);}form.append(actual);
  }
  request().then(d=>{state=d;render();}).catch(e=>status.textContent=e.message);
- setInterval(async()=>{if(!panel.open)return;try{const d=await request();for(const [name,r] of Object.entries(d.rows)){const p=panel.querySelector('[data-model-name="'+name+'"]');if(p)p.textContent=r.label+'：'+r.current+(r.last.model?'；最近调用 '+r.last.model:'');}}catch{}},5000);
+ setInterval(async()=>{if(!panel.open)return;try{const d=await request();showEntryRoute(d.decision);for(const [name,r] of Object.entries(d.rows)){const p=panel.querySelector('[data-model-name="'+name+'"]');if(p)p.textContent=r.label+'：'+r.current+(r.last.model?'；最近调用 '+r.last.model:'');}}catch{}},5000);
 })();

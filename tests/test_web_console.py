@@ -281,7 +281,7 @@ def test_selected_text_completes_in_connected_voice_session(process):
             for turn in conversation.debug_history:
                 assert turn['input']['source'] == 'web_text'
                 assert turn['timing']['voice']['asr_lag_ms'] is None
-                assert turn['timing']['voice']['speech_end_at_ms'] is None
+                assert turn['timing']['voice']['estimated_audio_end_at_ms'] is None
             assert not any(m['type'] == 'notice' and '主流程调用失败' in m.get('text', '') for m in emitted)
         finally:
             await conversation.close()

@@ -116,7 +116,7 @@ class WebData:
                              and r.get('subject_id', self.subject_id) == self.subject_id)
             rendered = []
             for r in calls:
-                if purpose != 'all' and r.get('purpose') != purpose and not (purpose == 'voice_jev' and r.get('purpose') in {'voice_jev_entry','voice_jev_prepare'}):
+                if purpose != 'all' and r.get('purpose') != purpose and not (purpose == 'voice_jev' and r.get('purpose') in {'voice_jev_entry','voice_jev_identity','voice_jev_prepare'}):
                     continue
                 system, user = r.get('system_text', ''), r.get('user_text', '')
                 sections.extend(re.findall(r'^【([^\n】]+)】\s*$', system+'\n'+user, re.M))

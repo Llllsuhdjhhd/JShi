@@ -558,7 +558,7 @@ def model_thinking_fields(
 def deepseek_json_output(request: ModelRequest, model: str) -> bool:
     """DeepSeek Chat JSON mode is a transport constraint, not a schema guarantee."""
     return str(model).lower().startswith('deepseek') and (request.json_output or bool(request.persona_schema) or request.purpose in {
-        'voice_jev', 'voice_jev_entry', 'voice_jev_prepare', 'voice_jev_scene',
+        'voice_jev', 'voice_jev_entry', 'voice_jev_identity', 'voice_jev_prepare', 'voice_jev_scene',
         'voice_person_review',
     })
 

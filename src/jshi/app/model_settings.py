@@ -99,7 +99,7 @@ class ModelSettings:
         if self.path.exists():
             saved=json.loads(self.path.read_text(encoding='utf8'))
             self.jev_mode = saved.get('jev_mode', self.jev_mode)
-            if self.jev_mode not in {'split', 'combined', 'legacy', 'serial'}:
+            if self.jev_mode not in {'split', 'combined', 'decision', 'legacy', 'serial'}:
                 self.jev_mode = 'split'
             if self.jev is not None:
                 self.jev.mode = self.jev_mode
@@ -164,7 +164,7 @@ class ModelSettings:
     def save(self, data):
         with self.lock:
             mode = data.get('jev_mode', self.jev_mode)
-            if mode not in {'split', 'combined', 'legacy', 'serial'}:
+            if mode not in {'split', 'combined', 'decision', 'legacy', 'serial'}:
                 raise ValueError('JEV1模式无效')
             services={k:dict(v) for k,v in self.services.items()}
             for name,raw in data.get('services',{}).items():

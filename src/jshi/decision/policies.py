@@ -43,9 +43,8 @@ def collision_action(result, threshold=.85):
 
 
 def continuation_action(result, threshold=.85):
-    expression = result.choice('expression', threshold)
-    if expression == 'incomplete':
-        return 'wait'
-    if expression != 'complete':
-        return 'restart'
-    return {'reuse': 'reuse', 'revise': 'revise'}.get(result.choice('impact', threshold), 'restart')
+    """Only a confident restart is spoken. Faults, uncertainty and unfinished speech stay quiet."""
+    if result.status != 'success' or result.choice('expression', threshold) != 'complete':
+        return 'normal'
+    return {'reuse': 'reuse', 'revise': 'revise', 'restart': 'restart'}.get(
+        result.choice('impact', threshold), 'normal')

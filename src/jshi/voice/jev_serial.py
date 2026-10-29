@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from copy import copy
 import json
 import re
 from time import monotonic
@@ -107,12 +108,19 @@ def combined_instruction():
 def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                   on_request=None, on_entry=None, is_current=None):
     from .jev import BatchDecision
+    cooldown_owner = getattr(gate, '_cooldown_owner', gate)
+    if gate.mode == 'decision':
+        gate = copy(gate)
     stages, raw = [], ''
     current = is_current or (lambda: True)
     accepted = None
     entry = None
-    mode = 'combined' if gate.mode == 'combined' else 'split'
-    if monotonic() < gate._unavailable_until:
+    mode = gate.mode if gate.mode in {'combined', 'decision'} else 'split'
+    early_stop = None
+    used_decision = False
+    if mode == 'decision':
+        gate._entry_deadline = monotonic() + 2 * gate.budget_s
+    if monotonic() < cooldown_owner._unavailable_until:
         return BatchDecision(action='ignore', model_error=gate._unavailable_error,
             stage_records=({'stage': 'cooldown', 'mode': mode, 'status': 'failed',
                             'error_kind': 'cooldown', 'error': gate._unavailable_error},))
@@ -146,7 +154,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             subject_state=SubjectState(subject_id, '匠石', stage),
             system_extra=system + '\nJSON Schema：' + json.dumps(output, ensure_ascii=False, separators=(',', ':')),
             input_parts=tuple(p for p in (packed or {}).get('parts', []) if p.get('kind') == 'image')
-                if stage in {'voice_jev', 'voice_jev_entry'} else ())
+                if stage in {'voice_jev', 'voice_jev_entry', 'voice_jev_identity'} else ())
         started = monotonic()
         record = {'stage': stage, 'mode': mode, 'status': 'failed'}
         stages.append(record)
@@ -175,8 +183,84 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         finally:
             record['ms'] = round((monotonic() - started) * 1000, 1)
 
+    def decision_entry():
+        nonlocal early_stop, accepted, used_decision
+        from jshi.decision.entry_policy import entry_action
+        from .jev_prompts import identity_instruction
+        fallback = 'unsupported_scope'
+        # First release supports one expression only; never infer same person from track.
+        bridge = delivery.get('_decision_entry')
+        if len(batch) == 1 and not overlap and not any(p.get('kind') not in {'audio', 'text'} for p in snapshot['media']) and not snapshot['environment'] and not snapshot['scope'].get('unprovided_events') and bridge:
+            if not current():
+                raise JEVStaleError('JEV决策材料已失效')
+            state = {'material': entry_text(snapshot)}
+            if len(json.dumps(state, ensure_ascii=False)) <= 24000:
+                try:
+                    result, config = bridge(state, deadline=gate._entry_deadline)
+                    fields = entry_action(result, [r['evidence_ref'] for r in thin],
+                                          config['entry_thresholds'][config['provider']])
+                    fallback = result.reason or 'uncertain_or_conflicting'
+                    stages.append({'stage': 'decision_entry', 'mode': mode, 'status': result.status,
+                                   'provider': result.provider, 'model': result.model, 'ms': result.elapsed_ms,
+                                   'answers': dict(result.answers), 'fallback_reason': fallback if fields is None else ''})
+                    if not current():
+                        raise JEVStaleError('JEV决策返回已失效')
+                    if fields is not None:
+                        # Stop promptly without waiting for name recognition. Host callback is the
+                        # sole control owner; remember its receipt across identity and fallback.
+                        if fields['control'] == 'stop' and on_entry:
+                            provisional = BatchDecision(action='stop', control='stop', route='background')
+                            receipt = on_entry(provisional)
+                            if receipt is False:
+                                raise JEVStaleError('停止许可已失效')
+                            early_stop = receipt if receipt is not None else True
+                            accepted = replace(provisional, control_applied=type(receipt) is int,
+                                               applied_epoch=receipt if type(receipt) is int else None)
+                        bound = {r['n']: gate._selected_text(r) for r in batch}
+                        if all(bound.values()):
+                            people = [{'i': n, 'person': p, 'certainty': 'confirmed',
+                                       'why': '文字输入由用户选择人物'} for n, p in bound.items()]
+                        else:
+                            identity_schema = object_schema({'items': schema['properties']['items'],
+                                                            'source_conflict': {'type': 'boolean'}})
+                            identity = call('voice_jev_identity', identity_instruction(),
+                                            entry_text(snapshot) + '\n\n' + blocks([('待核对的入口假设', fields)]), identity_schema)
+                            # Validate per-sentence candidates before committing any identity.
+                            gate._from_current(identity['items'], batch, '')
+                            if identity['source_conflict']:
+                                raise ValueError('人物或媒体来源改变交往判断')
+                            people = identity['items']
+                        assembled = dict(fields, items=people)
+                        validate(assembled, schema)
+                        used_decision = True
+                        if hasattr(bridge, 'report'):
+                            bridge.report('decision', '')
+                        return assembled
+                except JEVStaleError:
+                    raise
+                except Exception as exc:
+                    fallback = type(exc).__name__
+            else:
+                fallback = 'material_budget'
+        elif not bridge:
+            fallback = 'host_bridge_unavailable'
+        stages.append({'stage': 'decision_fallback', 'mode': mode, 'status': 'fallback',
+                       'actual_mode': 'split', 'reason': fallback})
+        if hasattr(bridge, 'report'):
+            bridge.report('split', fallback)
+        value = call('voice_jev_entry', ENTRY_INSTRUCTION, entry_text(snapshot), schema)
+        if early_stop is not None:
+            value['control'] = 'stop'
+            if value['route'] == 'wait':
+                value['route'] = 'background'
+            value['decision_reason'] = '已执行停止；' + value['decision_reason'][:110]
+        return value
+
     try:
-        if mode == 'combined':
+        if mode == 'decision':
+            entry = decision_entry()
+            preparation = None
+        elif mode == 'combined':
             user = entry_text(snapshot) + '\n\n' + blocks([
                 ('回应许可与材料可用性', {'short_chat': snapshot['short_chat'],
                  'waiting': snapshot['waiting'], **snapshot['availability']})])
@@ -194,7 +278,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             entry['items'] = [{'i': i.n, 'person': i.speaker_pick,
                 'certainty': {'确定': 'confirmed', '可能': 'tentative', '不确定': 'unknown'}[i.speaker_level],
                 'why': i.speaker_reason} for i in accepted.items]
-            if len(bound) == len(batch):
+            if len(bound) == len(batch) and not used_decision:
                 entry['interaction'] = 'direct'
                 if entry['control'] != 'stop' and entry['route'] == 'background' and entry['utterance_complete'] != 'incomplete':
                     entry['route'] = 'prepare'
@@ -220,7 +304,10 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         selected = set(process)
         accepted = replace(accepted, items=tuple(replace(i, to_jiangshi='no', relevance='unrelated')
                            if route == 'prepare' and f'I{i.n}' not in selected else i for i in accepted.items))
-        if on_entry:
+        if early_stop is not None:
+            accepted = replace(accepted, control_applied=type(early_stop) is int,
+                               applied_epoch=early_stop if type(early_stop) is int else None)
+        if on_entry and early_stop is None:
             state = on_entry(accepted)
             if state is False:
                 raise RuntimeError('JEV入口结果已失效')
@@ -265,8 +352,8 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
     except Exception as exc:
         status = getattr(exc, 'status', None) or getattr(exc, 'code', None)
         if status in {401, 402, 403}:
-            gate._unavailable_until = monotonic() + 60
-            gate._unavailable_error = f'{type(exc).__name__}: HTTP {status}'
+            cooldown_owner._unavailable_until = monotonic() + 60
+            cooldown_owner._unavailable_error = f'{type(exc).__name__}: HTTP {status}'
         details = failure_details(exc, 'routing')
         if not stages or stages[-1]['status'] != 'failed':
             stages.append(dict(stage='routing', mode=mode, status='failed', **details))

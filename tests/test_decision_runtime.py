@@ -161,10 +161,76 @@ def test_newer_C_never_released_by_AB_decision(tmp_path):
 
 
 @pytest.mark.parametrize('impact,expression,route',[('reuse','complete','reuse'),('revise','complete','revise'),
-    ('restart','complete','restart'),('reuse','incomplete','wait'),('uncertain','complete','restart')])
+    ('restart','complete','restart'),('reuse','incomplete','normal'),('uncertain','complete','normal'),
+    ('uncertain','uncertain','normal')])
 def test_continuation_routing(impact,expression,route):
     result=DecisionResult('success',answers(CONTINUATION,{'impact':impact,'expression':expression,'address':'direct'}))
     assert continuation_action(result)==route
+
+
+def test_continuation_fault_does_not_request_a_spoken_restart():
+    failed = DecisionResult('timeout', answers(CONTINUATION, {
+        'impact': 'restart', 'expression': 'complete', 'address': 'direct'}))
+    assert continuation_action(failed) == 'normal'
+
+
+def test_cooldown_stays_inside_one_active_purpose(tmp_path, monkeypatch):
+    monkeypatch.setenv('DASHSCOPE_API_KEY', 'ali-secret')
+
+    def service_at(path, mode):
+        service = DecisionService(path)
+        service.config['mode'] = mode
+        service.config['providers']['bailian']['endpoint'] = 'https://workspace.maas.aliyuncs.com/v1/systemone'
+        class Port:
+            async def decide(self, request, *, deadline):
+                return DecisionResult('timeout', reason='deadline')
+            async def close(self):
+                pass
+        service.factory = lambda *args: Port()
+        return service
+
+    async def scenario():
+        shadow = service_at(tmp_path / 'shadow', 'shadow')
+        observed = await shadow.decide('entry', {'material': '观察'})
+        shadow.config['mode'] = 'active'
+        after = await shadow.decide('entry', {'material': '观察之后'})
+        assert observed.reason == after.reason == 'deadline'
+        active = service_at(tmp_path / 'active', 'active')
+        continuation = await active.decide('continuation', {'input': ['前段']})
+        entry = await active.decide('entry', {'material': '一句'})
+        collision = await active.decide('collision', {'old': [], 'new': []})
+        collision_again = await active.decide('collision', {'old': [], 'new': []})
+        assert continuation.reason == entry.reason == collision.reason == 'deadline'
+        assert collision_again.reason == 'cooldown'
+    asyncio.run(scenario())
+
+
+def test_collision_report_uses_this_result_not_the_shared_last(tmp_path):
+    async def scenario():
+        service = DecisionService(tmp_path)
+        service.config['mode'] = 'active'
+        reports = []
+        async def decide(purpose, state, revision=0, **kwargs):
+            service.last = {'purpose': 'entry', 'status': 'timeout', 'reason': 'other', 'model': 'stale'}
+            return DecisionResult('success', answers(COLLISION, {'relation': 'independent', 'old_work': 'continue'}),
+                                  model='this-call')
+        service.decide = decide
+        scheduler = EntryScheduler(service, report=lambda *args: reports.append(args))
+        started, done = asyncio.Event(), asyncio.Event()
+        async def operation():
+            started.set()
+            await done.wait()
+            return 'ok'
+        task = asyncio.create_task(scheduler.run((speech('A'),), operation))
+        await started.wait()
+        scheduler.notify((speech('B', 1),))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        done.set()
+        assert await asyncio.wait_for(task, 1) == 'ok'
+        assert reports[0][1]['model'] == 'this-call' and reports[0][1]['status'] == 'success'
+        assert reports[0][1]['reason'] == ''
+    asyncio.run(scenario())
 
 
 def test_shadow_never_blocks_old_call(tmp_path):

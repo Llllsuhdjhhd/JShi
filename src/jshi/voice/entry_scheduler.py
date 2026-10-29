@@ -51,8 +51,10 @@ class EntryScheduler:
                 old, new = speech_rows((job.rows, incoming), bindings=bindings)
                 result = await self.service.decide('collision', {'old': old, 'new': new}, version)
                 if self.report:
-                    self.report('decision_collision', {**self.service.last, 'scope':bindings,
-                        'shadow': self.service.config['mode'] != 'active'})
+                    self.report('decision_collision', {'purpose': 'collision', 'status': result.status,
+                        'provider': result.provider, 'model': result.model, 'elapsed_ms': result.elapsed_ms,
+                        'server_ms': result.server_ms, 'reason': result.reason, 'answers': dict(result.answers),
+                        'revision': version, 'scope': bindings, 'shadow': config['mode'] != 'active'})
                 if version != job.revision:
                     continue  # Newer evidence arrived; never release based on A/B while C is pending.
                 self.pending.clear()

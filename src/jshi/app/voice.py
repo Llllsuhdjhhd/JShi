@@ -265,7 +265,7 @@ class VoiceConversation:
                 for r in calls:
                     system, user = prompts.get(r.get('system_hash'), '记录已清理'), r.get('user_text', '')
                     sections.extend(re.findall(r'^【([^\n】]+)】\s*$', system + '\n' + user, re.M))
-                    if purpose != 'all' and r.get('purpose') != purpose and not (purpose == 'voice_jev' and r.get('purpose') in {'voice_jev_entry', 'voice_jev_prepare'}):
+                    if purpose != 'all' and r.get('purpose') != purpose and not (purpose == 'voice_jev' and r.get('purpose') in {'voice_jev_entry', 'voice_jev_identity', 'voice_jev_prepare'}):
                         continue
                     if part == 'all': body = 'system\n' + system + '\nuser\n' + user
                     elif part == 'system': body = system
@@ -617,7 +617,8 @@ class VoiceConversation:
                 self.sample_bytes -= len(self.input_records.pop(old).get('pcm') or b'')
             await self.emit('typed_input', text=text, original_text=original_text, label=profile.label, input_id=iid,
                             pipeline=dict(self.input_records[iid].get('pipeline') or {}))
-            if self.decisions.config['mode'] == 'active' and self.decisions.config['collision']:
+            if (getattr(self.jev, 'mode', '') == 'decision'
+                    and self.decisions.config['mode'] == 'active' and self.decisions.config['collision']):
                 self.input_idle.clear()
                 self.judge_pending.append({'current':[utterance], 'track_id':evidence.track_id,
                     'expression_complete':True, 'collection_trigger':'typed', 'queued':0})
@@ -830,7 +831,8 @@ class VoiceConversation:
             audio_end_received_at_ms=receipt.get('audio_end_received_at_ms'),
             speech_audio_duration_ms=transcript.end_ms-transcript.start_ms,
             audio_clock_drift_ms=clock_drift)
-        await self.save_voice_latency(iid, 'asr_returned')
+        # Disk logging must not yield before enqueue, or the next sentence starts a new batch.
+        self.schedule_voice_latency(iid, 'asr_returned')
         self.sample_bytes += len(pcm or b'')
         while len(self.input_records) > 128 or self.sample_bytes > 16 * 1024 * 1024:
             old = next(iter(self.input_records))
@@ -848,7 +850,7 @@ class VoiceConversation:
                     self.sample_source.capture_id,asdict(transcript),pcm=pcm,
                     received_at_ms=self.input_records[iid]['received_at_ms'])
                 self.input_records[iid]['audio_saved'] = not self.sample_source.archive_error
-                await self._archive_update(iid, pipeline=dict(self.input_records[iid].get('pipeline') or {}))
+                self._background(self._archive_update(iid, pipeline=dict(self.input_records[iid].get('pipeline') or {})))
             except Exception:
                 logging.getLogger(__name__).exception('Recent input audio indexing failed')
                 await self.emit('notice',text='本句录音保存失败；当前对话继续。')
@@ -893,20 +895,42 @@ class VoiceConversation:
             logging.getLogger(__name__).exception('Turn analysis log could not be saved')
         await self.emit('turn_analysis', text='\n'.join(t.text for t in previews), decisions=decisions)
 
-    async def save_voice_latency(self, iid, stage, **values):
-        from jshi.voice.latency import append_latency, public_timing
+    def _background(self, coro):
+        task = asyncio.create_task(coro)
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+        return task
+
+    def _latency_row(self, iid, stage, **values):
+        from jshi.voice.latency import public_timing
         row = self.input_records.get(iid)
         if row is None:
-            return
+            return None
         timing = row.setdefault('asr_timing', {})
         timing.update(values)
         result = public_timing(timing)
         result.update(stage=stage, input_id=iid, session_id=self.session_id,
             subject_id=self.subject_id, at_ms=time()*1000)
+        return result
+
+    async def _write_voice_latency(self, result):
+        from jshi.voice.latency import append_latency
         try:
             await asyncio.to_thread(append_latency, self.process.repository.path.parent/'voice_latency.jsonl', result)
         except OSError:
             logging.getLogger(__name__).exception('Voice latency log could not be saved')
+
+    def schedule_voice_latency(self, iid, stage, **values):
+        result = self._latency_row(iid, stage, **values)
+        if result is not None:
+            self._background(self._write_voice_latency(result))
+        return result
+
+    async def save_voice_latency(self, iid, stage, **values):
+        result = self._latency_row(iid, stage, **values)
+        if result is None:
+            return
+        await self._write_voice_latency(result)
         return result
 
     async def transcript_displayed(self, iid, render_ms=None):
@@ -1980,10 +2004,16 @@ class VoiceConversation:
         def on_entry(result):
             return asyncio.run_coroutine_threadsafe(apply_entry(result), loop).result()
 
+        from jshi.voice.jev_decision import entry_bridge
+        delivery = {**delivery, '_decision_entry': entry_bridge(self.decisions)}
+        from copy import copy
+        gate_snapshot = copy(self.jev)
+        gate_snapshot._cooldown_owner = self.jev
+
         def run():
             if hasattr(self.jev, "decide_batch"):
                 if isinstance(self.jev, VoiceJEV) and type(self.jev).decide_batch is VoiceJEV.decide_batch:
-                    return self.jev.decide_batch(self.subject_id, batch, context, delivery,
+                    return gate_snapshot.decide_batch(self.subject_id, batch, context, delivery,
                                                  overlap=overlap, on_request=capture_request, on_entry=on_entry, is_current=is_current)
                 return self.jev.decide_batch(self.subject_id, batch, context, delivery, overlap=overlap)
             legacy_delivery = self._single_jev_context(delivery, context, utterances, cutoff)
@@ -1998,7 +2028,7 @@ class VoiceConversation:
             self.jev_future = loop.run_in_executor(self.jev_executor, run)
             self.jev_running.add(self.jev_future)
             try:
-                limit = self.timeout_s * (2 if getattr(self.jev, 'mode', 'legacy') in {'split', 'serial'} else 1)
+                limit = self.timeout_s * (2 if getattr(self.jev, 'mode', 'legacy') in {'split', 'serial', 'decision'} else 1)
                 result = await asyncio.wait_for(asyncio.shield(self.jev_future), limit)
             except asyncio.TimeoutError:
                 path, timed_out = "timeout_rule", True
@@ -2639,7 +2669,7 @@ class VoiceConversation:
         prepared, preparation_route = await self.preparation.finish(envelope)
         if self.closed or epoch != self.epoch:
             return
-        preparation_context = json.dumps(prepared.model_material(), ensure_ascii=False) if prepared else ''
+        preparation_context = json.dumps(prepared.model_material(include_memories=False), ensure_ascii=False) if prepared else ''
         feedback_revision = self.feedback.revision
         emitted = False
         self.turn_sequence += 1
@@ -3189,8 +3219,15 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         from jshi.voice.jev_material import task_context
         tasks = await asyncio.to_thread(task_context, process, subject_id, [envelope.speaker])
         generation = material['generation']
+        from jshi.voice.jev_decision import entry_bridge
+        from jshi.decision import decision_service
+        from copy import copy
+        original_judge = judge
+        judge = copy(judge)
+        judge._cooldown_owner = original_judge
         result = await asyncio.to_thread(judge.decide_envelope, subject_id, envelope,
-            {'state':'completed', 'jev_scene':scene, 'unwritten':unwritten, 'now':time()*1000,
+            {'_decision_entry': entry_bridge(decision_service(process)),
+             'state':'completed', 'jev_scene':scene, 'unwritten':unwritten, 'now':time()*1000,
              'conversation':dialogue.recent(subject_id, exclude={envelope.input_id}),
              'task_context':tasks, 'selected_person_code':selected_code or 'P1',
              'people':{p:labels.get(oid,p) for p,oid in codes.items()}, 'jev_material_scope':{k:material[k] for k in ('version','generation','archived_unread_count')},

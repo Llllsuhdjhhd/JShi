@@ -127,11 +127,16 @@ class PreparationManager:
         except Exception:
             return None, 'normal'
         action = continuation_action(result, voice.decisions.config['threshold'])
-        voice.record('decision_continuation', {**voice.decisions.last, 'action':action})
-        # Formal JEV1 already authorized this complete process range: don't lose it to a second wait.
+        voice.record('decision_continuation', {'purpose': 'continuation', 'status': result.status,
+            'provider': result.provider, 'model': result.model, 'elapsed_ms': result.elapsed_ms,
+            'server_ms': result.server_ms, 'reason': result.reason, 'answers': dict(result.answers),
+            'action': action})
+        # Formal JEV1 already authorized this range. Only an explicit restart is spoken.
         if action in {'reuse', 'revise'}:
             return analysis, action
-        return None, 'restart'
+        if action == 'restart':
+            return None, 'restart'
+        return None, 'normal'
 
     async def close(self):
         self.closed = True

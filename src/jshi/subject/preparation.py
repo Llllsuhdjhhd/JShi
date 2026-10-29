@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 import hashlib
 import json
+import re
 from time import monotonic
 from uuid import uuid4
 
@@ -18,7 +19,8 @@ LIGHT_INSTRUCTION = '''【提前准备与本次收尾】
 user中的提前准备是未交付、可推翻的候选，不是人物原话或已确认事实。完整本轮输入优先。
 核对新增条件、否定、引用、人物与目标变化；可复用有效证据，但不顺着旧候选解释新话。
 若能可靠完成，按本次正常Schema输出完整回应；若需要重新深入分析或材料不足以轻量收尾，只输出{"need_deep":true}，不要先输出不完整实质答案。
-本次没有义务说等待话，不声称候选内容已经让用户听到。'''
+本次没有义务说等待话，不声称候选内容已经让用户听到。
+准备材料只有前段原话和候选，不含记忆编号。正式回忆只用本轮材料里的M编号。'''
 
 
 class NeedDeep(Exception):
@@ -38,6 +40,11 @@ class PreparedAnalysis:
     trace_id: str = ''
 
     def compatible(self, subject_id, object_id, rows, scene_version):
+        # Removing the memory array does not remove citations embedded in generated
+        # candidate prose. Such a candidate cannot enter the formal M-only namespace.
+        if re.search(r'(?<![A-Za-z0-9_])R[1-9]\d*(?![A-Za-z0-9_])',
+                     json.dumps(self.content, ensure_ascii=False)):
+            return False
         if (subject_id != self.subject_id or object_id != self.object_id or scene_version != self.scene_version
                 or monotonic()-self.created > 45):
             return False
@@ -45,11 +52,15 @@ class PreparedAnalysis:
         # Corrected or missing prefix invalidates preparation; not mere text-prefix guessing.
         return all(current.get((r.start_ms, r.end_ms)) == r.text for r in self.rows)
 
-    def model_material(self):
-        return {'prefix': [r.text for r in self.rows], 'preparation': self.content,
-                'memories': [{'ref': f'R{i}', 'text': r.content or r.text,
-                              'occurred_at': r.occurred_at.isoformat(timespec='seconds') if r.occurred_at else None}
-                             for i, r in enumerate(self.memory_rows, 1)]}
+    def model_material(self, *, include_memories=True):
+        body = {'prefix': [r.text for r in self.rows], 'preparation': self.content}
+        if include_memories:
+            # R codes stay inside preparation and the continuation decision.
+            # The main cognition request uses the formal M codes instead.
+            body['memories'] = [{'ref': f'R{i}', 'text': r.content or r.text,
+                                  'occurred_at': r.occurred_at.isoformat(timespec='seconds') if r.occurred_at else None}
+                                 for i, r in enumerate(self.memory_rows, 1)]
+        return body
 
 
 def fingerprint(value):
