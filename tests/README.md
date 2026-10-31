@@ -1,5 +1,7 @@
 # 测试入口
 
+场景录音库及按时间回放：见 [使用说明](../doc/场景录音与回放测试.md)。新增离线验证为 `tests/test_entry_cases.py`；真实模型回放须明确配置适配器，不能与模拟回归结论混用。
+
 自动化测试使用 pytest，默认从 src 加载项目代码：
 
     python -m pip install -e ".[dev]"

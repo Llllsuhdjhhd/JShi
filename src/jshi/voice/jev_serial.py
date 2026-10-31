@@ -9,9 +9,9 @@ from time import monotonic
 
 from jshi.core import SubjectState
 from jshi.models import ModelRequest
-from jshi.skill.base import parse_json_object
+from jshi.skill.base import parse_json_object, SkillError
 from .jev_material import build_snapshot, entry_text, preparation_text, blocks
-from .jev_prompts import ENTRY_INSTRUCTION, PREPARATION_INSTRUCTION
+from .jev_prompts import ENTRY_INSTRUCTION, PREPARATION_INSTRUCTION, ENTRY_OUTPUT_RULES, PREPARATION_OUTPUT_RULES
 from .jev_errors import JEVStaleError, failure_details
 
 
@@ -102,7 +102,10 @@ def combined_instruction():
             + section(PREPARATION_INSTRUCTION, '目标任务', '输出')
             + '\n\n【输出】\n只输出Schema允许的一个JSON对象。顶层为入口结果；'
               'preparation仅在顶层route=prepare时填写回应准备对象，其余必须为null。'
-              '两种route各属于自己的对象，不得互换。所有引用、人物范围及长度服从Schema。')
+              '两种route各属于自己的对象，不得互换。所有引用、人物范围及长度服从Schema。\n'
+            + '入口字段关联约束：' + ENTRY_OUTPUT_RULES
+            + '\n本合并对象另允许preparation字段，仍按上述条件填写或为null。'
+            + '\n仅preparation内部的输出约束：' + PREPARATION_OUTPUT_RULES)
 
 
 def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
@@ -118,6 +121,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
     mode = gate.mode if gate.mode in {'combined', 'decision'} else 'split'
     early_stop = None
     used_decision = False
+    syntax_retry_used = False
     if mode == 'decision':
         gate._entry_deadline = monotonic() + 2 * gate.budget_s
     if monotonic() < cooldown_owner._unavailable_until:
@@ -145,8 +149,8 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         schema['properties']['preparation'] = {'anyOf': [preparation_schema(), {'type': 'null'}]}
         schema['required'].append('preparation')
 
-    def call(stage, system, user, output):
-        nonlocal raw
+    def call(stage, system, user, output, *, retry_budget=None):
+        nonlocal raw, syntax_retry_used
         raw = ''
         if not current():
             raise JEVStaleError('JEV材料或播放代次已失效')
@@ -163,7 +167,12 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             if on_request:
                 on_request(request)
             phase = 'model_call'
-            response = gate._generate_gate(request)
+            attempt_gate = gate
+            if retry_budget is not None:
+                attempt_gate = copy(gate)
+                attempt_gate.budget_s = retry_budget
+                record['attempt'] = 2
+            response = attempt_gate._generate_gate(request)
             record['model'] = response.model
             metadata = getattr(response, 'metadata', {}) or {}
             record['finish_reason'] = metadata.get('finish_reason')
@@ -179,9 +188,17 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             return data
         except Exception as exc:
             record.update(failure_details(exc, phase), raw=raw)
+            remaining = gate.budget_s - (monotonic() - started)
+            if (phase == 'output_json' and isinstance(exc, SkillError)
+                    and not syntax_retry_used and remaining > .1 and current()):
+                # One fresh generation, never string repair or schema coercion.
+                # No controls have been applied at this point. Keep both attempts.
+                syntax_retry_used = True
+                record.update(status='retried', ms=round((monotonic()-started)*1000,1))
+                return call(stage, system, user, output, retry_budget=remaining)
             raise
         finally:
-            record['ms'] = round((monotonic() - started) * 1000, 1)
+            record.setdefault('ms', round((monotonic() - started) * 1000, 1))
 
     def decision_entry():
         nonlocal early_stop, accepted, used_decision

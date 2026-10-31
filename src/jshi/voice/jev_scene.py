@@ -467,6 +467,11 @@ class JEVSceneWriter:
                 or len(discarded) != len(set(discarded))):
             raise ValueError('片场历史删除引用非法')
         from .jev_serial import validate
+        # A copied input timestamp has no authority over event or commit time.
+        # Retain it diagnostically; all other extra fields remain strict errors.
+        if 'scene_at' in data:
+            snapshot['ignored_output_fields'] = {'scene_at': data['scene_at']}
+            data = {k: v for k, v in data.items() if k != 'scene_at'}
         validate(data, schema)
         snapshot['discard_history'] = discarded
         return scene, raw

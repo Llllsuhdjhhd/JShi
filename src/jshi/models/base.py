@@ -657,10 +657,13 @@ class OpenAICompatibleModel:
         if isinstance(content, str) and not content.lstrip().startswith(('{', '[')):
             from jshi.simplified import simplify_text
             content = simplify_text(content)
+        metadata = _provider_usage_metadata(result)
+        metadata['finish_reason'] = result['choices'][0].get('finish_reason')
+        metadata['response_format'] = (json.loads(payload).get('response_format') or {}).get('type')
         return ModelResponse(
             text=content,
             model=self.name,
-            metadata=_provider_usage_metadata(result),
+            metadata=metadata,
         )
 
     def generate_stream(self, request: ModelRequest) -> Iterator[str]:

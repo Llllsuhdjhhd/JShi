@@ -11,6 +11,35 @@ class TranscriptAssembler:
         self.final_texts: dict[tuple[int, int], str] = {}
 
     @staticmethod
+    def utterance_text(utterance):
+        text = utterance.get('text')
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+        # Some two-pass finals omit sentence text while supplying final words.
+        # Never promote a preview or reuse earlier provisional wording.
+        words = utterance.get('words')
+        if utterance.get('definite') is not True or not isinstance(words, list) or not words:
+            return ''
+        start, end = utterance.get('start_time', 0), utterance.get('end_time', 0)
+        if not isinstance(start,(int,float)) or not isinstance(end,(int,float)) or end <= start:
+            return ''
+        previous = start
+        pieces = []
+        for word in words:
+            if not isinstance(word, dict):return ''
+            value = word.get('text')
+            a,b = word.get('start_time'),word.get('end_time')
+            if (not isinstance(value,str) or not value.strip()
+                or not isinstance(a,(int,float)) or not isinstance(b,(int,float))
+                or not start <= a <= b <= end or a < previous):
+                return ''
+            value=value.strip()
+            if pieces and pieces[-1][-1].isascii() and pieces[-1][-1].isalnum() and value[0].isascii() and value[0].isalnum():
+                pieces.append(' ')
+            pieces.append(value);previous=b
+        return ''.join(pieces)
+
+    @staticmethod
     def covered(start: int, end: int, ranges) -> bool:
         if end <= start:
             return False
@@ -44,7 +73,7 @@ class TranscriptAssembler:
         for r in results:
             utterances = r.get("utterances", [])
             for u in utterances:
-                text = str(u.get("text", "")).strip()
+                text = self.utterance_text(u)
                 if not text:
                     continue
                 start, end = int(u.get("start_time", 0)), int(u.get("end_time", 0))

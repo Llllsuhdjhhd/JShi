@@ -911,6 +911,8 @@ function message(m) {
     $('compare-status').textContent=m.comparison_available ? '对照样本保存在本机；请选择姓名和录音。' : '当前服务尚未加载对照功能，重启语音服务后可用。';
     $('known-names').replaceChildren();for(const name of m.names || [])$('known-names').appendChild(new Option(name,name));
     $('typed').disabled=false;$('send-text').disabled=false;
+    if(m.acoustic_turn==='enabled')log('本地声音断句辅助已开启：未完发言会等待续句，播放中插话优先判断。','notice');
+    else if(m.acoustic_turn==='unavailable')log('本地声音断句辅助暂不可用，本次沿用在线识别。','notice');
   }
   else if(m.type==='rename_prompt'){
     const ask=$('rename-ask'),words=document.createElement('span');words.textContent=m.text+' ';

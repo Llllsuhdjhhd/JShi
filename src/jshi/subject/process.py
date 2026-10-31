@@ -2105,7 +2105,7 @@ class SubjectProcess:
                                                      media_references)
             except Exception:
                 logger.exception('Cognition succeeded but visual memory association failed')
-        if persona_instruction and self.style_packs.get(current.subject_state.subject_id) == "smith" and self._prompt_profile(current).level != 1:
+        if self._prompt_profile(current).level != 1:
             if response.tool_intent or response.tool_handling or response.tool_consumed:
                 self.repository.add_history(HistoryRecord(subject_id=current.subject_state.subject_id,
                     kind=HistoryKind.SUBJECT, event_type="unexpected_tool_output",

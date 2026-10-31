@@ -1,9 +1,9 @@
 """Atomic entry questions; the caller combines answers, never generated actions."""
 from .policies import choice
 
-ENTRY_VERSION = 'entry-v1'
+ENTRY_VERSION = 'entry-v2'
 ENTRY = {
-    'address': choice('判断当前原话的交流对象；引用、媒体台词、旁人互聊不等于向匠石发指令', {
+    'address': choice('判断当前原话的交流对象。结合点名、实际问答、有效视听及场景变化；同话题、已知身份或匠石自己插过话不证明交往。例：匠石问开门时间，稍后答七点可承接；家人问同题则不指向匠石。无人承接且家人问答继续可反证旧关系，单独沉默不能判错；引用、媒体与旁聊不当指令', {
         'direct': '明确面向匠石的交往', 'other': '有依据的旁聊或背景', 'uncertain': '关系未明'}),
     'expression': choice('判断本次表达是否足够独立处理；ASR final、标点、切窗不证明说完，不补全半句', {
         'complete': '已有可独立处理的内容', 'incomplete': '确需后文且没有独立完整内容', 'uncertain': '完整度不明或范围混合'}),

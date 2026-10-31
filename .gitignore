@@ -1,4 +1,7 @@
 __pycache__/
+test_runs/entry/
+/test_runs/
+**/entry_test_assets/
 *.py[cod]
 .tmp/
 # 旧临时根（历史残留，可整目录删）

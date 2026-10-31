@@ -225,7 +225,7 @@ class TurnCoordinator:
                 pass
         return {},None
 
-    def finish(self, ticket, segments, rows, timings, *, final=False):
+    def finish(self, ticket, segments, rows, timings, *, final=False, allow_expiry=True):
         if ticket.generation != self.generation:
             return (),[]  # Reset/old session: never publish a late result.
         waiting = monotonic()
@@ -289,6 +289,16 @@ class TurnCoordinator:
                 'turn_semantic_probability':semantic.probability if semantic else None,
                 'turn_semantic_reason':semantic.reason if semantic else 'disabled',
                 'turn_semantic_ms':semantic_ms,'turn_semantic_join_wait_ms':semantic_join_ms}
+            if getattr(decision, 'correction', None):
+                metadata['online_completion'] = dict(decision.correction)
+                correction = decision.correction
+                metadata.update(turn_audio_state=correction['acoustic'],
+                    turn_audio_probability=correction['acoustic_probability'],
+                    turn_audio_reason=correction['acoustic_reason'],
+                    turn_semantic_enabled=correction['semantic_available'],
+                    turn_semantic_state=correction['semantic'],
+                    turn_semantic_reason=correction.get('semantic_reason','not_needed'),
+                    turn_semantic_ms=correction.get('semantic_ms'))
             self.last_events.append({'state':decision.state,'probability':decision.probability,
                 'reason':decision.reason,'segments':len(pending.rows),'audio_ms':compute_ms,
                 'join_wait_ms':extra_ms,**metadata})
@@ -299,7 +309,7 @@ class TurnCoordinator:
                 self._release(key,ready,ready_timings,decision.reason)
             elif duration >= self.max_audio_s or len(pending.rows)>=32:
                 self._release(key,ready,ready_timings,'pending_limit')
-        self.poll(ready,ready_timings,final=final)
+        self.poll(ready,ready_timings,final=final,allow_expiry=allow_expiry)
         ordered = sorted(zip(ready,ready_timings),key=lambda pair:(pair[0].start_ms,pair[0].end_ms))
         return tuple(r for r,t in ordered),[t for r,t in ordered]
 
@@ -317,10 +327,17 @@ class TurnCoordinator:
         for row in pending.rows:
             self._remember_released(row)
 
-    def poll(self, rows, timings, *, final=False, allow_expiry=True):
+    def poll(self, rows, timings, *, final=False, allow_expiry=True, hard_max_hold=False):
         for key,pending in list(self.pending.items()):
-            if final or (allow_expiry and monotonic()-pending.touched>=self.max_hold_s):
-                self._release(key,rows,timings,'capture_end' if final else 'hold_limit')
+            # Online finals already exist independently of subsequent ambient
+            # speech. Bound their oldest arrival, rather than extending their
+            # lifetime each time another fragment updates this speaker's turn.
+            anchors = (f.timing.get('_asr_return_mono') for f in pending.fragments)
+            oldest = min((at for at in anchors if at is not None), default=pending.touched)
+            deadline = hard_max_hold and monotonic()-oldest>=self.max_hold_s
+            if final or deadline or (allow_expiry and monotonic()-pending.touched>=self.max_hold_s):
+                reason = 'capture_end' if final else 'hold_deadline' if deadline else 'hold_limit'
+                self._release(key,rows,timings,reason)
 
     def reset(self):
         self.generation += 1

@@ -12,6 +12,7 @@ from jshi.core.tool_handling import TOOL_HANDLING_SCHEMA, parse_tool_handling
 from jshi.core.conversation_review import parse_reply_targets
 
 import json
+import math
 import re
 from dataclasses import replace
 from typing import Any, Callable, Mapping
@@ -288,37 +289,50 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
     )
 
     # ---- recall_requests（budget 钳制 ≤3；level 钳制 1–9，见 05 文档）----
-    rr_raw = data.get("recall_requests") or []
-    recall_requests = tuple(
-        RecallRequest(
+    rr_raw = data.get("recall_requests")
+    recall_requests = []
+    for item in rr_raw if isinstance(rr_raw, list) else ():
+        if not isinstance(item, dict) or not item.get("query"):
+            continue
+        try:
+            budget = int(item.get("budget", 3) or 3)
+            level = int(item.get("level", 1) or 1)
+        except (TypeError, ValueError, OverflowError):
+            continue  # Optional annotations must never discard a valid reply.
+        recall_requests.append(RecallRequest(
             query=str(item.get("query", "")),
-            budget=min(max(int(item.get("budget", 3) or 3), 1), 3),
-            level=min(max(int(item.get("level", 1) or 1), 1), 9),
-            object_ids=tuple(item.get("object_ids") or ()),
-            anchor_event_ids=tuple(item.get("anchor_event_ids") or ()),
-        )
-        for item in rr_raw
-        if isinstance(item, dict) and item.get("query")
-    )
+            budget=min(max(budget, 1), 3),
+            level=min(max(level, 1), 9),
+            object_ids=tuple(v for v in item.get("object_ids", []) if isinstance(v, str))
+                if isinstance(item.get("object_ids"), list) else (),
+            anchor_event_ids=tuple(v for v in item.get("anchor_event_ids", []) if isinstance(v, str))
+                if isinstance(item.get("anchor_event_ids"), list) else (),
+        ))
 
     # ---- importance_ranking（第 5 用途段，供 14，占位）----
-    ir_raw = data.get("importance_ranking") or []
-    importance_ranking = tuple(
-        ImportanceRank(
+    ir_raw = data.get("importance_ranking")
+    importance_ranking = []
+    for item in ir_raw if isinstance(ir_raw, list) else ():
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        try:
+            importance = float(item.get("importance", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(importance):
+            continue
+        importance_ranking.append(ImportanceRank(
             id=str(item.get("id", "")),
-            importance=float(item.get("importance", 0.0) or 0.0),
+            importance=importance,
             reason=str(item.get("reason", "")),
-        )
-        for item in ir_raw
-        if isinstance(item, dict) and item.get("id")
-    )
+        ))
 
     return ModelResponse(
         model=model,
         response_plan=response_plan,
-        recall_requests=recall_requests,
+        recall_requests=tuple(recall_requests),
         context_assessment=context_assessment,
-        importance_ranking=importance_ranking,
+        importance_ranking=tuple(importance_ranking),
         memory_ratings=_parse_memory_ratings(data),
         tool_intent=_parse_tool_intent(data),
         tool_consumed=_parse_tool_consumed(data),
@@ -631,6 +645,7 @@ class CognitionSkill(Skill[ModelResponse]):
 
         data: dict[str, Any] = {}
         mode = ""
+        delivered = False
         try:
             for key, value_json in iter_top_level_json_values(
                 _capture(model.generate_stream(req))
@@ -639,9 +654,10 @@ class CognitionSkill(Skill[ModelResponse]):
                 data[key] = value
                 if key == "mode" and isinstance(value, str):
                     mode = value.strip().lower()
-                if key == "reply" and on_reply is not None and isinstance(value, str):
-                    if mode == "respond" and value.strip():
-                        on_reply(value)
+                reply = data.get("reply")
+                if not delivered and on_reply is not None and mode == "respond" and isinstance(reply, str) and reply.strip():
+                    delivered = True
+                    on_reply(reply)
         except Exception:
             text = "".join(raw)
             return self._fallback(text)

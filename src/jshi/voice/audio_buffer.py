@@ -7,6 +7,7 @@ from .latency import AudioReceiptClock
 
 
 class SessionAudio:
+    tail_tolerance_ms = 20  # small provider endpoint mismatch, not a missing 100ms packet
     def __init__(self, seconds=45, *, archive=None):
         self.limit = int(seconds * 32000)  # mono 16 kHz int16
         self.data = bytearray()
@@ -69,11 +70,27 @@ class SessionAudio:
         self.archive_error = error
 
     def segment(self, start_ms, end_ms):
+        return self.segment_with_bounds(start_ms, end_ms)[0]
+
+    def segment_with_bounds(self, start_ms, end_ms):
+        """Allow a small provider endpoint mismatch beyond the received tail.
+
+        Never pad missing audio, shift the start, or conceal an evicted interval.
+        Original provider timestamps remain unchanged on the transcript.
+        """
         with self.lock:
-            start, end = start_ms * 32 - self.offset, end_ms * 32 - self.offset
+            available_end = (self.offset + len(self.data)) / 32
+            actual_end = end_ms
+            if 0 < end_ms - available_end <= self.tail_tolerance_ms and start_ms < available_end:
+                actual_end = available_end
+            bounds = {'requested_start_ms': start_ms, 'requested_end_ms': end_ms,
+                      'actual_start_ms': start_ms, 'actual_end_ms': actual_end,
+                      'tail_trim_ms': end_ms - actual_end}
+            start, end = int(start_ms * 32) - self.offset, int(actual_end * 32) - self.offset
             if start < 0 or end > len(self.data) or end <= start:
-                return self.archive.segment(self.capture_id,start_ms,end_ms) if self.archive else None
-            return bytes(self.data[start:end])
+                pcm = self.archive.segment(self.capture_id,start_ms,actual_end) if self.archive else None
+                return pcm, bounds
+            return bytes(self.data[start:end]), bounds
 
     def match(self, transcript, speakers, *, pcm=None):
         # Compatibility for callers predating the separate analysis stage.

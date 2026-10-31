@@ -47,7 +47,11 @@ def unpack_asr(frame: bytes) -> tuple[dict, bool]:
         payload = gzip.decompress(payload)
     data = json.loads(payload) if frame[2] >> 4 == 1 else {"message": payload.decode("utf-8", "replace")}
     if code:
-        raise RuntimeError(f"ASR error {code}: {data.get('message', 'request failed')}")
+        detail = data.get('message') or data.get('msg') or data.get('error')
+        if not detail:
+            detail = ('火山连续8秒未收到下一音频包，已断开识别；请检查音频采集或网络并重新开始识别'
+                      if code == 45000081 else 'request failed')
+        raise RuntimeError(f"ASR error {code}: {detail}")
     if data.get("code", 0) not in (0, 1000, 20000000):
         raise RuntimeError(f"ASR error {data.get('code')}")
     return data.get("payload_msg", data), bool(flags & 2 or data.get("is_last_package"))

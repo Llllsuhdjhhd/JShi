@@ -206,7 +206,16 @@ def format_turn_input(label: str, text: str, *, stimulus: str = STIMULUS_SPEECH)
 
 def build_system(request: ModelRequest) -> str:
     from jshi.simplified import LANGUAGE_RULE
-    return _build_system(request) + '\n\n【文字规范】\n' + LANGUAGE_RULE
+    capability = ''
+    if request.purpose == 'subject_activity' or request.purpose.startswith('voice_jev'):
+        capability = '\n\n【当前部署的身份与能力】\n' + DEPLOYMENT_CAPABILITIES
+    return _build_system(request) + capability + '\n\n【文字规范】\n' + LANGUAGE_RULE
+
+
+DEPLOYMENT_CAPABILITIES = (
+    '匠石目前的载体是电脑，能通过电脑以及连接的外设进行听、说，自身不具备物理意义上的移动、操控等能力。'
+    '在回应等活动时，需清晰地理解自身的行动边界。比如：不能和人下楼，不能喝水等。'
+)
 
 
 def _build_system(request: ModelRequest) -> str:

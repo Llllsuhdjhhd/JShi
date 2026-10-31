@@ -1228,6 +1228,7 @@ class VoiceConversation:
                                 subject_id=self.subject_id, activity_id=review_id))
                         snapshot['material_window'] = model_snapshot.get('material_window', {})
                         snapshot['discard_history'] = model_snapshot.get('discard_history', [])
+                        snapshot['ignored_output_fields'] = model_snapshot.get('ignored_output_fields', {})
                         return result
                     started = monotonic()
                     self._last_scene_attempt = started
@@ -1236,6 +1237,7 @@ class VoiceConversation:
                     self.record("voice_jev_scene", {"review_id": review_id, "accepted": accepted,
                         "trigger": trigger,
                         "model_raw": raw, "scene": scene, "chars": len(scene),
+                        "ignored_output_fields": snapshot.get('ignored_output_fields', {}),
                         "version": self.jev_scene_store.snapshot()["version"],
                         "covered_input_ids": snapshot.get("material_window", {}).get("model_input_ids", []) if accepted else [],
                         "material_window": snapshot.get("material_window", {}),
@@ -3772,6 +3774,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         asr = None
         local_executor = None
         local_pump = None
+        online_turn = None
+        online_turn_error = ''
         cloud = None
         from jshi.voice.capture import PcmCapture
         capture_source = PcmCapture()
@@ -3829,9 +3833,25 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         on_provisional=conversation.preparation.preview)
                 else:
                     from jshi.voice.streaming_asr import open_stream
-                    asr = await open_stream(replace(config, asr_backend=backend), http, cloud)
                     if speakers is not None:
                         local_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-cloud-identity")
+                    if backend == 'online' and config.turn_strategy != 'eager':
+                        from jshi.voice.online_turn import build_online_turn_gate
+                        model_root = Path(os.getenv('JSHI_VOICE_LOCAL_DIR', str(process.repository.path.parent/'voice_models')))
+                        try:
+                            from jshi.voice.turns import build_turn_policy
+                            policy = await asyncio.to_thread(build_turn_policy, config, model_root)
+                            online_turn = build_online_turn_gate(config, audio, conversation.accept, model_root,
+                                policy=policy, report=conversation.record,
+                                urgent=lambda: conversation.turn_busy or conversation.judging or conversation.delivery.snapshot().get('state') in
+                                    {'playing','thinking','paused','queued'})
+                            conversation.speech_active = online_turn.speech_active
+                        except Exception as exc:
+                            logging.getLogger(__name__).exception('Online acoustic completion unavailable')
+                            online_turn_error = '本地声音整句判断不可用，沿用火山输入：'+type(exc).__name__
+                    # The provider starts its audio-packet deadline on connect.
+                    # Finish local cold starts before opening that connection.
+                    asr = await open_stream(replace(config, asr_backend=backend), http, cloud)
                 async def receive():
                     failed = False
                     identity_pending = None
@@ -3847,10 +3867,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                                 if speakers is not None and not transcript.replaces:
                                     transcript, identity_pending = await bounded_online_match(audio, transcript, speakers,
                                         local_executor, identity_pending, config.candidate_timeout_s)
-                                await conversation.accept(transcript, asr_received_mono=received_mono,
+                                await (online_turn.submit if online_turn else conversation.accept)(transcript, asr_received_mono=received_mono,
                                     asr_received_at_ms=received_at_ms,
                                     online_identity_ms=round((monotonic()-received_mono)*1000,1))
                             if final:
+                                if online_turn:
+                                    await online_turn.flush()
                                 final_received = True
                                 break
                         if not final_received and not ws.closed:
@@ -3869,6 +3891,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 if asr is not None:
                     receiver = asyncio.create_task(receive())
                 await conversation.emit("ready", session_id=conversation.session_id, identity_mode="local" if use_local else config.identity_mode,
+                    acoustic_turn='enabled' if online_turn else 'unavailable' if online_turn_error else 'disabled',
+                    acoustic_turn_error=online_turn_error,
                     voiceprint_available=speakers is not None,
                     voiceprint_count=len(getattr(speakers, 'known', {})) if speakers else 0,
                     saved_references=getattr(speakers, 'saved_reference_counts', lambda: [])() if speakers else [],
@@ -3886,6 +3910,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                             raise ValueError("invalid microphone PCM frame")
                         frame = capture_source.accept(message.data)
                         audio.append(frame.pcm)
+                        if online_turn:
+                            online_turn.feed(frame.pcm)
                         intake_lag_ms = audio.clock_drift_ms()
                         if intake_lag_ms is not None and intake_lag_ms > 3000 and not intake_lag_reported:
                             intake_lag_reported = True
@@ -4009,6 +4035,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     receiver.cancel()
                     await asyncio.gather(receiver, return_exceptions=True)
                 actions = []
+                if online_turn is not None:
+                    actions.append(('关闭在线声音整句判断', online_turn.close))
                 if asr:
                     actions.append(('关闭语音识别连接', asr.close))
                 if local_pump:
@@ -4035,6 +4063,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         return ws
 
     app.router.add_get("/", page)
+    from .entry_tests import register as register_entry_tests
+    register_entry_tests(app, process.repository.path.parent/'entry_test_assets', recent_audio)
     app.router.add_get('/recent-audio',recent_audio_page)
     app.router.add_get('/api/recent-audio',recent_audio_index)
     app.router.add_get('/api/recent-audio-stream/{capture}/{start}.wav',recent_audio_stream)

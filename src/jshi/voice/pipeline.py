@@ -103,6 +103,7 @@ class LocalASR:
         self.segment_samples = 0
         self.samples = []
         self.last_text = ""
+        self.last_timings = []
 
     def reset_session(self) -> None:
         self.stream = self.recognizer.create_stream()
@@ -119,6 +120,8 @@ class LocalASR:
             self.speakers.reset_session()
 
     def feed(self, pcm: bytes, *, final: bool = False) -> tuple[Transcript, ...]:
+        began = monotonic()
+        self.last_timings = []
         import numpy as np
         if len(pcm) % 2:
             raise ValueError("PCM must be signed 16-bit little endian")
@@ -134,6 +137,9 @@ class LocalASR:
             self.recognizer.decode_stream(self.stream)
         text = clean_asr_text(self.recognizer.get_result(self.stream))
         endpoint = final or self.recognizer.is_endpoint(self.stream) or self.segment_samples >= 16000 * (6 if self.diarizer else 25)
+        decode_done = monotonic()
+        endpoint_reason = ('eof' if final else 'length_limit'
+                           if self.segment_samples >= 16000 * (6 if self.diarizer else 25) else 'acoustic_endpoint')
         start, end = self.offset_samples // 16, (self.offset_samples+self.segment_samples) // 16
         output = []
         if endpoint and (text or (self.refiner is not None and self.samples)):
@@ -156,6 +162,14 @@ class LocalASR:
             track, vpid, score = self.early_speaker or (f"pending-{start}", "", None)
             output.append(Transcript(text, track, start, end, False, voiceprint_id=vpid, confidence=score))
         self.last_text = text
+        returned = monotonic()
+        self.last_timings = [{'start_ms': t.start_ms, 'end_ms': t.end_ms,
+            'window_start_ms': start, 'window_end_ms': end, 'endpoint_audio_ms': end,
+            'cut_reason': endpoint_reason if endpoint else 'preview',
+            'stream_decode_ms': elapsed_ms(decode_done, began),
+            'analysis_transcription_ms': elapsed_ms(returned, decode_done),
+            '_window_ready_mono': decode_done, '_pipeline_return_mono': returned,
+            '_asr_return_mono': returned} for t in output]
         if endpoint and not final:
             self.recognizer.reset(self.stream)
             self.offset_samples += self.segment_samples

@@ -3,7 +3,7 @@
 <title>最近录音 · 匠石</title>
 <style>body{font:15px/1.7 system-ui;background:#f7f9fc;color:#26374d;max-width:1000px;margin:30px auto;padding:0 18px}article{padding:18px;margin:14px 0;background:white;border:1px solid #e1e7f0;border-radius:12px}small,p{color:#66788e}audio{display:block;max-width:100%;margin:10px 0}button,a{color:#245fba;margin-right:14px}pre{white-space:pre-wrap;word-break:break-word;font-size:12px}h1{font-size:24px}</style>
 <h1>最近录音</h1><p>本地保留最近24小时的输入声音，音频最多512 MB。停止对话后仍保留；超过时间或容量会清理最早的录音。录音不会自动加入训练集。</p>
-<button id="refresh">刷新</button><span id="status"></span><main id="rows"></main><details><summary>连续录音片段（含未完成转写的声音）</summary><div id="streams"></div></details>
+<a href="/entry-tests">长期场景测试库</a><button id="refresh">刷新</button><span id="status"></span><main id="rows"></main><details><summary>连续录音片段（含未完成转写的声音）</summary><div id="streams"></div></details>
 <script>
 const $=id=>document.getElementById(id);
 function link(parent,text,url){const a=document.createElement('a');a.textContent=text;a.href=url;a.target='_blank';a.rel='noopener';parent.append(a);return a;}
