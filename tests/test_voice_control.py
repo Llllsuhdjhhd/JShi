@@ -67,6 +67,15 @@ def test_dialogue_defaults_to_confirmed_segments_and_retains_raw_output(tmp_path
     assert VoiceDialogue(state.path).include_unplayed
 
 
+def test_waiting_ack_text_stays_visible_before_playback_receipt(tmp_path):
+    state = VoiceDialogue(tmp_path/'dialogue.json')
+    state.plan('s','formal','session',['正式回复还没播出。'])
+    state.plan('s','ack','session',['我查一下天气'], hide_until_played=False)
+    note = '【本轮过渡语】已安排语音，未确认播出，可能跳过："我查一下天气"。'
+    assert '我查一下天气' in state.filter_text(note)
+    assert '正式回复还没播出' not in state.filter_text('旁白：正式回复还没播出。')
+
+
 def test_dialogue_cutoff_and_subject_scope_do_not_mix_delivery(tmp_path):
     state=VoiceDialogue(tmp_path/'dialogue.json')
     before=time()*1000

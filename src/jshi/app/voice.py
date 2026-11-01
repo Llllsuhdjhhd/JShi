@@ -2913,8 +2913,12 @@ class VoiceConversation:
             return
         from jshi.voice.delivery import sentences
         key = self.session_id + ':' + str(turn_key)
+        # Waiting acknowledgements are already scheduled by the host. Keep their wording
+        # visible to main cognition without waiting for player playback receipts.
+        hide = self.voice_timings.get(turn_key, (None, {}))[1].get('route') != 'waiting_ack'
         self.dialogue.plan(self.subject_id, key, self.session_id,
-                           [segment for item in items for segment in sentences(item.text)])
+                           [segment for item in items for segment in sentences(item.text)],
+                           hide_until_played=hide)
         if self.delivery.snapshot().get("state") in {"queued", "playing", "paused"}:
             if len(self.pending_plans) == self.pending_plans.maxlen:
                 await self.emit("notice", text="待播回应较多，暂不增加新语音。")

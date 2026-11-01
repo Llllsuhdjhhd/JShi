@@ -70,6 +70,9 @@ def test_formal_reply_waits_for_ack_playback_but_cognition_runs(process, finish)
             material = build_user(process.cognition.requests[-1])
             assert '本轮过渡语' in material and '未确认播出' in material
             assert '不是用户要求或执行结果' in material
+            # Host already scheduled the ack; do not wait for player receipts to show wording.
+            assert '嗯，我想一下。' in material
+            assert '〔未播出正文已隐藏〕' not in material
             ack=c.delivery.current
             assert ack.texts==('嗯，我想一下。',)
             if c.tts_task:await c.tts_task
