@@ -1886,7 +1886,7 @@ class VoiceConversation:
         delivery = {"state": state, "spoken": spoken[-1200:],
                     "pending": (snapshot or {}).get("pending_text", "")[:200], "names_for_jiangshi": names,
                     "attention": self.attention.hint(speaker, overlap=overlap),
-                    "short_chat": self.direct_replies.context(self.subject_id, [u.speaker.object_id for u in utterances]),
+                    "short_chat": self.direct_replies.context(self.subject_id, [u.speaker.object_id for u in utterances], allow_general=self.jev.mode != "legacy"),
                     "jev_scene": material['scene'],
                     "jev_material_scope": {k: material[k] for k in ('version', 'generation', 'archived_unread_count')},
                     "people": {p: self.code_labels.get(oid, p) for p, oid in self.code_owner.items()},
@@ -2585,7 +2585,7 @@ class VoiceConversation:
                     if (direct and current and all(u.speaker.object_id == oid for u in current)
                             and set(call.get('input_ids', ())) == {u.input_id for u in current}
                             and call.get('collection_complete') is not False
-                            and self.direct_replies.accept(self.subject_id, oid, '\n'.join(u.text for u in current), direct, include_reply=False)):
+                            and self.direct_replies.accept(self.subject_id, oid, '\n'.join(u.text for u in current), direct, include_reply=False, allow_general=self.jev.mode != 'legacy')):
                         await self._direct_reply(direct, oid, epoch, envelope, current, call)
                         continue
                 facts = []
@@ -2781,6 +2781,9 @@ class VoiceConversation:
                     and not self.output_disconnected
                     and self.delivery.snapshot().get('state') not in {'playing', 'paused', 'queued'}
                     and self.wait_ack_timing.claim_ack()):
+                from jshi.voice.wait_ack import ack_context
+                envelope = replace(envelope, delivery_context='\n'.join(filter(None,
+                    (envelope.delivery_context, ack_context(brief)))))
                 ack_key = (epoch, -self.turn_sequence)
                 self.reply_input_ids[ack_key] = [u.input_id for u in envelope.current_utterances]
                 self.voice_timings[ack_key] = (monotonic(), {'route':'waiting_ack'})
@@ -2910,8 +2913,12 @@ class VoiceConversation:
             return
         from jshi.voice.delivery import sentences
         key = self.session_id + ':' + str(turn_key)
+        # Waiting acknowledgements are already scheduled by the host. Keep their wording
+        # visible to main cognition without waiting for player playback receipts.
+        hide = self.voice_timings.get(turn_key, (None, {}))[1].get('route') != 'waiting_ack'
         self.dialogue.plan(self.subject_id, key, self.session_id,
-                           [segment for item in items for segment in sentences(item.text)])
+                           [segment for item in items for segment in sentences(item.text)],
+                           hide_until_played=hide)
         if self.delivery.snapshot().get("state") in {"queued", "playing", "paused"}:
             if len(self.pending_plans) == self.pending_plans.maxlen:
                 await self.emit("notice", text="待播回应较多，暂不增加新语音。")
@@ -3234,7 +3241,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
              'task_context':tasks, 'selected_person_code':selected_code or 'P1',
              'people':{p:labels.get(oid,p) for p,oid in codes.items()}, 'jev_material_scope':{k:material[k] for k in ('version','generation','archived_unread_count')},
              'waiting':wait_timing(process).guidance(model_key(process), allowed=waiting_allowed, mode='text'),
-             'short_chat':{**text_direct_replies.context(subject_id, [envelope.speaker.object_id]),
+             'short_chat':{**text_direct_replies.context(subject_id, [envelope.speaker.object_id], allow_general=judge.mode != "legacy"),
                            'person_code':selected_code or 'unknown'}}, vision=visual, on_request=capture,
             is_current=lambda: scene_store.state['generation'] == generation)
         jev_finished = monotonic()
@@ -3654,7 +3661,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         return SimpleNamespace(response_plan=ResponsePlan('ignore'),action_text='',timing=timing,
                                                activity_id=timing.activity_id,route='control')
                     direct = judged_envelope.jev_calls[-1].get('direct_reply', '')
-                    if direct and text_direct_replies.accept(subject_id, profile.object_id, text, direct):
+                    if direct and text_direct_replies.accept(subject_id, profile.object_id, text, direct, allow_general=judged_envelope.jev_calls[-1].get("mode", "legacy") != "legacy"):
                         from types import SimpleNamespace
                         from jshi.subject.process import ActivityTiming
                         plan = ResponsePlan('respond', items=(ResponseItem('verbal', direct, (profile.object_id,)),))
@@ -3678,12 +3685,13 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     call = judged_envelope.jev_calls[-1]
                     main_level = (call.get('main_prompt_hint') or {}).get('level', 1)
                     brief = call.get('waiting_reply', '')
-                    from jshi.voice.wait_ack import wait_timing
+                    from jshi.voice.wait_ack import wait_timing, ack_context
                     if brief and streaming and wait_timing(process).claim_ack():
                         events.put_nowait({'type':'waiting_ack', 'text':brief, 'label':profile.label})
                         # Sent to the stream, not a claim that it was heard or read.
                         judged_envelope = replace(judged_envelope,
-                            delivery_context=f'【等待接话交付】本轮安排向文字页面发送短接话“{brief}”；未确认显示或阅读，不是正式回答。')
+                            delivery_context='\n'.join(filter(None,
+                                (judged_envelope.delivery_context, ack_context(brief, channel='text')))))
                     main_started = monotonic()
                     result = await asyncio.to_thread(process.experience, subject_id, text, envelope=judged_envelope,
                         objects={profile.label:profile.object_id}, on_voice_plan=plan_ready if streaming else None,

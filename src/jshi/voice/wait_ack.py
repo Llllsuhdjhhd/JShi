@@ -36,7 +36,7 @@ class WaitAckTiming:
             temp.replace(self.path)
 
     def guidance(self, model, *, allowed, mode='voice'):
-        enabled = os.getenv('JSHI_JEV_WAIT_ACK_ENABLED', 'false').lower() not in {'0', 'false', 'off'}
+        enabled = os.getenv('JSHI_JEV_WAIT_ACK_ENABLED', 'true').lower() not in {'0', 'false', 'off'}
         with self.lock:
             levels = {}
             for level, initial in ((1, 10), (2, 6), (3, 3)):
@@ -46,7 +46,7 @@ class WaitAckTiming:
                 levels[f'L{level}'] = {'expected_seconds': round(seconds, 1), 'samples': len(samples),
                     'basis': 'recent_median' if samples else 'initial_estimate',
                     'suggested_speech_seconds': round(duration, 1),
-                    'recommendation': 'brief_ack' if seconds >= 3 else 'optional' if seconds >= 2 else 'silent',
+                    'recommendation': 'brief_ack' if seconds >= 3 else 'optional' if seconds >= 1.5 else 'silent',
                     'max_chars': min(16, int(duration * 4))}
             cooldown_ready = self.last_ack is None or monotonic() - self.last_ack >= 30
         return {'allowed': bool(allowed and enabled and cooldown_ready), 'mode': mode, 'levels': levels,
@@ -55,7 +55,7 @@ class WaitAckTiming:
     def claim_ack(self):
         """Do not insert acknowledgements on every consecutive turn."""
         with self.lock:
-            if os.getenv('JSHI_JEV_WAIT_ACK_ENABLED', 'false').lower() in {'0', 'false', 'off'}:
+            if os.getenv('JSHI_JEV_WAIT_ACK_ENABLED', 'true').lower() in {'0', 'false', 'off'}:
                 return False
             now = monotonic()
             if self.last_ack is not None and now - self.last_ack < 30:
@@ -73,3 +73,9 @@ def wait_timing(process):
 def model_key(process):
     model = process.cognition
     return str(getattr(model, 'model_tag', getattr(model, 'name', type(model).__name__)))
+
+
+def ack_context(text, *, channel='voice'):
+    """A provisional utterance is neither a user instruction nor a delivery fact."""
+    status = '已安排语音，未确认播出，可能跳过' if channel == 'voice' else '已提交页面显示，未确认已读'
+    return f'【本轮过渡语】{status}：{json.dumps(text, ensure_ascii=False)}。这是匠石的预先接话，不是用户要求或执行结果；合适则自然承接，不合适可忽略，确需纠正时简短说明。'

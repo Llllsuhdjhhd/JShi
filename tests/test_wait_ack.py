@@ -15,10 +15,11 @@ def enable_optional_ack_for_feature_tests(monkeypatch):
     monkeypatch.setenv('JSHI_JEV_WAIT_ACK_ENABLED', 'true')
 
 
-def test_waiting_ack_is_off_by_default(tmp_path, monkeypatch):
+def test_waiting_ack_is_enabled_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv('JSHI_JEV_WAIT_ACK_ENABLED', raising=False)
     stats = WaitAckTiming(tmp_path/'wait.json')
-    assert not stats.guidance('a', allowed=True)['allowed']
+    assert stats.guidance('a', allowed=True)['allowed']
+    assert stats.claim_ack()
     assert not stats.claim_ack()
 
 
@@ -65,6 +66,13 @@ def test_formal_reply_waits_for_ack_playback_but_cognition_runs(process, finish)
             await c._respond(e,c.epoch)
             await asyncio.sleep(0)
             assert process.cognition.requests  # No playback completion yet.
+            from jshi.models.prompt import build_user
+            material = build_user(process.cognition.requests[-1])
+            assert '本轮过渡语' in material and '未确认播出' in material
+            assert '不是用户要求或执行结果' in material
+            # Host already scheduled the ack; do not wait for player receipts to show wording.
+            assert '嗯，我想一下。' in material
+            assert '〔未播出正文已隐藏〕' not in material
             ack=c.delivery.current
             assert ack.texts==('嗯，我想一下。',)
             if c.tts_task:await c.tts_task

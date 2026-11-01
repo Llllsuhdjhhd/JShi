@@ -135,13 +135,19 @@ def entry_text(snapshot):
 
 def preparation_text(snapshot, entry):
     selected = set(entry['process_refs'])
+    # Keep pending participants for continuation safety, but do not send unrelated
+    # identity decisions. Full entry and raw evidence remain with the caller.
+    relevant = selected | set(entry['pending_refs'])
+    preparation_entry = {**entry, 'items': [
+        item for item in entry['items'] if f'I{item["i"]}' in relevant]}
     # No voice evidence, candidates or initial guesses cross the identity boundary.
     lines = [{k: v for k, v in row.items() if k not in
               {'p', 'name', 'continuity', 'recent_confirmed', 'identity', 'binding', 'short_voice_hint'}}
              for row in snapshot['lines'] if row['evidence_ref'] in selected]
-    return blocks([('入口结论', entry), ('本次处理原话', lines),
+    return blocks([('入口结论', preparation_entry), ('本次处理原话', lines),
                    ('当前现场与新事件', {'scene': snapshot['scene'], 'events': snapshot['events']}),
                    ('处理许可与材料可用性', {'short_chat': snapshot['short_chat'],
-                    'waiting': snapshot['waiting'], **snapshot['availability']}),
+                    'waiting': snapshot['waiting'], 'activity_state': snapshot.get('state', {}).get('state', 'unknown'),
+                    **snapshot['availability']}),
                    ('有效观察', snapshot['environment']), ('相关任务', snapshot['task_context']),
                    ('材料范围', snapshot['scope'])])

@@ -77,12 +77,15 @@ class VoiceDialogue:
                 self.state['inputs'] = rows[-256:]
                 self._save()
 
-    def plan(self, subject, key, session, texts, *, shown=False):
+    def plan(self, subject, key, session, texts, *, shown=False, hide_until_played=True):
+        """Register a reply. Waiting-ack text is already committed by the host, so keep it
+        visible to the model without waiting for player receipts."""
         with self.lock:
             if not any(r['subject'] == subject and r['key'] == key for r in self.state['replies']):
                 self.state['replies'].append({'subject': subject, 'key': key, 'session': session,
                     'reply_id': '', 'texts': list(texts), 'played': list(range(len(texts))) if shown else [],
-                    'state': 'shown' if shown else 'generated', 'at': time()*1000})
+                    'state': 'shown' if shown else 'generated', 'at': time()*1000,
+                    'hide_until_played': bool(hide_until_played)})
                 self.state['replies'] = self.state['replies'][-128:]
                 self._save()
 
@@ -161,7 +164,8 @@ class VoiceDialogue:
             if subject not in self._hidden:
                 self._hidden[subject] = tuple(sorted({segment for row in self.state['replies']
                     for i, segment in enumerate(row['texts']) if (subject is None or row['subject'] == subject)
-                    and i not in row['played'] and len(segment.strip()) >= 4}, key=len, reverse=True))
+                    and i not in row['played'] and row.get('hide_until_played', True)
+                    and len(segment.strip()) >= 4}, key=len, reverse=True))
             hidden = self._hidden[subject]
         # Older pending-scene records carry explicit speech-plan lines. They are
         # source formatting, not a keyword classifier for people's utterances.

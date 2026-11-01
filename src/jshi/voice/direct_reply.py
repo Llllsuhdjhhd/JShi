@@ -50,17 +50,18 @@ class DirectReplyState:
             self.recent.append({'subject':subject, 'object_id':oid, 'input':current.input_text[:200],
                                 'reply':result.response_plan.verbal_text()[:200] if include_reply else ''})
 
-    def context(self, subject, object_ids):
+    def context(self, subject, object_ids, *, allow_general=False):
         object_ids = tuple(object_ids)
         ids = tuple(dict.fromkeys(object_ids))
         with self.lock:
             ready = len(ids) == 1 and bool(ids[0]) and (subject, ids[0]) in self.people
-            return {'allowed':ready, 'reason':'人物材料已由主流程加载' if ready else '人物材料尚未加载或当前多人/身份未明',
+            general = allow_general and len(ids) == 1 and bool(ids[0])
+            return {'allowed':bool(ready or general), 'reason':'人物材料已由主流程加载' if ready else '仅可用当前材料或通用知识短答，不补造人物经历' if general else '人物材料尚未加载或当前多人/身份未明',
                 'person': self.people.get((subject, ids[0])) if ready else None,
                 'recent':[r for r in self.recent if ready and r['subject']==subject and r['object_id']==ids[0]][-4:]}
 
-    def accept(self, subject, oid, text, reply, *, include_reply=True):
-        if not self.context(subject, [oid])['allowed']:
+    def accept(self, subject, oid, text, reply, *, include_reply=True, allow_general=False):
+        if not self.context(subject, [oid], allow_general=allow_general)['allowed']:
             return False
         with self.lock:
             self.recent.append({'subject':subject,'object_id':oid,'input':text[:200],
