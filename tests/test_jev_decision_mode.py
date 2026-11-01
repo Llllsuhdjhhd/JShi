@@ -21,6 +21,14 @@ def decision(address='direct', expression='complete', effect='redirect', work='n
                            task_effect=effect, work_after_stop=work)), model='decision-fixture')
 
 
+def native_answer(questions):
+    values = {}
+    defaults = dict(effect='redirect', work='none', level='L2', memory='no', image='no', route='main', ack='no')
+    for key in questions:
+        values[key] = defaults.get(key, {'p':'unknown','c':'unknown','a':'direct','e':'complete'}.get(key[0]))
+    return DecisionResult('success', answers(questions, values), model='native-fixture')
+
+
 def run(result=None, *, bound=True, outputs=None, callback=None, current=None, batch=None):
     config = defaults()
     config['mode'] = 'active'
@@ -180,16 +188,15 @@ def test_voice_host_runs_decision_identity_and_main_once(process):
         calls = []
         async def decide(purpose, state, **kwargs):
             calls.append(purpose)
-            return decision()
+            return native_answer(kwargs['questions'])
         voice.decisions.decide = decide
         try:
             await voice.accept(Transcript('匠石，解释一下', 'A', 0, 1000, True))
             await asyncio.wait_for(voice.queue.join(), 4)
             await asyncio.wait_for(voice.turn_queue.join(), 4)
-            assert calls == ['entry'], [r.input_text for r in model.requests]
+            assert calls == ['entry', 'entry'], [r.input_text for r in model.requests]
             assert len(process.cognition.requests) == 1 and voice.epoch == 1
-            assert [r.purpose for r in model.requests if r.purpose != 'voice_jev_scene'] == [
-                'voice_jev_identity', 'voice_jev_prepare']
+            assert [r.purpose for r in model.requests if r.purpose != 'voice_jev_scene'] == []
         finally:
             await voice.close()
     asyncio.run(scenario())
@@ -218,7 +225,7 @@ def test_selected_text_http_uses_same_decision_service(process):
     calls = []
     async def decide(purpose, state, **kwargs):
         calls.append(purpose)
-        return decision()
+        return native_answer(kwargs['questions'])
     service.decide = decide
     async def scenario():
         async with TestClient(TestServer(create_app(process, 'stone', VoiceConfig(api_key=''), jev=gate))) as client:
@@ -227,8 +234,8 @@ def test_selected_text_http_uses_same_decision_service(process):
                 json={'text': '解释一下', 'object_id': 'lux-id'})
             assert response.status == 200
             await response.read()
-            assert calls == ['entry']
-            assert [r.purpose for r in model.requests if r.purpose != 'voice_jev_scene'] == ['voice_jev_prepare']
+            assert calls == ['entry', 'entry']
+            assert [r.purpose for r in model.requests if r.purpose != 'voice_jev_scene'] == []
     asyncio.run(scenario())
 
 

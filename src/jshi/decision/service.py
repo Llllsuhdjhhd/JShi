@@ -170,7 +170,7 @@ class DecisionService:
         self.config = config
         return self.public()
 
-    async def decide(self, purpose, state, revision=0, *, force=False, config_snapshot=None):
+    async def decide(self, purpose, state, revision=0, *, force=False, config_snapshot=None, questions=None):
         started = monotonic()
         if purpose not in {'collision', 'continuation', 'entry'}:
             return DecisionResult('invalid', reason='unknown_purpose')
@@ -185,8 +185,9 @@ class DecisionService:
             return DecisionResult('unavailable', reason='cooldown')
         if cache not in self.ports:
             self.ports[cache] = self.factory(provider, options['model'], options['endpoint'], key)
-        questions = {'collision': COLLISION, 'continuation': CONTINUATION, 'entry': ENTRY}[purpose]
-        policy = ENTRY_VERSION if purpose == 'entry' else VERSION
+        dynamic_questions = questions is not None
+        questions = questions if dynamic_questions else {'collision': COLLISION, 'continuation': CONTINUATION, 'entry': ENTRY}[purpose]
+        policy = 'jev-native-v3' if dynamic_questions else ENTRY_VERSION if purpose == 'entry' else VERSION
         if purpose == 'continuation' and self.slots.locked():
             return DecisionResult('unavailable', reason='formal_work_priority')
         request = DecisionRequest(purpose, state, questions, revision)

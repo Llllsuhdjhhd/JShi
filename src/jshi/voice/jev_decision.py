@@ -13,13 +13,13 @@ def entry_bridge(service):
     config = deepcopy(service.config)
     tasks = service.observations
 
-    async def request(state, budget_ms=None):
+    async def request(state, budget_ms=None, questions=None):
         snapshot = deepcopy(config)
         if budget_ms is not None:
             snapshot['entry_timeout_ms'] = min(snapshot['entry_timeout_ms'], budget_ms)
-        return await service.decide('entry', state, config_snapshot=snapshot)
+        return await service.decide('entry', state, config_snapshot=snapshot, questions=deepcopy(questions))
 
-    def decide(state, *, deadline=None):
+    def decide(state, *, deadline=None, questions=None):
         if config['mode'] == 'off' or not config.get('entry', True):
             return DecisionResult('unavailable', reason='entry_disabled'), config
         if config['mode'] == 'shadow':
@@ -27,7 +27,7 @@ def entry_bridge(service):
             def observe():
                 if service.slots.locked() or tasks:
                     return
-                task = loop.create_task(request(state))
+                task = loop.create_task(request(state, questions=questions))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
@@ -38,7 +38,7 @@ def entry_bridge(service):
             budget = min(budget, deadline - monotonic())
         if budget <= 0:
             return DecisionResult('timeout', reason='batch_deadline'), config
-        future = asyncio.run_coroutine_threadsafe(request(state, max(1, int(budget*1000))), loop)
+        future = asyncio.run_coroutine_threadsafe(request(state, max(1, int(budget*1000)), questions), loop)
         try:
             return future.result(budget), config
         except FutureTimeout:
@@ -49,4 +49,5 @@ def entry_bridge(service):
                  'provider': config['provider'], 'mode': config['mode']}
         loop.call_soon_threadsafe(setattr, service, 'entry_last', value)
     decide.report = report
+    decide.protocol = 'native-v3'
     return decide

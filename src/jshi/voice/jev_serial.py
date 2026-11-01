@@ -207,6 +207,29 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         fallback = 'unsupported_scope'
         # First release supports one expression only; never infer same person from track.
         bridge = delivery.get('_decision_entry')
+        if getattr(bridge, 'protocol', '') == 'native-v3':
+            from jshi.decision.jev_native import entry_questions, decode_entry
+            try:
+                if snapshot['environment'] or any(p.get('kind') not in {'audio', 'text'} for p in snapshot['media']) or snapshot['scope'].get('unprovided_events'):
+                    raise ValueError('unsupported_media_or_scope')
+                questions = entry_questions(thin, schema)
+                result, config = bridge({'material': entry_text(snapshot)}, questions=questions, deadline=gate._entry_deadline)
+                stages.append({'stage': 'decision_entry', 'mode': mode, 'status': result.status,
+                               'model': result.model, 'ms': result.elapsed_ms, 'answers': dict(result.answers)})
+                if not current(): raise JEVStaleError('JEV决策返回已失效')
+                fields = decode_entry(result, snapshot['lines'], questions, config['entry_thresholds'][config['provider']]['address'])
+                validate(fields, schema)
+                gate._from_current(fields['items'], batch, '')
+                used_decision = True
+                bridge.report('decision', '')
+                return fields
+            except JEVStaleError:
+                raise
+            except Exception as exc:
+                stages.append({'stage': 'decision_fallback', 'mode': mode, 'status': 'fallback',
+                               'actual_mode': 'split', 'reason': type(exc).__name__ + ':' + str(exc)})
+                bridge.report('split', type(exc).__name__)
+                return call('voice_jev_entry', ENTRY_INSTRUCTION, entry_text(snapshot), schema)
         if len(batch) == 1 and not overlap and not any(p.get('kind') not in {'audio', 'text'} for p in snapshot['media']) and not snapshot['environment'] and not snapshot['scope'].get('unprovided_events') and bridge:
             if not current():
                 raise JEVStaleError('JEV决策材料已失效')
@@ -309,6 +332,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                 or entry['utterance_complete'] == 'incomplete' and route == 'prepare'
                 or route in {'wait', 'background'} and control == 'redirect'
                 or control == 'stop' and route == 'wait'
+                or entry['interaction'] == 'none' and route == 'wait'
                 or route == 'prepare' and entry['interaction'] == 'none' and control != 'stop'):
             raise ValueError('JEV入口范围、完整度或控制矛盾')
         accepted = replace(accepted, interaction=entry['interaction'], control=control,
@@ -334,7 +358,36 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             if preparation is not None:
                 raise ValueError('背景或等待不能附带回应准备')
             return replace(accepted, stage_records=tuple(stages), model_raw=raw)
-        if mode != 'combined':
+        native_prepare = False
+        bridge = delivery.get('_decision_entry')
+        if mode == 'decision' and used_decision and getattr(bridge, 'protocol', '') == 'native-v3':
+            from jshi.decision.jev_native import PREPARE, decode_prepare, REPLY_INSTRUCTION
+            try:
+                result, config = bridge({'material': preparation_text(snapshot, entry)}, questions=PREPARE, deadline=gate._entry_deadline)
+                stages.append({'stage': 'decision_prepare', 'mode': mode, 'status': result.status,
+                               'model': result.model, 'ms': result.elapsed_ms, 'answers': dict(result.answers)})
+                if not current(): raise JEVStaleError('JEV准备返回已失效')
+                preparation = decode_prepare(result, config['entry_thresholds'][config['provider']]['address'])
+                if preparation['route'] == 'self_reply':
+                    chosen = [i for i in accepted.items if f'I{i.n}' in selected]
+                    short = snapshot['short_chat']
+                    if not (short.get('allowed') is True and entry['interaction'] == 'direct'
+                            and (control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed', 'idle'})
+                            and not overlap and not pending and chosen
+                            and all(i.speaker_level == '确定' and i.speaker_pick == short.get('person_code') for i in chosen)
+                            and all(r.get('source') != 'visual_environment' for r in batch)):
+                        raise ValueError('short_reply_permission')
+                    generated = call('voice_jev_reply', REPLY_INSTRUCTION,
+                                     preparation_text(snapshot, entry), object_schema({'reply': text_schema(160, minimum=1)}))
+                    preparation['reply'] = generated['reply']
+                validate(preparation, preparation_schema())
+                native_prepare = True
+            except JEVStaleError:
+                raise
+            except Exception as exc:
+                stages.append({'stage': 'decision_prepare_fallback', 'mode': mode, 'status': 'fallback',
+                               'reason': type(exc).__name__ + ':' + str(exc)})
+        if mode != 'combined' and not native_prepare:
             preparation = call('voice_jev_prepare', PREPARATION_INSTRUCTION,
                                preparation_text(snapshot, entry), preparation_schema())
         if not isinstance(preparation, dict):
@@ -346,7 +399,8 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         short, waiting = snapshot['short_chat'], snapshot['waiting']
         selected_items = [i for i in accepted.items if f'I{i.n}' in selected]
         direct_allowed = (short.get('allowed') is True and entry['interaction'] == 'direct'
-            and control == 'redirect' and not overlap and not pending
+            and (control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed', 'idle'})
+            and not overlap and not pending
             and all(r.get('source') != 'visual_environment' for r in batch)
             and all(i.speaker_level == '确定' and i.speaker_pick == short.get('person_code')
                     for i in selected_items) and bool(selected_items)
@@ -355,9 +409,10 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         route = 'self_reply' if direct else 'main'
         brief = ''
         budget = waiting.get('levels', {}).get(f'L{hint["level"]}', {})
-        if (route == 'main' and waiting.get('allowed') is True and control == 'redirect'
+        if (route == 'main' and waiting.get('allowed') is True
+                and (control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed', 'idle'})
                 and entry['interaction'] == 'direct' and not pending and not overlap
-                and budget.get('expected_seconds', 0) >= 2
+                and budget.get('expected_seconds', 0) >= 1.5
                 and len(preparation['waiting_reply'].strip()) <= min(16, budget.get('max_chars', 0))):
             brief = preparation['waiting_reply'].strip()
         if accepted.silent_operation:
