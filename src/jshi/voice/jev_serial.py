@@ -51,6 +51,19 @@ def entry_schema(lines, refs):
                           'decision_refs': references(sorted(refs), 1, 6)})
 
 
+def exact_identity_duplicates(data):
+    """Only identical repeated rows can be removed without inventing a choice."""
+    if not isinstance(data, dict) or not isinstance(data.get('items'), list):
+        return data, False
+    unique = []
+    for item in data['items']:
+        if item not in unique:
+            unique.append(item)
+    if len(unique) == len(data['items']):
+        return data, False
+    return {**data, 'items': unique}, True
+
+
 def validate(value, schema, path='$'):
     """Validate the small exact schema used here, including booleans vs integers."""
     if 'anyOf' in schema:
@@ -136,7 +149,8 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
     if contextual:
         batch = [{**r, 'candidates': [*r.get('candidates', []), *[
             {'who': p, 'source': 'scene', 'names': [delivery['people'][p]]} for p in sorted(contextual)
-            if p not in {c['who'] for c in r.get('candidates', [])}]]} for r in batch]
+            if p not in {c['who'] for c in r.get('candidates', [])}]]}
+            if r.get('person_scope') != 'unaligned_cloud_span' else r for r in batch]
     thin, payload, packed = gate._build_material(batch, context, delivery)
     snapshot = build_snapshot(payload, batch, delivery)
     refs = {r['evidence_ref'] for r in thin}
@@ -149,14 +163,18 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         schema['properties']['preparation'] = {'anyOf': [preparation_schema(), {'type': 'null'}]}
         schema['required'].append('preparation')
 
+    from jshi.core.person_names import PersonNames
+    names = PersonNames(delivery.get('named_people', {}))
+
     def call(stage, system, user, output, *, retry_budget=None):
         nonlocal raw, syntax_retry_used
         raw = ''
         if not current():
             raise JEVStaleError('JEV材料或播放代次已失效')
+        user = names.material(user)
         request = ModelRequest(purpose=stage, input_text=user, persona_user_text=user,
             subject_state=SubjectState(subject_id, '匠石', stage),
-            system_extra=system + '\nJSON Schema：' + json.dumps(output, ensure_ascii=False, separators=(',', ':')),
+            system_extra=system + '\nJSON Schema：' + json.dumps(names.schema(output), ensure_ascii=False, separators=(',', ':')),
             input_parts=tuple(p for p in (packed or {}).get('parts', []) if p.get('kind') == 'image')
                 if stage in {'voice_jev', 'voice_jev_entry', 'voice_jev_identity'} else ())
         started = monotonic()
@@ -179,8 +197,12 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             record['response_format'] = metadata.get('response_format')
             raw = response.text
             phase = 'output_json'
-            data = parse_json_object(raw)
+            data = names.value(parse_json_object(raw), reverse=True)
             phase = 'output_schema'
+            if stage in {'voice_jev', 'voice_jev_entry', 'voice_jev_identity'}:
+                data, repaired = exact_identity_duplicates(data)
+                if repaired:
+                    record['normalization'] = 'identical_identity_rows'
             validate(data, output)
             if not current():
                 raise JEVStaleError('JEV返回结果已过期')
@@ -212,12 +234,13 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             try:
                 if snapshot['environment'] or any(p.get('kind') not in {'audio', 'text'} for p in snapshot['media']) or snapshot['scope'].get('unprovided_events'):
                     raise ValueError('unsupported_media_or_scope')
-                questions = entry_questions(thin, schema)
-                result, config = bridge({'material': entry_text(snapshot)}, questions=questions, deadline=gate._entry_deadline)
+                named_lines = names.value(thin)
+                questions = entry_questions(named_lines, names.schema(schema))
+                result, config = bridge({'material': names.material(entry_text(snapshot))}, questions=questions, deadline=gate._entry_deadline)
                 stages.append({'stage': 'decision_entry', 'mode': mode, 'status': result.status,
                                'model': result.model, 'ms': result.elapsed_ms, 'answers': dict(result.answers)})
                 if not current(): raise JEVStaleError('JEV决策返回已失效')
-                fields = decode_entry(result, snapshot['lines'], questions, config['entry_thresholds'][config['provider']]['address'])
+                fields = names.value(decode_entry(result, names.value(snapshot['lines']), questions, config['entry_thresholds'][config['provider']]['address']), reverse=True)
                 validate(fields, schema)
                 gate._from_current(fields['items'], batch, '')
                 used_decision = True
@@ -233,7 +256,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         if len(batch) == 1 and not overlap and not any(p.get('kind') not in {'audio', 'text'} for p in snapshot['media']) and not snapshot['environment'] and not snapshot['scope'].get('unprovided_events') and bridge:
             if not current():
                 raise JEVStaleError('JEV决策材料已失效')
-            state = {'material': entry_text(snapshot)}
+            state = {'material': names.material(entry_text(snapshot))}
             if len(json.dumps(state, ensure_ascii=False)) <= 24000:
                 try:
                     result, config = bridge(state, deadline=gate._entry_deadline)
@@ -363,7 +386,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         if mode == 'decision' and used_decision and getattr(bridge, 'protocol', '') == 'native-v3':
             from jshi.decision.jev_native import PREPARE, decode_prepare, REPLY_INSTRUCTION
             try:
-                result, config = bridge({'material': preparation_text(snapshot, entry)}, questions=PREPARE, deadline=gate._entry_deadline)
+                result, config = bridge({'material': names.material(preparation_text(snapshot, entry))}, questions=PREPARE, deadline=gate._entry_deadline)
                 stages.append({'stage': 'decision_prepare', 'mode': mode, 'status': result.status,
                                'model': result.model, 'ms': result.elapsed_ms, 'answers': dict(result.answers)})
                 if not current(): raise JEVStaleError('JEV准备返回已失效')

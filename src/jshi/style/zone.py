@@ -323,6 +323,7 @@ class ZoneStore:
         mods: dict[int, str] = {}
         tiers: dict[int, int] = {}
         append_tiers: dict[int, int] = {}
+        append_deleted: set[int] = set()
         add_blocks: list[ZoneBlock] = []
         hollow: list[tuple[str, str, str]] = []
         for edit in edits or ():
@@ -331,8 +332,10 @@ class ZoneStore:
             op = str(edit.get("op") or "").strip()
             tier = valid_tier(edit.get("tier"))
             ref = str(edit.get("id") or "").strip()
-            if op == "tier" and ref.startswith("A"):
-                if ref[1:].isdigit() and tier is not None:
+            if ref.startswith("A"):
+                if op == "del" and ref[1:].isdigit():
+                    append_deleted.add(int(ref[1:]) - 1)
+                if op == "tier" and ref[1:].isdigit() and tier is not None:
                     append_tiers[int(ref[1:]) - 1] = tier
                 continue
             if op == "add":
@@ -374,11 +377,11 @@ class ZoneStore:
             else:
                 result.append(_replace(block, tier=tiers.get(i, block.tier)))
         result.extend(_replace(block, at=stamp) for block in add_blocks)
-        result.extend(_replace(block, tier=append_tiers.get(i, block.tier)) for i, block in enumerate(append_blocks_with_time or ()))
+        result.extend(_replace(block, tier=append_tiers.get(i, block.tier)) for i, block in enumerate(append_blocks_with_time or ()) if i not in append_deleted)
         extra = [*(append_blocks or ()), append_text]
         for i, text in enumerate(extra, start=len(append_blocks_with_time or ())):
             cleaned = str(text or "").strip()
-            if cleaned:
+            if cleaned and i not in append_deleted:
                 result.append(ZoneBlock(text=cleaned, at=stamp, tier=append_tiers.get(i, 1)))
         return self.save(subject_id, result, keep_time=False, covered_event_ids=covered_event_ids)
 

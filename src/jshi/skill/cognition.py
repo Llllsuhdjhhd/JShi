@@ -435,6 +435,14 @@ def salvage_persona_json(text: str) -> dict[str, Any] | None:
     }
 
 
+def _restore_named_targets(data, request):
+    names = dict(request.person_name_codes)
+    if not names or not isinstance(data.get('reply_targets'), list):
+        return data
+    return {**data, 'reply_targets': [names.get(value, value) if isinstance(value, str) else value
+                                     for value in data['reply_targets']]}
+
+
 def _persona_to_model_response(
     data: Mapping[str, Any], model: str
 ) -> ModelResponse:
@@ -585,7 +593,7 @@ class CognitionSkill(Skill[ModelResponse]):
                 salvaged = salvage_persona_json(raw_text)
                 if salvaged is not None:
                     response = _persona_to_model_response(
-                        salvaged, model=self.model_tag
+                        _restore_named_targets(salvaged, request), model=self.model_tag
                     ).with_raw(raw_text)
                     meta = dict(response.metadata or {})
                     meta["skill_fallback"] = "persona_partial_json"
@@ -610,7 +618,7 @@ class CognitionSkill(Skill[ModelResponse]):
             )
         if getattr(request, "persona_schema", None):
             return _keep_usage_metadata(
-                _persona_to_model_response(data, model=self.model_tag).with_raw(raw_text),
+                _persona_to_model_response(_restore_named_targets(data, request), model=self.model_tag).with_raw(raw_text),
                 raw,
             )
         response = self.parse(data)
@@ -663,7 +671,7 @@ class CognitionSkill(Skill[ModelResponse]):
             return self._fallback(text)
         text = "".join(raw)
         try:
-            parsed = _persona_to_model_response(data, model=self.model_tag)
+            parsed = _persona_to_model_response(_restore_named_targets(data, request), model=self.model_tag)
         except Exception:
             return self._fallback(text)
         if hasattr(parsed, "with_raw"):

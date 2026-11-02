@@ -107,7 +107,7 @@ def test_scene_writer_marks_omissions_and_never_silently_truncates_large_event(t
     scene, _ = JEVSceneWriter(model).run('stone', snap, 'B1[2分钟前]  旧参考' + '字' * 4000 + '\nB2[1分钟前]  最新完整参考')
     assert model.data['window']['omitted_events'] == 1
     assert model.data['input_output'] == [{'ref':'E2', 'text': '等一下，先别继续', 'at': round(2-model.data['now'])}]
-    assert model.data['main_scene'] == 'B2[1分钟前]  最新完整参考'
+    assert model.data['main_scene'] == '[1分钟前]  最新完整参考'
     assert store.commit(snap, scene)
     archive = json.loads(store.path.with_suffix('.archive.jsonl').read_text(encoding='utf-8'))
     assert archive['events'][0]['payload']['text'] == '不是' + '字' * 5000

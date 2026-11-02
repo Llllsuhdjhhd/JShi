@@ -424,6 +424,10 @@ class JEVSceneWriter:
                 raise ValueError('不能引用未来片场')
             payload['history_reference'] = {'scene': history_reference['scene'], 'at': history_reference['at'],
                 'scope': 'historical_only'}
+        # Include people actually referenced by scene, events, evidence and history.
+        people = payload.pop('people')
+        referenced = set(re.findall(r'(?<![A-Za-z0-9])P\d+(?![A-Za-z0-9])', json.dumps(payload, ensure_ascii=False)))
+        payload['people'] = {code: name for code, name in people.items() if code in referenced}
         from .jev_input import compact_jev_input
         from .jev_material import blocks
         material = compact_jev_input(payload)
@@ -433,6 +437,9 @@ class JEVSceneWriter:
             ('人物映射', material['people']), ('历史候选', material.get('history_candidates')),
             ('历史参考', material.get('history_reference')),
             ('材料范围', {'now': material['now'], 'time_basis': material.get('time_basis'), **material['window']})])
+        from jshi.core.person_names import PersonNames
+        names = PersonNames(snapshot.get('named_people', {}))
+        user = names.material(user)
         schema = deepcopy(SCENE_SCHEMA)
         history_codes = [row['h'] for row in snapshot.get('history_candidates', [])]
         # The instruction allows an empty array even without history candidates.

@@ -86,6 +86,8 @@ def build_snapshot(payload, batch, delivery):
     availability = {'memory': '按主认知既有召回能力取得；此处未预先召回',
                     'image_available': any(p.get('kind') == 'image' for p in (delivery.get('envelope') or {}).get('parts', []))}
     environment = payload.get('environment') or envelope.get('environment')
+    if isinstance(environment, dict) and environment.get('image_available') is False:
+        availability['image_available'] = False
     snapshot = {'lines': lines, 'scene': payload.get('scene', ''), 'events': events,
                 'state': {**payload.get('playback', {}), 'names': payload['input'].get('names', ['匠石']),
                           'now': payload.get('now'), 'time_basis': payload['input'].get('time_basis', '')},
@@ -144,10 +146,15 @@ def preparation_text(snapshot, entry):
     lines = [{k: v for k, v in row.items() if k not in
               {'p', 'name', 'continuity', 'recent_confirmed', 'identity', 'binding', 'short_voice_hint'}}
              for row in snapshot['lines'] if row['evidence_ref'] in selected]
-    return blocks([('入口结论', preparation_entry), ('本次处理原话', lines),
+    addresses = [{'person': item['person'], 'name': row.get('name', '')}
+                 for item in preparation_entry['items'] for row in snapshot['lines']
+                 if row['evidence_ref'] == f"I{item['i']}" and item.get('certainty') == 'confirmed'
+                 and row.get('p') == item['person'] and row.get('name')]
+    direct = entry.get('interaction') == 'direct'
+    return blocks([('可用称呼', addresses), ('入口结论', preparation_entry), ('本次处理原话', lines),
                    ('当前现场与新事件', {'scene': snapshot['scene'], 'events': snapshot['events']}),
-                   ('处理许可与材料可用性', {'short_chat': snapshot['short_chat'],
-                    'waiting': snapshot['waiting'], 'activity_state': snapshot.get('state', {}).get('state', 'unknown'),
+                   ('处理许可与材料可用性', {'short_chat': snapshot['short_chat'] if direct else {'allowed': False},
+                    'waiting': snapshot['waiting'] if direct else {'allowed': False}, 'activity_state': snapshot.get('state', {}).get('state', 'unknown'),
                     **snapshot['availability']}),
                    ('有效观察', snapshot['environment']), ('相关任务', snapshot['task_context']),
                    ('材料范围', snapshot['scope'])])

@@ -136,4 +136,15 @@ unsaid只保留影响后续交往、仍未说出口的明确事项，点明涉�
 沿用入口对象归属，只处理当前输入与反应；人物复判由独立流程处理，本轮不输出人物判断。"""
 
 def smith_reply(text, profile):
-    return text if profile.level == 1 else MEDIUM if profile.level == 2 else SHORT
+    result = text if profile.level == 1 else MEDIUM if profile.level == 2 else SHORT
+    result = result.replace('回应对象只填本轮入口提供的P代号，或入口明确作为可靠声音对象提供的S代号',
+                            '回应对象填写本轮材料提供的已有姓名，临时对象填写入口提供的P或S代号')
+    result = result.replace('不填姓名、内部ID、N编号、unknown或new', '不自造姓名，不填内部ID、N编号、unknown或new')
+    result = result.replace(
+        '- action / embodied：给执行层的短动作意图，如“转向声音来处，点头”“坐下”，不写小说镜头；可伴随任何 mode。语言和动作独立，wait 时也可以微笑或点头；无需动作写“无动作”。',
+        '- action：只填写当前部署能力明确支持的动作意图。电脑端没有可执行动作时写“无动作”，不生成移动、点头或坐下等身体动作。不要把动作写进reply。')
+    start = result.find('其他仍须按实际情况分析：')
+    end = result.find('不需要工具则不要这两个键。', start)
+    if start >= 0 and end >= start:
+        result = result[:start] + result[end:]
+    return result

@@ -53,15 +53,9 @@ def recent_scene_blocks(main_scene, cap=800):
             minutes = re.fullmatch(r'(\d+)分钟前', label)
             if not ('秒前' in label or label in {'刚才', '现在'} or minutes):
                 continue
-        # Strip only the known host observation header, never user utterances.
-        def observation(match):
-            try:
-                stamp = float(match[1])
-                when = datetime.fromtimestamp(stamp / 1000, timezone.utc).isoformat(timespec='seconds') if stamp > 0 else '未知'
-            except (ValueError, OverflowError, OSError):
-                when = '未知'
-            return f'[入口观察；事件绝对时间={when}]'
-        block = re.sub(r'\[入口观察，input_id=[^,，\]\s]+[,，]\s*at=([0-9.]+)\]', observation, block)
+        block = re.sub(r'^B\d+(?=\[)', '', block)
+        from jshi.core.scene_text import observation_text
+        block = observation_text(block)
         if size + len(block) <= cap:
             kept.insert(0, block)
             size += len(block)

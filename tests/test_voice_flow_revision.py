@@ -69,6 +69,7 @@ def test_short_alias_target_is_resolved_before_playback(process):
             await asyncio.sleep(.02)
             reply = next(message for message in messages if message['type'] == 'reply')
             assert reply['items'][0]['target_ids'] == (c.scene[0].speaker.object_id,)
+            assert reply['items'][0]['target_labels'] == ['lux']
             assert c.scene[0].speaker.object_id != 'lux-id'
         finally:
             await c.close()

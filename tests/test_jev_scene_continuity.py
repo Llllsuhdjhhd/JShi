@@ -133,7 +133,7 @@ def test_many_selected_annotations_are_batched_without_discarding_scene(tmp_path
 
 def test_old_rules_and_unanswered_tasks_do_not_crowd_current_reference():
     reference, omitted = recent_scene_blocks('B1[2周前] 没点名别说话\nB2[半天前] 会诊资料未到\nB3[1分钟前] 匠石刚追问十五万')
-    assert reference == 'B3[1分钟前] 匠石刚追问十五万' and omitted == 2
+    assert reference == '[1分钟前] 匠石刚追问十五万' and omitted == 2
 
 
 @pytest.mark.parametrize('playing', [False, True])

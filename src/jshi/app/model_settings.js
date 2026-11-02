@@ -2,39 +2,45 @@
 (()=>{
  const host=document.querySelector('#debug-purpose')?.closest('details')?.parentElement||document.querySelector('.panel')?.parentElement;
  if(!host)return;
- const panel=document.createElement('details');panel.className='panel';
- panel.innerHTML='<summary>全局模型设置</summary><p class="tip">生成式用途共用一个模型；快速决策模型可独立选择。</p><div class="model-form"></div><p class="model-status" role="status"></p>';
- host.prepend(panel);const status=panel.querySelector('.model-status');let state;
+ const panel=document.createElement('details');panel.className='panel model-settings';panel.open=true;
+ panel.innerHTML='<summary>模型与声音选择</summary><p class="tip">按用途选择。对话设置保存后生效；声音选择用于下一次语音会话。</p><div class="model-form"></div><p class="model-status" role="status"></p>';
+ host.prepend(panel);const status=panel.querySelector('.model-status');let state,voiceState=null;
+ const asr=document.getElementById('asr'),speaker=document.getElementById('speaker-model'),tts=document.getElementById('tts-backend');
+ const asrLabel=asr?.closest('label'),speakerLabel=speaker?.closest('label'),ttsLabel=tts?.closest('label');
+ for(const [input,key] of [[asr,'jshi.asrChoice'],[speaker,'jshi.speakerChoice'],[tts,'jshi.ttsChoice']])if(input){
+  try{const value=localStorage.getItem(key);if(value!==null&&[...input.options].some(o=>o.value===value))input.value=value;}catch{}
+  input.addEventListener('change',()=>{try{localStorage.setItem(key,input.value);}catch{}status.textContent='声音选择已保留，下次开始语音时使用；当前会话不切换。';});
+ }
+ const style=document.createElement('style');style.textContent='.model-settings .model-form{display:grid;gap:18px}.model-settings .model-card{border:1px solid #e1e6ef;border-radius:12px;padding:18px;background:#fff;min-width:0}.model-settings h3{margin:0 0 7px;font-size:16px}.model-settings .model-card label{display:block;margin:14px 0 6px}.model-settings .model-card select,.model-settings .model-card input:not([type=checkbox]){box-sizing:border-box;width:100%;min-height:40px;border:1px solid #d8dfeb;border-radius:8px;padding:9px 11px}.model-settings .model-card .tip{margin:5px 0 12px;line-height:1.6}.model-settings .model-status{position:sticky;bottom:0;background:#f0f5ff;border-radius:8px;padding:10px;overflow-wrap:anywhere}.model-settings .model-status:empty{display:none}.model-settings .model-current{font-size:13px;color:#53637b}.model-settings .model-advanced>summary{font-size:14px;color:#53637b}';document.head.append(style);
  const el=(tag,text)=>{const n=document.createElement(tag);if(text)n.textContent=text;return n;};
  async function request(data){const r=await fetch('/model-settings',data?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}:{});const value=await r.json();if(!r.ok)throw Error(value.error||'保存未成功');return value;}
  function showEntryRoute(decision){const r=decision?.entry_last,p=panel.querySelector('[data-entry-route]');if(p)p.textContent=r?.actual?'最近入口实际使用：'+(r.actual==='decision'?'决策模式':'拆分模式')+(r.reason?'；原因：'+({shadow:'仅观察',entry_disabled:'入口决策关闭',unsupported_scope:'本批需要完整判断',host_bridge_unavailable:'此入口尚未连接决策服务',uncertain_or_conflicting:'决策不确定或结果冲突',material_budget:'材料超出入口预算'}[r.reason]||'本批需要完整复核'):''):'最近入口尚无决策模式记录。';}
  function render(){
   const form=panel.querySelector('.model-form');form.replaceChildren();
+  const conversation=el('section');conversation.className='model-card';conversation.append(el('h3','对话模型'),el('p','负责理解对话、生成回复和整理记忆。'));form.append(conversation);
+  const routing=el('details');routing.className='model-card model-advanced';routing.append(el('summary','高级：接话判断与快速决策'));
   const row=state.rows.cognition||Object.values(state.rows)[0];if(!row)return;
   const displayLabel=el('label'),display=el('input');display.type='checkbox';
   try{display.checked=localStorage.getItem('jshi.showModelInfo')==='true';}catch{}
   display.onchange=()=>window.dispatchEvent(new CustomEvent('jshi-model-info',{detail:display.checked}));
-  displayLabel.append(display,document.createTextNode(' 默认展开对话中的模型调用信息'));form.append(displayLabel);
-  form.append(el('p','当前模型：'+row.current));
+  displayLabel.append(display,document.createTextNode(' 默认展开对话中的模型调用信息'));routing.append(displayLabel);
+  const current=el('p','正在使用：'+row.current);current.className='model-current';conversation.append(current);
   const jevMode=el('select');jevMode.append(new Option('两段串行：先判断入口，按需准备回应','split'),new Option('单次合并：一次完成入口与回应准备','combined'),new Option('决策模型：入口决策，按需准备回应','decision'));
   jevMode.value=['combined','decision'].includes(state.jev_mode)?state.jev_mode:'split';
-  form.append(el('p','决策模式需快速决策设置为参与调度；关闭或仅观察时实际执行拆分模式。复杂输入或判断失败可单批回退。页面文字只在决策模式下进入撞车判断。'));
-  const jevLabel=el('label','JEV1处理方式');jevLabel.append(jevMode);form.append(jevLabel);
-  const modeSave=el('button','保存JEV1处理方式');modeSave.onclick=async()=>{
-   modeSave.disabled=true;try{state=await request({jev_mode:jevMode.value});render();status.textContent='已保存，后续输入使用所选处理方式。';}catch(e){status.textContent=e.message;}finally{modeSave.disabled=false;}
-  };form.append(modeSave);
+  routing.append(el('p','决策模式需快速决策设置为参与调度；关闭或仅观察时实际执行拆分模式。复杂输入或判断失败可单批回退。页面文字只在决策模式下进入撞车判断。'));
+  const jevLabel=el('label','接话处理方式');jevLabel.append(jevMode);routing.append(jevLabel);routing.append(el('p','随“保存对话设置”一起保存。通常保持默认即可。'));
   const select=el('select');select.append(new Option('沿用启动配置',''));
   for(const [service,s] of Object.entries(state.services))for(const model of s.models)select.append(new Option(model+' · '+s.label,service+'|'+model));
   const profile=state.global_profile||row.profile,choice=profile.choices?.[0];
   if(choice){const v=choice.service+'|'+choice.model;if(![...select.options].some(o=>o.value===v))select.append(new Option(choice.model,v));select.value=v;}
-  const modelLabel=el('label','模型');modelLabel.append(select);form.append(modelLabel);
+  const modelLabel=el('label','对话模型');modelLabel.append(select);conversation.append(modelLabel);
   const key=el('input');key.type='password';key.autocomplete='new-password';key.style.width='100%';
-  const keyLabel=el('label','API Key');keyLabel.append(key);form.append(keyLabel);
-  const hint=el('p');hint.className='tip';form.append(hint);
-  const effort=el('select');for(const [v,t] of [['off','关闭思考'],['minimal','最低思考'],['low','轻量思考'],['high','充分思考']])effort.append(new Option(t,v));effort.value=profile.effort||'off';
-  const effortLabel=el('label','思考强度（入口JEV自动使用快速判断）');effortLabel.append(effort);form.append(effortLabel);
+  const keyLabel=el('label','API Key');keyLabel.append(key);conversation.append(keyLabel);
+  const hint=el('p');hint.className='tip';conversation.append(hint);
+  const effort=el('select');for(const [v,t] of [['off','直接回答'],['minimal','少量思考'],['low','适度思考'],['high','深入思考']])effort.append(new Option(t,v));effort.value=profile.effort||'off';
+  const effortLabel=el('label','回答时的思考程度');effortLabel.append(effort);conversation.append(effortLabel);
   const advanced=el('details');advanced.append(el('summary','高级：API地址'));
-  const endpoint=el('input');endpoint.style.width='100%';advanced.append(endpoint);form.append(advanced);
+  const endpoint=el('input');endpoint.style.width='100%';advanced.append(endpoint);conversation.append(advanced);
   const values=()=>{const i=select.value.indexOf('|');return i<0?null:{service:select.value.slice(0,i),model:select.value.slice(i+1)};};
   function update(changed=false){
    const value=values(),s=value?state.services[value.service]:null;
@@ -45,17 +51,38 @@
    if(effort.selectedOptions[0]?.disabled)effort.value='low';effort.disabled=!s;
    hint.textContent=value?.service==='qwen'?'填百炼北京地域的API Key。地址已预填；业务空间专用地址在高级设置修改。轻量思考预算512 token。':s?.has_key?'密钥已保存，不用重复填写。':s?'填写所选服务的密钥，地址已预填。':'保留启动配置，无需填写密钥。';
   }
-  select.onchange=()=>update(true);update();
-  const save=el('button','保存并使用');save.onclick=async()=>{
+  update();
+  const credentials=el('details'),credentialSummary=el('summary');
+  const connectionLabel=()=>{const value=values();return value&&state.services[value.service]?.has_key?'连接设置 · 已配置':'连接设置 · 配置密钥';};
+  credentialSummary.textContent=connectionLabel();credentials.append(credentialSummary,keyLabel,hint,advanced);conversation.append(credentials);
+  select.onchange=()=>{update(true);credentialSummary.textContent=connectionLabel();};
+  const save=el('button','保存对话设置');save.onclick=async()=>{
    save.disabled=true;
    try{
     const value=values();
     if(value&&!state.services[value.service].has_key&&!key.value.trim())throw Error('请先在API Key栏粘贴密钥');
     const data={name:'all',jev_mode:jevMode.value,profile:{effort:effort.value,choices:value?[value]:[]}};
     if(value)data.services={[value.service]:{endpoint:endpoint.value.trim(),api_key:key.value.trim()}};
-    state=await request(data);render();status.textContent='已保存，后续所有用途统一使用 '+(value?.model||'启动配置')+'。';
+    state=await request(data);render();status.textContent='对话模型已保存，后续理解与回复使用 '+(value?.model||'启动配置')+'；声音模型分别选择。';
    }catch(e){status.textContent=e.message;}finally{save.disabled=false;}
-  };form.append(save);
+  };conversation.append(save);
+  if(asrLabel||speakerLabel){
+   const recognition=el('section');recognition.className='model-card';recognition.append(el('h3','语音转文字'),el('p','把听到的声音转成文字。模型不同，断句和分人能力也不同。'));
+   if(asrLabel)recognition.append(asrLabel);
+   const availability={online:'online_available',bailian:'bailian_available',deepgram:'deepgram_available',local:'local_available',qwen:'qwen_available'};
+   for(const option of asr?.options||[]){option.disabled=Boolean(option.value&&voiceState&&voiceState[availability[option.value]]===false);}
+   const rtip=el('p',voiceState?'服务默认：'+(voiceState.asr_backends?.[voiceState.asr]?.label||voiceState.asr):'模型选择用于下次语音会话。');rtip.className='tip';recognition.append(rtip);
+   if(asr?.options[0]&&voiceState)asr.options[0].textContent='默认（'+(voiceState.asr_backends?.[voiceState.asr]?.label||voiceState.asr)+'）';
+   if(speaker?.options[0]&&voiceState?.speaker_model_default)speaker.options[0].textContent='默认（'+voiceState.speaker_model_default+'）';
+   if(tts?.options[0]&&voiceState?.tts)tts.options[0].textContent='默认（'+voiceState.tts+'）';
+   const capabilities=el('p');capabilities.className='tip';recognition.append(capabilities);
+   const describe=()=>{const value=asr?.value||voiceState?.asr;capabilities.textContent=value==='bailian'?'阿里只负责文字识别；换人边界由本地声音分段校验，分不清时标为不确定。':value==='online'||value==='deepgram'?'使用服务端人物时间线，并结合本地声纹判断人物。':'使用本地声音处理与转写；未加载的选项不可选择。';};if(asr)asr.onchange=describe;describe();form.append(recognition);
+   const identity=el('section');identity.className='model-card';identity.append(el('h3','识别谁在说话'),el('p','本地声纹用于认人，与上面的转文字模型分开选择。'));
+   if(speakerLabel)identity.append(speakerLabel);
+   const ihint=el('p','CAM++ 与 ERes2NetV2 使用各自的登记样本；换模型后需重新开始语音。');ihint.className='tip';identity.append(ihint);form.append(identity);
+   const speech=el('section');speech.className='model-card';speech.append(el('h3','语音播报'),el('p',voiceState?.tts||'沿用服务启动时的播报配置。'));if(ttsLabel)speech.append(ttsLabel);for(const option of tts?.options||[])option.disabled=Boolean(option.value&&voiceState?.tts_backends&&voiceState.tts_backends[option.value]===false);
+   speech.append(el('p','播报与识别独立，不会随转文字模型一起切换。'));form.append(speech);
+  }
   const decision=state.decision;
   if(decision){
    const box=el('details');box.append(el('summary','快速决策模型（独立选择）'));
@@ -70,12 +97,12 @@
    const dsave=el('button','保存决策设置'),test=el('button','测试已保存的决策连接');
    dsave.onclick=async()=>{dsave.disabled=true;try{const r=await fetch('/model-settings/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:provider.value,mode:mode.value,providers:{[provider.value]:{model:dmodel.value.trim(),endpoint:url.value.trim(),api_key_env:keyenv.value.trim()}},...Object.fromEntries(Object.entries(flags).map(([k,v])=>[k,v.checked]))})});const d=await r.json();if(!r.ok)throw Error(d.error);state.decision=d;render();status.textContent='决策设置已保存；下一次判断生效。';}catch(e){status.textContent=e.message;}finally{dsave.disabled=false;}};
    test.onclick=async()=>{test.disabled=true;try{const r=await fetch('/model-settings/decision/test',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const d=await r.json();if(!r.ok)throw Error(d.error);status.textContent=d.status+' · '+d.model+' · '+d.elapsed_ms+'毫秒'+(d.reason?' · '+d.reason:'');}catch(e){status.textContent=e.message;}finally{test.disabled=false;}};
-   box.append(dsave,test);form.append(box);
+   box.append(dsave,test);routing.append(box);
   }
-  const route=el('p');route.dataset.entryRoute='true';form.append(route);showEntryRoute(state.decision);
+  const route=el('p');route.dataset.entryRoute='true';routing.append(route);form.append(routing);showEntryRoute(state.decision);
   const actual=el('details');actual.append(el('summary','实际使用情况'));
-  for(const [name,r] of Object.entries(state.rows)){const p=el('p',r.label+'：'+r.current);p.dataset.modelName=name;actual.append(p);}form.append(actual);
+  for(const [name,r] of Object.entries(state.rows)){const p=el('p',r.label+'：'+r.current);p.dataset.modelName=name;actual.append(p);}routing.append(actual);
  }
- request().then(d=>{state=d;render();}).catch(e=>status.textContent=e.message);
+ Promise.all([request(),asr?fetch('/status',{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null):Promise.resolve(null)]).then(([d,v])=>{state=d;voiceState=v;render();}).catch(e=>status.textContent=e.message);
  setInterval(async()=>{if(!panel.open)return;try{const d=await request();showEntryRoute(d.decision);for(const [name,r] of Object.entries(d.rows)){const p=panel.querySelector('[data-model-name="'+name+'"]');if(p)p.textContent=r.label+'：'+r.current+(r.last.model?'；最近调用 '+r.last.model:'');}}catch{}},5000);
 })();

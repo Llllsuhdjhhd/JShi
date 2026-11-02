@@ -108,6 +108,8 @@ class ModelRequest:
     json_output: bool = False
     preparation_context: str = ''  # Ephemeral, unspoken candidate; full current input remains authoritative.
     light_finalize: bool = False
+    # Host-only round-trip mapping; never serialized as prompt material.
+    person_name_codes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

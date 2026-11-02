@@ -21,7 +21,13 @@ def test_defaults_preserve_full_prompt_and_levels_remove_functions():
     # Shared continuity and mixed-speaker rules also apply to the short profile.
     assert 2000 <= len(texts[2]) <= 3500
     assert len(texts[0]) > len(texts[1]) > len(texts[2])
-    assert PERSONA_TOOL_NOTE in texts[0]
+    assert '【任务2 · 工具】' in texts[0]
+    assert '不要为了让材料消失而标完成' in texts[0]
+    assert '其他仍须按实际情况分析：' not in texts[0]
+    for level in (1, 2, 3):
+        schema = reply_schema_for('smith', prompt_level=level)
+        assert schema['additionalProperties'] is False
+        assert set(schema['required']) == {'mode', 'reply', 'action', 'unsaid', 'reason', 'reply_targets'}
     for level, text in enumerate(texts[1:], 2):
         assert '【任务2 · 工具】' not in text
         assert PERSONA_TOOL_NOTE not in text
@@ -87,7 +93,7 @@ def test_one_writer_prompt_keeps_contract_and_classifies_blocks():
     assert 'B1 是固定自我介绍' in text
     assert '只认可播放器确认的完成片段' in text
     assert '准备说、开始播放、部分播出、整句播完和中断' in text
-    assert 'A块不能add、mod或del' in text
+    assert '新A块可用del舍弃无用或重复材料' in text
     assert '不重复本轮输入、回应或已有内容' in text
     assert '仍只整理一份片场' in text
     assert '"op":"tier"' in text
@@ -160,6 +166,7 @@ def test_batched_writer_uses_highest_pending_level(process):
     selected = []
     def capture(*args):
         selected.append(args[2].prompt_level)
+        process.pending_scene.complete(args[2].pending_write_ids)
         return True
     process._commit_zone = capture
     assert process._flush_pending_scene('stone')

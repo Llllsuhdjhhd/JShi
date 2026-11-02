@@ -185,7 +185,7 @@ PERSONA_OUTPUT_RULES = """【你的输出】
 
 
 def format_zone_budget_note(
-    current: int, cap: int, *, tool_chars: int = 0, tool_cap: int = 0
+    current: int, cap: int, *, tool_chars: int = 0, tool_cap: int = 0, pending_chars: int = 0
 ) -> str:
     """每轮写入 user 的字数行，避免模型自己数块、把空 edit 当合法。
 
@@ -213,6 +213,9 @@ def format_zone_budget_note(
             f"\n【工具块】占 {tool_chars} 字 / 上限 {tool_cap} 字，单独一档，不占上面的片场字数。"
             "工具过程材料在回复侧的【工具相关】里看；不要把工具台账写进片场，也不要写成「我说」。"
         )
+    if pending_chars:
+        note += (f"\n【待追加材料】{pending_chars}字；全部保留后约{current + pending_chars}字，"
+                 f"超出上限{max(0, current + pending_chars - cap)}字。结合上下文舍弃无用新A块并清理旧块，保留必要事实与交付边界。")
     return note
 
 # --------------------------------------------------------------------------- #
@@ -426,7 +429,7 @@ SMITH_WRITE_MATERIAL_NOTE = """【写场】
 回忆只补当前需要的部分，不全量搬入或重复已有经历。未开口事项仍需告知或处理就保留，已经告知、解决或失去意义就清理；未再提起不表示已经结束。不写推理过程，不猜测缺失的输入、回应或执行结果。
 
 三、提交结果
-输出edit更新已有B块、补入必要历史内容，并为保留内容和新A块标tier。程序执行增删改后按清单顺序保存合批事件。A块不能add、mod或del，正文不重复输出。"""
+输出edit更新已有B块、补入必要历史内容，并为保留内容和新A块标tier。程序执行增删改后按清单顺序保存保留的合批事件。新A块可用del舍弃无用或重复材料，不能add或mod；原始事件仍留在程序记录。背景材料也须结合上下文判断，不因未触发回应就忽略，不机械丢弃短确认。重要承诺、纠正及必要交付边界应保留。正文不重复输出。"""
 
 SMITH_WRITE_INSTRUCTION = _persona_write_instruction(
     "平实、准确的语言，口语化。不要杜撰，不要文艺加工。注意时间、地点、人物等信息。语句连贯。",
@@ -440,9 +443,13 @@ SCENE_TIER_NOTE = """【片场块重要性分档】
 3档：完整情境中可保留、但短版可以省略的补充细节。
 档位表示保留优先级，不是时间排序；不要改事实、改变先后关系或把所有块机械标为1。
 对本轮保留的已有块，包括未mod的块，输出 {"op":"tier","id":"B2","tier":1}。引用更新前的B编号，删除的块不用分档。add可直接带tier，不另抄正文。
-【本次合批整理的输入输出】中的A1、A2等是待保存的新块；输出 {"op":"tier","id":"A1","tier":2}标记其tier，不用add重复写入，不得mod/del这些新块。B1固定自述始终保留。
+【本次合批整理的输入输出】中的A1、A2等是待保存的新块；输出 {"op":"tier","id":"A1","tier":2}标记其tier；不需保留的新块用 {"op":"del","id":"A1"} 舍弃。不用add重复写入，不得mod新块。B1固定自述始终保留。
 有交付计划或播放器事实时，保留重要状态的相关上下文，不能把未播计划当已播出。程序按1、1+2、1+2+3读取短、中、全三个视图，不再调用模型生成另两份。
 只输出一个JSON对象：{"edit":[...]}。分类只写编号与tier，不重复块正文。"""
+
+
+SMITH_WRITE_INSTRUCTION = SMITH_WRITE_INSTRUCTION.replace(
+    '只输出一个 JSON 对象：{"edit": [...]}，不输出任何解释文字。', '', 1)
 
 
 def _persona_reply_instruction(style_note: str, *, task1: str, interpretation_note: str = "") -> str:
@@ -783,6 +790,8 @@ def reply_schema_for(
         return None
     result = _without_edit(pack.schema)
     if pack.pack_id == SMITH and result:
+        result['required'] = ['mode', 'reply', 'action', 'unsaid', 'reason', 'reply_targets']
+        result['additionalProperties'] = False
         from jshi.core.prompt_profile import valid_level
         if valid_level(prompt_level) != 1:
             result["properties"] = {k:v for k,v in result["properties"].items()

@@ -51,6 +51,10 @@ class VoiceConfig:
     candidate_timeout_s: float = 1.2
     input_max_batch_s: float = 12.0
     input_batch_chars: int = 20
+    bailian_asr_api_key: str = field(default='', repr=False)
+    bailian_asr_model: str = 'qwen-audio-3.1-asr-flash-streaming'
+    bailian_asr_url: str = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
+    bailian_asr_vad_model: str = 'far_field_meeting_16k'
     deepgram_api_key: str = field(default='', repr=False)
     deepgram_model: str = 'nova-3'
     deepgram_language: str = 'zh-CN'
@@ -83,8 +87,18 @@ class VoiceConfig:
             raise ValueError('声音分离最长等待须为1–120秒')
         if self.separation_backend != 'off' and self.asr_backend != 'qwen' and not self.api_key:
             raise ValueError('分离音轨独立转写需要JSHI_VOICE_API_KEY')
+        if not self.bailian_asr_model.strip():
+            raise ValueError('百炼ASR模型名称不能为空')
+        if self.bailian_asr_vad_model not in {'far_field_meeting_16k', 'near_meeting_16k'}:
+            raise ValueError('百炼VAD须为far_field_meeting_16k或near_meeting_16k')
+        from urllib.parse import urlparse
+        endpoint = urlparse(self.bailian_asr_url)
+        if endpoint.scheme != 'wss' or not endpoint.hostname or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
+            raise ValueError('百炼ASR地址须为不含凭据和查询参数的wss地址')
+        if self.asr_backend == 'bailian' and self.identity_mode == 'voiceprint':
+            raise ValueError('百炼识别使用本地人物识别，请设置diarization；云端voiceprint仅用于火山')
         if self.asr_backend not in ASR_BACKENDS:
-            raise ValueError("voice ASR backend must be online, local, deepgram or qwen")
+            raise ValueError("voice ASR backend must be online, local, deepgram, bailian or qwen")
         if not 1 <= self.qwen_asr_batch_size <= 32 or not 1 <= self.qwen_asr_timeout_s <= 300:
             raise ValueError('Qwen ASR批次大小须为1–32，超时须为1–300秒')
         if self.asr_backend == 'qwen' and self.identity_mode == 'voiceprint':
@@ -121,6 +135,7 @@ class VoiceConfig:
         key = os.getenv("JSHI_VOICE_API_KEY", "").strip()
         asr = asr or os.getenv("JSHI_VOICE_ASR", "online")
         tts = tts or os.getenv("JSHI_VOICE_TTS", "online")
+        bailian_key = (os.getenv('JSHI_BAILIAN_ASR_API_KEY') or os.getenv('DASHSCOPE_API_KEY') or '').strip()
         deepgram_key = os.getenv('JSHI_DEEPGRAM_API_KEY', '').strip()
         missing = []
         if not key and "online" in {asr, tts}:
@@ -128,6 +143,8 @@ class VoiceConfig:
             missing.append(f'火山{uses}已选online，需要JSHI_VOICE_API_KEY')
         if asr == 'deepgram' and not deepgram_key:
             missing.append('Deepgram识别（ASR）需要JSHI_DEEPGRAM_API_KEY')
+        if asr == 'bailian' and not bailian_key:
+            missing.append('百炼识别需要JSHI_BAILIAN_ASR_API_KEY或DASHSCOPE_API_KEY')
         if missing:
             raise ValueError('请补充 .env 语音配置：'+'；'.join(missing)+'。识别与播报独立配置。')
         diarize = os.getenv('JSHI_DEEPGRAM_DIARIZE', 'true').strip().lower()
@@ -135,6 +152,10 @@ class VoiceConfig:
             raise ValueError('JSHI_DEEPGRAM_DIARIZE必须为true或false')
         return cls(
             api_key=key,
+            bailian_asr_api_key=bailian_key,
+            bailian_asr_url=os.getenv('JSHI_BAILIAN_ASR_URL', 'wss://dashscope.aliyuncs.com/api-ws/v1/inference').strip(),
+            bailian_asr_model=os.getenv('JSHI_BAILIAN_ASR_MODEL', 'qwen-audio-3.1-asr-flash-streaming').strip(),
+            bailian_asr_vad_model=os.getenv('JSHI_BAILIAN_ASR_VAD_MODEL', 'far_field_meeting_16k').strip(),
             qwen_asr_url=os.getenv('JSHI_QWEN_ASR_URL', 'http://127.0.0.1:8000/v1').rstrip('/'),
             qwen_asr_model=os.getenv('JSHI_QWEN_ASR_MODEL', '').strip(),
             qwen_asr_timeout_s=float(os.getenv('JSHI_QWEN_ASR_TIMEOUT_S', '60')),

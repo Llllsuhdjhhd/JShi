@@ -32,7 +32,7 @@ def test_qwen_backend_status_and_websocket_use_segment_pipeline(process, monkeyp
             status = await (await client.get('/status')).json()
             assert status['asr'] == 'qwen' and status['qwen_available']
             assert not status['local_available'] and not status['online_available']
-            assert set(status['asr_backends']) == {'local', 'qwen', 'online', 'deepgram'}
+            assert set(status['asr_backends']) == {'local', 'qwen', 'online', 'deepgram', 'bailian'}
             origin = {'Origin': str(client.make_url('/')).rstrip('/')}
             async with client.ws_connect('/voice', headers=origin) as ws:
                 ready = await ws.receive_json()

@@ -1,6 +1,6 @@
 """Provider-independent audio and transcript contracts. Times are session-relative ms."""
 from dataclasses import dataclass
-from typing import Any, Protocol, Iterable
+from typing import Any, Protocol, Iterable, AsyncIterator
 
 SAMPLE_RATE = 16000
 BYTES_PER_SAMPLE = 2
@@ -59,6 +59,13 @@ class SpeakerIdentity(Protocol):
     def reset_session(self): ...
 
 @dataclass(frozen=True)
+class TimedWord:
+    text: str
+    start_ms: int
+    end_ms: int
+
+
+@dataclass(frozen=True)
 class Transcript:
     text: str
     track_id: str
@@ -75,5 +82,23 @@ class Transcript:
     identity_tentative: bool = False  # session continuity, not a fresh named match
     replaces: tuple[tuple[int, int], ...] = ()  # corrected audio ranges, not new speech
     audio_kind: str = 'original'  # original, mixed, or separately extracted source
+    words: tuple[TimedWord, ...] = ()  # optional provider word times, session-relative ms
 
 
+
+
+class StreamingRecognitionSession(Protocol):
+    """Transport-neutral interface consumed by the microphone application.
+
+    Providers own authentication, framing, acknowledgements, errors and final
+    flushing. The caller only sends canonical PCM and reads common transcripts.
+    """
+    @property
+    def close_code(self) -> int | None: ...
+    @property
+    def wait_for_final(self) -> bool: ...
+    def exception(self) -> BaseException | None: ...
+    async def send_audio(self, pcm: bytes) -> None: ...
+    async def finish(self) -> None: ...
+    async def close(self) -> None: ...
+    def results(self) -> AsyncIterator[tuple[tuple[Transcript, ...], bool]]: ...

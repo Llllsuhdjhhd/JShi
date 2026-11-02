@@ -303,8 +303,32 @@ class SubjectActivityResult:
 def _plain_turn_input(text: str) -> str:
     """写入记忆和片场的输入原话，不含入口的 JEV 初判。"""
     return "\n".join(
-        line for line in (text or "").splitlines() if not line.startswith("JEV 初判")
+        line for line in (text or "").splitlines() if not line.startswith(("JEV 初判", "（程序说明）"))
     ).strip()
+
+
+def _scene_input(text: str, label: str) -> str:
+    """Render already attributed numbered utterances without attributing metadata."""
+    plain = _plain_turn_input(text)
+    lines = plain.splitlines()
+    if lines and all(re.match(r"^\d+\. .+?：", line) for line in lines):
+        return "\n".join(re.sub(r"^\d+\. ", "", line) for line in lines)
+    return f'{label}说：“{plain}”' if plain else ""
+
+
+def _scene_turn(current, label, restore=None):
+    """Persist attributed utterance fields; rendered routing notes are separate."""
+    if current.audio_delivery and current.input_items:
+        from jshi.core.scene_text import scoped_voice_label
+        rows = []
+        for item in current.input_items:
+            display = item.get('display') or label
+            if restore:
+                display = restore(display)
+            display = scoped_voice_label(display, item.get('actor_id', ''))
+            rows.append(f"{display}：{item['text']}")
+        return '\n'.join(rows)
+    return _scene_input(current.input_text, label)
 
 
 def _recall_context_projection(view: ContextViewState) -> ContextViewState:
@@ -845,8 +869,8 @@ class SubjectProcess:
             items = tuple(make_input(u.input_id, u.speaker.object_id,
                 (dict(object_codes or {}).get(u.speaker.object_id, "") + "（" + u.speaker.label + "）") if object_codes else u.speaker.label, u.text,
                 source="text" if "文字输入" in u.identity_note else "audio",
-                level="确定" if u.speaker.status == "recognized" or u.speaker.method == "manual_annotation" else (
-                    "可能" if u.speaker.method in {"self_report", "context_attribution"} else "不确定"),
+                level=annotations.get(u.input_id, {}).get("speaker_level") or ("确定" if u.speaker.status == "recognized" or u.speaker.method == "manual_annotation" else (
+                    "可能" if u.speaker.method in {"self_report", "context_attribution"} else "不确定")),
                 evidence={"self_report": "对方自报称呼，尚未核定", "context_attribution": "入口上下文推测", "voiceprint_match": "入口声纹匹配", "manual_annotation": "人工关联", "user_selected": "文字输入由用户选择人物"}.get(u.speaker.method, "入口未确认姓名"),
                 parts=parts, number=annotations.get(u.input_id, {}).get('n', ''),
                 direction='yes' if u.speaker.method == 'user_selected' else annotations.get(u.input_id, {}).get('direction', ''),
@@ -864,10 +888,18 @@ class SubjectProcess:
         modes = tuple(dict.fromkeys(str(mode).strip() for mode in processing_modes if str(mode).strip()))
         current = replace(current, processing_modes=modes or ("interaction",))
         if observed_environment and self.vision:
+            from jshi.vision.store import description_current, image_current
+            valid_description = description_current(observed_environment, datetime.now().timestamp())
             note = "以下是视觉环境材料，不是人物发言；观察时间可能早于本轮。\n" + self.vision.store.render(observed_environment, tuple((object_codes or {}).items()))
             if self.vision.config.face_enabled and self.vision.config.portrait_enabled:
                 note += '\n有明确视觉身份依据时，可用embodied动作“关联面孔 F代号 P代号：依据”关联人物参考；声音归属不单独证明脸的身份，无依据不关联。'
-            current = replace(current, visual_snapshot=observed_environment,
+            if not valid_description:
+                note = "【当前视觉】无有效描述；旧描述不代表当前现场。"
+            valid_image = image_current(observed_environment, datetime.now().timestamp())
+            if not valid_image:
+                current = replace(current, input_parts=tuple(p for p in current.input_parts
+                    if p.get('kind') != 'image' or p.get('reference') != observed_environment.get('frame')))
+            current = replace(current, visual_snapshot=observed_environment if valid_image else None,
                               transport_context=(current.transport_context + '\n' + note).strip())
         if envelope is not None:
             # 信封只留在入口和记录里。主流程看到的是已经整理好的文字。
@@ -1134,7 +1166,7 @@ class SubjectProcess:
         # Always save the input/output before returning. Failed writing retains it.
         label = speaker.label if speaker else "未知来源"
         plain = _plain_turn_input(current.input_text)
-        event_blocks = ["（空闲观察，距上次交往已过3分钟，没有新发言）"] if idle else [f'{label}说：“{plain}”']
+        event_blocks = ["（空闲观察，距上次交往已过3分钟，没有新发言）"] if idle else [_scene_turn(current, label, code_restore)]
         if spoken_text and (not current.audio_delivery or getattr(self, 'voice_dialogue', None) is None or self.voice_dialogue.include_unplayed):
             prefix = "我准备说（尚未确认播放）" if current.audio_delivery else "我说"
             for item in plan.items:
@@ -1555,9 +1587,11 @@ class SubjectProcess:
         if graded:
             if not profile.includes("memory"):
                 memories = []
+        from jshi.core.scene_text import observation_text
         scene = self._zone_text_for_turn(subject_id, stamp, live=live_zone,
             max_tier=profile.scene_view if graded else 3,
             show_tiers=self.style_packs.get(subject_id) == SMITH and live_zone)
+        scene = observation_text(scene)
         pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
         cap = zone_chars_for(pack_id, registry=registry)
@@ -1574,6 +1608,7 @@ class SubjectProcess:
                 cap,
                 tool_chars=tool_chars,
                 tool_cap=self._tool_block_cap(),
+                pending_chars=sum(len(block) for block in current.pending_write_blocks),
             ))
         turn = (current.input_text or "").strip()
         if not current.audio_delivery:
@@ -1606,7 +1641,9 @@ class SubjectProcess:
         hot = (current.tool_hot_state or "").strip() if include_tool and profile.includes("tool") else ""
         if hot:
             parts.append(hot)
-        return "\n\n".join(parts)
+        from jshi.core.person_names import known_names, PersonNames
+        names = known_names({code: oid for oid, code in current.object_codes}, self.profiles)
+        return PersonNames(names).material("\n\n".join(parts))
 
     def _boot_user_text(
         self,
@@ -1690,7 +1727,10 @@ class SubjectProcess:
                 status=speaker.status,
                 reason=speaker.reason,
             )
+        from jshi.core.person_names import known_names
+        person_names = known_names({code: oid for oid, code in current.object_codes}, self.profiles)
         request = ModelRequest(
+            person_name_codes=tuple((name, code) for code, name in person_names.items()),
             purpose="subject_activity",
             input_text=current.input_text,
             subject_state=current.subject_state,
@@ -1746,7 +1786,7 @@ class SubjectProcess:
         restore = code_restore
         if restore is not None and inbound:
             inbound = restore(inbound)
-        input_block = f"{label}说：“{inbound}”" if inbound else ""
+        input_block = _scene_turn(current, label, code_restore)
         if current.pending_write_text:
             input_block = current.pending_write_text.split("\n", 1)[-1]
             reply_block = unsaid_block = ""
@@ -1758,9 +1798,13 @@ class SubjectProcess:
         count = len(current.pending_write_ids) or 1
         times = current.pending_write_block_times
         lines = ["【本次合批整理的输入输出】", f"合批次数：{count}"]
+        from jshi.core.scene_text import observation_text
         for i, block in enumerate(blocks, 1):
+            block = observation_text(block)
             recorded = times[i-1] if i <= len(times) else ""
-            label = f"（记录时间：{recorded}；事件时间以正文为准）" if recorded else ""
+            label = f"[记录于{recorded}]" if recorded else ""
+            if recorded and block.startswith(f"[记录于{recorded}] "):
+                block = block[len(f"[记录于{recorded}] "):]
             lines.append(f"A{i}{label}：{block}")
         if not blocks:
             lines.append("（没有待追加事件）")
@@ -2003,7 +2047,10 @@ class SubjectProcess:
         extra_context = ({"kind": "pending_scene", "content": pending_text},) if pending_text and not persona_instruction else ()
         if current.interaction_scene and not persona_instruction:
             extra_context += ({'kind': 'jev_scene', 'content': current.interaction_scene},)
+        from jshi.core.person_names import known_names
+        person_names = known_names({code: oid for oid, code in current.object_codes}, self.profiles)
         request = ModelRequest(
+            person_name_codes=tuple((name, code) for code, name in person_names.items()),
             purpose="subject_activity",
             preparation_context=current.preparation_context,
             light_finalize=current.light_finalize,
@@ -2201,11 +2248,32 @@ class SubjectProcess:
                 self._write_payloads.pop(event_id, None)
 
     def _flush_pending_scene(self, subject_id: str) -> bool:
+        # Drain the snapshot present on entry. New arrivals belong to the next
+        # job, so a busy microphone cannot keep this worker running forever.
+        target = {row['id'] for row in self.pending_scene.snapshot(subject_id)}
+        while target:
+            if not self._flush_pending_scene_batch(subject_id, target):
+                return False
+            remaining = target & {row['id'] for row in self.pending_scene.snapshot(subject_id)}
+            if remaining == target:
+                return False  # Never spin if a failed/no-op commit kept its rows.
+            target = remaining
+        return True
+
+    def _flush_pending_scene_batch(self, subject_id: str, eligible_ids=None) -> bool:
         # Only one scene writer, but never hold the reader lock during a model call.
         with self._scene_writer_lock:
             with self._write_lock:
                 self._reconcile_pending_scene(subject_id)
-                rows = self.pending_scene.snapshot(subject_id)
+                available = tuple(row for row in self.pending_scene.snapshot(subject_id)
+                                  if eligible_ids is None or row['id'] in eligible_ids)
+                rows, chars = [], 0
+                for row in available:
+                    cost = sum(len(block) for block in row.get('blocks', (row['text'],)))
+                    if rows and chars + cost > 12000:
+                        break
+                    rows.append(row)
+                    chars += cost
                 if not rows:
                     return True
                 payload = next((self._write_payloads.get(row["id"]) for row in reversed(rows)
@@ -2217,8 +2285,7 @@ class SubjectProcess:
                                   prompt_level=min(row.get("prompt_level", 1) for row in rows),
                                   pending_write_ids=tuple(row["id"] for row in rows),
                                   pending_write_blocks=tuple(block for row in rows for block in row.get("blocks", (row["text"],))),
-                                  pending_write_block_times=tuple(row['text'].split(']',1)[0]+']'
-                                      if row['text'].startswith('[') and ']' in row['text'] else ''
+                                  pending_write_block_times=tuple(row.get('recorded_at', '')
                                       for row in rows for block in row.get('blocks',(row['text'],))),
                                   pending_through_sequence=max((row.get("sequence", 0) for row in rows), default=0))
             try:
@@ -2247,8 +2314,13 @@ class SubjectProcess:
                        *getattr(self.activity_ledger.current_context_view(subject_id), 'covered_event_ids', ()))
             if event_id in covered:
                 return
-            text = f"[入口观察，input_id={utterance.input_id}，at={utterance.received_at_ms}] {utterance.speaker.label}：{utterance.text}（未触发回应）"
-            self.pending_scene.append(subject_id, event_id, text, blocks=(text,), input_ids=(utterance.input_id,))
+            from datetime import timezone, timedelta
+            stamp = utterance.received_at_ms
+            recorded = datetime.fromtimestamp(stamp / 1000, timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S') if stamp is not None and stamp > 0 else ''
+            from jshi.core.scene_text import scoped_voice_label
+            label = scoped_voice_label(utterance.speaker.label, utterance.speaker.object_id)
+            text = (f"[记录于{recorded}] " if recorded else "") + f"{label}：{utterance.text}（未触发回应）"
+            self.pending_scene.append(subject_id, event_id, text, blocks=(text,), input_ids=(utterance.input_id,), recorded_at=recorded)
 
     def person_review_scene(self, subject_id: str) -> dict:
         with self._write_lock:

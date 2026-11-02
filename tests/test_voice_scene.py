@@ -160,6 +160,7 @@ def test_busy_main_collects_multiple_batches_for_one_next_model_call(process, st
     gate = Gate()
     setattr(process, stage, gate)
     class Judge:
+        mode = 'legacy'
         def __init__(self): self.calls = 0
         def decide(self, *args, **kwargs):
             self.calls += 1
@@ -171,7 +172,7 @@ def test_busy_main_collects_multiple_batches_for_one_next_model_call(process, st
         c=VoiceConversation(process,'stone',FakeCloud(),send,jev=judge,input_pause_s=.04)
         try:
             await c.accept(Transcript('我是 lux','A',0,2000,True))
-            assert await asyncio.to_thread(entered.wait,2)
+            assert await asyncio.to_thread(entered.wait,2), str(events[-3:])
             calls=judge.calls
             if stage == 'write_zone':
                 for _ in range(50):

@@ -121,3 +121,42 @@ class TranscriptAssembler:
             for other in outputs) else t for t in outputs)
 
 
+
+
+def equivalent_regrouping(transcript, records):
+    """Recognize an exact lexical replay of contiguous audio from this session.
+
+    This is not a general overlap/revision detector. Different wording or audio
+    sources remain untouched, and no earlier speaker assignment is rewritten.
+    """
+    if not transcript.final or transcript.replaces or transcript.end_ms <= transcript.start_ms:
+        return ()
+    rows = sorted(((iid, row['transcript']) for iid, row in records.items()
+                   if row.get('transcript') is not None and row.get('audio_kind') != 'separated'
+                   and not row.get('superseded_by')
+                   and row['transcript'].final
+                   and transcript.start_ms <= row['transcript'].start_ms
+                   and row['transcript'].end_ms <= transcript.end_ms),
+                  key=lambda pair: (pair[1].start_ms, pair[1].end_ms))
+    if len(rows) < 2:
+        return ()
+    cursor = transcript.start_ms
+    for _, old in rows:
+        if old.start_ms != cursor or old.end_ms <= cursor:
+            return ()
+        cursor = old.end_ms
+    if cursor != transcript.end_ms:
+        return ()
+    def words(text):
+        return ''.join(ch for ch in text if ch.isalnum())
+    if words(''.join(old.text for _, old in rows)) != words(transcript.text):
+        return ()
+    return tuple(iid for iid, _ in rows)
+
+
+def cosmetic_revision(previous, current):
+    # Preserve question/exclamation marks, commas, digits and inner punctuation.
+    # Only whitespace and a terminal full stop are irrelevant here.
+    def normalize(text):
+        return ''.join(text.split()).rstrip('。.')
+    return normalize(previous) == normalize(current)

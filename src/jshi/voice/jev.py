@@ -30,6 +30,18 @@ JEV_GATE_FALLBACK_RESERVE_S = 3.5
 _FALLBACK_EXECUTOR: ThreadPoolExecutor | None = None
 
 
+def promote_withheld_stop(record: dict, playing: bool) -> bool:
+    """The entry model heard a stop but kept playback only because the addressee was unknown."""
+    if not playing or record.get('control') != 'keep' or record.get('route') not in {'background', 'wait'}:
+        return False
+    text = str(record.get('decision_reason') or record.get('reason') or '')
+    if any(mark in text for mark in ('不是停', '并未要求停', '没有要求停', '不构成停', '未要求停', '引用')):
+        return False
+    heard = '停说' in text or '要求停止' in text or '停止当前' in text
+    withheld = any(mark in text for mark in ('不明', '未知', '拿不准'))
+    return heard and withheld
+
+
 def _jev_fallback_executor() -> ThreadPoolExecutor:
     """Lazily shared pool for hard-deadline Qwen fallback waits (sync gate, no asyncio)."""
     global _FALLBACK_EXECUTOR
@@ -143,6 +155,14 @@ def explicit_name(text: str) -> str:
     if not match:
         return ""
     name = re.split(r"你好|您好|大家好|我想|我在", match.group(1), maxsplit=1)[0].strip()
+    # Predicate phrases and occupations are not explicit personal names. This
+    # extraction remains a provisional claim, never an identity confirmation.
+    if re.match(r'^(?:这么|那么|这样|那样|说|做|在|觉得|认为|知道|不知道|不|没有|来找|来问)', name):
+        return ''
+    if any(word in name for word in ('觉得', '认为', '说的', '做销售', '工程师', '程序员', '工作人员')):
+        return ''
+    if not re.fullmatch(r'[\u4e00-\u9fff]{1,6}|[A-Za-z][A-Za-z\s]{0,29}', name):
+        return ''
     if re.fullmatch(r"[A-Za-z](?:[A-Za-z\s]*[A-Za-z])?", name):
         name = re.sub(r"\s+", "", name)
     return name
@@ -381,16 +401,18 @@ class VoiceJEV:
             "reply": {"type":"string", "maxLength":160 if delivery.get('short_chat', {}).get('allowed') is True else 0},
             "waiting_reply": {"type":"string", "maxLength":16}},
             "required": ["items", "level", "recall_memory", "main_image", "utterance_complete", "control", "route", "reply", "decision_reason", "decision_refs"], "additionalProperties": False}
-        request = ModelRequest(purpose="voice_jev", input_text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        from jshi.core.person_names import PersonNames
+        names = PersonNames(delivery.get('named_people', {}))
+        request = ModelRequest(purpose="voice_jev", input_text=json.dumps(names.value(payload), ensure_ascii=False, separators=(",", ":")),
             subject_state=SubjectState(subject_id, "匠石", "快速入口判断"),
-            system_extra=ENTRY_INSTRUCTION + "\nJSON Schema：" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
+            system_extra=ENTRY_INSTRUCTION + "\nJSON Schema：" + json.dumps(names.schema(schema), ensure_ascii=False, separators=(",", ":")),
             input_parts=tuple(packed.get('parts', ())) if packed else ())
         raw_text = ""
         try:
             if on_request is not None:
                 on_request(request)
             raw_text = self._generate_gate(request).text
-            data = parse_json_object(raw_text)
+            data = names.value(parse_json_object(raw_text), reverse=True)
             if isinstance(data.get("items"), list):
                 from jshi.core.prompt_profile import normalize_hint
                 modern = "level" in data or any("i" in row for row in data["items"] if isinstance(row, dict))
@@ -556,6 +578,8 @@ class VoiceJEV:
                 thin['source'] = row['source']
             if row.get('overlap'):
                 thin['overlap'] = True
+            if row.get('person_scope'):
+                thin['person_scope'] = row['person_scope']
             if self._selected_text(row):
                 thin['binding'] = {'person': thin['p'], 'certainty': 'confirmed', 'to_jiangshi': 'yes'}
             thin_batch.append(thin)

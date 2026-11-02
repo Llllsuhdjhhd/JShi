@@ -14,7 +14,7 @@ from jshi.core import SubjectState
 from jshi.voice.config import VoiceConfig
 from jshi.voice.dialogue import VoiceDialogue
 from jshi.voice.direct_reply import reply_state
-from jshi.voice.jev import VoiceJEV
+from jshi.voice.jev import VoiceJEV, promote_withheld_stop
 from jshi.voice.volc import Transcript
 from tests.test_voice import FakeCloud, Model, process
 
@@ -273,3 +273,27 @@ def test_control_while_thinking_does_not_wait_for_old_model_or_revive_it(process
             release.set()
             await c.close()
     asyncio.run(run())
+
+
+def test_reply_target_name_never_shows_the_internal_id():
+    from types import SimpleNamespace
+    profiles = {
+        'OBJ-scene': SimpleNamespace(label='语音现场', source='voice_scene'),
+        'OBJ-lux': SimpleNamespace(label='lux', source='manual'),
+        'OBJ-blank': SimpleNamespace(label='OBJ-blank', source='voice_anonymous'),
+    }
+    talk = SimpleNamespace(process=SimpleNamespace(profiles=SimpleNamespace(get=profiles.get)))
+    assert VoiceConversation.reply_target_name(talk, 'OBJ-scene') == '现场'
+    assert VoiceConversation.reply_target_name(talk, 'OBJ-lux') == 'lux'
+    assert VoiceConversation.reply_target_name(talk, 'OBJ-blank') == '对方'
+    assert VoiceConversation.reply_target_name(talk, '') == '现场'
+
+
+def test_withheld_stop_is_promoted_only_while_playback_is_active():
+    reason = '两句均为插话，涉停说含义但对象与是否指向匠石不明，先保留背景。'
+    kept = {'control': 'keep', 'route': 'background', 'decision_reason': reason}
+    assert promote_withheld_stop(kept, True)
+    assert not promote_withheld_stop(kept, False)
+    assert not promote_withheld_stop({**kept, 'route': 'main'}, True)
+    quoted = {'control': 'keep', 'route': 'background', 'decision_reason': '这是引用别人的停说，对象不明'}
+    assert not promote_withheld_stop(quoted, True)

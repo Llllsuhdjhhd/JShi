@@ -68,3 +68,22 @@ def test_revision_updates_original_input_and_does_not_queue_second_turn(process)
         finally:
             await c.close()
     asyncio.run(run())
+
+
+def test_cross_speaker_revision_preserves_original_rows(process):
+    async def run():
+        async def send(message): pass
+        c = VoiceConversation(process, 'stone', FakeCloud(), send)
+        try:
+            await c.accept(Transcript('我讲这题。', 'a', 0, 1000, True))
+            await c.accept(Transcript('为什么？', 'b', 1000, 2000, True))
+            before = [(iid, r['transcript']) for iid, r in c.input_records.items()]
+            await c.accept(Transcript('我讲这题。为什么呀？', 'unknown', 0, 2000, True,
+                replaces=((0, 1000), (1000, 2000))))
+            assert [(iid, r['transcript']) for iid, r in c.input_records.items()] == before
+            assert c.queue.qsize() == 2
+            assert any('跨声音转写修订' in e['payload']['text']
+                for e in c.jev_scene_store.snapshot()['events'])
+        finally:
+            await c.close()
+    asyncio.run(run())

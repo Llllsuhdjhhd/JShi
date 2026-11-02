@@ -1,6 +1,7 @@
 """Cloud streaming protocol adapters exposing one session interface to the app."""
 from .volc import pack_asr, unpack_asr
 from .transcripts import TranscriptAssembler
+from .contracts import StreamingRecognitionSession
 
 
 class VolcProtocol:
@@ -75,7 +76,10 @@ class StreamingASRSession:
                 yield self.protocol.assembler.accept(payload), final
 
 
-async def open_stream(config, http, cloud):
+async def open_stream(config, http, cloud) -> StreamingRecognitionSession:
+    if config.asr_backend == 'bailian':
+        from .bailian import open_bailian
+        return await open_bailian(config, http)
     if config.asr_backend == 'deepgram':
         from .deepgram import DeepgramASR
         return StreamingASRSession(await DeepgramASR(config, http).open_asr(), DeepgramProtocol(config))

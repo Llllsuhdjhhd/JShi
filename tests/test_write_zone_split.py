@@ -197,7 +197,7 @@ def test_persona_write_receives_current_response_in_actual_prompt(tmp_path):
     assert "点头" in prompt
     assert "user 的路线结果暂缓告知。" in prompt
     assert "OBJ-USER" not in prompt
-    assert "A1（记录时间：" in prompt and "事件时间以正文为准" in prompt
+    assert "A1[记录于" in prompt and "事件时间以正文为准）" not in prompt
 
 
 def test_smith_writer_merges_two_turns_without_repeating_events(tmp_path):
@@ -221,7 +221,7 @@ def test_smith_writer_merges_two_turns_without_repeating_events(tmp_path):
     assert events.count('第一轮独有内容') == events.count('第二轮独有内容') == 1
     assert '【此时的输入】' not in prompt and '【你的回应】' not in prompt
     assert '【程序将追加的新块】' not in prompt
-    assert 'A4（记录时间：' in prompt
+    assert 'A4[记录于' in prompt
     blocks = process.zone_store.get('stone')
     saved = '\n'.join(blocks)
     assert saved.count('第一轮独有内容') == saved.count('第二轮独有内容') == 1

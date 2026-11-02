@@ -11,6 +11,7 @@ def make_input(input_id, actor_id, display, text, *, source="text", level="不�
 
 def render_inputs(items):
     rows = []
+    media = {}
     for i, item in enumerate(items, 1):
         source = {"text": "文字", "audio": "语音"}.get(item["source"], item["source"])
         number = str(item.get("number") or i).removeprefix("N")
@@ -22,9 +23,17 @@ def render_inputs(items):
         if direction:
             note += '；指向：' + direction
         rows.append("（输入标注·不是原话）" + note)
-        refs = [p.get("reference", "") for p in item.get("parts", ()) if p.get("reference")]
+        refs = []
+        for part in item.get('parts', ()):
+            reference = part.get('reference')
+            if not reference:
+                continue
+            key = (part.get('kind', ''), reference)
+            code = media.setdefault(key, f'媒体{len(media) + 1}')
+            if code not in refs:
+                refs.append(code)
         if refs:
-            rows.append("材料引用：" + "、".join(refs))
+            rows.append("媒体关联（本次请求内）：" + "、".join(refs))
     return "\n".join(rows)
 
 

@@ -80,6 +80,10 @@ def compact_jev_input(payload):
                 lifetime = float(os.getenv('JSHI_JEV_VISUAL_MAX_AGE_SECONDS', '60'))
                 if not math.isfinite(lifetime) or lifetime <= 0:
                     raise ValueError('JSHI_JEV_VISUAL_MAX_AGE_SECONDS 必须为正数')
+                frame_at = v.get('captured')
+                frame_known = type(frame_at) in (int, float) and math.isfinite(frame_at) and frame_at > 0
+                if frame_known and not 0 <= now - frame_at * 1000 <= lifetime * 1000:
+                    v['image_available'] = False
                 if not valid or not 0 <= now - captured * 1000 <= lifetime * 1000:
                     value[k] = {'status': 'description_stale' if valid else 'description_time_unknown',
                                 'described_at': captured if valid else None,

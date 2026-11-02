@@ -9,6 +9,25 @@ from time import time
 from uuid import uuid4
 
 
+def observation_current(snapshot, now, field):
+    """Description freshness uses its source time, never a newer frame time."""
+    import math
+    import os
+    stamp = snapshot.get(field)
+    lifetime = float(os.getenv('JSHI_JEV_VISUAL_MAX_AGE_SECONDS', '60'))
+    if not math.isfinite(lifetime) or lifetime <= 0:
+        raise ValueError('JSHI_JEV_VISUAL_MAX_AGE_SECONDS 必须为正数')
+    return type(stamp) in (int, float) and math.isfinite(stamp) and stamp > 0 and 0 <= now - stamp <= lifetime
+
+
+def description_current(snapshot, now):
+    return observation_current(snapshot, now, 'described_at')
+
+
+def image_current(snapshot, now):
+    return observation_current(snapshot, now, 'captured')
+
+
 class VisionStore:
     def __init__(self, root, config):
         self.root = Path(root)

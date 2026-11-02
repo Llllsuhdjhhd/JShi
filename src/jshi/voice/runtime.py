@@ -134,3 +134,14 @@ def build_speakers(data_dir: Path, profiles, *, model=None):
         anonymous_ttl_s=float(os.getenv('JSHI_VOICE_ANONYMOUS_DAYS', '7')) * 86400)
 
 
+
+
+def build_cloud_analyzer(root, speakers, model):
+    """Audio-only speaker analysis shared by cloud ASR adapters."""
+    from .analysis import SpeakerAnalyzer
+    threads = max(1, min(4, int(os.getenv('JSHI_VOICE_LOCAL_THREADS', '2'))))
+    root = Path(root)
+    if not (root / SEGMENTATION_NAME / 'model.onnx').is_file():
+        raise ValueError('本地多人分段模型尚未准备')
+    factory = build_segmenter_factory(root, threads)
+    return SpeakerAnalyzer(factory(model), speakers, build_engine=factory, model=model)
