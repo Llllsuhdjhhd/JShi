@@ -147,4 +147,7 @@ def smith_reply(text, profile):
     end = result.find('不需要工具则不要这两个键。', start)
     if start >= 0 and end >= start:
         result = result[:start] + result[end:]
-    return result
+    return result + "\n\n" + FIRST_MEETING_NOTE
+
+
+FIRST_MEETING_NOTE = '【初次相识】\n对方明确与你交往、尚未认识且无称呼时，在问候或分享中自然问怎么称呼，主动了解对方，不只等其讲事，不固定轮次。身份未确认不等于初次见面；已有称呼或问过就沿用上下文。对方未答、不愿透露或有急事时先接事情，不反复追问。访客编号不作口语称呼，不要求实名、声纹登记或身份核验。'

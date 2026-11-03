@@ -136,7 +136,7 @@ class VoiceDialogue:
                     played = i in r['played'] and at <= cutoff
                     if played or self.state['include_unplayed']:
                         rows.append({'who': '匠石', 'text': text, 'at': at if played else r['at'],
-                            'basis': ('文字回复已发送，未确认阅读' if r['state'] == 'shown' else '播放器确认已播出') if played
+                            'basis': ('文字回复已发送，未确认阅读' if r['state'] == 'shown' else '已播') if played
                                      else '已生成但未确认播出' + ('，已中断' if r['state'] == 'stopped' else '')})
             rows.sort(key=lambda r: r['at'])
             selected, size = [], 0
@@ -153,7 +153,7 @@ class VoiceDialogue:
             return ''
         # Human labels and relative times only; internal record IDs stay in storage.
         now = time()*1000
-        return '【共享近期对话·原话与实际交付】\n' + '\n'.join(
+        return '【共享近期对话·原话与实际交付】\n已播=确认整句播出；部分播放=曾开始，具体进度未知；未播=尚未播放。\n' + '\n'.join(
             f"{round(max(0, now-r['at'])/1000)}秒前 {r['who']}（{r['basis']}）：{r['text']}" for r in rows)
 
     def filter_text(self, text, *, subject=None):
@@ -213,3 +213,12 @@ def dialogue_state(process):
         state = VoiceDialogue(process.repository.path.parent/'voice_dialogue.json')
         process.voice_dialogue = state
     return state
+
+
+def delivery_brief(snapshot, target=""):
+    """Project playback facts without transport IDs or repeated target lists."""
+    lines = [('对' + target + '的' if target else '') + '播放中断' + ('（连接断开）' if snapshot.get('reason') == 'connection closed' else '') + '。']
+    for key, label in (('played_text', '已播'), ('partial_text', '部分播放（具体进度未知）'), ('pending_text', '未播')):
+        if snapshot.get(key):
+            lines.append(label + '｜匠石：' + snapshot[key])
+    return '\n'.join(lines)

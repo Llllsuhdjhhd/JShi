@@ -249,7 +249,8 @@ def select_tool_related_entries(
             continue
         result_at = item.get("updated_at") or _entry_used_at(item)
         fresh = (now - result_at).total_seconds() <= UNCONSUMED_TTL_S
-        if item.get("work_open") or (item.get("delivered_at") is None and fresh):
+        # Old open work remains in storage; only related old work belongs in this turn.
+        if (item.get("work_open") and fresh) or (item.get("delivered_at") is None and fresh):
             unseen.append(item)
             continue
         if not need_hits:

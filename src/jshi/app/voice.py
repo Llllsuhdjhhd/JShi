@@ -753,12 +753,16 @@ class VoiceConversation:
         self.record("voice_delivery", self.delivery.snapshot())
 
         snapshot = self.delivery.snapshot()
+        from jshi.voice.dialogue import delivery_brief
         if rid and snapshot.get('state') == 'stopped':
+            oid = snapshot.get('object_id')
+            profile = self.process.profiles.get(oid) if oid else None
+            target = profile.label if profile else self.assign_code(oid, '') if oid else ''
             self.jev_scene_store.append(f"stopped:{rid}", {"p": "匠石", "at": time()*1000,
                 "basis": "播放中断", "text": "播放已中断；曾开始的句子未确认完整播出，未播放内容不算已说。"})
             self.process.note_scene_delivery(self.subject_id, f"stopped:{rid}",
-                "（播放器交付中断）" + json.dumps(self.dialogue.clean(snapshot, subject=self.subject_id), ensure_ascii=False)
-                + "；partial_text只表示该句曾开始播放，不知道具体播到哪个字；pending_text尚未播放。")
+                delivery_brief(
+                    self.dialogue.clean(snapshot, subject=self.subject_id), target=target))
 
     async def accept(self, transcript, *, asr_received_mono=None, asr_received_at_ms=None, online_identity_ms=0) -> None:
         # Capture before any emit, queue backpressure or archive I/O.
@@ -3075,7 +3079,7 @@ class VoiceConversation:
                              'basis':'等待接话已播出' if measured[1].get('route') == 'waiting_ack' else 'JEV回复已播出', 'at':time()*1000})
                         self.process.note_scene_delivery(self.subject_id,
                             f"played:{d.reply_id}:{payload['segment']}",
-                            '（播放器确认已播出）匠石：' + d.texts[int(payload['segment'])])
+                            '已播｜匠石：' + d.texts[int(payload['segment'])])
                     await self._next_plan()
                 return
             if payload.get("phase") == "completed":
@@ -3089,7 +3093,7 @@ class VoiceConversation:
                 targets = d.targets[int(payload['segment'])] if d.targets else (d.object_id,)
                 self.process.note_scene_delivery(
                     self.subject_id, f"played:{d.reply_id}:{payload['segment']}",
-                    "（播放器确认已播出）匠石：" + d.texts[int(payload['segment'])],
+                    "已播｜匠石：" + d.texts[int(payload['segment'])],
                 )
                 self.write_queue.put_nowait(lambda: self.process._flush_pending_scene(self.subject_id))
                 self.jev_scene_store.append(f"played:{d.reply_id}:{payload['segment']}",

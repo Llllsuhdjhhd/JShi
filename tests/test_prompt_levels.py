@@ -19,7 +19,9 @@ def test_defaults_preserve_full_prompt_and_levels_remove_functions():
     texts = [reply_instruction_for('smith', prompt_level=i) for i in range(1, 4)]
     assert texts[0] == reply_instruction_for('smith')
     # Shared continuity and mixed-speaker rules also apply to the short profile.
-    assert 2000 <= len(texts[2]) <= 3500
+    from jshi.style.prompt_levels import FIRST_MEETING_NOTE
+    assert 2000 <= len(texts[2]) - len(FIRST_MEETING_NOTE) <= 3500
+    assert all(FIRST_MEETING_NOTE in text for text in texts)
     assert len(texts[0]) > len(texts[1]) > len(texts[2])
     assert '【任务2 · 工具】' in texts[0]
     assert '不要为了让材料消失而标完成' in texts[0]
