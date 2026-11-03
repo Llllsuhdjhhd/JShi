@@ -436,6 +436,9 @@ def test_short_repeat_candidate_is_hint_to_jev_not_confirmed_identity(process, t
             utterance = SceneUtterance('好啊', speaker, 0, 250, input_id='short')
             row = c._jev_batch((utterance,))[0]
             assert row['short_voice_hint']['repeat_count'] == 12
+            from jshi.voice.jev_material import support_evidence
+            assert support_evidence(row['candidates'][0])['similarity'] == 1.0
+            assert row['voice_evidence']['measurement']['result'] == '已取得相似度，未确认身份'
             assert row['voice_evidence']['strength'] == 'unavailable'
             pick = row['candidates'][0]['who']
             c._apply_attribution((utterance,), (BatchItem(1, speaker_pick=pick, speaker_level='确定'),))

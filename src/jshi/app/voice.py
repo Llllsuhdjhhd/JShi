@@ -1716,13 +1716,21 @@ class VoiceConversation:
                     r=comparison[kind]
                     joint[kind]={'p':self.assign_code(r['object_id'],r.get('label','')),
                         **{k:round(v,3) if type(v) is float else v for k,v in r.items() if k not in {'object_id','label'}}}
+            check = self.input_records.get(utterance.input_id, {})
+            measured = [r for r in candidates if r.get('source') in {'voiceprint', 'voiceprint_match', 'repeated_short_audio'}
+                        and type(r.get('score')) in (int, float)]
+            voice = self.voice_evidence(utterance, candidates)
+            voice['measurement'] = {
+                'status': check.get('candidate_status', 'not_recorded'),
+                'result': '已取得相似度，未确认身份' if measured else '本轮未取得可用相似度；检查status原因，不能等同未运行',
+                'repeated_short_audio': bool(check.get('short_voice_hint'))}
             batch.append({"n": index, "input_id": utterance.input_id, "track": utterance.speaker.track_id,
                           "sound": self.sound_code(utterance),
                           "who": self.display_speaker(utterance.speaker), "text": utterance.text,
                           "seconds": round(max(0, utterance.end_ms - utterance.start_ms) / 1000, 2),
                           "basis": utterance.speaker.method, "at": utterance.received_at_ms, "at_ms": utterance.start_ms, "candidates": candidates,
                           "short_voice_hint": self.input_records.get(utterance.input_id, {}).get('short_voice_hint', {}),
-                          "joint_evidence":joint,"voice_evidence": self.voice_evidence(utterance, candidates)})
+                          "joint_evidence":joint,"voice_evidence": voice})
         return batch
 
     def _jev_context(self, utterances):
@@ -2389,9 +2397,12 @@ class VoiceConversation:
                         identity_display=self.identity_display(transcript.input_id,evidence),
                         voiceprint_candidates=ui_candidates,identity_note=utterance.identity_note,
                         identity_comparison=self.identity_comparison(transcript.input_id),
-                        classifier_result=self.personal_prediction_view(input_record))
+                        classifier_result=self.personal_prediction_view(input_record),
+                        voiceprint_check={'status': candidate_status, 'elapsed_ms': input_record['candidate_ms'],
+                            'short_repeat': {k:v for k,v in input_record.get('short_voice_hint', {}).items() if k != 'candidates'}})
                     await self.emit("voiceprint_candidates", input_id=transcript.input_id,
-                                    candidates=ui_candidates, identity_note=utterance.identity_note)
+                                    candidates=ui_candidates, identity_note=utterance.identity_note,
+                                    voiceprint_check={'status': candidate_status, 'elapsed_ms': input_record['candidate_ms']})
                     if self.personal_speakers is not None:
                         job = self.personal_speakers.collect_original(input_record.get('pcm'), transcript,
                             self.source_speakers[transcript.input_id], self.session_id, self.local_speakers,

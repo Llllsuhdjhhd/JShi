@@ -80,3 +80,28 @@ def test_stop_button_path_discards_queued_input(process):
             assert any(m['type']=='stop' for m in sent)
         finally:await c.close()
     asyncio.run(run())
+
+
+def test_semantic_stop_reaches_player_despite_route_scope_error(process):
+    from tests.test_jev_split_modes import Model, entry
+    first = entry('background', 'stop', process_refs=['I1'])
+    first['items'][0].update(person='unknown', certainty='unknown', why='不影响停说的未知姓名')
+    async def run():
+        sent = []
+        async def send(message): sent.append(message)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send,
+            jev=VoiceJEV(Model([first]), mode='split', fallback_models=[]))
+        c.person_reviewer = None
+        try:
+            d = c.delivery.begin('这是还在播放的解释。', 'lux-id')
+            c.delivery.acknowledge(d.reply_id, 0, 'started')
+            old_epoch = c.epoch
+            await c.accept(Transcript('匠石不用解释了，匠石。', 'A', 0, 1600, True))
+            await asyncio.wait_for(c.queue.join(), 4)
+            assert c.delivery.snapshot()['state'] == 'stopped'
+            assert c.epoch == old_epoch + 1
+            assert sum(m['type'] == 'stop' for m in sent) == 1
+            assert not any(m['type'] == 'reply' for m in sent)
+        finally:
+            await c.close()
+    asyncio.run(run())

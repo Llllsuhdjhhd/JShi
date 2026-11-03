@@ -25,6 +25,8 @@ def support_evidence(candidate):
                else '未分档' if numeric else '无有效证据')
     result = {'p': candidate.get('who', candidate.get('p', 'unknown')),
               'source': candidate.get('source', 'voice'), 'support': support}
+    if numeric and candidate.get('source') in {'voiceprint', 'voiceprint_match', 'repeated_short_audio'}:
+        result['similarity'] = round(score, 3)  # Similarity, never identity probability.
     if type(candidate.get('verified')) is bool:
         result['validation'] = 'cross_session' if candidate['verified'] is True else 'limited'
     elif 'validation' in candidate:
@@ -52,7 +54,7 @@ def build_snapshot(payload, batch, delivery):
                       if k not in {'voice', 'candidates', 'voice_ranking', 'joint_evidence'}})
         voice = row.get('voice', {})
         item = {'ref': row['evidence_ref'],
-                'voice': {k: voice[k] for k in ('pick', 'strength', 'basis') if k in voice},
+                'voice': {k: voice[k] for k in ('pick', 'strength', 'basis', 'measurement') if k in voice},
                 'candidates': [support_evidence(c) for c in original.get('candidates', [])]}
         joint = row.get('joint_evidence', {})
         if joint:

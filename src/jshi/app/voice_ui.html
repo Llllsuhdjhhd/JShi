@@ -1002,6 +1002,18 @@ function message(m) {
   else if(m.type==='voiceprint_candidates') {
     const row=inputRows.get(m.input_id);if(!row?.ranking)return;
     row.voiceprintCandidates=voiceRanking(row.ranking,m.identity_note,m.candidates);
+    if(m.voiceprint_check){
+      let check=row.extra.querySelector('.voiceprint-check');
+      if(!check){check=document.createElement('small');check.className='voiceprint-check';check.style.display='block';row.extra.appendChild(check);}
+      const labels={already_identified:'沿用已有身份判断',reused_voiceprint_candidates:'复用本句声纹比较',
+        no_audio_or_model:'未比较：缺少音频或声纹模型',short_audio:'未比较：音频过短或存在重叠',
+        previous_candidate_still_running:'未比较：上一项声音比较尚未完成',short_repeat_hint:'已进行短句重复辅助比较',
+        ranked:'已进行原音频声纹比较',candidate_timeout:'比较超时，本轮尚无结果',candidate_error:'声纹比较失败'};
+      const state=m.voiceprint_check.status;
+      check.textContent='声纹检查：'+(labels[state]||state)+(m.voiceprint_check.elapsed_ms!=null?' · '+m.voiceprint_check.elapsed_ms+'毫秒':'')+
+        (['short_repeat_hint','ranked'].includes(state)&&!m.candidates?.length?'；未取得可用候选，不能确认姓名':'');
+    }
+
     if(row.training){row.training.ranked=row.voiceprintCandidates.map(c=>c.object_id);refreshTrainingLabel(row);}
   }
   else if(m.type==='pipeline_clock') {const row=inputRows.get(m.input_id);if(row)applyPipeline(row,m.pipeline);}

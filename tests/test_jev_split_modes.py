@@ -366,3 +366,45 @@ def test_standalone_failed_preparation_falls_back_to_main(process):
             assert data['timing']['end_to_end']['jev_fallback'] is True
             assert data['timing']['end_to_end']['jev_failure_kind'] == 'model_call'
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('mode', ['split', 'combined'])
+def test_stop_survives_invalid_background_process_scope(mode):
+    controls = []
+    def apply(value):
+        controls.append(value.control)
+        return 7
+    # Reproduces 2026-11-03 19:18:57: stop was correct, process_refs was redundant.
+    first = entry('background', 'stop', process_refs=['I1'])
+    first['items'][0].update(person='unknown', certainty='unknown', why='姓名未知')
+    result, model = run(mode, first, on_entry=apply)
+    assert controls == ['stop']
+    assert result.action == result.control == 'stop' and result.control_applied
+    assert result.applied_epoch == 7 and result.routing_error
+    assert not result.direct_reply and not result.waiting_reply and len(model.requests) == 1
+
+
+def test_rejected_stop_receipt_does_not_promote_failed_route():
+    result, _ = run('split', entry('background', 'stop', process_refs=['I1']),
+                    on_entry=lambda value: False)
+    assert result.control != 'stop' and not result.control_applied
+
+
+def test_invalid_stop_reference_cannot_reach_control_callback():
+    applied = []
+    result, _ = run('split', entry('background', 'stop', process_refs=['I1'], decision_refs=['I99']),
+                    on_entry=lambda value: applied.append(value))
+    assert not applied and result.control != 'stop'
+
+
+def test_stale_stop_does_not_reach_control_callback():
+    state = {'current': True}
+    def response(request):
+        state['current'] = False
+        return entry('background', 'stop', process_refs=['I1'])
+    applied = []
+    model = Model([response])
+    result = VoiceJEV(model, mode='split', fallback_models=[]).decide_batch(
+        'stone', [{'n':1,'text':'不用解释了'}], [], {},
+        is_current=lambda: state['current'], on_entry=lambda value: applied.append(value))
+    assert not applied and result.control != 'stop'

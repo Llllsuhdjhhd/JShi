@@ -348,6 +348,25 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                     entry['process_refs'] = [f'I{r["n"]}' for r in batch]
                     if delivery.get('state') not in {'thinking', 'playing', 'paused', 'queued'}:
                         entry['control'] = 'redirect'
+        # Playback control has its own validity boundary. A downstream routing
+        # contradiction must not swallow a valid stop grounded in this batch.
+        current_refs = {f'I{r["n"]}' for r in batch if r.get('source') != 'visual_environment'}
+        if (early_stop is None and entry['control'] == 'stop'
+                and entry['interaction'] == 'direct'
+                and current_refs.intersection(entry['decision_refs'])):
+            if not current():
+                raise JEVStaleError('停止许可已失效')
+            stopping = replace(accepted, action='stop', control='stop', route='background',
+                entry_route='background', interaction='direct',
+                utterance_complete=entry['utterance_complete'],
+                reason=entry['decision_reason'], decision_reason=entry['decision_reason'],
+                decision_refs=tuple(entry['decision_refs']))
+            receipt = on_entry(stopping) if on_entry else None
+            if receipt is False:
+                raise JEVStaleError('停止许可已失效')
+            early_stop = receipt if receipt is not None else True
+            accepted = replace(stopping, control_applied=type(receipt) is int,
+                               applied_epoch=receipt if type(receipt) is int else None)
         process, pending = tuple(entry['process_refs']), tuple(entry['pending_refs'])
         route, control = entry['route'], entry['control']
         if (route == 'prepare' and not process or route == 'wait' and not pending
