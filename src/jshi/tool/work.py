@@ -53,18 +53,24 @@ class WorkIndex:
             row["closed"] = False
             self._save(row)
 
+    def _project(self, row):
+        value=deepcopy(row)
+        owner=getattr(self,'person_owner',None)
+        if value is not None and owner is not None: value['object_id']=owner(value)
+        return value
+
     def get(self, work_id: str) -> dict[str, Any] | None:
         with self._lock:
-            return deepcopy(self._records.get(work_id))
+            return self._project(self._records.get(work_id))
 
     def for_object(self, subject_id: str, object_id: str) -> tuple[dict[str, Any], ...]:
         with self._lock:
-            return tuple(deepcopy(row) for row in self._records.values()
-                         if row["subject_id"] == subject_id and row["object_id"] == object_id)
+            return tuple(self._project(row) for row in self._records.values()
+                         if row['subject_id']==subject_id and self._project(row)['object_id']==object_id)
 
     def for_task(self, task_id: str) -> tuple[dict[str, Any], ...]:
         with self._lock:
-            return tuple(deepcopy(self._records[work_id])
+            return tuple(self._project(self._records[work_id])
                          for work_id in sorted(self._by_task.get(task_id, ())))
 
     def handle(self, work_id: str, task_id: str, handling: Mapping[str, Any]) -> None:

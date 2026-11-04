@@ -431,6 +431,21 @@ class SubjectProcess:
         self._memory_short_map: dict[str, str] = {}
         self.memory = memory or MemoryShell(InProcessMemoryBackend(repository))
         self.long_term_experience = long_term_experience
+        from jshi.recognition.acquaintance import acquaintance_store
+        links=acquaintance_store(self)
+        self.memory.person_links=links
+        if self.long_term_experience is not None:
+            self.long_term_experience.person_links=links
+        self.tool_service.hang_store.person_links=links
+        self.tool_service.intake_store.person_links=links
+        def work_owner(row):
+            tasks=[self.tool_service.hang_store.get(t) for t in row['tasks'].values()]
+            if not tasks or any(t is None for t in tasks): return row['object_id']
+            owners={t.object_id for t in tasks}
+            return next(iter(owners)) if len(owners)==1 else row['object_id']
+        self.tool_service.work_index.person_owner=work_owner
+
+
         self.recall_coordinator = RecallCoordinator(repository, self.memory)
         self.recall_evaluator = recall_evaluator or RuleBasedRecallEvaluator()
         self.activity_ledger = activity_ledger or InProcessExperienceLedger()
@@ -753,6 +768,10 @@ class SubjectProcess:
             },
         )
         self.repository.add_history(fact)
+        if envelope is not None:
+            from jshi.recognition.acquaintance import acquaintance_store
+            ids=[u.input_id for u in envelope.current_utterances if u.input_id]
+            acquaintance_store(self).provenance(subject_id,fact.id,ids or (envelope.input_id,))
         observed_environment = visual_snapshot
         if self.vision and observed_environment is None:
             observed_environment = (self.vision.store.snapshot(envelope.visual_snapshot_id, subject_id)
@@ -1239,6 +1258,9 @@ class SubjectProcess:
             speaker.object_id if speaker is not None else "",
             handled_ids,
         )
+        from jshi.recognition.acquaintance import acquaintance_store
+        acquaintance_store(self).provenance(subject_id,activity.id,
+            [item['input_id'] for item in current.input_items if item.get('input_id')])
         self._intake_tool_if_requested(subject_id, activity, speaker, response, current.input_text)
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
         close_result = self.activity_close.close(
@@ -1628,6 +1650,13 @@ class SubjectProcess:
                 "【人物肖像·可修订】\n这是过往白描形成的描述，需以本轮信息为准。\n"
                 + "\n".join(portraits)
             )
+        if current.speaker and current.speaker.object_id and include_turn:
+            from jshi.recognition.acquaintance import acquaintance_store
+            acquaintance = acquaintance_store(self)
+            person = current.speaker.object_id
+            state = acquaintance.context(current.subject_state.subject_id, person)
+            parts.append('【相识情况】\n' + json.dumps(state, ensure_ascii=False) +
+                '\n这是已记录的交往状态；使用已知称呼，结合本轮话题自然了解对方，已问过不反复追问。')
         if experiences:
             parts.append(
                 "【人物相处经验·可修订】\n"

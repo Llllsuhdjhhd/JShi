@@ -154,6 +154,9 @@ class VoiceConversation:
         self.reply_input_ids = {}
         from jshi.voice.jev_scene import JEVSceneStore, JEVSceneWriter
         self.jev_scene_store = JEVSceneStore(process.repository.path.parent / "jev_scenes" / hashlib.sha256(subject_id.encode()).hexdigest()[:16] / (self.session_id + ".json"))
+        from jshi.recognition.link_updates import retry_links
+        retry_links(process,subject_id,personal=self.personal_speakers,live_scene=self.jev_scene_store,local=self.local_speakers)
+
         saved = self.jev_scene_store.snapshot()
         self.code_owner.update(saved["codes"])
         self.code_labels.update(saved["labels"])
@@ -288,6 +291,68 @@ class VoiceConversation:
             sections = []
         await self.emit("debug", section=section, activity_id=activity_id, text=value, sections=sections)
 
+    def link_selected_inputs(self, input_ids, target_id, *, basis='manual_annotation'):
+        """Commit scoped identity evidence and project it to live conversation stores."""
+        from jshi.recognition.acquaintance import acquaintance_store
+        store = acquaintance_store(self.process)
+        target = self.process.profiles.get(target_id)
+        if target is None or target.status == 'rejected':
+            raise ValueError('关联目标人物不存在')
+        groups = {}
+        for iid in input_ids:
+            original = self.source_speakers.get(iid)
+            if original and original.object_id != target_id:
+                groups.setdefault(original.object_id, []).append(iid)
+        from jshi.recognition.link_updates import MODULES, apply_link
+        self.assign_code(target_id,target.label)
+        keys=[]
+        for source, ids in groups.items():
+            payload={'session':self.session_id,'codes':dict(self.code_owner),'labels':dict(self.code_labels),'source_label':self.source_speakers[ids[0]].label,
+                'texts':{i:self.input_records[i]['transcript'].text for i in ids if self.input_records.get(i,{}).get('transcript')},
+                'bindings':{i:self.input_records.get(i,{}).get('personal_label_before',{}).get('binding') for i in ids},
+                'sample_baselines':{i:self.input_records[i]['personal_label_before'].get('sample') for i in ids
+                    if 'sample' in self.input_records.get(i,{}).get('personal_label_before',{})}}
+            if self.local_speakers is not None and hasattr(self.local_speakers,'path'):
+                payload['voice_bank']=os.path.relpath(self.local_speakers.path,self.process.repository.path.parent)
+                payload['voice_model']=self.local_speakers.model_id
+            from hashlib import sha256
+            key=sha256(json.dumps([self.subject_id,self.session_id,source,target_id,sorted(ids)],ensure_ascii=False).encode()).hexdigest()
+            key=store.link(self.subject_id,source,target_id,ids,basis=basis,modules=MODULES,link_id=key)
+            store.facts(key,payload)
+            apply_link(self.process,key,personal=self.personal_speakers,live_scene=self.jev_scene_store,local=self.local_speakers)
+            for iid in ids:
+                original=self.source_speakers[iid]
+                self.annotations[iid]=replace(original,object_id=target_id,label=target.label,
+                    status='recognized',method='manual_annotation' if basis.startswith('manual') else 'voiceprint_match')
+            self.scene=deque((replace(u,speaker=self.annotations.get(u.input_id,u.speaker)) for u in self.scene),maxlen=24)
+            keys.append(key)
+        return keys
+
+    def revoke_person_link(self, link_id):
+        from jshi.recognition.acquaintance import acquaintance_store
+        from jshi.recognition.link_updates import apply_link
+        store=acquaintance_store(self.process)
+        if link_id not in {r['id'] for r in store.links(self.subject_id,active_only=False)}:
+            raise ValueError('人物关联不属于当前主体')
+        link=next(r for r in store.links(self.subject_id,active_only=False) if r['id']==link_id)
+        store.revoke(link_id)
+        for iid in link['inputs']:
+            original=self.source_speakers.get(iid)
+            current=self.annotations.get(iid)
+            if original and current and current.object_id==link['target']:
+                self.annotations[iid]=original
+                transcript=self.input_records.get(iid,{}).get('transcript')
+                if transcript is not None:
+                    for table,key in ((self.identities.tracks,transcript.track_id),
+                                      (self.identities.clusters,transcript.speaker_cluster_id)):
+                        existing=table.get(key)
+                        if existing and existing.object_id==link['target']: table[key]=original
+                    associated=self.identities.associations.get(original.object_id)
+                    if associated and associated.object_id==link['target']:
+                        self.identities.associations.pop(original.object_id,None)
+        self.scene=deque((replace(u,speaker=self.annotations.get(u.input_id,u.speaker)) for u in self.scene),maxlen=24)
+        return apply_link(self.process,link_id,personal=self.personal_speakers,live_scene=self.jev_scene_store,local=self.local_speakers)
+
     async def enroll_inputs(self, input_ids, name):
         try:
             if not isinstance(input_ids, list) or not 1 <= len(input_ids) <= 32:
@@ -324,8 +389,8 @@ class VoiceConversation:
                 old = previous[iid]
                 profile = self.process.profiles.get(old.object_id)
                 if profile and profile.source == 'voice_anonymous' and profile.label.startswith('未命名访客') and old.object_id != evidence.object_id:
-                    self.identities.associations[old.object_id] = evidence
-                    retired.add(old.object_id)
+                    # A selection confirms these inputs only; keep other anonymous history isolated.
+                    pass
                 cluster = row['transcript'].speaker_cluster_id
                 if cluster:
                     self.identities.clusters[cluster] = evidence
@@ -342,6 +407,7 @@ class VoiceConversation:
             self.jev_scene_store.correct(self._scene_correction(input_ids, self.assign_code(evidence.object_id, evidence.label)),
                 codes=self.code_owner, labels=self.code_labels)
             self.unknown_inputs.bind(tuple(input_ids), evidence.object_id)
+            self.link_selected_inputs(input_ids,evidence.object_id,basis='manual_selection')
             if self.personal_speakers is not None:
                 for iid, row in selected_pairs:
                     self.personal_speakers.submit_capture(row['pcm'], evidence.object_id, self.session_id,
@@ -399,8 +465,9 @@ class VoiceConversation:
                     prior = self.annotations.get(iid) or next((u.speaker for u in self.scene if u.input_id == iid),
                         self.source_speakers.get(iid, SpeakerEvidence(row['transcript'].track_id)))
                     unknown = self.unknown_inputs.read(iid)
+                    prior_sample=self.personal_speakers.store.sample(self.personal_speakers.store.sample_id(self.session_id,iid))
                     before = {'speaker': prior, 'annotation': self.annotations.get(iid),
-                              'binding': unknown.get('manual_object_id') if unknown else None}
+                              'binding': unknown.get('manual_object_id') if unknown else None, 'sample':prior_sample}
                 future = self.personal_speakers.submit_capture(row['pcm'], object_id, self.session_id,
                     iid, self.local_speakers, source='manual')
                 if future is None:
@@ -422,6 +489,8 @@ class VoiceConversation:
             self.scene = deque((replace(u, speaker=self.annotations.get(u.input_id, u.speaker)) for u in self.scene), maxlen=24)
             if not negative_only:
                 self.jev_scene_store.correct(self._scene_correction(input_ids, self.assign_code(object_id, profile.label)), codes=self.code_owner, labels=self.code_labels)
+            if not negative_only:
+                self.link_selected_inputs(input_ids,object_id)
             self.record('personal_voice_manual_label', {'input_ids': input_ids, 'object_id': object_id,
                                                        'sample_ids': saved})
             await self.emit('personal_labelled', input_ids=input_ids, object_id=object_id,
@@ -467,6 +536,10 @@ class VoiceConversation:
                 if manual:
                     self.jev_scene_store.correct(self._scene_correction(manual, undo=True),
                         codes=self.code_owner, labels=self.code_labels)
+                from jshi.recognition.acquaintance import acquaintance_store
+                for link in acquaintance_store(self.process).links(self.subject_id):
+                    if set(link['inputs']).issubset(input_ids):
+                        self.revoke_person_link(link['id'])
                 self.record('personal_voice_manual_undo', {'input_ids': input_ids})
                 await self.emit('personal_unlabelled', input_ids=input_ids, restored=restored)
             except Exception as exc:
@@ -603,6 +676,17 @@ class VoiceConversation:
                 with self.sample_source.lock:
                     start = max(start, (self.sample_source.offset+len(self.sample_source.data))//32)
             evidence = SpeakerEvidence('typed:'+object_id, object_id, profile.label, 'recognized', 'user_selected', 1.0)
+            if profile.source == 'voice_anonymous':
+                from jshi.voice.jev import explicit_name
+                from jshi.voice.identity import typed_name_answer
+                name = explicit_name(text) or typed_name_answer(self.process,self.subject_id,evidence,text)
+                if name:
+                    self.identities.tracks[evidence.track_id] = evidence
+                    evidence, _ = self.identities.introduce(evidence.track_id,name)
+                    # Text selection remains bound to this person, not to an acoustic identity.
+                    evidence = replace(evidence,status='recognized',method='user_selected')
+                    profile = self.process.profiles.get(object_id)
+
             code = self.assign_code(object_id, profile.label)
             utterance = SceneUtterance(text, evidence, start, start, input_id=iid, received_at_ms=at,
                                        identity_note='文字输入；人物由用户选择，不是声纹确认')
@@ -615,7 +699,7 @@ class VoiceConversation:
             while len(self.input_records) > 128:
                 old = next(iter(self.input_records))
                 self.sample_bytes -= len(self.input_records.pop(old).get('pcm') or b'')
-            await self.emit('typed_input', text=text, original_text=original_text, label=profile.label, input_id=iid,
+            await self.emit('typed_input', text=text, original_text=original_text, label=evidence.label, input_id=iid,
                             pipeline=dict(self.input_records[iid].get('pipeline') or {}))
             if (getattr(self.jev, 'mode', '') == 'decision'
                     and self.decisions.config['mode'] == 'active' and self.decisions.config['collision']):
@@ -1184,7 +1268,7 @@ class VoiceConversation:
                 u = replace(u, text=latest.text)
             if self.input_records.get(u.input_id, {}).get('superseded_by'):
                 continue
-            self.dialogue.input(self.subject_id, u.input_id, u.text, u.speaker.label, u.received_at_ms)
+            self.dialogue.input(self.subject_id, u.input_id, u.text, u.speaker.label, u.received_at_ms, actor_id=u.speaker.object_id)
             if u.input_id not in self.recorded_inputs:
                 if u.speaker.method == 'user_selected':
                     self.record('web_text_input', {'input_id':u.input_id, 'text':u.text,
@@ -1940,6 +2024,12 @@ class VoiceConversation:
         cutoff = min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=time()*1000)
         from jshi.core.person_names import known_names
         delivery['named_people'] = known_names(self.code_owner, self.process.profiles)
+        from jshi.recognition.acquaintance import acquaintance_store
+        acquaintances = acquaintance_store(self.process)
+        delivery['acquaintance'] = {self.assign_code(u.speaker.object_id,u.speaker.label):
+            acquaintances.context(self.subject_id,u.speaker.object_id) for u in utterances
+            if u.speaker.method not in {'unassigned_audio','visual_scene','voice_scene'}}
+
         delivery['conversation'] = self.dialogue.recent(self.subject_id, cutoff=cutoff,
             exclude={u.input_id for u in utterances})
         delivery = self.dialogue.clean(delivery, subject=self.subject_id)
@@ -2125,6 +2215,13 @@ class VoiceConversation:
         record['control'] = result.control
         record['utterance_complete'] = result.utterance_complete
         record['decision_reason'] = result.decision_reason
+        if result.interaction == 'direct' and not result.routing_error and result.judged:
+            for u in utterances:
+                if u.speaker.method not in {'unassigned_audio','visual_scene','voice_scene'}:
+                    acquaintances.record(self.subject_id, 'encounter:'+self.session_id+':'+u.speaker.object_id,
+                        u.speaker.object_id, 'encounter', {'session':self.session_id,'input_id':u.input_id,
+                            'text':u.text,'source':u.speaker.method})
+
         record['reason'] = decision.reason
         playing = self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'} or self.active_turn is not None
         from jshi.voice.jev import promote_withheld_stop
@@ -2270,8 +2367,22 @@ class VoiceConversation:
                     input_record['collection_trigger'] = collection_trigger
                     input_record["worker_started_at"] = max(worker_started, input_record.get("at", worker_started))
                     identity_started = monotonic()
+                    prior_cluster = self.identities.clusters.get(transcript.speaker_cluster_id) if transcript.speaker_cluster_id else None
                     evidence = self.resolve_speaker(transcript)
                     self.source_speakers[transcript.input_id] = evidence
+                    if (prior_cluster and prior_cluster.object_id != evidence.object_id
+                            and evidence.method == 'voiceprint_match' and evidence.status == 'recognized'
+                            and not transcript.overlap and not transcript.identity_uncertain):
+                        old_profile=self.process.profiles.get(prior_cluster.object_id)
+                        if old_profile and old_profile.source=='voice_anonymous':
+                            related=[iid for iid,src in self.source_speakers.items()
+                                if src.object_id==prior_cluster.object_id
+                                and self.input_records.get(iid,{}).get('transcript') is not None
+                                and self.input_records[iid]['transcript'].speaker_cluster_id==transcript.speaker_cluster_id
+                                and not self.input_records[iid]['transcript'].overlap]
+                            if related:
+                                self.link_selected_inputs(related,evidence.object_id,basis='verified_voice')
+
                     # Start personal classifier without blocking the first on-screen text.
                     evidence = await self.personal_identity(transcript, evidence, wait=False)
                     received = self.input_records.get(transcript.input_id, {}).get('received_at_ms')
@@ -2299,6 +2410,10 @@ class VoiceConversation:
                         wait=collection_trigger != 'active_control')
                     answer = self.identities.name_answer(evidence, transcript.text) if not transcript.overlap else ''
                     claimed = (explicit_name(transcript.text) or answer) if not transcript.overlap else ""
+                    if self.identities.acquaintance is not None and evidence.method not in {'unassigned_audio','visual_scene','voice_scene'}:
+                        self.identities.acquaintance.observe_text(self.subject_id,evidence.object_id,transcript.input_id,
+                            transcript.text,session=self.session_id,encounter=False)
+
                     remembered = False
                     if self.local_speakers is not None and evidence.method == 'anonymous_voice_cluster':
                         remembered = await asyncio.to_thread(self.local_speakers.remember_anonymous,
@@ -2306,7 +2421,7 @@ class VoiceConversation:
                     if claimed:
                         evidence, binding_note = self.identities.introduce(transcript.track_id, claimed,
                             basis='name_answer' if answer else 'explicit_self_introduction',
-                            cluster_id=transcript.speaker_cluster_id, uncertain=transcript.identity_uncertain)
+                            cluster_id=transcript.speaker_cluster_id, uncertain=transcript.identity_uncertain,input_id=transcript.input_id)
                         if evidence.status == "introduced" and self.local_speakers is not None:
                             learned = self.local_speakers.bind(transcript.track_id, evidence.object_id)
                             if not learned and transcript.speaker_cluster_id and not transcript.identity_uncertain:
@@ -2322,13 +2437,18 @@ class VoiceConversation:
                                 if linked.object_id == evidence.object_id and old_id != evidence.object_id and old and old.label.startswith('未命名访客'):
                                     self.local_speakers.forget(old_id)
                             self.local_speakers.confirm(evidence.object_id)
+                        if (self.local_speakers is not None and evidence.method != 'unassigned_audio'
+                                and self.process.profiles.get(evidence.object_id) is not None):
+                            # Retain the already associated voice; naming does not add
+                            # unverified audio or merge any same-named registration.
+                            self.local_speakers.confirm(evidence.object_id)
                         binding_notes.append(binding_note)
                         if evidence.status == "introduced":
                             self.attention.engage((evidence.object_id,))
                         await self.emit("identity", **asdict(evidence), detail=binding_note)
                     if remembered and evidence.label.startswith('未命名访客') and evidence.object_id not in self.remembered_voices:
                         self.remembered_voices.add(evidence.object_id)
-                        await self.emit('notice', text=f'{evidence.label} 是内部名，还不知道姓名。声音暂存；自报先记称呼线索，正式关联按人工确认。')
+                        await self.emit('notice', text=f'{evidence.label} 是内部名，还不知道姓名。声音已暂存；得知称呼后，会记在同一个人下面。')
                     utterance = replace(utterance, speaker=evidence)
                     self.note_address(evidence, transcript.text, transcript.input_id)
                     self.note_person_names(evidence, transcript.text, transcript.input_id)
@@ -3354,6 +3474,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         if result.model_error and not fallback:
             # Failure is never reported as a successful background/control decision.
             raise RuntimeError('入口判断失败（'+record['failure_kind']+'）：'+result.model_error)
+        from jshi.recognition.acquaintance import acquaintance_store
+        acquaintances=acquaintance_store(process)
+        acquaintances.observe_text(subject_id,envelope.speaker.object_id,envelope.input_id,envelope.text,session=envelope.session_id)
         dialogue.input(subject_id, envelope.input_id, envelope.text, envelope.speaker.label)
         judgment = result.items[0] if result.items else None
         scene_store.append(envelope.input_id, {'text':envelope.text, 'at':time()*1000,
@@ -3412,6 +3535,10 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             text_jev_task = asyncio.create_task(flush_text_jev())
 
     def record_text_jev_delivery(result, incoming):
+        from jshi.recognition.acquaintance import acquaintance_store
+        acquaintance_store(process).reply_delivered(subject_id,incoming.speaker.object_id,
+            'text-question:'+incoming.input_id,result.response_plan.verbal_text(),medium='text')
+
         if getattr(jev, 'mode', 'split') == 'legacy' or not result.response_plan.verbal_text().strip():
             return
         text_jev_store.append('text-response:'+incoming.input_id,
@@ -3645,6 +3772,40 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             "deepgram_available": bool(config.deepgram_api_key), "bailian_available": bool(config.bailian_asr_api_key), "vision_available": visual is not None, "voice_active": active_conversation is not None},
             headers={"Cache-Control": "no-store"})
 
+    async def person_links(request):
+        from jshi.recognition.acquaintance import acquaintance_store
+        from jshi.recognition.link_updates import apply_link
+        store=acquaintance_store(process)
+        if request.method=='POST':
+            if request.headers.get('Origin','')!=f'http://{request.host}':
+                raise web.HTTPForbidden(text='人物更正需要同源请求')
+            payload=await request.json()
+            key=str(payload.get('link_id',''))
+            if key not in {r['id'] for r in store.links(subject_id,active_only=False)}:
+                raise web.HTTPBadRequest(text='找不到本主体的关联记录')
+            if payload.get('action')=='revoke':
+                if active_conversation is not None:
+                    active_conversation.revoke_person_link(key)
+                else:
+                    store.revoke(key)
+                    await asyncio.to_thread(apply_link,process,key,personal=personal_speakers)
+            elif payload.get('action')=='retry':
+                await asyncio.to_thread(apply_link,process,key,personal=personal_speakers,
+                    live_scene=active_conversation.jev_scene_store if active_conversation else None)
+            else: raise web.HTTPBadRequest(text='无效操作')
+        rows=[]
+        for row in store.links(subject_id,active_only=False)[-50:]:
+            source=process.profiles.get(row['source']);target=process.profiles.get(row['target'])
+            rows.append({'id':row['id'],'source':source.label if source else '临时人物',
+                'target':target.label if target else '已确认人物','inputs':len(row['inputs']),
+                'active':bool(row['active']),'jobs':store.jobs(row['id'])})
+        return web.json_response({'links':list(reversed(rows))},headers={'Cache-Control':'no-store'})
+
+    async def resume_person_links(app):
+        from jshi.recognition.link_updates import retry_links
+        await asyncio.to_thread(retry_links,process,subject_id,personal=personal_speakers)
+    app.on_startup.append(resume_person_links)
+
     async def text_people(request):
         return web.json_response({'people': [{'object_id': p.object_id, 'label': p.label, 'source': p.source}
             for p in process.profiles.list() if p.status != 'rejected' and p.source != 'voice_scene']},
@@ -3679,6 +3840,19 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         try:
             evidence = SpeakerEvidence('typed:'+profile.object_id, profile.object_id, profile.label,
                                        'recognized', 'user_selected', 1.0)
+            if profile.source=='voice_anonymous':
+                from jshi.voice.jev import explicit_name
+                from jshi.recognition.acquaintance import acquaintance_store
+                state=acquaintance_store(process)
+                from jshi.voice.identity import typed_name_answer
+                name=explicit_name(text) or typed_name_answer(process,subject_id,evidence,text)
+                if name:
+                    from jshi.voice.identity import save_reported_name
+                    save_reported_name(process.profiles,state,subject_id,profile.object_id,name,
+                        event_id='text-name:'+uuid4().hex,basis='text_self_report',original_text=text)
+                saved_name=state.context(subject_id,profile.object_id)['reported_name']
+                if saved_name: evidence=replace(evidence,label=saved_name)
+
             envelope = InputEnvelope(session_id='web-text', source='web_text',
                 parts=(InputPart('text', text),), speaker=evidence,
                 entry_timing={'received_mono':received_mono, 'received_at_ms':received_at_ms,
@@ -4136,6 +4310,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                             task = asyncio.create_task(submit_text())
                             conversation.background_tasks.add(task)
                             task.add_done_callback(conversation.background_tasks.discard)
+                        elif kind == 'person_link_revoke':
+                            try:
+                                jobs=conversation.revoke_person_link(str(payload.get('link_id','')))
+                                await conversation.emit('person_link_updated',jobs=jobs)
+                            except ValueError as exc:
+                                await conversation.emit('notice',text=str(exc))
                         elif kind == 'rename_confirm':
                             await conversation.apply_rename(str(payload.get('object_id', '')), str(payload.get('name', '')), bool(payload.get('accept')))
                         elif kind == 'personal_label':
@@ -4217,6 +4397,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     app.router.add_get("/status", status)
     app.router.add_get('/vision_chat.js', vision_chat_script)
     app.router.add_get('/text-people', text_people)
+    app.router.add_get('/person-links',person_links)
+    app.router.add_post('/person-links',person_links)
     from jshi.app.model_settings import install_model_settings
     def paid_notice(label, model):
         text = (f'{label}：正在调用可能计费的百炼模型（{model}）' if model.startswith('qwen') else

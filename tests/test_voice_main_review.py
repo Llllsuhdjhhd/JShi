@@ -140,7 +140,7 @@ def test_names_and_subject_nicknames_are_portrait_material_without_merging(proce
             process.profiles.create(ObjectProfile('other', '小琴', status='confirmed'))
             assert {p.object_id for p in process.profiles.find_by_names('小琴')} == {'lux-id', 'other'}
             unknown, note = c.identities.introduce('B', '小琴', uncertain=True)
-            assert unknown.object_id not in {'lux-id', 'other'} and '多个' in note
+            assert unknown.object_id not in {'lux-id', 'other'} and '声音归属待定' in note
             conflict, note = c.identities.introduce('A', '陌生名')
             process.profiles.create(ObjectProfile('third', '另一人', status='confirmed'))
             conflict, note = c.identities.introduce('A', '另一人')

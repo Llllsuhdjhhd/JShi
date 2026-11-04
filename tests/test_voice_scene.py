@@ -143,7 +143,7 @@ def test_spelled_name_with_greeting_links_existing_lux(process):
     ids=VoiceIdentities(process.profiles,'stone','session')
     assert explicit_name('我是 L U X 你好')=='LUX'
     who,note=ids.introduce('voice-A',explicit_name('我是 L U X 你好'))
-    assert who.object_id!='lux-id' and who.label=='lux' and who.status=='unknown'
+    assert who.object_id!='lux-id' and who.label=='LUX' and who.status=='unknown'
 
 
 @pytest.mark.parametrize('stage', ['cognition', 'write_zone'])

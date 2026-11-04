@@ -16,7 +16,7 @@ def known_names(codes, profiles):
             continue
         name = profile.label.strip()
         if (not name or name.startswith(('待定声音', '未命名', '身份未确认', '声音归属', '语音现场'))
-                or profile.source in {'voice_anonymous', 'voice_self_introduction', 'voice_scene'}
+                or profile.source in {'voice_scene'}
                 or name in {'unknown', 'new', 'none'} or re.fullmatch(r'[PS]\d+', name)):
             continue
         candidates[code] = name

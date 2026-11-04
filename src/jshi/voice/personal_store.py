@@ -33,6 +33,9 @@ class PersonalStore:
             db.executescript('''
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS person_link_samples(
+                    link TEXT NOT NULL, sample TEXT NOT NULL, original_person TEXT NOT NULL,
+                    original_source TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY(link,sample));
                 CREATE TABLE IF NOT EXISTS targets(
                     object_id TEXT PRIMARY KEY, pinned INTEGER NOT NULL, source TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'collecting', detail TEXT NOT NULL DEFAULT '',
@@ -200,6 +203,33 @@ class PersonalStore:
                 score=excluded.score,pcm=excluded.pcm,revision=excluded.revision''',
                 (sid, object_id, session_id, input_id, source, score, pcm, revision, time()))
         return sid
+
+    def link_inputs(self, link, inputs, session, target, *, active, baselines=None):
+        """Change only existing, scoped samples; never manufacture training evidence."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            changed=False
+            for iid in inputs:
+                sid=self.sample_id(session,iid)
+                sample=db.execute('SELECT object_id,source FROM samples WHERE id=?',(sid,)).fetchone()
+                if sample is None: continue
+                old=db.execute('SELECT original_person,original_source,target FROM person_link_samples WHERE link=? AND sample=?',(link,sid)).fetchone()
+                if active:
+                    if old is None:
+                        before=(baselines or {}).get(iid,dict(object_id=sample[0],source=sample[1]))
+                        db.execute('INSERT INTO person_link_samples VALUES(?,?,?,?,?)',(link,sid,before.get('object_id','') if before else '',before.get('source','') if before else '',target))
+                    elif sample[0]!=old[2]:
+                        raise ValueError('声音样本已被其他标注修改，不能覆盖')
+                    if sample[0]!=target:
+                        db.execute("UPDATE samples SET object_id=?,source='manual' WHERE id=?",(target,sid));changed=True
+                elif old:
+                    if sample[0]!=old[2]: raise ValueError('声音样本已变化，撤销需要核对')
+                    if old[0]: db.execute('UPDATE samples SET object_id=?,source=? WHERE id=?',(old[0],old[1],sid))
+                    else: db.execute('DELETE FROM samples WHERE id=?',(sid,))
+                    changed=True
+            if changed:
+                self.put(db,'label_epoch',self.value(db,'label_epoch')+1)
+                self.put(db,'revision',self.value(db,'revision')+1)
 
     def relabel(self, sid, object_id):
         with self.connect() as db:

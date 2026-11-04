@@ -114,21 +114,22 @@ def test_self_report_keeps_unknown_actor_and_records_clue(process):
     updated, note = ids.introduce("A", "lux")
     assert updated.object_id == e.speaker.object_id != "lux-id"
     assert updated.label == "lux" and updated.status == "unknown"
-    assert "不迁移历史" in note
+    assert "后续使用" in note
     assert ids.resolve("A") == updated
     assert ids.resolve("B").object_id != updated.object_id
     event = process.repository.list_history("stone", HistoryKind.FACT)[-1]
     assert event.event_type == "voice_identity_clue"
     assert event.content["object_id"] == e.speaker.object_id
-    assert event.content["scope"] == "clue_only"
+    assert event.content["scope"] == "person_name"
 
 
 def test_same_name_is_not_automatically_bound(process):
     process.profiles.create(ObjectProfile("other-lux", "lux", status="confirmed"))
     e, ids = envelope(process)
     updated, note = ids.introduce("A", "lux")
-    assert updated == e.speaker
-    assert "多个" in note
+    assert updated.object_id == e.speaker.object_id
+    assert updated.label == "lux"
+    assert len(process.profiles.find_by_names("lux")) == 3
 
 
 def test_old_greeting_name_voiceprint_resolves_existing_lux(process):
@@ -136,7 +137,7 @@ def test_old_greeting_name_voiceprint_resolves_existing_lux(process):
         source='voice_self_introduction', status='provisional'))
     process.profiles.add_carrier('old-voice-name', CarrierEntry('voiceprint','local:model:old'))
     ids = VoiceIdentities(process.profiles, 'stone', 'session')
-    assert ids.resolve('0', voiceprint_id='local:model:old').object_id == 'lux-id'
+    assert ids.resolve('0', voiceprint_id='local:model:old').object_id == 'old-voice-name'
     assert process.profiles.get('old-voice-name').label == 'L U X 你好'
 
 
@@ -148,13 +149,14 @@ def test_final_speaker_revision_does_not_repeat_input():
     assert assembler.accept({'result':{'utterances':[{**u,'start_time':3000,'end_time':5000}]}})
 
 
-def test_old_voice_name_samples_do_not_compete_with_same_person(process,tmp_path):
+def test_legacy_spelling_does_not_merge_competing_voice_profiles(process,tmp_path):
     process.profiles.create(ObjectProfile('old-voice-name','L U X 你好',source='voice_self_introduction'))
     speakers=LocalSpeakers(None,'model',tmp_path/'voices.json',process.profiles)
     speakers.known={'old':{'object_id':'old-voice-name','embedding':[1.,0.]},
                     'lux':{'object_id':'lux-id','embedding':[1.,0.]}}
     speakers.embedding=lambda samples:[1.,0.]
-    assert speakers.identify([])[1].startswith('local:model:')
+    assert speakers.identify([])[1] == ''
+    assert {row['object_id'] for row in speakers.known.values()} == {'old-voice-name', 'lux-id'}
 
 
 def test_carrier_collision_is_rejected_and_device_is_not_voiceprint(process):

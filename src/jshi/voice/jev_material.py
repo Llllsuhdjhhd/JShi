@@ -94,6 +94,7 @@ def build_snapshot(payload, batch, delivery):
                 'state': {**payload.get('playback', {}), 'names': payload['input'].get('names', ['匠石']),
                           'now': payload.get('now'), 'time_basis': payload['input'].get('time_basis', '')},
                 'evidence': evidence, 'environment': environment,
+                'acquaintance': deepcopy(delivery.get('acquaintance', {})),
                 'media': envelope.get('parts', []), 'availability': availability,
                 'short_chat': short, 'waiting': waiting,
                 'task_context': deepcopy(payload.get('task_context', [])),
@@ -132,7 +133,7 @@ def task_context(process, subject_id, speakers, *, code_of=None):
 def entry_text(snapshot):
     return blocks([('当前输入', snapshot['lines']), ('当前现场·JEV2已编排', snapshot['scene']),
                    ('尚未编排的新事件', snapshot['events']), ('当前状态', snapshot['state']),
-                   ('人物证据', snapshot['evidence']), ('有效观察', snapshot['environment']),
+                   ('相识情况', snapshot.get('acquaintance', {})), ('人物证据', snapshot['evidence']), ('有效观察', snapshot['environment']),
                    ('媒体关联', snapshot['media']), ('相关任务', snapshot['task_context']),
                    ('材料范围', snapshot['scope'])])
 

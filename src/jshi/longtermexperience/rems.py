@@ -49,6 +49,22 @@ class RemsLongTermExperience:
                 general_limit=0,
             )
         )
+        entries=list(result.person)
+        links=getattr(self,'person_links',None)
+        if links is not None:
+            for link in links.links(subject_id):
+                if link['target'] not in ids: continue
+                recalled=self._module.recall(self._query_type(subject_id=subject_id,query=query,
+                    object_ids=(link['source'],),budget_chars=budget_chars,person_limit=1,general_limit=0))
+                for item in recalled.person:
+                    if links.project(subject_id,item.object_id,item.source_event_ids)==link['target']:
+                        from dataclasses import replace
+                        entries.append(replace(item,object_id=link['target']))
+        used=0
+        kept=[]
+        for item in entries:
+            if used+len(item.content)>budget_chars: continue
+            kept.append(item);used+=len(item.content)
         return tuple(
             PersonExperience(
                 object_id=item.object_id,
@@ -58,7 +74,7 @@ class RemsLongTermExperience:
                 updated_at=item.updated_at,
                 score=float(item.score),
             )
-            for item in result.person
+            for item in kept
         )
 
     def refresh_person_experience(

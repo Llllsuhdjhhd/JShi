@@ -68,12 +68,12 @@ class VoiceDialogue:
             loaded.append(subject)
             self._save()
 
-    def input(self, subject, event_id, text, label, at=None):
+    def input(self, subject, event_id, text, label, at=None, *, actor_id=""):
         with self.lock:
             rows = self.state['inputs']
             if not any(r['subject'] == subject and r['id'] == event_id for r in rows):
                 rows.append({'subject': subject, 'id': event_id, 'text': text, 'who': label,
-                             'at': at if at is not None else time()*1000})
+                             'at': at if at is not None else time()*1000, 'actor_id':actor_id})
                 self.state['inputs'] = rows[-256:]
                 self._save()
 
@@ -88,6 +88,19 @@ class VoiceDialogue:
                     'hide_until_played': bool(hide_until_played)})
                 self.state['replies'] = self.state['replies'][-128:]
                 self._save()
+
+    def link_inputs(self, subject, ids, target, label, *, link_id, active=True):
+        """A reversible projection; preserve the original label and actor."""
+        with self.lock:
+            for row in self.state['inputs']:
+                if row['subject'] != subject or row['id'] not in ids:
+                    continue
+                projection = row.setdefault('person_links', {})
+                if active:
+                    projection[link_id] = {'actor_id':target,'who':label}
+                else:
+                    projection.pop(link_id,None)
+            self._save()
 
     def revise_input(self, subject, event_ids, text):
         with self.lock:
@@ -125,7 +138,7 @@ class VoiceDialogue:
     def recent(self, subject, *, cutoff=None, exclude=()):
         cutoff = time()*1000 if cutoff is None else cutoff
         with self.lock:
-            rows = [{'who': r['who'], 'text': r['text'], 'at': r['at'], 'basis': '收到的原话'}
+            rows = [{'who': list(r.get('person_links', {}).values())[-1]['who'] if r.get('person_links') else r['who'], 'text': r['text'], 'at': r['at'], 'basis': '收到的原话'}
                     for r in self.state['inputs'] if r['subject'] == subject and r['id'] not in exclude
                     and 0 <= cutoff-r['at'] <= 300000]
             for r in self.state['replies']:

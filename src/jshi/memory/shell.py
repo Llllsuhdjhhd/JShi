@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from typing import Sequence
+from dataclasses import replace
 import logging
 import threading
 from jshi.core.params import reflection_param as param
@@ -69,6 +70,25 @@ class MemoryShell:
             level=level,
             anchor_event_ids=tuple(dict.fromkeys((*anchor_event_ids, *positive))),
         ))
+        links = getattr(self, 'person_links', None)
+        if links is not None:
+            requested = set(filter(None,(object_id,interlocutor_object_id,*object_ids)))
+            extra=[]
+            for link in links.links(subject_id):
+                if link['target'] not in requested: continue
+                candidates=self._backend.recall(subject_id,query,limit=expanded,
+                    object_id=link['source'],object_ids=(),interlocutor_object_id=None,
+                    level=level,anchor_event_ids=())
+                for item in candidates:
+                    if links.project(subject_id,item.object_id,item.source_ids)==link['target']:
+                        extra.append(replace(item,object_id=link['target'],
+                            interlocutor=link['target'] if item.interlocutor==link['source'] else item.interlocutor,
+                            query_object_role='interlocutor' if link['target']==interlocutor_object_id else 'involved'))
+            combined={}
+            for item in (*fragments,*extra):
+                projected=links.project(subject_id,item.object_id,item.source_ids)
+                combined[item.event_id]=replace(item,object_id=projected)
+            fragments=tuple(combined.values())
         cap = len(fragments) if limit is None else max(0, limit)
         # 保留后端相关度不变，以归一化排名为基线，有限的反馈只改最终顺序。
         if adjustments:
@@ -102,10 +122,13 @@ class MemoryShell:
 
     def prepare_recall(self, subject_id, query, object_id):
         """Explicit read-only backend capability; never falls back to reinforcing recall."""
+        if getattr(self,'person_links',None) is not None and self.person_links.links(subject_id):
+            return (), {'__person_links__':'refresh_required'}
         fn = getattr(self._backend, 'prepare_recall', None)
         return fn(subject_id, query, object_id) if callable(fn) else ((), {})
 
     def validate_prepared(self, versions):
+        if '__person_links__' in versions: return False
         fn = getattr(self._backend, 'validate_prepared', None)
         return bool(fn(versions)) if callable(fn) else not versions
 
@@ -114,7 +137,14 @@ class MemoryShell:
         return int(fn(subject_id)) if callable(fn) else 0
 
     def ingest_batch(self, batch: MemoryBatch) -> BackendIngestResult:
-        return self._backend.ingest_batch(batch)
+        result=self._backend.ingest_batch(batch)
+        links=getattr(self,'person_links',None)
+        if links is not None:
+            for item in batch.experiences:
+                links.provenance(batch.subject_id,item.segment_id,item.source_ids)
+                for event in result.stored_marks.get(item.segment_id,()):
+                    links.provenance(batch.subject_id,event,(item.segment_id,))
+        return result
 
     def portrait(self, subject_id: str, object_id: str) -> dict | None:
         """读取后端已形成的人物描述肖像。"""

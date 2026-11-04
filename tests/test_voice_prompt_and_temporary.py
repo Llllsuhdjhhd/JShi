@@ -120,7 +120,7 @@ def test_close_registered_and_temporary_matches_do_not_create_another_visitor(pr
     assert [oid for score, oid in speakers.rank_vector([1., 0., 0.])] == ['lux-id']
 
 
-def test_manual_enrollment_retires_only_selected_temporary_voice(process, tmp_path):
+def test_manual_enrollment_links_only_selected_inputs_and_keeps_source_voice(process, tmp_path):
     from jshi.voice.audio_buffer import SessionAudio
     from jshi.recognition import ObjectProfile
     async def run():
@@ -144,10 +144,11 @@ def test_manual_enrollment_retires_only_selected_temporary_voice(process, tmp_pa
             old_profile = process.profiles.get(old_id)
             await c.enroll_inputs([iid], 'lux')
             assert events[-1]['type'] == 'enrollment'
-            assert not any(e['object_id'] == old_id for e in speakers.known.values())
-            assert {e['object_id'] for e in speakers.known.values()} == {'lux-id', 'other-id'}
+            assert any(e['object_id'] == old_id for e in speakers.known.values())
+            assert {e['object_id'] for e in speakers.known.values()} == {'lux-id', 'other-id', old_id}
+            assert old_id not in c.identities.associations
             assert process.profiles.get(old_id) == old_profile
-            assert 'temp' not in speakers.tracks
+            assert 'temp' in speakers.tracks  # Preserve unselected continuity; selected input has its own annotation.
             assert c.scene[0].speaker.object_id == 'lux-id'
             metadata, _ = c.review_material(tuple(c.scene), ())
             assert '用户已手动将本句声音关联为' in metadata
@@ -167,9 +168,11 @@ def test_recognized_temporary_voice_can_introduce_its_existing_name(process):
     assert old.status == 'recognized'
     introduced, _ = ids.introduce('A', 'lux', cluster_id='temp')
     assert introduced.object_id == 'temp-id' and introduced.label == 'lux'
-    assert introduced.status == 'unknown'
+    assert introduced.status == old.status
     assert ids.associations['temp-id'].object_id == 'temp-id'
-    assert process.profiles.get('temp-id') == before
+    after = process.profiles.get('temp-id')
+    assert after.label == 'lux' and after.carriers == before.carriers
+    assert before.label in after.aliases
 
 
 def test_clear_anonymous_cluster_reaches_conversation_and_retains_internal_person(process, tmp_path):

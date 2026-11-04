@@ -555,6 +555,25 @@ class LocalSpeakers:
                 self.discard_pending(track)
             return bound
 
+    def withdraw_reference_inputs(self, object_id, session_id, input_ids):
+        """Withdraw only explicitly scoped references, retaining unrelated registrations."""
+        with self.lock:
+            changed=False
+            for key,entry in list(self.known.items()):
+                if entry.get('object_id')!=object_id: continue
+                rows=references(entry)
+                kept=[r for r in rows if not (r.get('session_id')==session_id and r.get('input_id') in input_ids)]
+                if len(kept)==len(rows): continue
+                changed=True
+                if kept:
+                    vector=_unit([sum(c)/len(kept) for c in zip(*(r['embedding'] for r in kept))])
+                    self.known[key]={**entry,'references':kept,'embedding':vector}
+                else: self.known.pop(key)
+            if changed:
+                self.binding.clear()
+                self.last_embedding.clear()
+                self._save_bank()
+
     def enroll_samples(self, clips, object_id: str, *, user_labeled: bool = False, sample_ids=None, session_id='') -> dict:
         """Trust explicit human labels; reserve consistency gates for unconfirmed samples."""
         import numpy as np

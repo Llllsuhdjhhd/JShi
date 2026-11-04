@@ -100,9 +100,8 @@ def test_name_question_answer_then_text_rename_preserves_person_and_voiceprint(p
     assert ids.name_answer(short,'小明。')=='小明'
     named,_=ids.introduce('cloud-0','小明',basis='name_answer',uncertain=True)
     assert named.object_id==visitor.object_id and not ids.name_questions
-    assert process.profiles.get(named.object_id).label.startswith('未命名访客')
-    # Manual confirmation precedes enrollment and archive rename.
-    process.profiles.rename(named.object_id, '小明')
+    assert process.profiles.get(named.object_id).label == '小明'
+    # Naming needs no manual confirmation; enrollment remains a separate operation.
     ids.associations.pop(named.object_id, None)
     s=LocalSpeakers(None,'test',tmp_path/'prints.json',process.profiles)
     s.embedding=lambda a:[1.,0.]

@@ -168,6 +168,8 @@
   <p id="text-status" class="tip" role="status" aria-live="polite">选择发言人物后即可发送。Enter 发送，Shift + Enter 换行。</p>
   </div></div></section>
   <section id="debug-workspace" class="debug-workspace" aria-labelledby="inspector-heading" hidden><header class="dialog-header"><div><h2 id="inspector-heading">设置与调试</h2><p>声音、数据与运行记录</p></div><div class="debug-toolbar"><button id="maximize-debug" class="secondary" aria-pressed="false">铺满</button><button id="close-inspector" class="secondary" aria-label="隐藏设置与调试">隐藏</button></div></header><nav class="debug-nav" aria-label="调试工作区"><button id="debug-settings-tab" aria-pressed="true">模型与声音</button><button id="debug-data-tab" aria-pressed="false">记录与数据</button></nav><div id="settings-pane"><aside class="inspector" id="inspector" aria-label="声音登记与检查">
+<details class="panel" id="person-links-panel"><summary>人物归属更正</summary><p class="tip">查看哪些发言后来确认属于某人。撤销只影响关联范围内的材料。</p><button type="button" class="secondary" id="refresh-person-links">刷新</button><div id="person-links-list" role="status">展开后查看</div></details>
+
   <details class="panel" open><summary>保存的数据</summary><p class="tip">查看历史记录，或按人物、任务与活动查找。</p><div class="data-shortcuts"><button id="open-memory">记忆与肖像</button><button id="open-work">工件与工具任务</button><button id="open-prompts">实际提示词</button><button id="open-timing">运行与耗时</button><button id="open-all-data" class="all-data">打开数据工作台 →</button></div></details>
   <div class="panel"><a href="/recent-audio" target="_blank" rel="noopener">最近录音 · 回听与排查</a><p class="tip">最近24小时、音频最多512 MB；停止对话后仍保留。</p><label><input type="checkbox" id="include-unplayed"> 把未播出的回复也放入上下文</label><p class="tip">默认关闭，只按播放器确认已播出的内容接续；开启后会注明哪些内容尚未播出。</p><span id="voice-context-status" role="status"></span></div>
   <details class="panel"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20v-2a7 7 0 0 1 14 0v2"/></svg>声音与姓名</summary>
@@ -225,6 +227,26 @@
   </aside></div><div id="data-pane" hidden><iframe id="data-frame" title="保存数据与调试工作台"></iframe></div></section></div></main><dialog id="media-view"><button id="close-media" type="button" class="secondary">关闭</button><video id="media-video" muted playsinline hidden></video><img id="media-large" alt="查看聊天图片"><p id="media-caption"></p></dialog>
 <script>
 const $ = id => document.getElementById(id);
+async function refreshPersonLinks(){
+ const host=$('person-links-list');
+ try{
+  const response=await fetch('/person-links',{cache:'no-store'});if(!response.ok)throw Error('读取失败');
+  const data=await response.json();host.replaceChildren();
+  if(!data.links.length){host.textContent='暂无人物归属更正';return;}
+  for(const item of data.links){
+   const row=document.createElement('p'),label=document.createElement('span');
+   const pending=item.jobs.some(j=>j.status!=='done');
+   label.textContent=item.source+' → '+item.target+' · '+item.inputs+'条发言 · '+(item.active?'已关联':'已撤销')+(pending?'，部分更新待完成':'');row.appendChild(label);
+   for(const [action,title] of (item.active?[['revoke','撤销关联'],...(pending?[['retry','重试更新']]:[])]:pending?[['retry','重试恢复']]:[])){
+    const button=document.createElement('button');button.className='secondary';button.textContent=title;
+    button.onclick=async()=>{button.disabled=true;try{const r=await fetch('/person-links',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,link_id:item.id})});if(!r.ok)throw Error(await r.text());await refreshPersonLinks();}catch(e){host.textContent='更新失败：'+e.message;}finally{button.disabled=false;}};row.appendChild(button);
+   }
+   host.appendChild(row);
+  }
+ }catch(e){host.textContent='读取失败：'+e.message;}
+}
+$('refresh-person-links').onclick=refreshPersonLinks;
+$('person-links-panel').addEventListener('toggle',()=>{if($('person-links-panel').open)refreshPersonLinks();});
 const messageScroll=$('message-scroll'), jumpLatest=$('jump-latest');
 let followLatest=true, scrollFrame=0, scrollbarDragging=false, dragScrollTop=0, lastAutoScrollTop=null;
 function nearLatest(){return messageScroll.scrollHeight-messageScroll.clientHeight-messageScroll.scrollTop<=48;}

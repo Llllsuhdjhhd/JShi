@@ -3,6 +3,7 @@ from dataclasses import replace
 import math
 import re
 from time import monotonic
+from uuid import uuid4
 
 
 from jshi.core.envelope import SpeakerEvidence
@@ -21,6 +22,29 @@ def internal_name(profiles) -> str:
     used = [int(m.group(1)) for p in profiles.list() for name in (p.label, *p.aliases)
             if (m := re.fullmatch(INTERNAL_PREFIX + r' (\d+)', name))]
     return f'{INTERNAL_PREFIX} {max(used, default=0) + 1}'
+
+
+def normalize_reported_name(name: str) -> str:
+    """Remove naming-answer particles, retaining the original utterance elsewhere."""
+    name = name.strip().strip('。！!，, ')
+    return re.sub(r'(?:就好|就行|即可)$', '', name).strip() or name
+
+
+def save_reported_name(profiles, state, subject, object_id, name, *, event_id, basis, **details):
+    """A name labels this person; duplicates never select or merge another person."""
+    name = normalize_reported_name(name)
+    duplicates = [p.object_id for p in profiles.find_by_names(name)
+                  if p.object_id != object_id and p.status != 'rejected']
+    if state is not None:
+        state.record(subject, event_id, object_id, 'reported_name',
+                     {'name': name, 'basis': basis, 'status': 'self_reported',
+                      'same_name_people': duplicates, **details})
+    profile = profiles.get(object_id)
+    if profile is None:
+        profiles.create(ObjectProfile(object_id, name, status='provisional', source='voice_anonymous'))
+    elif profile.label != name:
+        profiles.rename(object_id, name, keep_alias=True)
+    return name
 
 
 def name_correction(text: str, current: str, *, anonymous: bool) -> str:
@@ -49,14 +73,7 @@ def name_correction(text: str, current: str, *, anonymous: bool) -> str:
 
 
 def canonical_voice_profile(profiles, profile):
-    if profile.source == 'voice_self_introduction':
-        from .jev import explicit_name
-        name = explicit_name('我是 ' + profile.label)
-        if name and name != profile.label:
-            matches = [p for p in profiles.find_by_names(name)
-                       if p.object_id != profile.object_id and p.status != 'rejected']
-            if len(matches) == 1:
-                return matches[0]
+    # A legacy spelling artifact is not evidence that two voices are one person.
     return profile
 
 
@@ -71,6 +88,8 @@ class VoiceIdentities:
         self.clusters: dict[str, SpeakerEvidence] = {}
         self.associations: dict[str, SpeakerEvidence] = {}
         self.name_questions = {}
+        from jshi.recognition.acquaintance import AcquaintanceStore
+        self.acquaintance = AcquaintanceStore(repository.path) if repository is not None else None
         self.unassigned = SpeakerEvidence('unassigned', new_object_id(), '声音归属待定', 'unknown', 'unassigned_audio')
 
     def name_question_played(self, object_id, text):
@@ -78,6 +97,9 @@ class VoiceIdentities:
             profile = self.profiles.get(object_id)
             if profile and profile.source == 'voice_anonymous' and profile.label.startswith(INTERNAL_PREFIX):
                 self.name_questions[object_id] = monotonic()
+                if self.acquaintance is not None:
+                    self.acquaintance.record(self.subject_id, 'question:'+self.session_id+':'+object_id,
+                        object_id, 'name_question_played', {'text':text,'session':self.session_id})
 
     def name_answer(self, evidence, text):
         """A bare name is meaningful only as this person's answer to a played question."""
@@ -94,7 +116,7 @@ class VoiceIdentities:
         if asked is None or monotonic()-asked > 90:
             return ''
         answer = text.strip().strip('。！!，, ')
-        answer = re.sub(r'^(?:叫我|名字是|叫)\s*', '', answer)
+        answer = normalize_reported_name(re.sub(r'^(?:叫我|名字是|叫)\s*', '', answer))
         if re.match(r'^(?:我|你|他|她|我们|不|没|先|等|随便|好的|谢谢|今天|明天|现在)', answer):
             return ''
         if answer in {'不知道','不告诉你','不想说','随便','好的','你好','没有','不用','是的','不是','为什么','怎么了','听到了','听见了','不需要','谢谢'}:
@@ -103,18 +125,21 @@ class VoiceIdentities:
 
     def associated(self, evidence):
         linked = self.associations.get(evidence.object_id)
-        if linked:
+        if linked and linked.object_id == evidence.object_id:
+            evidence = replace(evidence, label=linked.label)
+        elif linked:
             evidence = replace(linked, track_id=evidence.track_id,
                 status='unknown', method='voice_continuity', confidence=None, voiceprint_id='') if evidence.method == 'voice_continuity' else replace(linked, track_id=evidence.track_id)
         if evidence.method == 'self_report' or (linked and linked.method == 'self_report'):
             return evidence
         profile = self.profiles.get(evidence.object_id)
+        if self.acquaintance is not None:
+            reported = self.acquaintance.context(self.subject_id,evidence.object_id)['reported_name']
+            if reported and (profile is None or profile.label.startswith(INTERNAL_PREFIX)):
+                return replace(evidence,label=reported)  # A usable address, not confirmed identity.
         return replace(evidence, label=profile.label) if profile else evidence
 
     def canonical(self, profile):
-        # Earlier self-introduction parsing could register "L U X 你好".
-        # Resolve this specific greeting/name artifact without deleting memories
-        # or moving voiceprint registrations between stored profiles.
         return canonical_voice_profile(self.profiles, profile)
 
     def resolve(self, track_id: str, *, voiceprint_id: str = "", confidence: float | None = None, cluster_id: str = "", uncertain: bool = False, tentative: bool = False, local_confirmation_threshold: float | None = None) -> SpeakerEvidence:
@@ -141,6 +166,7 @@ class VoiceIdentities:
                 profile = self.canonical(profile)
                 evidence = SpeakerEvidence(track_id, profile.object_id, profile.label,
                     "recognized", "voiceprint_match", confidence, voiceprint_id)
+                evidence = self.associated(evidence)
                 self.tracks[track_id] = evidence
                 if cluster_id:
                     old = self.clusters.get(cluster_id)
@@ -179,22 +205,26 @@ class VoiceIdentities:
             self.tracks[track_id] = evidence
         return evidence
 
-    def introduce(self, track_id: str, name: str, *, basis: str = 'explicit_self_introduction', cluster_id: str = '', uncertain: bool = False) -> tuple[SpeakerEvidence, str]:
+    def introduce(self, track_id: str, name: str, *, basis: str = 'explicit_self_introduction', cluster_id: str = '', uncertain: bool = False, input_id: str = '') -> tuple[SpeakerEvidence, str]:
+        name = normalize_reported_name(name)
         old = self.resolve(track_id, cluster_id=cluster_id, uncertain=uncertain)
         if basis == 'name_answer' and old.method == 'unassigned_audio':
             previous = self.tracks.get(track_id)
             if previous and monotonic()-self.name_questions.get(previous.object_id, -1e20) <= 8:
                 old = previous
         if basis != 'manual_selection':
-            matches = [p for p in self.profiles.find_by_names(name) if p.status != 'rejected']
-            if len(matches) > 1:
-                return old, '这个称呼对应多个已有对象，需要进一步确认；不自动关联。'
             if old.status in {'recognized', 'introduced'} and not (self.profiles.get(old.object_id) and self.profiles.get(old.object_id).source == 'voice_anonymous'):
                 known = self.profiles.get(old.object_id)
                 if known and name not in (known.label, *known.aliases):
                     return old, "自报姓名与入口归属冲突，保留两种证据，待礼貌核对。"
                 return old, "自报姓名与当前声纹归属一致；不更改档案。"
-            updated = replace(old, label=matches[0].label if len(matches) == 1 else name, status='unknown', method='self_report')
+            # A reported name belongs to this temporary person, never to a same-name stranger.
+            if old.method != 'unassigned_audio':
+                name = save_reported_name(self.profiles, self.acquaintance, self.subject_id,
+                    old.object_id, name, event_id='name:'+self.session_id+':'+old.object_id+':'+(input_id or uuid4().hex),
+                    basis=basis, session=self.session_id, input_id=input_id)
+            # Naming changes neither acoustic evidence nor the person's stable key.
+            updated = replace(old, label=name)
             if old.method != 'unassigned_audio':
                 self.tracks[track_id] = updated
                 self.associations[old.object_id] = updated
@@ -206,8 +236,9 @@ class VoiceIdentities:
                     subject_id=self.subject_id, kind=HistoryKind.FACT,
                     event_type='voice_identity_clue',
                     content={'session_id': self.session_id, 'object_id': old.object_id,
-                             'reported_name': name, 'basis': basis, 'scope': 'clue_only'}, source_ids=()))
-            return updated, f"对方自报称呼{name}，可以这样称呼；仍保留独立内部编号，不迁移历史、不登记声纹。"
+                             'reported_name': name, 'basis': basis, 'scope': 'person_name'}, source_ids=()))
+            return updated, (f"本句自报称呼{name}；声音归属待定，不迁移历史。" if old.method == "unassigned_audio"
+                             else f"对方称呼为{name}，后续使用这个称呼。")
         matches = tuple(p for p in self.profiles.find_by_names(name) if p.status != "rejected")
         # A known voice can have several names, including a name shared by others.
         # Self-introducing another name does not move its voiceprint to that person.
@@ -253,10 +284,9 @@ class VoiceIdentities:
 
     def rename(self, object_id: str, name: str, previous: str, *, basis: str) -> SpeakerEvidence:
         """Correct a name in place; person id, voiceprints and memories stay linked."""
-        others = [p for p in self.profiles.find_by_names(name) if p.object_id != object_id and p.status != 'rejected']
-        if others:
-            raise ValueError(f'已有另一个叫 {name} 的人物，不自动合并；请到登记页确认是否同一人')
         profile = self.profiles.rename(object_id, name, expected_label=previous, keep_alias=True)
+        save_reported_name(self.profiles, self.acquaintance, self.subject_id, object_id, name,
+            event_id='rename:'+self.session_id+':'+object_id+':'+uuid4().hex, basis=basis)
         for table in (self.tracks, self.clusters, self.associations):
             for key, evidence in table.items():
                 if evidence.object_id == object_id:
@@ -287,3 +317,19 @@ def attach_voiceprint(profiles, object_id: str, voiceprint_id: str) -> None:
     if profile is None:
         raise ValueError("unknown object for voiceprint")
     profiles.add_carrier(object_id, CarrierEntry("voiceprint", f"volc:{voiceprint_id}", "volc_registration"))
+
+
+def typed_name_answer(process, subject, evidence, text):
+    """Use an actually delivered, recent naming question; a bare word is not a name otherwise."""
+    from time import time
+    from jshi.recognition.acquaintance import acquaintance_store
+    state=acquaintance_store(process)
+    questions=[r for r in state.events(subject,evidence.object_id)
+        if r['kind'] in {'name_question_played','name_question_sent'} and 0<=time()-r['at']<=90]
+    if not questions: return ''
+    last_question=max(q['at'] for q in questions)
+    if any(r['kind'] in {'reported_name','name_declined'} and r['at']>=last_question
+           for r in state.events(subject,evidence.object_id)): return ''
+    identities=VoiceIdentities(process.profiles,subject,'typed-name',process.repository)
+    identities.name_questions[evidence.object_id]=monotonic()
+    return identities.name_answer(evidence,text)
