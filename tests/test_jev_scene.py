@@ -339,3 +339,21 @@ def test_background_notification_does_not_shift_filtered_batch_judgments(process
         finally:
             await c.close()
     asyncio.run(run())
+def test_atomic_scene_save_retries_transient_windows_sharing_denial(tmp_path, monkeypatch):
+    from pathlib import Path
+    import json
+    from jshi.voice.jev_scene import JEVSceneStore
+    path = tmp_path / 'scene.json'
+    store = JEVSceneStore(path)
+    original = Path.replace
+    attempts = []
+    def replace(source, target):
+        attempts.append(target)
+        if len(attempts) == 1:
+            raise PermissionError('temporary sharing denial')
+        return original(source, target)
+    monkeypatch.setattr(Path, 'replace', replace)
+    store.append('input', {'text':'前半句', 'at':1})
+    assert len(attempts) == 2
+    assert json.loads(path.read_text(encoding='utf-8'))['events'][0]['payload']['text'] == '前半句'
+

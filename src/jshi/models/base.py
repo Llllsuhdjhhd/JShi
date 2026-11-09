@@ -108,6 +108,8 @@ class ModelRequest:
     json_output: bool = False
     preparation_context: str = ''  # Ephemeral, unspoken candidate; full current input remains authoritative.
     light_finalize: bool = False
+    # Brief L3 exchanges: same prompt and schema, lowest thinking the model allows.
+    thinking_off: bool = False
     # Host-only round-trip mapping; never serialized as prompt material.
     person_name_codes: tuple[tuple[str, str], ...] = ()
 
@@ -476,6 +478,15 @@ def iter_top_level_json_values(chunks: Iterator[str]) -> Iterator[tuple[str, str
             idx = value_end
 
 
+def finish_stream(chunks: Iterator[str]) -> None:
+    """Read past the closed JSON so the provider's final usage event is still recorded."""
+    try:
+        for _ in chunks:
+            pass
+    except Exception:
+        pass
+
+
 def _verbal_text(plan: Mapping[str, Any]) -> str:
     """从 ``response_plan`` 段取口头文本;非 respond 或空则返回空串。"""
     mode = (plan.get("mode") or "").strip()
@@ -577,7 +588,7 @@ def _chat_payload(
 ) -> bytes:
     """Chat Completions 请求体。思考档位见 ``model_thinking_fields``。"""
     from jshi.models.prompt import build_system, build_user
-    if request.light_finalize and thinking is not None:
+    if (request.light_finalize or request.thinking_off) and thinking is not None:
         thinking = 'disabled'
 
     body: dict[str, Any] = {

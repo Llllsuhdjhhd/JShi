@@ -63,6 +63,23 @@ class ExperienceSegment:
     status: SegmentStatus = SegmentStatus.ACCEPTED
 
 
+DELIVERY_PLANNED_AUDIO = "planned_audio"
+DELIVERY_PLAYED = "played"
+_DELIVERY_LABELS = {DELIVERY_PLANNED_AUDIO: "（准备说，未确认播出）", DELIVERY_PLAYED: "（已播）"}
+
+
+def segment_delivery(segment: object) -> str:
+    state = getattr(segment, "state_delta", None)
+    return str(state.get("delivery") or "") if isinstance(state, Mapping) else ""
+
+
+def segment_view_text(segment: object) -> str:
+    """Delivery state lives beside the words; it is labelled only when shown to a model."""
+    text = str(getattr(segment, "text_raw", "") or "")
+    label = _DELIVERY_LABELS.get(segment_delivery(segment), "")
+    return label + text if text and label else text
+
+
 @dataclass(frozen=True)
 class ContextViewState:
     version: int = 0

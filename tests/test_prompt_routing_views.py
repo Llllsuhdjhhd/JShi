@@ -41,6 +41,9 @@ def test_memory_switch_keeps_scene_and_person_reference(process):
     calls=[{'input_ids':['a'],'main_prompt_hint':{'level':3,'recall_memory':False}},
            {'input_ids':['b'],'main_prompt_hint':{'level':2,'recall_memory':True}}]
     assert select_profile(['a','b'],calls)==PromptProfile(2,recall_memory=True)
+    calls=[{'input_ids':['a'],'main_prompt_hint':{'level':3,'recall_memory':True,'recall_query':' 上周的出行约定 '}},
+           {'input_ids':['b'],'main_prompt_hint':{'level':3,'recall_memory':False,'recall_query':'不该带上'}}]
+    assert select_profile(['a','b'],calls).recall_query=='上周的出行约定'
 
 
 def test_three_portrait_views_are_validated_persisted_and_invalidated(tmp_path):

@@ -66,6 +66,11 @@ class VoiceConfig:
     qwen_asr_model: str = ''
     qwen_asr_timeout_s: float = 60.0
     qwen_asr_batch_size: int = 8
+    # off: 6s acoustic precompute only; shadow: 1s rolling evidence without recovery;
+    # active: 1s rolling evidence plus boundary recovery feeds input.
+    continuous_analysis: str = 'active'
+    # Utterance continuation records enter JEV and main cognition only when enabled.
+    utterance_material: bool = False
 
     def __post_init__(self) -> None:
         from .segmentation import SEGMENT_POLICIES
@@ -129,6 +134,8 @@ class VoiceConfig:
             raise ValueError("JSHI_VOICE_CANDIDATE_TIMEOUT_MS must be between 100 and 5000")
         if not 1 <= self.jev_timeout_s <= 20:
             raise ValueError("JSHI_VOICE_JEV_TIMEOUT_MS must be between 1000 and 20000")
+        if self.continuous_analysis not in {'off', 'shadow', 'active'}:
+            raise ValueError('JSHI_VOICE_CONTINUOUS_ANALYSIS须为off、shadow或active')
 
     @classmethod
     def from_env(cls, *, asr: str | None = None, tts: str | None = None) -> VoiceConfig:
@@ -150,7 +157,12 @@ class VoiceConfig:
         diarize = os.getenv('JSHI_DEEPGRAM_DIARIZE', 'true').strip().lower()
         if diarize not in {'true','false','1','0','on','off'}:
             raise ValueError('JSHI_DEEPGRAM_DIARIZE必须为true或false')
+        material = os.getenv('JSHI_VOICE_UTTERANCE_MATERIAL', 'off').strip().lower()
+        if material not in {'true','false','1','0','on','off'}:
+            raise ValueError('JSHI_VOICE_UTTERANCE_MATERIAL必须为on或off')
         return cls(
+            continuous_analysis=os.getenv('JSHI_VOICE_CONTINUOUS_ANALYSIS', 'active').strip().lower(),
+            utterance_material=material in {'true','1','on'},
             api_key=key,
             bailian_asr_api_key=bailian_key,
             bailian_asr_url=os.getenv('JSHI_BAILIAN_ASR_URL', 'wss://dashscope.aliyuncs.com/api-ws/v1/inference').strip(),

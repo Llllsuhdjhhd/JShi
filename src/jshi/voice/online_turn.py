@@ -11,7 +11,8 @@ class OnlineTurnGate:
                  urgent=lambda: False, timeout_s=.6, max_hold_s=2):
         self.audio, self.detector, self.accept = audio, detector, accept
         self.report, self.urgent = report, urgent
-        self.coordinator = TurnCoordinator(policy, timeout_s=timeout_s, max_hold_s=max_hold_s)
+        self.coordinator = TurnCoordinator(policy, timeout_s=timeout_s, max_hold_s=max_hold_s,
+                                           audio_source=audio.segment)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='jshi-online-turn')
         self.lock = asyncio.Lock()
         self.closed = False

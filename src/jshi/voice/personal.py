@@ -162,14 +162,21 @@ class PersonalSpeakers:
         vectors, durations = [], []
         for piece in pieces:
             values = np.frombuffer(piece, dtype='<i2').astype('float32') / 32768
-            # Use the extractor directly: preserve the original embedding() length policy.
-            with speakers.lock:
-                stream = speakers.extractor.create_stream()
-                stream.accept_waveform(sample_rate=16000, waveform=values)
-                stream.input_finished()
-                if not speakers.extractor.is_ready(stream):
+            # Both decisions start together; the common feature extraction runs
+            # once. MLP scoring never holds the voice bank/identity lock.
+            if hasattr(speakers, 'raw_embedding'):
+                raw = speakers.raw_embedding(values)
+                if raw is None:
                     raise ValueError('当前特征模型不能处理这段真实长度的声音；没有重复补长')
-                vector = normalize(speakers.extractor.compute(stream))
+                vector = normalize(raw)
+            else:
+                with speakers.lock:
+                    stream = speakers.extractor.create_stream()
+                    stream.accept_waveform(sample_rate=16000, waveform=values)
+                    stream.input_finished()
+                    if not speakers.extractor.is_ready(stream):
+                        raise ValueError('当前特征模型不能处理这段真实长度的声音；没有重复补长')
+                    vector = normalize(speakers.extractor.compute(stream))
             vectors.append(vector.tolist())
             durations.append(len(piece) / 32000)
         if len({len(v) for v in vectors}) != 1:

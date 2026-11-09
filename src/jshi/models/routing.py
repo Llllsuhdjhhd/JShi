@@ -7,7 +7,7 @@ import re
 from threading import RLock
 from urllib.error import HTTPError
 from urllib.error import URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import Request
 
 from jshi.models.http_pool import urlopen
@@ -30,10 +30,37 @@ class ProviderModel:
     # routes (write_zone / introspection) pass a higher timeout explicitly.
     DEFAULT_TIMEOUT_S = 7.0
 
-    def __init__(self, service, model, effort='low', max_tokens=None, timeout=None):
+    def __init__(self, service, model, effort='low', max_tokens=None, timeout=None, route=''):
         self.service, self.name, self.effort = dict(service), model, effort
         self.max_tokens = max_tokens
         self.timeout = self.DEFAULT_TIMEOUT_S if timeout is None else float(timeout)
+        self.route = route
+
+    def _with_timeout(self, timeout):
+        return ProviderModel(self.service, self.name, self.effort, self.max_tokens, timeout=timeout, route=self.route)
+
+    def _lowest_effort(self):
+        if self.name.startswith('gemini-3'):
+            return 'low' if self.name == 'gemini-3.8-flash' else 'minimal'
+        return 'off'
+
+    def _for_request(self, request):
+        """L3 requests keep prompt and schema; only thinking drops to the model's lowest level."""
+        if not getattr(request, 'thinking_off', False) or self.effort == self._lowest_effort():
+            return self
+        return ProviderModel(self.service, self.name, self._lowest_effort(), self.max_tokens,
+                             timeout=self.timeout, route=self.route)
+
+    def _log(self, started, response, *, purpose, stream, usage=None, error=None):
+        from .call_log import record, usage_fields
+        transport = getattr(response, 'transport', None) or {}
+        record({'route': self.route, 'purpose': purpose, 'service': self.service.get('label', ''),
+                'model': self.name, 'effort': self.effort, 'stream': stream, 'status': 'error' if error else 'ok',
+                **({'error_type': error} if error else {}),
+                'reused': transport.get('reused'), 'connect_ms': transport.get('connect_ms'),
+                'headers_ms': transport.get('headers_ms'), 'idle_s': transport.get('idle_s'),
+                'stale_retry': transport.get('stale_retry'),
+                'total_ms': round((monotonic() - started) * 1000, 1), **usage_fields(usage)})
 
     def _payload(self, messages, stream=False, max_tokens=None, response_format=None):
         service = self.service
@@ -75,6 +102,8 @@ class ProviderModel:
             headers = {'x-goog-api-key':service['api_key']}
         else:
             body = {'model':self.name,'messages':messages,'stream':stream}
+            if stream and 'deepseek.com' in (urlsplit(service['endpoint']).hostname or ''):
+                body['stream_options'] = {'include_usage': True}
             if response_format:
                 body['response_format'] = {'type': response_format}
             if service.get('thinking_style')=='qwen':
@@ -130,9 +159,16 @@ class ProviderModel:
             return ''.join(p.get('text','') for p in (result.get('candidates') or [{}])[0].get('content',{}).get('parts',[]) if not p.get('thought'))
         return (result.get('choices') or [{}])[0].get('message',{}).get('content','')
 
-    def chat(self, messages, max_tokens=None, *, response_format=None):
-        with self._open(self._payload(messages,max_tokens=max_tokens, response_format=response_format)) as response:
-            result = json.load(response)
+    def chat(self, messages, max_tokens=None, *, response_format=None, purpose=''):
+        started, response = monotonic(), None
+        try:
+            with self._open(self._payload(messages,max_tokens=max_tokens, response_format=response_format)) as response:
+                result = json.load(response)
+        except BaseException as exc:
+            self._log(started, response, purpose=purpose, stream=False, error=type(exc).__name__)
+            raise
+        self._log(started, response, purpose=purpose, stream=False,
+                  usage=result.get('usageMetadata') or result.get('usage'))
         text = self._text(result)
         if not text: raise RuntimeError('模型未返回正文，可能被拦截或输出被截断')
         if not response_format and not text.lstrip().startswith(('{', '[')):
@@ -155,28 +191,43 @@ class ProviderModel:
         if getattr(request, 'light_finalize', False):
             from dataclasses import replace
             effort = 'low' if self.service['protocol'] == 'gemini' else 'off'
-            return ProviderModel(self.service, self.name, effort, self.max_tokens, self.timeout).generate(
+            return ProviderModel(self.service, self.name, effort, self.max_tokens, self.timeout, self.route).generate(
                 replace(request, light_finalize=False))
+        model = self._for_request(request)
+        if model is not self:
+            return model.generate(request)
         if deepseek_json_output(request, self.name) and self.service['protocol'] != 'gemini':
             return self.chat(self._messages(request),
                              max_tokens=self.max_tokens or (8192 if request.purpose.startswith('voice_jev') else None),
-                             response_format='json_object')
-        return self.chat(self._messages(request))
+                             response_format='json_object', purpose=request.purpose)
+        return self.chat(self._messages(request), purpose=request.purpose)
 
     def generate_stream(self, request):
+        model = self._for_request(request)
+        if model is not self:
+            yield from model.generate_stream(request)
+            return
         options = ({'response_format': 'json_object',
                     'max_tokens': self.max_tokens or (8192 if request.purpose.startswith('voice_jev') else None)}
                    if deepseek_json_output(request, self.name) and self.service['protocol'] != 'gemini' else {})
-        with self._open(self._payload(self._messages(request),stream=True, **options)) as response:
-            for line in response:
-                line = line.decode('utf8').strip()
-                if not line.startswith('data:'): continue
-                data = line[5:].strip()
-                if data=='[DONE]': break
-                event = json.loads(data)
-                if self.service['protocol']=='gemini': text = self._text(event)
-                else: text = (event.get('choices') or [{}])[0].get('delta',{}).get('content','')
-                if text: yield text
+        started, response, usage, error = monotonic(), None, None, None
+        try:
+            with self._open(self._payload(self._messages(request),stream=True, **options)) as response:
+                for line in response:
+                    line = line.decode('utf8').strip()
+                    if not line.startswith('data:'): continue
+                    data = line[5:].strip()
+                    if data=='[DONE]': break
+                    event = json.loads(data)
+                    usage = event.get('usageMetadata') or event.get('usage') or usage
+                    if self.service['protocol']=='gemini': text = self._text(event)
+                    else: text = (event.get('choices') or [{}])[0].get('delta',{}).get('content','')
+                    if text: yield text
+        except BaseException as exc:
+            error = 'cancelled' if isinstance(exc, GeneratorExit) else type(exc).__name__
+            raise
+        finally:
+            self._log(started, response, purpose=request.purpose, stream=True, usage=usage, error=error)
 
 
 def _model_name(model):
@@ -202,8 +253,7 @@ class _TimeoutBound:
     def generate(self, request):
         model = self._model
         if isinstance(model, ProviderModel):
-            return ProviderModel(model.service, model.name, model.effort, model.max_tokens,
-                                timeout=self.timeout).generate(request)
+            return model._with_timeout(self.timeout).generate(request)
         previous = getattr(model, 'timeout', None)
         if previous is not None:
             model.timeout = self.timeout
@@ -225,7 +275,7 @@ def _cap_model_timeout(model, remaining_s):
     if capped <= 0:
         raise ProviderFailure(408, True, 'JEV gate', 'wall-clock budget exhausted')
     if isinstance(model, ProviderModel):
-        return ProviderModel(model.service, model.name, model.effort, model.max_tokens, timeout=capped)
+        return model._with_timeout(capped)
     return _TimeoutBound(model, capped)
 
 

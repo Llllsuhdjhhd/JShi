@@ -10,7 +10,8 @@ from pathlib import Path
 
 SUBJECT_TABLES = {'histories': '输入输出与事件', 'activities': '主流程活动',
     'cognitive_contents': '认知内容', 'personal_items': '个人世界',
-    'object_profiles': '人物档案', 'transitions': '状态变更', 'experience_ledger': '经历账本'}
+    'object_profiles': '人物档案', 'transitions': '状态变更', 'experience_segments': '经历账本 · 逐段',
+    'experience_ingest': '经历账本 · 记忆入库', 'experience_ledger': '经历账本 · 游标与现场'}
 MEMORY_TABLES = {'events': '长期记忆', 'object_portraits': '人物肖像',
     'portrait_summaries': '肖像摘要', 'object_traits': '人物特征',
     'object_states': '人物状态', 'object_dispositions': '人物倾向',
@@ -176,7 +177,7 @@ class WebData:
                     args.extend(['%' + escaped + '%'] * len(columns))
                 where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
                 total = conn.execute(f'SELECT count(*) FROM "{table}"{where}', args).fetchone()[0]
-                order = next((k for k in ('sequence', 'created_at', 'create_time', 'updated_at', 'id', 'event_id') if k in columns), columns[0])
+                order = next((k for k in ('sequence', 'position', 'created_at', 'create_time', 'updated_at', 'id', 'event_id') if k in columns), columns[0])
                 rows = [dict(r) for r in conn.execute(f'SELECT * FROM "{table}"{where} ORDER BY "{order}" DESC LIMIT ? OFFSET ?',
                                                     [*args, size, page*size])]
                 rows = [{k: unpack(v) for k, v in row.items()} for row in rows]

@@ -7,6 +7,8 @@ import math
 
 
 SUPPORT_BANDS = ('强不支持', '不支持', '区分不明显', '支持', '强支持')
+# Short replies use only current speech and general knowledge when the person is tentative.
+SHORT_REPLY_LEVELS = frozenset({'确定', '可能'})
 
 
 def support_evidence(candidate):
@@ -48,21 +50,35 @@ def blocks(parts):
 
 def build_snapshot(payload, batch, delivery):
     """Payload has already been compacted ONCE; both stages reuse its aliases."""
-    lines, evidence = [], []
+    lines, evidence, shared, first_of = [], [], {}, {}
     for row, original in zip(payload['input']['lines'], batch):
         lines.append({k: deepcopy(v) for k, v in row.items()
                       if k not in {'voice', 'candidates', 'voice_ranking', 'joint_evidence'}})
         voice = row.get('voice', {})
-        item = {'ref': row['evidence_ref'],
-                'voice': {k: voice[k] for k in ('pick', 'strength', 'basis', 'measurement') if k in voice},
-                'candidates': [support_evidence(c) for c in original.get('candidates', [])]}
+        candidates = original.get('candidates', [])
+        for c in candidates:
+            if c.get('source') == 'scene':
+                shared.setdefault(c.get('who', c.get('p')), support_evidence(c))
+        brief = {k: voice[k] for k in ('pick', 'strength', 'basis', 'measurement') if k in voice}
+        brief.update({k: round(voice[k], 3) for k in ('score', 'threshold', 'gap', 'margin')
+                      if type(voice.get(k)) in (int, float) and math.isfinite(voice[k])})
+        item = {'ref': row['evidence_ref'], 'voice': brief,
+                'candidates': [support_evidence(c) for c in candidates if c.get('source') != 'scene']}
         joint = row.get('joint_evidence', {})
         if joint:
             item['joint'] = {k: joint[k] for k in ('state', 'voice_reliable', 'mlp_high', 'mlp_priority') if k in joint}
             for kind in ('voice', 'mlp'):
                 if joint.get(kind, {}).get('p'):
                     item['joint'][kind] = {'p': joint[kind]['p']}
+        key = json_text({k: v for k, v in item.items() if k != 'ref'})
+        if key in first_of:
+            item = {'ref': item['ref'], 'same_as': first_of[key]}
+        else:
+            first_of[key] = item['ref']
         evidence.append(item)
+    if shared:
+        evidence.insert(0, {'scope': 'batch', 'basis': '片场提到的人物，各句共用；不是本句声音证据',
+                            'candidates': list(shared.values())})
     # Keep each real event once. Stable E references win over local C references.
     events, seen, size, deferred = [], set(), 0, 0
     for row in [*payload['input'].get('unwritten', []), *payload.get('conversation', [])]:
@@ -102,6 +118,10 @@ def build_snapshot(payload, batch, delivery):
     if deferred:
         snapshot['scope']['unprovided_events'] = deferred
         snapshot['scope']['note'] = '超预算事件仍保留程序队列，未据此声称已经理解'
+    if payload.get('utterance_context'):
+        snapshot['state']['utterance_context'] = deepcopy(payload['utterance_context'])
+    if delivery.get('answer_handling'):
+        snapshot['state']['answer_handling'] = delivery['answer_handling']
     return snapshot
 
 
@@ -154,9 +174,18 @@ def preparation_text(snapshot, entry):
                  if row['evidence_ref'] == f"I{item['i']}" and item.get('certainty') == 'confirmed'
                  and row.get('p') == item['person'] and row.get('name')]
     direct = entry.get('interaction') == 'direct'
+    short = snapshot['short_chat'] if direct else {'allowed': False}
+    if short.get('person') and any(item.get('certainty') != 'confirmed' for item in preparation_entry['items']
+                                   if f'I{item["i"]}' in selected):
+        short = {**{k: v for k, v in short.items() if k != 'person'},
+                 'person': None, 'reason': '人物暂定，仅可用当前材料或通用知识短答，不用人物材料'}
     return blocks([('可用称呼', addresses), ('入口结论', preparation_entry), ('本次处理原话', lines),
-                   ('当前现场与新事件', {'scene': snapshot['scene'], 'events': snapshot['events']}),
-                   ('处理许可与材料可用性', {'short_chat': snapshot['short_chat'] if direct else {'allowed': False},
+                   ('当前现场与新事件', {'scene': snapshot['scene'], 'events': snapshot['events'],
+                    **({'answer_handling': snapshot['state']['answer_handling']}
+                       if snapshot.get('state', {}).get('answer_handling') else {}),
+                    **({'utterance_context': snapshot['state']['utterance_context']}
+                       if snapshot.get('state', {}).get('utterance_context') else {})}),
+                   ('处理许可与材料可用性', {'short_chat': short,
                     'waiting': snapshot['waiting'] if direct else {'allowed': False}, 'activity_state': snapshot.get('state', {}).get('state', 'unknown'),
                     **snapshot['availability']}),
                    ('有效观察', snapshot['environment']), ('相关任务', snapshot['task_context']),

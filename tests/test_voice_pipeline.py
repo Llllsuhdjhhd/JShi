@@ -69,10 +69,15 @@ def test_pipeline_injects_independent_analysis_and_transcriber():
 def test_analysis_runs_without_any_text_model_and_preserves_overlap():
     spans = [SimpleNamespace(start=0, end=2, speaker=0), SimpleNamespace(start=1, end=3, speaker=1)]
     engine = SimpleNamespace(process=lambda _: SimpleNamespace(sort_by_start_time=lambda: spans))
-    speakers = SimpleNamespace(identify=lambda _: pytest.fail('mixed audio must not identify'))
+    measured = []
+    def identify(audio):
+        measured.append(len(audio))
+        return 'clean', 'person', .8
+    speakers = SimpleNamespace(identify=identify)
     rows = SpeakerAnalyzer(engine, speakers).analyze(np.zeros(48000), 8000)
-    assert [(r.start_ms, r.end_ms, r.overlap) for r in rows] == [(8000, 10000, True), (9000, 11000, True)]
-    assert all(not r.voiceprint_id for r in rows)
+    assert [(r.start_ms, r.end_ms, r.overlap) for r in rows] == [(8000, 9000, False), (9000, 10000, True), (9000, 10000, True), (10000, 11000, False)]
+    assert measured == [16000,16000]
+    assert all(not r.voiceprint_id for r in rows if r.overlap)
 
 
 def test_alternate_embedding_model_uses_shared_contract():

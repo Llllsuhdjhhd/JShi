@@ -22,8 +22,11 @@ def normalize_hint(value):
         return {}
     if value.get("main_image", "omit") not in ("omit", "include"):
         return {}
+    query = value.get("recall_query", "")
+    query = query.strip()[:40] if isinstance(query, str) else ""
     return {"level": value["level"], "needs": list(dict.fromkeys(needs)),
             **({"recall_memory": value["recall_memory"]} if "recall_memory" in value else {}),
+            **({"recall_query": query} if query and value.get("recall_memory") is True else {}),
             **({"main_image": value["main_image"]} if "main_image" in value else {})}
 
 
@@ -33,6 +36,7 @@ class PromptProfile:
     modules: tuple[str, ...] = ()
     recall_memory: bool = True
     main_image: str = "omit"
+    recall_query: str = ""
 
     @property
     def scene_view(self):
@@ -71,4 +75,5 @@ def select_profile(input_ids, calls):
     if not expected or covered != expected:
         return PromptProfile()
     return PromptProfile(min(h["level"] for h in hints), recall_memory=any(h.get("recall_memory", True) for h in hints),
-                         main_image="include" if any(h.get("main_image") == "include" for h in hints) else "omit")
+                         main_image="include" if any(h.get("main_image") == "include" for h in hints) else "omit",
+                         recall_query="\n".join(dict.fromkeys(h["recall_query"] for h in hints if h.get("recall_query"))))

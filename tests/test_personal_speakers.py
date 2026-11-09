@@ -46,6 +46,25 @@ def speakers():
     return SimpleNamespace(extractor=Extractor(), lock=RLock(), model_id='fixture-encoder')
 
 
+def test_input_worker_starts_voice_candidates_before_mlp_completes(process):
+    async def run():
+        entered=asyncio.Event()
+        async def send(value):pass
+        c=VoiceConversation(process,'stone',FakeCloud(),send,input_pause_s=.01)
+        async def personal(t,e,*,wait=True):
+            if wait:await asyncio.wait_for(entered.wait(),1)
+            return e
+        async def candidates(t,e):entered.set();return [],'parallel_test'
+        c.personal_identity=personal
+        c.rank_candidates=candidates
+        try:
+            await c.accept(Transcript('你好','unidentified-a',0,1000,True))
+            await asyncio.wait_for(c.queue.join(),3)
+            assert entered.is_set() and c.scene
+        finally:await c.close()
+    asyncio.run(run())
+
+
 def weights(bias=0, seed=0):
     rng, result, width = np.random.default_rng(seed), {}, 2
     for i, end in enumerate((*WIDTHS, 1), 1):

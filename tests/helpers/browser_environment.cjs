@@ -1,6 +1,7 @@
 // Browser facilities used by the page, shared by microphone/player UI mocks.
 module.exports=function prepare(context){
  function element(node){
+  node.dataset??={};
   node.addEventListener??=function(name,fn){(this.listeners??={})[name]=fn;};
   node.scrollTo??=function(value){this.scrollTop=value.top;};
   node.getBoundingClientRect??=()=>({left:0,right:800,top:0,bottom:400});

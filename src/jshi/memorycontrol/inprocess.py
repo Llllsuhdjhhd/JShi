@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
 
 from jshi.core.params import memory_flush_chars
 from jshi.experienceledger import ConsumerKind, ExperienceLedgerPort, OutputKind
+from jshi.experienceledger.port import DELIVERY_PLANNED_AUDIO, segment_delivery
 from jshi.memory.contracts import (
     MemoryBatch,
     MemoryExperience,
@@ -75,6 +76,9 @@ def _embodied_from_state(state_delta: Mapping[str, object] | None) -> str:
 def _experience_text(segment, subject_name: str = "匠石") -> str:
     speaker = _speaker_name(segment, subject_name or "匠石")
     raw = getattr(segment, "text_raw", None)
+    # Planned speech is not an experience; the player appends each sentence it actually completed.
+    if segment_delivery(segment) == DELIVERY_PLANNED_AUDIO:
+        raw = None
     if raw:
         return _prefix_speaker(speaker, raw)
     embodied = _embodied_from_state(getattr(segment, "state_delta", None))

@@ -1,0 +1,13 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const html=fs.readFileSync(require('node:path').join(__dirname,'../src/jshi/app/voice_ui.html'),'utf8');
+const script=html.match(/<script>([\s\S]*?)<\/script>/)[1];new vm.Script(script);
+const clock=script.slice(script.indexOf('const playbackClocks ='),script.indexOf('function refreshStatus()'));
+const ctx=vm.createContext({Date,Number,Map});
+vm.runInContext('let audioDone=false,playing=null,queue=[],replyId="r";const endedSegments=new Set([0,1]),finishedSegments=new Set([0]);const sent=[];function send(m){sent.push(m);}'+clock,ctx);
+vm.runInContext('const node={};playbackClocks.set("r",{generated:1794228435085,nodes:[node]});showPlaybackClock("r","generated");',ctx);
+assert.match(vm.runInContext('node.textContent',ctx),/生成 20:47:15.*尚未播放.*尚未播完/);
+vm.runInContext('showPlaybackClock("r","started",1794228435701);showPlaybackClock("r","started",1794228436405);audioDone=true;finishPlaybackClock();',ctx);
+assert.match(vm.runInContext('node.textContent',ctx),/开始播放 20:47:15.*尚未播完/);
+vm.runInContext('finishedSegments.add(1);showPlaybackClock("r","completed",1794228441028);',ctx);
+assert.match(vm.runInContext('node.textContent',ctx),/生成 20:47:15.*开始播放 20:47:15.*播完 20:47:21/);
+console.log('Playback clock: generation/start/completion, no early finish, first start retained.');

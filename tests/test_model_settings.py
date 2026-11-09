@@ -223,7 +223,7 @@ def test_global_save_and_restart_apply_to_all_purposes(tmp_path):
     assert next_settings.public()['global_profile']==profile
     assert all(route.name=='gemini-3.6-flash' for route in next_settings.routes.values())
     settings.save({'name':'all','profile':{'choices':[]}})
-    assert all(route.chain==settings.originals[name] for name,route in settings.routes.items())
+    assert all(route.name=='deepseek-v4-flash' for route in settings.routes.values())
 
 
 def test_one_save_sets_qwen_key_and_single_global_model(tmp_path):
@@ -306,3 +306,64 @@ def test_model_status_callback_failure_does_not_break_response():
     def broken(event):
         raise RuntimeError('observer failed')
     assert RoutedModel(Model(), on_status=broken).generate(None).text == 'ok'
+
+
+def test_purpose_effort_override_survives_global_restart(tmp_path):
+    from jshi.voice.jev import VoiceJEV
+    settings=ModelSettings(tmp_path,process(tmp_path),VoiceJEV(EchoModel(),mode='split'))
+    settings.services['deepseek']=services()['deepseek']
+    default={'choices':[{'service':'deepseek','model':'deepseek-v4-flash'}],'effort':'low'}
+    settings.save({'name':'all','profile':default})
+    custom={**default,'effort':'high','effort_explicit':True}
+    settings.save({'name':'voice_jev','profile':custom})
+    again=ModelSettings(tmp_path,process(tmp_path),VoiceJEV(EchoModel(),mode='split'))
+    assert again.routes['voice_jev'].chain[0].effort=='high'
+    assert not again.public()['rows']['voice_jev']['inherited']
+    again.save({'name':'voice_jev','profile':{'choices':[]}})
+    assert again.routes['voice_jev'].chain[0].effort=='off'
+    assert again.public()['rows']['voice_jev']['inherited']
+
+
+def test_default_change_preserves_explicit_purpose(tmp_path):
+    settings=ModelSettings(tmp_path,process(tmp_path),None)
+    default={'choices':[{'service':'gemini','model':'gemini-3.6-flash'}],'effort':'low'}
+    settings.save({'services':services(),'name':'all','profile':default})
+    settings.save({'name':'cognition','profile':{**default,'effort':'high','effort_explicit':True}})
+    settings.save({'name':'all','profile':{**default,'effort':'minimal'}})
+    assert settings.routes['cognition'].chain[0].effort=='high'
+    assert settings.routes['write_zone'].chain[0].effort=='minimal'
+
+
+def test_memory_shared_provider_uses_selected_route(tmp_path):
+    from types import SimpleNamespace
+    pytest.importorskip('rems')
+    class MemoryProvider:
+        _invocations=[]
+        def _get_model(self, task): return 'original-memory'
+        def complete(self, task_type, messages, **options): return 'original'
+    provider=MemoryProvider()
+    p=process(tmp_path)
+    p.memory=SimpleNamespace(_backend=SimpleNamespace(_pipeline=SimpleNamespace(llm=provider)))
+    settings=ModelSettings(tmp_path,p,None)
+    assert provider.complete('portrait',[])=='original'
+    class Selected:
+        name='selected-memory'
+        def chat(self,messages,max_tokens=None,**options):
+            assert any(m['content']=='问题' for m in messages)
+            return ModelResponse(text='回答',model=self.name)
+    settings.routes['memory'].replace([Selected()])
+    assert provider.complete('portrait',[{'role':'user','content':'问题'}])=='回答'
+    assert provider._invocations[-1].model=='selected-memory'
+
+
+def test_deepseek_native_effort_max_and_invalid_explicit_minimal(tmp_path):
+    settings=ModelSettings(tmp_path,process(tmp_path),None)
+    settings.services['deepseek']=services()['deepseek']
+    choices=[{'service':'deepseek','model':'deepseek-v4-flash'}]
+    settings.save({'name':'cognition','profile':{'choices':choices,'effort':'max','effort_explicit':True}})
+    model=settings.routes['cognition'].chain[0]
+    payload=json.loads(model._payload([{'role':'user','content':'test'}]).data)
+    assert payload['reasoning_effort']=='max' and payload['thinking']['type']=='enabled'
+    with pytest.raises(ValueError,match='不支持'):
+        settings.save({'name':'cognition','profile':{'choices':choices,'effort':'minimal','effort_explicit':True}})
+    assert settings.routes['cognition'].chain[0].effort=='max'

@@ -18,6 +18,7 @@ from .port import (
     SegmentStatus,
     empty_context_view,
     new_id,
+    segment_view_text,
     utc_now,
 )
 
@@ -28,6 +29,9 @@ class _SubjectLedgerState:
     ingest_entries: list[MemoryIngestLedgerEntry] = field(default_factory=list)
     context: ContextViewState = field(default_factory=empty_context_view)
     pending_sequences: list[int] = field(default_factory=list)
+    # Rows changed since the last successful write; kept on failure so the next write retries them.
+    dirty_segments: set[int] = field(default_factory=set)
+    dirty_ingest: set[str] = field(default_factory=set)
 
 
 class InProcessExperienceLedger(ExperienceLedgerPort):
@@ -57,7 +61,10 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         return state
 
     def _after_write(self, subject_id: str) -> None:
-        """落盘钩子。内存实现为空。"""
+        """落盘钩子。内存实现只清空改动记录。"""
+        state = self._states[subject_id]
+        state.dirty_segments.clear()
+        state.dirty_ingest.clear()
 
     def append_external(
         self,
@@ -226,6 +233,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         )
         state.segments.append(segment)
         state.pending_sequences.append(sequence)
+        state.dirty_segments.add(sequence)
         self._after_write(subject_id)
         return segment
 
@@ -458,7 +466,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             segment = by_id.get(ref)
             if segment is None or not segment.text_raw:
                 continue
-            parts.append(segment.text_raw)
+            parts.append(segment_view_text(segment))
         body = "\n".join(parts)
         if not excerpts:
             return body
@@ -582,6 +590,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
                     segment,
                     status=SegmentStatus.ARCHIVED,
                 )
+                state.dirty_segments.add(segment.sequence)
                 archived += 1
         if archived:
             self._after_write(subject_id)
@@ -594,6 +603,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             batch_id=batch.batch_id,
         )
         state.ingest_entries.append(entry)
+        state.dirty_ingest.add(entry.ingest_id)
         self._after_write(batch.subject_id)
         return entry
 
@@ -657,6 +667,7 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             for index, entry in enumerate(state.ingest_entries):
                 if entry.ingest_id == updated.ingest_id:
                     state.ingest_entries[index] = updated
+                    state.dirty_ingest.add(updated.ingest_id)
                     self._after_write(subject_id)
                     return
         raise KeyError(updated.ingest_id)

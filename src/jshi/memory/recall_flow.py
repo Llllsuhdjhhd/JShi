@@ -13,6 +13,34 @@ from .port import RecalledFragment
 
 logger = logging.getLogger(__name__)
 
+_PREFETCH_POOL = None
+
+
+class RecallPrefetch:
+    """One recall started before assembly; it is used only for identical inputs."""
+
+    def __init__(self, flow, request, extra_queries=(), legacy_excerpts=()):
+        global _PREFETCH_POOL
+        if _PREFETCH_POOL is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _PREFETCH_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix='recall-prefetch')
+        self.key = (request, tuple(extra_queries), tuple(legacy_excerpts))
+        self.started = perf_counter()
+        self._future = _PREFETCH_POOL.submit(flow.load_candidates, request, extra_queries, legacy_excerpts)
+
+    def take(self, request, extra_queries=(), legacy_excerpts=()):
+        """Return the early batch, or None when inputs changed or the early run failed."""
+        if (request, tuple(extra_queries), tuple(legacy_excerpts)) != self.key:
+            return None
+        waited = perf_counter()
+        try:
+            batch = self._future.result()
+        except Exception:
+            logger.exception('recall prefetch failed')
+            return None
+        self.wait_ms = round((perf_counter() - waited) * 1000, 3)
+        return batch
+
 
 class RecallFlow:
     def __init__(self, memory, store, working_set):

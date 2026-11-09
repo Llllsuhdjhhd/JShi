@@ -164,6 +164,23 @@ class AcquaintanceStore:
         if len(targets)>1: raise ValueError('历史材料存在冲突的人物关联')
         return next(iter(targets),person)
 
+    def projector(self, subject):
+        """Same result as project(), reading links once for a whole listing."""
+        links=self.links(subject)
+        if not links: return lambda person, sources: person
+        proven={}
+        def project(person, sources):
+            evidence=set(sources)
+            if not evidence: return person
+            targets=set()
+            for row in links:
+                if row['source']!=person: continue
+                if row['id'] not in proven: proven[row['id']]=self.proven_sources(subject,row['inputs'])
+                if evidence.issubset(proven[row['id']]): targets.add(row['target'])
+            if len(targets)>1: raise ValueError('历史材料存在冲突的人物关联')
+            return next(iter(targets),person)
+        return project
+
     def jobs(self, link_id):
         with closing(self.connect()) as db:
             return [dict(module=m,version=v,status=s,error=e) for m,v,s,e in db.execute(

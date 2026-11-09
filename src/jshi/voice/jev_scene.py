@@ -9,7 +9,7 @@ import os
 import re
 from pathlib import Path
 from threading import RLock
-from time import time, monotonic
+from time import time, monotonic, sleep
 
 from jshi.core import SubjectState
 from jshi.models import ModelRequest
@@ -58,7 +58,16 @@ class JEVSceneStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(".tmp")
         temp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-        temp.replace(self.path)
+        # Windows scanners/readers can briefly deny atomic replacement. Keep
+        # the lock and original state until persistence actually succeeds.
+        for attempt in range(5):
+            try:
+                temp.replace(self.path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                sleep(.02 * (attempt + 1))
         self.state = state
 
     def append(self, event_id, payload, *, codes=None, labels=None):
@@ -92,6 +101,18 @@ class JEVSceneStore:
             if codes is not None:
                 state["codes"] = dict(codes)
                 state["labels"] = dict(labels or {})
+            self._save(state)
+
+    def note_control(self, matter_id, payload):
+        """Record a control fact after playback has already changed. A later scene commit cannot reopen it."""
+        with self.lock:
+            state = deepcopy(self.state)
+            controls = state.setdefault('controls', [])
+            controls.append({'matter_id': matter_id, 'payload': deepcopy(payload), 'at': time()*1000})
+            del controls[:-32]
+            if payload.get('closed'):
+                state.setdefault('closed_matters', {})[str(matter_id)] = payload.get('input_version')
+                state['control_seq'] = state.get('control_seq', 0) + 1
             self._save(state)
 
     def snapshot(self):
@@ -261,6 +282,8 @@ class JEVSceneStore:
             raise ValueError("JEV片场必须为非空正文且不超过1000字符")
         with self.lock:
             if (snapshot["version"], snapshot["generation"]) != (self.state["version"], self.state["generation"]):
+                return False
+            if snapshot.get('control_seq', 0) != self.state.get('control_seq', 0):
                 return False
             window = snapshot.get('material_window')
             ids = set(window['model_input_ids']) | set(window.get('archived_input_ids', [])) if window else {r['id'] for r in snapshot['events']}

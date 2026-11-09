@@ -76,7 +76,7 @@ PREPARE = {
                     {'L1': '完整能力含工具', 'L2': '展开理解无工具', 'L3': '简短交往无工具', 'uncertain': '不明'}),
     'memory': choice('理解需要历史且当前材料不足才召回；不按暂归人物指定私人记忆', {'yes': '需要', 'no': '不需要', 'uncertain': '不明'}),
     'image': choice('主认知必须检查原图细节且图片可用才带图，旧观察不代表新画面', {'yes': '需要', 'no': '不需要', 'uncertain': '不明'}),
-    'route': choice('只有许可齐备、身份确定、direct、redirect或空闲keep、无需工具历史原图或保存新事实的简单交往可短答；通用知识不要求人物经历，否则main',
+    'route': choice('只有许可齐备、身份确认或暂归、direct、redirect或空闲keep、无需工具历史原图或保存新事实的简单交往可短答；暂归时不用人物材料、不称呼姓名；通用知识不要求人物经历，否则main',
                     {'main': '主认知', 'self_reply': '直接短答', 'uncertain': '不明'}),
     'ack': choice('有明确许可且接话有帮助才需要等待接话；不作答、不承诺、不为旁聊接话', {'yes': '可选接话', 'no': '不需要', 'uncertain': '不明'})}
 
@@ -86,5 +86,6 @@ def decode_prepare(result, threshold):
     if 'uncertain' in (level,memory,image,route,ack): raise ValueError('preparation_uncertain')
     if route == 'self_reply' and (level != 'L3' or memory != 'no' or image != 'no'):
         raise ValueError('short_reply_conflict')
-    return dict(route=route, level=int(level[1]), recall_memory=memory=='yes', main_image='include' if image=='yes' else 'omit',
+    return dict(route=route, level=int(level[1]), recall_memory=memory=='yes', recall_query='',
+                main_image='include' if image=='yes' else 'omit',
                 reply='', waiting_reply='', reason='程序组合原生处理需求；可选等待接话不阻塞主流程')

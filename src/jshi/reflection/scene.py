@@ -24,7 +24,7 @@ from jshi.core.params import (
     introspection_scene_max_segments,
     introspection_scene_window_seconds,
 )
-from jshi.experienceledger.port import SegmentStatus
+from jshi.experienceledger.port import SegmentStatus, segment_view_text
 
 from .port import IntrospectionRequest, IntrospectionScene
 
@@ -33,7 +33,7 @@ _USABLE_STATUSES = (SegmentStatus.ACCEPTED, SegmentStatus.CONSUMED)
 
 def segment_text(segment: object) -> str:
     """取一段经历的可读正文：原文优先，其次内部状态摘要。"""
-    text = str(getattr(segment, "text_raw", "") or "").strip()
+    text = segment_view_text(segment).strip()
     if text:
         return text
     state = getattr(segment, "state_delta", None)

@@ -221,7 +221,11 @@ class MemorySource:
         if ctx.recall_request is not None and self.recall_flow is not None:
             legacy = (ctx.context_view.recall_excerpts if ctx.context_view is not None
                       and ctx.speaker is not None and ctx.context_view.speaker_object_id == ctx.speaker.object_id else ())
-            batch = self.recall_flow.load_candidates(ctx.recall_request, ctx.extra_queries, legacy)
+            batch = None
+            if ctx.recall_prefetch is not None:
+                batch = ctx.recall_prefetch.take(ctx.recall_request, ctx.extra_queries, legacy)
+            if batch is None:
+                batch = self.recall_flow.load_candidates(ctx.recall_request, ctx.extra_queries, legacy)
             if ctx.recall_request.mode == 1:
                 local = getattr(self._memory, '_reflection_local', None)
                 previous = getattr(local, 'internal', False) if local else False

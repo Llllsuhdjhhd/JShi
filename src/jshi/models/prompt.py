@@ -209,7 +209,10 @@ def build_system(request: ModelRequest) -> str:
     capability = ''
     if request.purpose == 'subject_activity' or request.purpose.startswith('voice_jev'):
         capability = '\n\n【当前部署的身份与能力】\n' + DEPLOYMENT_CAPABILITIES
-    return _build_system(request) + capability + '\n\n【文字规范】\n' + LANGUAGE_RULE
+    # The minute-level time changes every turn; keeping it last lets the fixed rules hit the prefix cache.
+    now_label = _now_label(request.now) if _is_cognition(request) else ''
+    return (_build_system(request) + capability + '\n\n【文字规范】\n' + LANGUAGE_RULE
+            + ('\n\n' + now_label if now_label else ''))
 
 
 DEPLOYMENT_CAPABILITIES = (
@@ -222,9 +225,6 @@ def _build_system(request: ModelRequest) -> str:
     if not _is_cognition(request):
         return _short_system(request)
     parts: list[str] = []
-    now_label = _now_label(request.now)
-    if now_label:
-        parts.append(now_label)
     extra = (request.system_extra or "").strip()
     if extra:
         parts.append(extra)

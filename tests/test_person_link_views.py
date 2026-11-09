@@ -56,6 +56,17 @@ def test_task_owner_is_projected_without_rewriting_task_record(tmp_path):
     assert not tasks.list_for('s','lux') and tasks.get(task.task_id).object_id=='a'
 
 
+def test_listing_projector_matches_single_projection(tmp_path):
+    links=AcquaintanceStore(tmp_path/'people.db')
+    assert links.projector('s')('a',['i1'])=='a'
+    links.provenance('s','m1',['i1'])
+    links.link('s','a','lux',['i1'],basis='manual_annotation')
+    links.link('s','b','qf',['i3'],basis='manual_annotation')
+    project=links.projector('s')
+    for person,sources in [('a',['i1']),('a',['m1']),('a',['i1','i2']),('a',[]),('b',['i3']),('c',['i1'])]:
+        assert project(person,sources)==links.project('s',person,sources)
+
+
 def test_conflicting_person_link_requires_revocation(tmp_path):
     a=AcquaintanceStore(tmp_path/'people.db')
     k=a.link('s','a','lux',['i1'],basis='manual_annotation')

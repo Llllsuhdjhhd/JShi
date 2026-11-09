@@ -557,7 +557,7 @@ class CognitionSkill(Skill[ModelResponse]):
 ''' + TOOL_TASK_NOTE + '''
 
 【输出格式】
-你的输出格式：你每轮只输出一个 JSON 对象，字段按下方 Schema；枚举字段只取允许值，不输出任何解释文字。
+你的输出格式：字段按下方 Schema。
 未说出口、须留下的明确事项写在 response_plan.unsaid，用连贯叙述点名当前说话人；说出口的话写在 items 的 verbal。不要把 unsaid 写进 verbal。不要另加「（名字）」标签。
 '''
     schema: Mapping[str, Any] = {**COGNITION_JSON_SCHEMA, "properties": {
@@ -633,7 +633,7 @@ class CognitionSkill(Skill[ModelResponse]):
         """
         if request.light_finalize:
             return self.run(request)  # No partial candidate can escape before escalation is resolved.
-        from jshi.models.base import iter_top_level_json_values
+        from jshi.models.base import finish_stream, iter_top_level_json_values
 
         persona = bool(getattr(request, "persona_schema", None)) and not getattr(
             request, "boot", False
@@ -654,10 +654,9 @@ class CognitionSkill(Skill[ModelResponse]):
         data: dict[str, Any] = {}
         mode = ""
         delivered = False
+        stream = model.generate_stream(req)
         try:
-            for key, value_json in iter_top_level_json_values(
-                _capture(model.generate_stream(req))
-            ):
+            for key, value_json in iter_top_level_json_values(_capture(stream)):
                 value = json.loads(value_json)
                 data[key] = value
                 if key == "mode" and isinstance(value, str):
@@ -669,6 +668,7 @@ class CognitionSkill(Skill[ModelResponse]):
         except Exception:
             text = "".join(raw)
             return self._fallback(text)
+        finish_stream(stream)
         text = "".join(raw)
         try:
             parsed = _persona_to_model_response(_restore_named_targets(data, request), model=self.model_tag)

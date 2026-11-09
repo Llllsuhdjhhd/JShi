@@ -4,6 +4,65 @@ from .transcripts import TranscriptAssembler
 from .contracts import StreamingRecognitionSession
 
 
+async def buffered_results(session, *, capacity=64, report=None):
+    """Read cloud results independently of downstream identity/turn analysis.
+
+    Preserve order and arrival clocks. Bound memory and surface overflow instead
+    of silently losing speech or building an unlimited stale queue.
+    """
+    import asyncio
+    from time import monotonic, time
+    from .timing import report_safely
+    queue = asyncio.Queue(maxsize=capacity)
+
+    async def pump():
+        async for rows, final in session.results():
+            received, at = monotonic(), time()*1000
+            report_safely(report, 'asr_batch_timing', {'state': 'received',
+                'received_at_ms': at, 'queued_batches': queue.qsize(),
+                'parts': [{'start_ms': r.start_ms, 'end_ms': r.end_ms,
+                           'final': r.final} for r in rows] if report is not None else []})
+            try:
+                queue.put_nowait((rows, final, received, at))
+            except asyncio.QueueFull:
+                raise RuntimeError('语音处理积压，识别结果队列已满，请重新开始对话')
+            if final:
+                break
+
+    task = asyncio.create_task(pump())
+    get = None
+    def consumed(item):
+        report_safely(report, 'asr_batch_timing', {'state': 'consumed',
+            'received_at_ms': item[3], 'buffer_wait_ms': round((monotonic()-item[2])*1000, 3),
+            'queued_batches': queue.qsize(),
+            'parts': [{'start_ms': r.start_ms, 'end_ms': r.end_ms,
+                       'final': r.final} for r in item[0]] if report is not None else []})
+        return item
+    try:
+        while True:
+            if not queue.empty():
+                yield consumed(queue.get_nowait())
+                continue
+            if task.done():
+                await task
+                break
+            get = asyncio.create_task(queue.get())
+            await asyncio.wait((task, get), return_when=asyncio.FIRST_COMPLETED)
+            if get.done():
+                yield consumed(get.result())
+                get = None
+            else:
+                get.cancel()
+                await asyncio.gather(get, return_exceptions=True)
+                get = None
+    finally:
+        task.cancel()
+        if get is not None:
+            get.cancel()
+            await asyncio.gather(get, return_exceptions=True)
+        await asyncio.gather(task, return_exceptions=True)
+
+
 class VolcProtocol:
     wait_for_final = False
 

@@ -30,6 +30,7 @@ from jshi.voice.identity import VoiceIdentities, attach_voiceprint
 from jshi.voice.interaction import InteractionFeedback
 from jshi.voice.jev import BatchDecision, InterruptDecision, VoiceJEV
 from jshi.subject.cancellation import TurnCancelled
+from jshi.voice.timing import input_stage, stage, report_safely
 
 
 async def bounded_online_match(audio, transcript, speakers, executor, pending, timeout_s):
@@ -52,8 +53,9 @@ from jshi.voice.volc import VolcVoice
 
 
 class VoiceConversation:
-    def __init__(self, process, subject_id: str, cloud, send, *, jev=None, timeout_s=3.0, local_speakers=None, input_pause_s=VOICE_INPUT_PAUSE_MS / 1000, sample_source=None, candidate_timeout_s=1.2, session_id=None, input_max_batch_s=12.0, input_batch_chars=20, scene_idle_s=15.0, scene_batch_inputs=6, scene_batch_chars=800, scene_max_wait_s=30.0, environment_idle_s=VISUAL_TURN_IDLE_SECONDS, personal_speakers=None, audio_preparer=None) -> None:
+    def __init__(self, process, subject_id: str, cloud, send, *, jev=None, timeout_s=3.0, local_speakers=None, input_pause_s=VOICE_INPUT_PAUSE_MS / 1000, sample_source=None, candidate_timeout_s=1.2, session_id=None, input_max_batch_s=12.0, input_batch_chars=20, scene_idle_s=15.0, scene_batch_inputs=6, scene_batch_chars=800, scene_max_wait_s=30.0, environment_idle_s=VISUAL_TURN_IDLE_SECONDS, personal_speakers=None, audio_preparer=None, utterance_material=False) -> None:
         self.process, self.subject_id, self.cloud, self.send = process, subject_id, cloud, send
+        self.utterance_material = utterance_material
         self.personal_speakers = personal_speakers
         from jshi.voice.sources import SpeakerAudioPreparer
         self.audio_preparer = audio_preparer or SpeakerAudioPreparer()
@@ -75,6 +77,11 @@ class VoiceConversation:
         from jshi.voice.entry_scheduler import EntryScheduler
         self.decisions = decision_service(process)
         self.entry_scheduler = EntryScheduler(self.decisions, self.record, self.stop)
+        self.entry_scheduler.on_ready = self._release_deferred_entry
+        self.entry_scheduler.work_busy = lambda: self.active_turn is not None or self.turn_busy or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}
+        self.entry_scheduler.work_context = lambda: tuple(self.scene)[-12:]
+        self.entry_scheduler.on_effect = self.apply_schedule_effect
+        self.premise_changed = False
         from jshi.voice.provisional import PreparationManager
         from jshi.voice.feedback import FeedbackArbiter
         self.preparation = PreparationManager(self)
@@ -82,6 +89,8 @@ class VoiceConversation:
         self.speech_active = lambda: False
         self.local_speakers = local_speakers
         self.sample_source = sample_source
+        from jshi.voice.utterance_organizer import UtteranceOrganizer
+        self.utterance_organizer = UtteranceOrganizer()
         self.input_records = {}
         self.asr_timings = {}
         self.jev_pending_inputs = {}
@@ -91,6 +100,7 @@ class VoiceConversation:
         self.background_tasks = set()
         self.personal_prediction_lock = asyncio.Lock()
         self.personal_prediction_jobs = {}
+        self.parallel_identity = None
         self.debug_history = deque(maxlen=12)
         self.voice_timings = {}
         self.last_jev = None
@@ -121,6 +131,7 @@ class VoiceConversation:
         self.judging = False
         self.turn_queue = asyncio.Queue(maxsize=64)
         self.epoch = 0
+        self.work_epoch_inputs = {}
         self.closed = False
         self.output_disconnected = False
         self.tts_task = None
@@ -132,10 +143,13 @@ class VoiceConversation:
         self.reply_epochs = {}
         self.tool_handling = {}
         self.turn_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-voice-turn")
-        # A second worker lets a fresh batch start while a timed-out call is still finishing.
-        self.jev_workers = 2
+        # A started HTTP call cannot be cancelled: one leftover call and the work-collision
+        # entry may still be finishing while a fresh batch starts.
+        self.jev_workers = 3
         self.jev_executor = ThreadPoolExecutor(max_workers=self.jev_workers, thread_name_prefix="jshi-voice-jev")
         self.jev_running = set()
+        self.entry_scheduler.running_calls = lambda: tuple(f for f in self.jev_running if not f.done())
+        self.permit_sequence = 0
         self.write_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-voice-write")
         self.code_owner = {}
         self.code_labels = {}
@@ -152,6 +166,10 @@ class VoiceConversation:
         self.jev_scene_calls = deque(maxlen=24)
         self.interaction_feedback = InteractionFeedback()
         self.reply_input_ids = {}
+        self.retired_turns = {}
+        self.answer_status = {}
+        self.answer_handling = deque(maxlen=3)
+        self.answer_sound_codes = {}
         from jshi.voice.jev_scene import JEVSceneStore, JEVSceneWriter
         self.jev_scene_store = JEVSceneStore(process.repository.path.parent / "jev_scenes" / hashlib.sha256(subject_id.encode()).hexdigest()[:16] / (self.session_id + ".json"))
         from jshi.recognition.link_updates import retry_links
@@ -202,6 +220,9 @@ class VoiceConversation:
         )) if executor else None
 
     async def emit(self, kind: str, **payload) -> None:
+        if kind in {'pause', 'resume', 'stop', 'block_next', 'clear_block'}:
+            self.permit_sequence += 1
+            payload['permit_seq'] = self.permit_sequence
         if kind == 'flow_phase':
             payload.setdefault('at_ms', time() * 1000)
         if not self.closed and not self.output_disconnected:
@@ -552,7 +573,14 @@ class VoiceConversation:
             async with self.personal_prediction_lock:
                 if self.input_records.get(transcript.input_id) is not record:
                     return
-                future = self.personal_speakers.submit_predict(record['pcm'], self.local_speakers)
+                if self.parallel_identity is not None:
+                    future = await asyncio.to_thread(self.parallel_identity.predict,
+                        record['pcm'], transcript.start_ms, transcript.end_ms,
+                        track=(transcript.speaker_cluster_id or transcript.track_id)
+                            if not transcript.overlap and not transcript.identity_uncertain
+                            and transcript.audio_kind != 'separated' else '')
+                else:
+                    future = self.personal_speakers.submit_predict(record['pcm'], self.local_speakers)
                 if future is None:
                     previous = getattr(self.personal_speakers, 'predict_future', None)
                     if previous is not None and not previous.done():
@@ -565,6 +593,8 @@ class VoiceConversation:
                     record['personal_classifier'] = {'status':'busy'}
                 else:
                     result = dict(await asyncio.shield(asyncio.wrap_future(future)))
+                    if getattr(future, 'identity_audio_bounds', (transcript.start_ms, transcript.end_ms)) != (transcript.start_ms, transcript.end_ms):
+                        result['identity_basis'] = '同一段连续清晰声音，沿用先前人物证据；不是对新增尾部重新比对'
                     features = result.pop('debug_features', None)
                     if transcript.overlap and transcript.audio_kind != 'separated':
                         result.update(matched='', overlap=True)
@@ -597,6 +627,7 @@ class VoiceConversation:
             except Exception:
                 logging.getLogger(__name__).exception('Personal speaker result could not be published')
 
+    @input_stage('personal_identity')
     async def personal_identity(self, transcript, evidence, *, wait=True):
         record = self.input_records.get(transcript.input_id, {})
         if self.personal_speakers is None:
@@ -705,7 +736,7 @@ class VoiceConversation:
                     and self.decisions.config['mode'] == 'active' and self.decisions.config['collision']):
                 self.input_idle.clear()
                 self.judge_pending.append({'current':[utterance], 'track_id':evidence.track_id,
-                    'expression_complete':True, 'collection_trigger':'typed', 'queued':0})
+                    'expression_complete':True, 'collection_trigger':'typed', 'queued':0, 'queued_at':monotonic()})
                 self.entry_scheduler.notify((utterance,))
                 self.judge_ready.set()
                 return
@@ -779,6 +810,13 @@ class VoiceConversation:
         await self.emit('renamed', object_id=object_id, previous=pending[1], label=evidence.label)
 
     def record(self, event_type: str, payload: dict) -> None:
+        from jshi.voice.diagnostics import DIAGNOSTIC_EVENTS, diagnostic_log
+        path = getattr(self.process.repository, 'path', None)
+        if event_type in DIAGNOSTIC_EVENTS and path is not None:
+            diagnostic_log(path.parent/'voice_diagnostics.jsonl').write({
+                'at_ms': round(time()*1000), 'event_type': event_type, 'subject_id': self.subject_id,
+                'session_id': self.session_id, **payload})
+            return
         self.process.repository.add_history(HistoryRecord(
             subject_id=self.subject_id, kind=HistoryKind.FACT, event_type=event_type,
             content={"session_id": self.session_id, **payload}, source_ids=()))
@@ -789,11 +827,15 @@ class VoiceConversation:
             await self.emit("pause", reply_id=self.delivery.snapshot()["reply_id"])
 
     async def noise(self) -> None:
+        if self.entry_scheduler.schedule.blocks_start():
+            return
         self.pending_voice = False
         if self.delivery.resume():
             await self.emit("resume", reply_id=self.delivery.snapshot()["reply_id"])
 
     async def stop(self, reason="explicit stop") -> None:
+        self._retire_answers('替换' if reason == 'semantic_redirect' else '取消', reason=reason)
+        effect = self.entry_scheduler.schedule.user_stop() if hasattr(self, 'entry_scheduler') else None
         if reason not in {'semantic_redirect', 'semantic_keep'} and hasattr(self, 'preparation'):
             self.preparation.cancel()
         self.epoch += 1
@@ -801,7 +843,12 @@ class VoiceConversation:
         if self.tts_task and not self.tts_task.done():
             self.tts_task.cancel()
         self.pending_plans.clear()
-        await self.emit("stop", reply_id=rid)
+        await self.emit("stop", reply_id=rid, permit_seq=effect.seq if effect else 0, reason_id=effect.reason if effect else reason)
+        if effect:
+            await self._persist_schedule(effect)
+        if reason not in {'explicit stop', 'connection closed', 'semantic_stop'}:
+            # Replacing an old reply must not cancel the new reply's permit.
+            self.entry_scheduler.schedule.open_matter()
         try:
             self.dialogue.stop(self.session_id)
         except OSError:
@@ -862,7 +909,7 @@ class VoiceConversation:
             self.record('original_text_evidence', {'source': 'asr', 'input_id': transcript.input_id,
                         'start_ms': transcript.start_ms, 'end_ms': transcript.end_ms, 'text': transcript.text})
             transcript = replace(transcript, text=simplified)
-        if transcript.replaces:
+        if transcript.replaces or transcript.replaces_input_ids:
             await self._revise_transcript(transcript)
             return
         from jshi.voice.transcripts import equivalent_regrouping
@@ -898,8 +945,15 @@ class VoiceConversation:
                 noticed_backpressure = True
                 await self.emit("notice", text="待处理的发言较多，正在赶上，请稍候。")
             await asyncio.sleep(0.05)
-        iid = uuid4().hex
+        iid = transcript.input_id or uuid4().hex
+        if iid in self.input_records:
+            await self._revise_transcript(replace(transcript, replaces_input_ids=(iid,)))
+            return
         transcript = replace(transcript, input_id=iid)
+        report_safely(self.record, 'voice_input_stage', {'stage': 'input_accepted',
+            'input_ids': [iid], 'source_start_ms': transcript.start_ms,
+            'source_end_ms': transcript.end_ms, 'result_ready_at_ms': accepted_wall,
+            'asr_received_at_ms': received_wall})
         pcm = self.sample_source.segment(transcript.start_ms, transcript.end_ms) if self.sample_source else None
         if pcm and len(pcm) > 30 * 32000:
             pcm = None
@@ -940,19 +994,35 @@ class VoiceConversation:
         self.input_idle.clear()
         if self.sample_source and getattr(self.sample_source,'archive',None):
             try:
-                await asyncio.to_thread(self.sample_source.archive.save_input,iid,
-                    self.sample_source.capture_id,asdict(transcript),pcm=pcm,
-                    received_at_ms=self.input_records[iid]['received_at_ms'])
+                with stage(self.record, 'input_audio_archive', input_ids=[iid]):
+                    await asyncio.to_thread(self.sample_source.archive.save_input,iid,
+                        self.sample_source.capture_id,asdict(transcript),pcm=pcm,
+                        received_at_ms=self.input_records[iid]['received_at_ms'])
                 self.input_records[iid]['audio_saved'] = not self.sample_source.archive_error
                 self._background(self._archive_update(iid, pipeline=dict(self.input_records[iid].get('pipeline') or {})))
             except Exception:
                 logging.getLogger(__name__).exception('Recent input audio indexing failed')
                 await self.emit('notice',text='本句录音保存失败；当前对话继续。')
-        await self.queue.put(transcript)
+        with stage(self.record, 'input_queue_put', input_ids=[iid]):
+            await self.queue.put(transcript)
 
-    async def accept_batch(self, transcripts):
+    @input_stage('input_batch_delivery')
+    async def accept_batch(self, transcripts, **arrival):
         """Record one already-returned ASR batch before the worker drains it."""
-        transcripts = tuple(transcripts)
+        from jshi.voice.utterance_organizer import coalesce_rows
+        states = arrival.pop('turn_states', {})
+        transcripts = coalesce_rows(tuple(transcripts))
+        updates = self.utterance_organizer.observe(transcripts)
+        for row in transcripts:
+            uid = self.utterance_organizer.sources.get((row.start_ms,row.end_ms))
+            record = self.utterance_organizer.records.get(uid)
+            state = states.get((row.start_ms,row.end_ms))
+            if record and state in {'complete','incomplete'}:
+                record.state = 'complete' if state == 'complete' else 'paused'
+        updates = [self.utterance_organizer.records[u['utterance_id']].view() for u in updates
+                   if u['utterance_id'] in self.utterance_organizer.records]
+        if updates:
+            self.record('utterance_organization', {'updates': updates})
         size = self.queue.maxsize or max(1,len(transcripts))
         for offset in range(0,len(transcripts),size):
             chunk = transcripts[offset:offset+size]
@@ -965,7 +1035,15 @@ class VoiceConversation:
                 await asyncio.sleep(0.05)
             async with self.accepting_batch:
                 for transcript in chunk:
-                    await self.accept(transcript)
+                    await self.accept(transcript, **arrival)
+        if updates:
+            for update in updates:
+                for part in update['parts']:
+                    part['input_id'] = next((iid for iid, record in self.input_records.items()
+                        if record.get('transcript') is not None and
+                        (record['transcript'].start_ms,record['transcript'].end_ms) ==
+                        (part['start_ms'],part['end_ms'])), '')
+            await self.emit('utterance_updates', updates=updates)
 
     def note_asr_timings(self, transcripts, timings):
         for transcript, timing in zip(transcripts, timings):
@@ -1020,6 +1098,24 @@ class VoiceConversation:
             self._background(self._write_voice_latency(result))
         return result
 
+    def _record_stage_latency(self, envelope, main_started):
+        from jshi.voice.latency import elapsed_ms
+        for u in envelope.current_utterances:
+            r = self.input_records.get(u.input_id)
+            if r is None or r.get('stage_latency_recorded'):
+                continue
+            r['stage_latency_recorded'] = True
+            first = r.get('jev_first_started_at')
+            finished = r.get('jev_finished_at')
+            self.schedule_voice_latency(u.input_id, 'main_started',
+                audio_end_to_text_ms=elapsed_ms(r['at'], r.get('asr_timing', {}).get('_audio_end_received_mono')),
+                text_to_jev_start_ms=elapsed_ms(first, r['at']),
+                jev_span_ms=elapsed_ms(finished, first),
+                jev_rounds=r.get('jev_rounds', 0),
+                jev_to_main_ms=elapsed_ms(main_started, finished),
+                text_to_main_ms=elapsed_ms(main_started, r['at']),
+                speech_ms=(r['transcript'].end_ms-r['transcript'].start_ms) if r.get('transcript') else None)
+
     async def save_voice_latency(self, iid, stage, **values):
         result = self._latency_row(iid, stage, **values)
         if result is None:
@@ -1043,6 +1139,7 @@ class VoiceConversation:
         await self._archive_update(iid, voice_latency=result, pipeline=row.get('pipeline'))
         await self.emit('voice_latency', input_id=iid, timing=result, pipeline=dict(row.get('pipeline') or {}))
 
+    @input_stage('input_archive_update')
     async def _archive_update(self,iid,**values):
         if self.sample_source and getattr(self.sample_source,'archive',None):
             try:
@@ -1054,7 +1151,8 @@ class VoiceConversation:
         rows = sorted(((iid, row) for iid, row in self.input_records.items()
             if row.get('transcript') is not None and
             row.get('audio_kind') != 'separated' and
-            (row['transcript'].start_ms, row['transcript'].end_ms) in transcript.replaces),
+            (iid in transcript.replaces_input_ids or
+             (row['transcript'].start_ms, row['transcript'].end_ms) in transcript.replaces)),
             key=lambda item: item[1]['transcript'].start_ms)
         if not rows:
             return  # old audio outside the retained session window is not new input
@@ -1068,7 +1166,7 @@ class VoiceConversation:
             return
         ids = [iid for iid, _ in rows]
         old = [row['transcript'].text for _, row in rows]
-        if len({row['transcript'].track_id for _, row in rows}) > 1:
+        if len({row['transcript'].speaker_cluster_id or row['transcript'].track_id for _, row in rows}) > 1:
             correction = '【跨声音转写修订】原多段声音收到整体修订：“' + transcript.text + '”；字词与各人物尚未重新对齐，不把修订全文归给某一人。'
             self.record('voice_asr_cross_speaker_revision', {'input_ids': ids, 'text': transcript.text,
                 'start_ms': transcript.start_ms, 'end_ms': transcript.end_ms})
@@ -1078,8 +1176,23 @@ class VoiceConversation:
                 codes=self.code_owner, labels=self.code_labels)
             return
         first_id, first = rows[0]
+        from jshi.voice.transcripts import equivalent_input_revision
+        cosmetic = equivalent_input_revision(''.join(old), transcript.text)
+        if not cosmetic:
+            first['revision_version'] = first.get('revision_version', 0) + 1
+        try:
+            preserve_sentence = json.loads(transcript.identity_note or '{}').get('preserve_utterance') is True
+        except (ValueError, TypeError, AttributeError):
+            preserve_sentence = False
         first['transcript'] = replace(first['transcript'], text=transcript.text,
-            start_ms=transcript.start_ms, end_ms=transcript.end_ms, words=transcript.words)
+            start_ms=transcript.start_ms, end_ms=transcript.end_ms, words=transcript.words,
+            **({'identity_note':transcript.identity_note, 'identity_uncertain':True}
+               if preserve_sentence else {}))
+        if self.sample_source and hasattr(self.sample_source, 'receipt_timing'):
+            receipt = self.sample_source.receipt_timing(transcript.start_ms, transcript.end_ms)
+            first.setdefault('asr_timing', {}).update({k:v for k,v in receipt.items() if v is not None})
+            self.stamp_pipeline(first_id, speech_audio_duration_ms=transcript.end_ms-transcript.start_ms,
+                **{k:v for k,v in receipt.items() if k in {'audio_start_received_at_ms','audio_end_received_at_ms'} and v is not None})
         await self._archive_update(first_id,transcript=asdict(first['transcript']))
         # Keep the original audio/evidence; a text correction cannot rename a person.
         for _, row in rows[1:]:
@@ -1088,24 +1201,132 @@ class VoiceConversation:
         correction = '【语音识别修订】此前转写“' + ' / '.join(old) + '”应为“' + transcript.text + '”；同一段声音的文字修正，不是新发言，不据此改变人物归属。'
         self.record('voice_asr_revision', {'input_ids': ids, 'previous': old,
             'text': transcript.text, 'start_ms': transcript.start_ms, 'end_ms': transcript.end_ms})
-        from jshi.voice.transcripts import cosmetic_revision
-        cosmetic = cosmetic_revision(''.join(old), transcript.text)
+        states = {self.answer_status.get(key) for key, owned in self.reply_input_ids.items()
+                  if set(ids).intersection(owned) and key not in self.retired_turns}
+        if states.intersection({'running', 'ready', 'playing'}):
+            action = '保留' if cosmetic else '替换未播部分'
+            reason = ('称呼或格式修正，沿用原回应' if cosmetic else
+                      '按修订文字重新判断；已播部分保留为已发生事实，不能撤回')
+        elif 'completed' in states:
+            action, reason = '已播完', '旧回答已发生，不撤回、不自动重播；按修订内容判断是否需要补充纠正'
+        else:
+            action, reason = '尚无待播回答', '更新原输入，不当作再次发言'
+        self._note_answer_handling(action, ids, transcript.text, reason)
+        correction += f'旧回答：{action}；{reason}。'
+        if not cosmetic:
+            # A later correction can turn a suppressed repeat into a distinct request.
+            first.pop('answer_reused_from', None)
+            retired = self._retire_answers('替换', ids, reason='asr_revision')
+            live = self.delivery.snapshot().get('reply_id')
+            if self.reply_epochs.get(live) in retired:
+                if self.tts_task and not self.tts_task.done():
+                    self.tts_task.cancel()
+                self.delivery.stop('asr_revision')
+                await self.emit('stop', reply_id=live, reason_id='asr_revision')
         if not cosmetic and any(row.get('processing_started') for _, row in rows):
             self.process.note_scene_delivery(self.subject_id, 'asr-revision:'+uuid4().hex, correction)
             self.jev_scene_store.append('asr-revision:'+uuid4().hex,
                 {'text': correction, 'at': time()*1000, 'basis': 'asr_revision'},
                 codes=self.code_owner, labels=self.code_labels)
         await self.emit('transcript_revision', input_ids=ids, text=transcript.text)
+        changed = tuple(self._latest_utterances([u for u in self.scene if u.input_id == first_id]))
+        if changed:
+            self.scene = deque((changed[0] if u.input_id == first_id else u
+                for u in self.scene if u.input_id not in ids[1:]), maxlen=self.scene.maxlen)
+            if not cosmetic and any(row.get('processing_started') for _, row in rows):
+                self.entry_scheduler.notify(changed)
+                self.judge_pending.append({'current':list(changed), 'track_id':changed[0].speaker.track_id,
+                    'expression_complete':None, 'collection_trigger':'revision', 'queued':0, 'queued_at':monotonic()})
+                for u in changed:
+                    report_safely(self.record, 'voice_input_stage', {
+                        'stage': 'jev_input_queued', 'input_ids': [u.input_id], 'reason': 'revision'})
+                self.judge_ready.set()
 
     def _latest_utterances(self, current):
         result = []
+        seen = set()
         for u in current:
+            if u.input_id in seen:
+                continue
+            seen.add(u.input_id)
             row = self.input_records.get(u.input_id, {})
-            if row.get('superseded_by'):
+            if row.get('superseded_by') or row.get('answer_reused_from'):
                 continue
             latest = row.get('transcript')
-            result.append(replace(u, text=latest.text) if latest is not None else u)
+            result.append(replace(u, text=latest.text, start_ms=latest.start_ms, end_ms=latest.end_ms,
+                recorded_start_at_ms=(u.recorded_start_at_ms+latest.start_ms-u.start_ms
+                                      if u.recorded_start_at_ms is not None else None),
+                recorded_end_at_ms=(u.recorded_end_at_ms+latest.end_ms-u.end_ms
+                                    if u.recorded_end_at_ms is not None else None)) if latest is not None else u)
         return result
+
+    def _note_answer_handling(self, action, input_ids, text, reason):
+        sources = []
+        for iid in input_ids:
+            source = self.input_records.get(iid, {}).get('transcript')
+            track = source.track_id if source is not None else ''
+            if not track or track.startswith(('unidentified-', 'pending-', 'overlap-')):
+                continue
+            code = self.answer_sound_codes.setdefault(track, f'答源{len(self.answer_sound_codes)+1}')
+            if code not in sources:
+                sources.append(code)
+        who = '、'.join(sources) or '来源未定'
+        note = f'{who}原话“{text[:80]}”：{action}。{reason}。'
+        self.answer_handling.append((monotonic(), note))
+        self.record('voice_answer_handling', {'action': action, 'input_ids': list(input_ids),
+                    'text': text, 'reason': reason})
+
+    def _answer_handling_context(self):
+        notes = [note for at, note in getattr(self, 'answer_handling', ()) if monotonic()-at <= 120]
+        return ('【回应处理】按发生顺序，后项可更新前项；答源仅关联声音，不确认身份。已播以回执为准。\n'
+                + '\n'.join(notes)) if notes else ''
+
+    def _retire_answers(self, action, input_ids=None, *, reason):
+        """Invalidate only matching unplayed work; an ASR edit is not a global stop."""
+        retired = set()
+        for key, ids in getattr(self, 'reply_input_ids', {}).items():
+            if input_ids is not None and not set(input_ids).intersection(ids):
+                continue
+            if key in self.retired_turns or self.answer_status.get(key) in {'completed', 'silent', 'failed'}:
+                continue
+            self.retired_turns[key] = reason
+            retired.add(key)
+            if reason != 'asr_revision':
+                text = ' / '.join(self.input_records[i]['transcript'].text for i in ids
+                                if self.input_records.get(i, {}).get('transcript'))
+                self._note_answer_handling(action, ids, text, '旧回应未播部分已作废')
+        self.pending_plans = deque((p for p in self.pending_plans if p[3] not in retired), maxlen=32)
+        while len(self.retired_turns) > 64:
+            self.retired_turns.pop(next(iter(self.retired_turns)))
+        return retired
+
+    def _retain_repeated_requests(self, current):
+        """Exact repeats from the same sound retain a still-pending response, never a played one."""
+        from jshi.voice.transcripts import same_request_wording
+        kept = []
+        for u in current:
+            found = None
+            for key, ids in reversed(list(self.reply_input_ids.items())):
+                if key in self.retired_turns or self.answer_status.get(key) not in {'running', 'ready', 'playing'}:
+                    continue
+                for iid in ids:
+                    old = self.input_records.get(iid, {}).get('transcript')
+                    # Acoustic continuity only; no deduplication across uncertain/overlapping voices.
+                    if (old is not None and iid != u.input_id and not old.overlap and not u.overlap
+                            and not old.identity_uncertain and old.track_id == u.speaker.track_id
+                            and old.track_id and not old.track_id.startswith(('unidentified-', 'pending-', 'overlap-'))
+                            and 0 <= u.start_ms - old.end_ms <= 30000
+                            and same_request_wording(old.text, u.text)):
+                        found = iid
+                        break
+                if found:
+                    break
+            if found:
+                self.input_records[u.input_id]['answer_reused_from'] = found
+                self._note_answer_handling('保留', (u.input_id, found), u.text, '同一声音重问，原回应仍在生成或待播，不另生成一份')
+            else:
+                kept.append(u)
+        return kept
 
     async def request_emergency_interrupt(self, reason: str, *, expected_epoch=None) -> bool:
         """预留给明确紧急事件的入口；调用方负责判定，不做危险检测。"""
@@ -1496,6 +1717,7 @@ class VoiceConversation:
         response = replace(response, response_plan=replace(response.response_plan, items=tuple(plan_items)))
         return response, envelope, self.identities.candidate(envelope.speaker)
 
+    @input_stage('voice_candidates')
     async def rank_candidates(self, transcript, speaker):
         record = self.input_records.get(transcript.input_id, {})
         if speaker.status in {"introduced", "recognized"}:
@@ -1702,6 +1924,19 @@ class VoiceConversation:
             self.turn_queue.put_nowait((envelope, self.epoch))
 
     def voice_evidence(self, utterance, candidates):
+        evidence = self._voice_evidence(utterance, candidates)
+        if utterance.speaker.method == 'manual_annotation':
+            return evidence
+        try:
+            note = json.loads(utterance.identity_note or '{}')
+        except (ValueError, TypeError):
+            note = {}
+        personal = self.input_records.get(utterance.input_id, {}).get('personal_classifier', {})
+        if (isinstance(note, dict) and note.get('identity_basis')) or personal.get('identity_basis'):
+            evidence['basis'] += '；同一连续声音沿用前段人物证据，未重新比对新增尾部'
+        return evidence
+
+    def _voice_evidence(self, utterance, candidates):
         """Physical support uses original measurements, never a previous model guess."""
         import math
         if utterance.speaker.method == 'manual_annotation':
@@ -1709,7 +1944,14 @@ class VoiceConversation:
                     'strength': 'clear', 'basis': '用户人工确认本句归属'}
         original = self.source_speakers.get(utterance.input_id, utterance.speaker)
         if original.method == "voiceprint_match":
-            return {"pick": self.assign_code(original.object_id, original.label), "strength": "clear", "basis": "声纹已匹配"}
+            evidence = {"pick": self.assign_code(original.object_id, original.label), "strength": "clear", "basis": "声纹已匹配"}
+            threshold = getattr(self.local_speakers, "confirmation_threshold", None)
+            confidence = getattr(original, 'confidence', None)
+            if type(confidence) in (int, float) and math.isfinite(confidence):
+                evidence["score"] = confidence
+                if type(threshold) in (int, float) and str(getattr(original, 'voiceprint_id', '') or '').startswith('local:'):
+                    evidence["threshold"] = threshold
+            return evidence
         personal = self.input_records.get(utterance.input_id, {}).get('personal_classifier', {})
         if personal.get('matched'):
             row = next((r for r in personal.get('ranking', ()) if r['object_id'] == personal['matched']), None)
@@ -1763,6 +2005,7 @@ class VoiceConversation:
             classifier=self.input_records.get(input_id,{}).get('personal_classifier',{}),
             original=asdict(self.source_speakers.get(input_id,speaker)))
 
+    @input_stage('jev_people_material')
     def _jev_batch(self, utterances):
         batch = []
         for index, utterance in enumerate(utterances, start=1):
@@ -1988,6 +2231,24 @@ class VoiceConversation:
         return result
 
     async def _judge(self, utterances, speaker, overlap, envelope=None) -> tuple[InterruptDecision, dict, tuple]:
+        """A judgement invalidated only by scene bookkeeping or its own stop is judged once more."""
+        decision, record, items = await self._judge_once(utterances, speaker, overlap, envelope)
+        causes = set(record.get('stale_causes') or ())
+        own_stop = record.get('control_applied') and record.get('applied_epoch') == self.epoch
+        if (causes and causes <= {'generation', 'epoch'} and ('epoch' not in causes or own_stop)
+                and not self.closed):
+            self.record('voice_jev_stale_retry', {'input_ids': record.get('input_ids', []),
+                'causes': sorted(causes), 'first_activity_id': record.get('prompt_activity_id', '')})
+            applied = record.get('applied_epoch') if record.get('control_applied') else None
+            decision, record, items = await self._judge_once(utterances, speaker, overlap, envelope)
+            record['stale_retry_of'] = sorted(causes)
+            if applied is not None and not record.get('control_applied'):
+                record.update(control_applied=True, applied_epoch=applied)
+        return decision, record, items
+
+    async def _judge_once(self, utterances, speaker, overlap, envelope=None) -> tuple[InterruptDecision, dict, tuple]:
+        preparation_mono, preparation_wall = monotonic(), time()*1000
+        schedule_scope = self.entry_scheduler.schedule.capture()
         entry_job = self.entry_scheduler.current
         if entry_job and tuple(u.input_id for u in utterances) != tuple(u.input_id for u in entry_job.rows):
             entry_job = None  # Standalone/legacy callers do not belong to a different in-flight voice job.
@@ -2023,16 +2284,21 @@ class VoiceConversation:
             delivery['state'] = 'thinking'
         cutoff = min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=time()*1000)
         from jshi.core.person_names import known_names
-        delivery['named_people'] = known_names(self.code_owner, self.process.profiles)
+        with stage(self.record, 'jev_known_names', input_ids=[u.input_id for u in utterances]):
+            delivery['named_people'] = known_names(self.code_owner, self.process.profiles)
         from jshi.recognition.acquaintance import acquaintance_store
         acquaintances = acquaintance_store(self.process)
-        delivery['acquaintance'] = {self.assign_code(u.speaker.object_id,u.speaker.label):
-            acquaintances.context(self.subject_id,u.speaker.object_id) for u in utterances
-            if u.speaker.method not in {'unassigned_audio','visual_scene','voice_scene'}}
+        with stage(self.record, 'jev_acquaintance', input_ids=[u.input_id for u in utterances]):
+            delivery['acquaintance'] = {self.assign_code(u.speaker.object_id,u.speaker.label):
+                acquaintances.context(self.subject_id,u.speaker.object_id) for u in utterances
+                if u.speaker.method not in {'unassigned_audio','visual_scene','voice_scene'}}
 
+        if self.utterance_material:
+            delivery['utterance_context'] = self.utterance_organizer.material()
         delivery['conversation'] = self.dialogue.recent(self.subject_id, cutoff=cutoff,
             exclude={u.input_id for u in utterances})
         delivery = self.dialogue.clean(delivery, subject=self.subject_id)
+        delivery['answer_handling'] = self._answer_handling_context()
         from jshi.voice.wait_ack import model_key
         delivery['waiting'] = self.wait_ack_timing.guidance(model_key(self.process),
             allowed=state == 'completed' and not overlap and not self.pending_voice and not self.output_disconnected
@@ -2080,14 +2346,22 @@ class VoiceConversation:
         if not batch:
             batch = [{'n': 1, 'text': envelope.text, 'who': 'unknown', 'at': time()*1000, 'source': envelope.source, 'voice_evidence': {'strength':'unavailable','basis':'非声音观察'}}]
         from jshi.voice.jev_material import task_context
-        delivery['task_context'] = await asyncio.to_thread(task_context, self.process, self.subject_id,
-            [u.speaker for u in utterances], code_of=lambda oid: self.assign_code(oid, self.code_labels.get(oid, '')))
+        with stage(self.record, 'jev_task_context', input_ids=[u.input_id for u in utterances]):
+            delivery['task_context'] = await asyncio.to_thread(task_context, self.process, self.subject_id,
+                [u.speaker for u in utterances], code_of=lambda oid: self.assign_code(oid, self.code_labels.get(oid, '')))
         started = monotonic()
         jev_started_at_ms = time()*1000
-        await self.emit('flow_phase', lane='input', stage='jev')
+        report_safely(self.record, 'voice_input_stage', {'stage': 'jev_material_prepare',
+            'input_ids': [u.input_id for u in utterances],
+            'started_at_ms': preparation_wall, 'finished_at_ms': jev_started_at_ms,
+            'elapsed_ms': round((started-preparation_mono)*1000, 3)})
+        await self.emit('flow_phase', lane='input', stage='jev', input_ids=[u.input_id for u in utterances if u.input_id])
         for u in utterances:
             if u.input_id in self.input_records:
-                self.input_records[u.input_id]['jev_started_at'] = started
+                record = self.input_records[u.input_id]
+                record['jev_started_at'] = started
+                record.setdefault('jev_first_started_at', started)
+                record['jev_rounds'] = record.get('jev_rounds', 0) + 1
                 self.stamp_pipeline(u.input_id, jev_started_at_ms=jev_started_at_ms)
         for row, utterance in zip(batch, utterances):
             row['overlap'] = utterance.overlap
@@ -2125,12 +2399,16 @@ class VoiceConversation:
             for utterance in utterances:
                 source = self.input_records.get(utterance.input_id, {})
                 latest = source.get('transcript')
-                if source.get('superseded_by') or (latest is not None and latest.text != utterance.text):
+                from jshi.voice.transcripts import equivalent_input_revision
+                if source.get('superseded_by') or (latest is not None and not equivalent_input_revision(latest.text, utterance.text)):
                     return False
             return True
 
+        own_inputs = {u.input_id for u in utterances}
+
         def is_current():
-            return ((entry_job is None or entry_job.valid) and same_sources() and not validity['expired'] and not self.closed and self.epoch == validity['epoch']
+            return ((entry_job is None or entry_job.valid) and same_sources() and not validity['expired'] and not self.closed
+                    and self._epoch_current(validity['epoch'], own_inputs)
                     and self.jev_scene_store.state['generation'] == validity['generation'])
 
         async def apply_entry(result):
@@ -2184,15 +2462,19 @@ class VoiceConversation:
                         route='background', direct_reply='', waiting_reply='', model_error='JEV1_2超时，保留入口判断')
                 else:
                     result = open_batch("未能初判")
-        if (not same_sources() or self.closed or self.epoch != validity['epoch']
-                or self.jev_scene_store.state['generation'] != validity['generation']):
+        stale_causes = [cause for cause, failed in (
+            ('source', not same_sources()), ('closed', self.closed),
+            ('entry_job', entry_job is not None and not entry_job.valid),
+            ('epoch', not self._epoch_current(validity['epoch'], own_inputs)),
+            ('generation', self.jev_scene_store.state['generation'] != validity['generation'])) if failed]
+        if set(stale_causes) - {'entry_job'}:
             result = replace(result, action='ignore', control='keep', route='background',
                              direct_reply='', waiting_reply='', items=(), judged=False,
                              routing_error=result.routing_error or 'JEV结果过期，不提交回应')
         validity['expired'] = True
         result = VoiceJEV.enforce_completeness(result)
         decision = InterruptDecision(result.action, result.reason, result.claimed_name)
-        await self.emit('flow_phase', lane='input', stage='judged')
+        await self.emit('flow_phase', lane='input', stage='judged', input_ids=[u.input_id for u in utterances if u.input_id])
         record = {"ms": round((monotonic() - started) * 1000), "action": decision.action,
                   "input_prepare_ms": input_prepare_ms,
                   "path": path, "timed_out": timed_out, "reason": decision.reason[:80],
@@ -2212,6 +2494,8 @@ class VoiceConversation:
         failed_stage = next((s for s in reversed(result.stage_records) if s.get('status') == 'failed'), {})
         record['failure_kind'] = 'timeout' if timed_out else failed_stage.get('error_kind', 'unclassified' if result.model_error else '')
         record['failure_stage'] = failed_stage.get('stage', '')
+        if record['failure_kind'] == 'stale' or set(stale_causes) - {'entry_job'}:
+            record['stale_causes'] = stale_causes
         record['control'] = result.control
         record['utterance_complete'] = result.utterance_complete
         record['decision_reason'] = result.decision_reason
@@ -2260,8 +2544,21 @@ class VoiceConversation:
         elif result.routing_error and monotonic() - self._last_jev_notice >= 30:
             self._last_jev_notice = monotonic()
             await self.emit('notice', text=result.routing_error)
+        schedule = self.entry_scheduler.schedule
+        matter = schedule.current()
+        if (self.decisions.config['mode'] == 'active' and matter and not matter.cancelled
+                and schedule_scope.input_version == matter.input_version
+                and not result.model_error and not result.routing_error and result.judged
+                and result.route != 'wait'):
+            attempt = matter.attempts.get(matter.current_attempt)
+            if attempt:
+                effect = schedule._reapprove(matter, attempt, schedule_scope)
+                # New answers may start after this decision; old ones only resume on keep.
+                if result.control == 'keep':
+                    await self.apply_schedule_effect(effect)
         return decision, record, result.items
 
+    @input_stage('speaker_audio_prepare')
     async def _prepare_speaker_audio(self, batch):
         """Replace a mixed batch only after all independent sources are ready."""
         if self.sample_source is None or any(t.input_id in self.annotations for t in batch):
@@ -2363,12 +2660,16 @@ class VoiceConversation:
                         continue
                     transcript = input_record.get('transcript', transcript)
                     input_record['processing_started'] = True
+                    report_safely(self.record, 'voice_input_stage', {'stage': 'input_worker_started',
+                        'input_ids': [transcript.input_id],
+                        'received_to_worker_ms': round((monotonic()-input_record['at'])*1000, 3)})
                     input_record["group_ready_at"] = group_ready
                     input_record['collection_trigger'] = collection_trigger
                     input_record["worker_started_at"] = max(worker_started, input_record.get("at", worker_started))
                     identity_started = monotonic()
                     prior_cluster = self.identities.clusters.get(transcript.speaker_cluster_id) if transcript.speaker_cluster_id else None
-                    evidence = self.resolve_speaker(transcript)
+                    with stage(self.record, 'resolve_speaker', input_ids=[transcript.input_id]):
+                        evidence = self.resolve_speaker(transcript)
                     self.source_speakers[transcript.input_id] = evidence
                     if (prior_cluster and prior_cluster.object_id != evidence.object_id
                             and evidence.method == 'voiceprint_match' and evidence.status == 'recognized'
@@ -2406,13 +2707,24 @@ class VoiceConversation:
                     latency = await self.save_voice_latency(transcript.input_id, 'text_sent')
                     if not input_record.get('display_acknowledged'):
                         await self._archive_update(transcript.input_id, voice_latency=latency)
-                    evidence = await self.personal_identity(transcript, evidence,
-                        wait=collection_trigger != 'active_control')
+                    # Both evidence lanes begin before either is awaited. Keep
+                    # voiceprint results even when MLP later recognizes someone.
+                    candidate_started = monotonic()
+                    if collection_trigger == 'active_control':
+                        found, candidate_status = [], '控制判断使用已有证据，不等待额外声音模型'
+                        evidence = await self.personal_identity(transcript, evidence, wait=False)
+                    else:
+                        evidence, candidate_result = await asyncio.gather(
+                            self.personal_identity(transcript, evidence),
+                            self.rank_candidates(transcript, evidence))
+                        found, candidate_status = candidate_result
+                    input_record['candidate_ms'] = round((monotonic()-candidate_started)*1000)
                     answer = self.identities.name_answer(evidence, transcript.text) if not transcript.overlap else ''
                     claimed = (explicit_name(transcript.text) or answer) if not transcript.overlap else ""
                     if self.identities.acquaintance is not None and evidence.method not in {'unassigned_audio','visual_scene','voice_scene'}:
-                        self.identities.acquaintance.observe_text(self.subject_id,evidence.object_id,transcript.input_id,
-                            transcript.text,session=self.session_id,encounter=False)
+                        with stage(self.record, 'acquaintance_observe', input_ids=[transcript.input_id]):
+                            self.identities.acquaintance.observe_text(self.subject_id,evidence.object_id,transcript.input_id,
+                                transcript.text,session=self.session_id,encounter=False)
 
                     remembered = False
                     if self.local_speakers is not None and evidence.method == 'anonymous_voice_cluster':
@@ -2459,11 +2771,6 @@ class VoiceConversation:
                         input_record['voice_candidate_status'] = self._sample_job(transcript.input_id, 'voice_candidate_collected',
                             lambda pcm=pcm, t=transcript, actor=actor: self.local_speakers.collect_candidate(pcm, t.input_id,
                                 actor, self.session_id, overlap=t.overlap, start_ms=t.start_ms, end_ms=t.end_ms))
-                    candidate_started = monotonic()
-                    if collection_trigger == 'active_control':
-                        found, candidate_status = [], '控制判断使用已有证据，不等待额外声音模型'
-                    else:
-                        found, candidate_status = await self.rank_candidates(transcript, evidence)
                     personal = input_record.get('personal_classifier', {})
                     if personal.get('ranking') and not personal.get('matched'):
                         # Preserve both sources; their scores are not ranked against one another.
@@ -2471,7 +2778,6 @@ class VoiceConversation:
                                           for row in personal['ranking'][:3]
                                           if row.get('verified') is not False
                                           and row['object_id'] not in {r['object_id'] for r in found}]]
-                    input_record["candidate_ms"] = round((monotonic() - candidate_started) * 1000)
                     input_record["candidate_status"] = candidate_status
                     if input_record.get('short_voice_hint'):
                         try:
@@ -2533,13 +2839,18 @@ class VoiceConversation:
                             task.add_done_callback(self.background_tasks.discard)
                     await self.emit("speaker", **asdict(evidence), jev_status="pending")
                 if current:
+                    current = self._retain_repeated_requests(current)
+                if current:
                     # Display never waits for the previous group's entry judgment.
                     # Queue unfinished-task accounting still completes after judgment
                     # so existing tests can await queue.join(); accept backpressure
                     # only waits for free display slots, not for that join.
+                    for u in current:
+                        report_safely(self.record, 'voice_input_stage', {
+                            'stage': 'jev_input_queued', 'input_ids': [u.input_id]})
                     self.judge_pending.append({'current':current, 'track_id':transcript.track_id,
                         'expression_complete':expression_complete, 'collection_trigger':collection_trigger,
-                        'queued':queued_count})
+                        'queued':queued_count, 'queued_at':monotonic()})
                     self.judge_ready.set()
                     self.entry_scheduler.notify(current)
                     queued_count = 0
@@ -2556,20 +2867,18 @@ class VoiceConversation:
             self.input_idle.set()
 
     def _take_judge_group(self):
-        """Merge groups displayed while the previous judgment was running."""
-        first = self.judge_pending.popleft()
-        current = list(first['current'])
-        group = dict(first)
-        while self.judge_pending and len(current) + len(self.judge_pending[0]['current']) <= 64:
-            more = self.judge_pending.popleft()
-            current.extend(more['current'])
-            group['queued'] += more['queued']
-            group['track_id'] = more['track_id']
-            if more['collection_trigger'] == 'active_control' or group['collection_trigger'] != 'active_control':
-                group['collection_trigger'] = more['collection_trigger']
-                group['expression_complete'] = more['expression_complete']
-        current.sort(key=lambda u: (u.start_ms, u.end_ms))
-        group['current'] = current
+        from jshi.voice.entry_queue import take_group
+        names = ['匠石']
+        if hasattr(self.process.profiles, 'all_terms'):
+            names.extend(self.process.profiles.all_terms('calls_subject'))
+        group = take_group(self.judge_pending, names=names)
+        self.record('voice_entry_queue', {'input_ids': [u.input_id for u in group['current']],
+            'queued_groups': len(self.judge_pending), 'wait_ms': round((monotonic()-group.get('queued_at', monotonic()))*1000)})
+        for u in group['current']:
+            queued = group['queued_at_by_input'].get(u.input_id)
+            report_safely(self.record, 'voice_input_stage', {'stage': 'jev_input_dequeued',
+                'input_ids': [u.input_id],
+                'queue_wait_ms': round((monotonic()-queued)*1000, 3) if queued is not None else None})
         return group
 
     async def _judge_work(self) -> None:
@@ -2586,6 +2895,18 @@ class VoiceConversation:
             input_epoch = self.epoch
             try:
                 current = self._latest_utterances(current)
+                if collection_trigger == 'revision':
+                    from jshi.voice.transcripts import equivalent_input_revision
+                    duplicate = [u for u in current
+                        if (previous := self.input_records.get(u.input_id, {}).get('last_judged_revision_text')) is not None
+                        and self.input_records[u.input_id].get('last_judged_revision_version')
+                            == self.input_records[u.input_id].get('revision_version', 0)
+                        and equivalent_input_revision(previous, u.text)]
+                    if duplicate:
+                        self.record('voice_revision_already_judged', {
+                            'input_ids': [u.input_id for u in duplicate],
+                            'reason': 'earlier_entry_used_current_revision'})
+                        current = [u for u in current if u not in duplicate]
                 if not current:
                     continue
                 evidence = current[-1].speaker
@@ -2597,8 +2918,30 @@ class VoiceConversation:
                 if explicit_stop:
                     decision = InterruptDecision('stop', 'explicit stop')
                 else:
+                    judged_sources = tuple(current)
+                    judged_versions = {u.input_id: self.input_records.get(u.input_id, {}).get('revision_version', 0)
+                                       for u in current}
                     judged = await self.entry_scheduler.run(current,
                         lambda: self._judge(current, evidence, any(u.overlap for u in current)))
+                    work_task = self.entry_scheduler.work_task
+                    if work_task and not work_task.done() and self.entry_scheduler.applies():
+                        # Its effect on old work must land before this batch is queued.
+                        await asyncio.shield(work_task)
+                    if self._epoch_current(input_epoch, {u.input_id for u in current}):
+                        input_epoch = self.epoch
+                    effect = self.entry_scheduler.take_effect()
+                    if effect and effect.grade == 'restart':
+                        self.premise_changed = True
+                    elif effect and effect.kind == 'reapprove':
+                        self.premise_changed = False
+                    if effect and effect.kind == 'cancel':
+                        await self.apply_schedule_effect(effect)
+                        continue
+                    if effect and effect.kind == 'capped':
+                        self.entry_scheduler.deferred_group = {**group, 'queued': 0}
+                        continue
+                    if effect and effect.resume:
+                        await self.apply_schedule_effect(effect)
                     if judged is None:
                         # Transfer queue accounting along with the original speech.
                         # The latest input may supersede some rows; existing source checks remove those.
@@ -2609,6 +2952,11 @@ class VoiceConversation:
                     decision, record, items = judged
                     if input_epoch != self.epoch and record.get("applied_epoch") != self.epoch:
                         continue  # A newer control invalidated this batch.
+                    if record.get('judged') and not record.get('stale_causes') and not record.get('model_error'):
+                        for u in judged_sources:
+                            if u.input_id in self.input_records:
+                                self.input_records[u.input_id]['last_judged_revision_text'] = u.text
+                                self.input_records[u.input_id]['last_judged_revision_version'] = judged_versions[u.input_id]
                     record['collection_complete'] = expression_complete
                     record['collection_trigger'] = collection_trigger
                     record['collected_chars'] = sum(ch.isalnum() for u in current for ch in u.text)
@@ -2771,12 +3119,14 @@ class VoiceConversation:
                     oid = current[0].speaker.object_id if current else ''
                     if (direct and current and all(u.speaker.object_id == oid for u in current)
                             and set(call.get('input_ids', ())) == {u.input_id for u in current}
-                            and call.get('collection_complete') is not False
+                            and (call.get('collection_complete') is not False
+                                 or call.get('utterance_complete') == 'complete' and not call.get('pending_refs'))
                             and self.direct_replies.accept(self.subject_id, oid, '\n'.join(u.text for u in current), direct, include_reply=False, allow_general=getattr(self.jev, 'mode', 'legacy') != 'legacy')):
                         await self._direct_reply(direct, oid, epoch, envelope, current, call)
                         continue
                 facts = []
-                if envelope.jev_calls and envelope.jev_calls[-1].get('collection_complete') is False:
+                if (envelope.jev_calls and envelope.jev_calls[-1].get('collection_complete') is False
+                        and envelope.jev_calls[-1].get('utterance_complete') != 'complete'):
                     facts.append('本轮只是分批处理；尚未观察到发言人的足够停顿，不能据此认为表达已经结束。')
                 delivery = self.delivery.snapshot()
                 previous = self.voice_timings.get(self.reply_epochs.get(delivery.get('reply_id')))
@@ -2833,6 +3183,12 @@ class VoiceConversation:
                     envelope = replace(envelope, visual_snapshot_id=call.get('visual_snapshot_id', ''))
                     images = tuple(InputPart(**p) for p in call.get('input_parts', ()) if p['kind'] == 'image')
                     envelope = replace(envelope, parts=tuple(p for p in envelope.parts if p.kind != 'image') + images)
+                self.entry_scheduler.schedule.set_task('cognition', 'running')
+                organized = self.utterance_organizer.material() if self.utterance_material else None
+                if organized:
+                    envelope = replace(envelope, delivery_context=(envelope.delivery_context or '') +
+                        '\n【发言接续记录】以下为声音发言的接续与插话记录，状态是分析证据；未知人物不据此确认身份。\n' +
+                        json.dumps(organized, ensure_ascii=False))
                 self.active_turn = {"state": "thinking", "object_id": envelope.speaker.object_id,
                                     "input": envelope.text, "pending_text": "尚未生成回应"}
                 self.schedule_person_review(current, items)
@@ -2846,18 +3202,32 @@ class VoiceConversation:
             finally:
                 self.turn_busy = False
                 self.active_turn = None
+                self.entry_scheduler.schedule.set_task('cognition', 'done')
                 self.last_settled_at_ms = time()*1000
                 complete_ids = [u.input_id for u in (current or ()) if getattr(u, 'input_id', None)]
+                for key, ids in self.reply_input_ids.items():
+                    if set(complete_ids).intersection(ids) and self.answer_status.get(key) == 'running':
+                        self.answer_status[key] = 'silent'
                 for iid in complete_ids:
                     self.stamp_pipeline(iid, turn_complete_at_ms=self.last_settled_at_ms)
                 await self.publish_pipeline(complete_ids)
-                await self.emit('turn_complete')
+                await self.emit('turn_complete', input_ids=complete_ids, at_ms=self.last_settled_at_ms)
                 self.turn_queue.task_done()
 
     async def _respond(self, envelope, epoch: int) -> None:
         loop = asyncio.get_running_loop()
+        preparation_started = monotonic()
         prepared, preparation_route = await self.preparation.finish(envelope)
+        preparation_finish_ms = round((monotonic() - preparation_started) * 1000)
         if self.closed or epoch != self.epoch:
+            return
+        from jshi.voice.transcripts import equivalent_input_revision
+        if any(self.input_records.get(u.input_id, {}).get('superseded_by') or
+               (self.input_records.get(u.input_id, {}).get('transcript') is not None and
+                not equivalent_input_revision(u.text, self.input_records[u.input_id]['transcript'].text))
+               for u in envelope.current_utterances):
+            self.record('voice_answer_discarded', {'input_ids': [u.input_id for u in envelope.current_utterances],
+                        'reason': 'source_changed_during_preparation'})
             return
         preparation_context = json.dumps(prepared.model_material(include_memories=False), ensure_ascii=False) if prepared else ''
         feedback_revision = self.feedback.revision
@@ -2865,13 +3235,19 @@ class VoiceConversation:
         self.turn_sequence += 1
         turn_key = (epoch, self.turn_sequence)
         self.reply_input_ids[turn_key] = [u.input_id for u in envelope.current_utterances]
+        self.answer_status[turn_key] = 'running'
+        envelope = replace(envelope, delivery_context='\n'.join(filter(None,
+            (envelope.delivery_context, self._answer_handling_context()))))
         while len(self.reply_input_ids) > 32:
-            self.reply_input_ids.pop(next(iter(self.reply_input_ids)))
+            old_key = next(iter(self.reply_input_ids))
+            self.reply_input_ids.pop(old_key)
+            self.answer_status.pop(old_key, None)
         began = monotonic()
         main_started_at_ms = time()*1000
         for u in envelope.current_utterances:
             self.stamp_pipeline(u.input_id, main_started_at_ms=main_started_at_ms)
         rows = [self.input_records[u.input_id] for u in envelope.current_utterances if u.input_id in self.input_records]
+        self._record_stage_latency(envelope, began)
         calls = [*self.unreported_jev, *envelope.jev_calls]
         self.unreported_jev.clear()
         metrics = {'input_to_main_ms': round((began - min(r['at'] for r in rows)) * 1000) if rows else None,
@@ -2890,6 +3266,9 @@ class VoiceConversation:
                 'input_prepare_ms': sum(call.get('input_prepare_ms', 0) for call in current_calls),
                 'jev_ms': metrics['current_jev_ms'],
                 'historical_jev_ms': metrics['historical_jev_ms'],
+                'ready_queue_wait_ms': max((round((preparation_started - r.get('ready_at', preparation_started)) * 1000)
+                                            for r in rows), default=None),
+                'preparation_finish_ms': preparation_finish_ms,
                 'audio_end_received_at_ms': max((r['pipeline']['audio_end_received_at_ms'] for r in rows
                     if r.get('pipeline', {}).get('audio_end_received_at_ms') is not None), default=None),
             })
@@ -2923,7 +3302,10 @@ class VoiceConversation:
 
         def plan_ready(plan):
             nonlocal emitted
-            if emitted or epoch != self.epoch or self.closed:
+            if emitted or epoch != self.epoch or self.closed or turn_key in self.retired_turns:
+                if not emitted:
+                    self.record('voice_answer_discarded', {'turn_key': turn_key, 'input_ids': list(current_ids),
+                        'reason': self.retired_turns.get(turn_key, 'closed' if self.closed else 'epoch_changed')})
                 return
             if any(c.get('silent_operation') for c in envelope.jev_calls):
                 emitted = True
@@ -2954,7 +3336,9 @@ class VoiceConversation:
                           for i in plan.items if i.channel == "verbal" and i.text.strip()
                           and (not i.target_ids or any(self.object_of(t) in valid for t in i.target_ids))) if plan.mode == "respond" else ()
             if not items:
+                self.answer_status[turn_key] = 'silent'
                 return
+            self.answer_status[turn_key] = 'ready'
             from jshi.voice.delivery import sentences
             self.dialogue.plan(self.subject_id, self.session_id + ':' + str(turn_key), self.session_id,
                 [segment for item in items for segment in sentences(item.text)])
@@ -2991,7 +3375,8 @@ class VoiceConversation:
         await self.emit("thinking", source=envelope.source)
         def phase_ready(stage):
             loop.call_soon_threadsafe(lambda: asyncio.create_task(self.emit('flow_phase',
-                lane='main', stage=stage, source=envelope.source)))
+                lane='main', stage=stage, source=envelope.source,
+                input_ids=[u.input_id for u in envelope.current_utterances if u.input_id])))
             if stage == 'reconsider':
                 async def reconsider_feedback():
                     if (emitted or self.closed or epoch != self.epoch or not self.input_idle.is_set() or self.preparation.fragments
@@ -3016,14 +3401,14 @@ class VoiceConversation:
             return reviewed, envelope, speaker
         def experience():
             from jshi.subject.cancellation import generation_scope
-            with generation_scope(lambda: not self.closed and epoch == self.epoch):
+            with generation_scope(lambda: not self.closed and epoch == self.epoch and turn_key not in self.retired_turns):
                 result = self.process.experience(self.subject_id, envelope.text, envelope=envelope,
                     objects={u.speaker.label:u.speaker.object_id for u in (*envelope.utterances, *envelope.current_utterances) if u.speaker.status in {"introduced", "recognized"}},
                     resolved_speaker=self.identities.candidate(envelope.speaker), on_voice_plan=plan_ready,
                     on_phase=phase_ready,
                     defer_write=True, code_restore=self.restore_codes,
                     preparation_context=preparation_context, light_finalize=prepared is not None,
-                    action_allowed=lambda: not self.closed and epoch == self.epoch,
+                    action_allowed=lambda: not self.closed and epoch == self.epoch and turn_key not in self.retired_turns,
                     on_conversation_review=review_ready,
                     object_codes={oid: code for code, oid in self.code_owner.items()})
             return result, self.process.last_model_response, result.selected_tool_ids
@@ -3032,7 +3417,9 @@ class VoiceConversation:
         metrics['recall_activity_id'] = result.activity.id
         if metrics.get('recall_delivery_status'):
             self.process.note_recall_delivery(result.activity.id, metrics['recall_delivery_status'])
-        self.direct_replies.prime(self.subject_id, result, include_reply=False)
+        with stage(self.record, 'main_reply_cache', activity_id=result.activity.id,
+                   input_ids=[u.input_id for u in envelope.current_utterances]):
+            self.direct_replies.prime(self.subject_id, result, include_reply=False)
         job = self.process.take_deferred_write()
         if job is not None:
             # Queued requests are wakeups, not one immutable write per turn.
@@ -3051,7 +3438,9 @@ class VoiceConversation:
                      "intent": asdict(response.tool_intent) if response.tool_intent else None,
                      "handling": response.tool_handling, "consumed": response.tool_consumed}}
         self.debug_history.append(self.last_debug)
-        self.record('voice_turn_diagnostics', self.last_debug)
+        with stage(self.record, 'main_debug_persist', activity_id=result.activity.id,
+                   input_ids=[u.input_id for u in envelope.current_utterances]):
+            self.record('voice_turn_diagnostics', self.last_debug)
         await self.emit('debug_turn', activity_id=result.activity.id, input=envelope.text[:100])
         handling = response.tool_handling
         if not handling and response.tool_consumed and not response.response_plan.unsaid_text():
@@ -3097,8 +3486,114 @@ class VoiceConversation:
         await self._start_plan((ResponseItem('verbal', text, (object_id,)),), object_id, epoch, activity_id)
         await self.emit('jev_reply', text=text, route='self_reply', main_called=False, memory_written=False)
 
+    async def _release_deferred_entry(self) -> None:
+        group = self.entry_scheduler.deferred_group
+        self.entry_scheduler.deferred_group = None
+        if group:
+            self.judge_pending.appendleft(group)
+            self.judge_ready.set()
+
+    async def apply_schedule_effect(self, effect) -> None:
+        if effect is None or effect.kind in {'none', 'ignored', 'observe', 'normal_entry', 'text',
+                'hold_submission', 'diagnostic', 'stale', 'replace_entry', 'capped', 'ack', 'await_asr'}:
+            return
+        snap = self.delivery.snapshot()
+        reply_id = snap.get('reply_id', '')
+        if effect.kind == 'block_next':
+            await self.emit('block_next', reply_id=reply_id, reason_id=effect.reason)
+        elif effect.kind == 'pause':
+            self.pending_voice = True
+            if self.delivery.pause():
+                await self.emit('pause', reply_id=reply_id, permit_seq=effect.seq, reason_id=effect.reason)
+        elif effect.kind in {'clear_block', 'reapprove'}:
+            await self.emit('clear_block', reply_id=reply_id, cleared=list(effect.cleared))
+            if effect.resume:
+                self.pending_voice = False
+                self.delivery.resume()
+                await self.emit('resume', reply_id=reply_id, cleared=list(effect.cleared))
+                await self._next_plan()
+        elif effect.kind == 'unclear':
+            self.pending_voice = True
+            if self.delivery.pause():
+                await self.emit('pause', reply_id=reply_id, permit_seq=effect.seq, reason_id='unclear')
+        elif effect.kind == 'invalidate_work':
+            self._retire_answers('替换', reason='premise_changed')
+            self._bump_work_epoch(effect)
+            self.preparation.cancel()
+            self.pending_plans.clear()
+            if self.tts_task and not self.tts_task.done():
+                self.tts_task.cancel()
+            rid = self.delivery.stop('premise_changed')
+            await self.emit('stop', reply_id=rid, reason_id='premise_changed')
+        elif effect.kind == 'cancel':
+            self._retire_answers('取消', reason=effect.reason or 'schedule_cancel')
+            self._bump_work_epoch(effect)
+            self.preparation.cancel()
+            rid = self.delivery.stop(effect.reason or 'schedule_cancel')
+            if self.tts_task and not self.tts_task.done():
+                self.tts_task.cancel()
+            self.pending_plans.clear()
+            await self.emit('stop', reply_id=rid, permit_seq=effect.seq, reason_id=effect.reason or 'cancel')
+            await self._persist_schedule(effect)
+
+    def _bump_work_epoch(self, effect) -> None:
+        self.epoch += 1
+        if effect.covered:
+            self.work_epoch_inputs[self.epoch] = set(effect.covered)
+            while len(self.work_epoch_inputs) > 16:
+                self.work_epoch_inputs.pop(next(iter(self.work_epoch_inputs)))
+
+    def _epoch_current(self, epoch, input_ids) -> bool:
+        """Old work invalidated because of these very inputs does not invalidate them."""
+        if epoch == self.epoch:
+            return True
+        ids = set(input_ids)
+        return bool(ids) and epoch < self.epoch and all(
+            ids & self.work_epoch_inputs.get(e, set()) for e in range(epoch + 1, self.epoch + 1))
+
+    async def _persist_schedule(self, effect) -> None:
+        if not effect.persist:
+            return
+        try:
+            await asyncio.to_thread(self.jev_scene_store.note_control, effect.matter_id, effect.persist[-1])
+        except OSError:
+            self.entry_scheduler.schedule.persist_failed(effect.matter_id)
+            self.record('schedule_persist_failed', {'matter_id': effect.matter_id})
+
+    async def _confirm_transient(self, token, matter_id=None) -> None:
+        await asyncio.sleep(self.entry_scheduler.schedule.transient_confirm_s)
+        effect = self.entry_scheduler.schedule.confirm_transient(token, matter_id)
+        if effect.kind != 'none':
+            await self.apply_schedule_effect(effect)
+
+    async def _expire_asr_wait(self, token, matter_id=None) -> None:
+        await asyncio.sleep(self.entry_scheduler.schedule.asr_wait_s)
+        effect = self.entry_scheduler.schedule.expire_asr_wait(token, matter_id)
+        if effect.kind != 'none':
+            self.record('voice_asr_wait_expired', {'matter_id': effect.matter_id, 'cleared': list(effect.cleared),
+                                                   'wait_s': self.entry_scheduler.schedule.asr_wait_s})
+            await self.apply_schedule_effect(effect)
+
     async def _start_plan(self, items, object_id, epoch, turn_key) -> None:
-        if self.closed or epoch != self.epoch:
+        if self.closed or epoch != self.epoch or turn_key in self.retired_turns:
+            self.record('voice_answer_discarded', {'turn_key': turn_key,
+                'input_ids': self.reply_input_ids.get(turn_key, []),
+                'reason': self.retired_turns.get(turn_key, 'closed' if self.closed else 'epoch_changed')})
+            return
+        self.answer_status[turn_key] = 'ready'
+        if self.entry_scheduler.schedule.blocks_start():
+            matter = self.entry_scheduler.schedule.current()
+            self.record('voice_answer_deferred', {'reason': 'schedule_block', 'turn_key': turn_key,
+                'input_ids': self.reply_input_ids.get(turn_key, []),
+                'pending_inputs': list(matter.pending) if matter else [],
+                'unclear': bool(matter and matter.unclear),
+                'cancelled': bool(matter and matter.cancelled),
+                'asr_pending': bool(matter and matter.asr_pending),
+                'reasons': list(matter.reasons) if matter else []})
+            if len(self.pending_plans) == self.pending_plans.maxlen:
+                await self.emit("notice", text="待播回应较多，暂不增加新语音。")
+                return
+            self.pending_plans.append((items, object_id, epoch, turn_key))
             return
         from jshi.voice.delivery import sentences
         key = self.session_id + ':' + str(turn_key)
@@ -3109,6 +3604,9 @@ class VoiceConversation:
                            [segment for item in items for segment in sentences(item.text)],
                            hide_until_played=hide)
         if self.delivery.snapshot().get("state") in {"queued", "playing", "paused"}:
+            self.record('voice_answer_deferred', {'reason': 'player_busy', 'turn_key': turn_key,
+                'input_ids': self.reply_input_ids.get(turn_key, []),
+                'playing_reply_id': self.delivery.snapshot().get('reply_id')})
             if len(self.pending_plans) == self.pending_plans.maxlen:
                 await self.emit("notice", text="待播回应较多，暂不增加新语音。")
                 return
@@ -3116,6 +3614,8 @@ class VoiceConversation:
             return
         text = "\n".join(i.text for i in items)
         d = self.delivery.begin(text, object_id, items=items)
+        schedule = self.entry_scheduler.schedule
+        schedule.add_answer(d.reply_id, schedule.capture().input_version)
         self.dialogue.bind(key, d.reply_id)
         if self.voice_timings.get(turn_key, (None, {}))[1].get('route') in {'self_reply', 'waiting_ack'}:
             self.direct_reply_ids.add(d.reply_id)
@@ -3131,14 +3631,21 @@ class VoiceConversation:
         if self.pending_voice:
             self.delivery.pause()
         reply_sent_at_ms = time()*1000
+        reply_kind = ('waiting_ack' if self.voice_timings.get(turn_key, (None, {}))[1].get('route') == 'waiting_ack'
+                      else 'answer')
         for iid in self.reply_input_ids.get(turn_key, ()):
-            self.stamp_pipeline(iid, reply_sent_at_ms=reply_sent_at_ms)
+            if reply_kind == 'waiting_ack':
+                self.stamp_pipeline(iid, waiting_reply_sent_at_ms=reply_sent_at_ms)
+            else:
+                self.stamp_pipeline(iid, reply_sent_at_ms=reply_sent_at_ms)
         reply_items = []
         for item in items:
             row = asdict(item)
             row['target_labels'] = [self.reply_target_name(target) for target in item.target_ids]
             reply_items.append(row)
         await self.emit("reply", reply_id=d.reply_id, text=text, paused=self.pending_voice,
+                        reply_kind=reply_kind, sent_at_ms=reply_sent_at_ms,
+                        input_ids=list(self.reply_input_ids.get(turn_key, ())),
                         turn_key=list(turn_key),
                         generated_at_ms=self.voice_timings.get(turn_key, (None, {}))[1].get('reply_ready_at_ms'),
                         items=reply_items)
@@ -3148,14 +3655,22 @@ class VoiceConversation:
         self.tts_task = asyncio.create_task(self._synthesize(d))
 
     async def _next_plan(self):
-        if self.pending_plans and self.delivery.snapshot().get("state") in {"completed", "failed", "stopped"}:
+        if self.entry_scheduler.schedule.blocks_start():
+            return
+        while self.pending_plans and self.delivery.snapshot().get("state") in {None, "completed", "failed", "stopped"}:
             await self._start_plan(*self.pending_plans.popleft())
+            if self.entry_scheduler.schedule.blocks_start():
+                break
 
     async def _synthesize(self, d) -> None:
         synthesis_started = monotonic()
         try:
             for segment, text in enumerate(d.texts):
-                stream = self.cloud.synthesize(text)
+                from jshi.voice.tts_retry import sentence_audio
+                stream = sentence_audio(self.cloud, text,
+                    is_current=lambda: self.delivery.accepts(d.reply_id) and not self.closed,
+                    on_retry=lambda error: self.record('voice_tts_retry',
+                        {'reply_id': d.reply_id, 'segment': segment, 'error_type': error, 'audio_sent': False}))
                 try:
                     async for pcm in stream:
                         if not self.delivery.accepts(d.reply_id):
@@ -3181,6 +3696,7 @@ class VoiceConversation:
         except Exception as exc:
             logging.getLogger(__name__).exception("Voice synthesis failed")
             self.delivery.fail(d.reply_id, str(exc))
+            self.answer_status[self.reply_epochs.get(d.reply_id)] = 'failed'
             self.record("voice_delivery", self.delivery.snapshot())
             if d.reply_id not in self.direct_reply_ids:
                 self.process.note_scene_delivery(self.subject_id, f"failed:{d.reply_id}",
@@ -3192,8 +3708,16 @@ class VoiceConversation:
 
     async def acknowledge(self, payload: dict) -> None:
         if self.delivery.acknowledge(str(payload.get("reply_id", "")), int(payload.get("segment", -1)), payload.get("phase", "")):
+            self.record('voice_playback_clock', {'reply_id':payload.get('reply_id'),
+                'segment':payload.get('segment'), 'phase':payload.get('phase'),
+                'browser_at_ms':payload.get('browser_at_ms'), 'received_at_ms':time()*1000})
+            key = self.reply_epochs.get(str(payload.get('reply_id', '')))
+            self.answer_status[key] = ('completed' if len(self.delivery.current.completed) == len(self.delivery.current.texts) else 'playing')
             if payload.get('phase') == 'completed':
                 self.dialogue.played(str(payload['reply_id']), int(payload['segment']))
+                self.entry_scheduler.schedule.ack(str(payload['reply_id']), int(payload['segment']),
+                    final=int(payload['segment']) == len(self.delivery.current.texts)-1,
+                    quick=str(payload['reply_id']) in self.direct_reply_ids)
             measured = self.voice_timings.get(self.reply_epochs.get(str(payload.get('reply_id',''))))
             if measured and payload.get('phase') == 'started' and 'playback_start_ms' not in measured[1]:
                 measured[1]['playback_start_ms'] = round((monotonic() - measured[0]) * 1000)
@@ -3239,7 +3763,7 @@ class VoiceConversation:
                 ledger = getattr(self.process, "activity_ledger", None)
                 if ledger is not None:
                     ledger.append_subject_reply(self.subject_id,
-                        text_raw="（播放器确认此句播放完成）" + d.texts[int(payload["segment"])],
+                        text_raw=d.texts[int(payload["segment"])],
                         mentioned_object_ids=d.targets[int(payload["segment"])] if d.targets else (d.object_id,),
                         objects={t:t for t in (d.targets[int(payload["segment"])] if d.targets else (d.object_id,))},
                         response_statuses=("verbal",), state_delta={"voice_reply_id": d.reply_id, "delivery": "played"})
@@ -3284,6 +3808,8 @@ class VoiceConversation:
             job.cancel()
         await asyncio.gather(*self.personal_prediction_jobs.values(), return_exceptions=True)
         self.personal_prediction_jobs.clear()
+        if self.parallel_identity is not None:
+            await asyncio.to_thread(self.parallel_identity.close)
         self.input_records.clear()
         self.annotations.clear()
         self.worker.cancel()
@@ -4046,12 +4572,15 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         ws = web.WebSocketResponse(max_msg_size=128 * 1024, heartbeat=20)
         conversation = None
         receiver = None
+        loop_watch = None
         asr = None
         local_executor = None
         local_pump = None
         online_turn = None
         online_turn_error = ''
         cloud_alignment = None
+        audio_timeline = None
+        recovery_intake = None
         speaker_split_error = ''
         cloud = None
         from jshi.voice.capture import PcmCapture
@@ -4093,6 +4622,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     input_batch_chars=config.input_batch_chars,
                     environment_idle_s=config.environment_idle_s,
                     personal_speakers=personal_speakers, audio_preparer=preparer,
+                    utterance_material=config.utterance_material,
                     session_id=request.query.get("session") or None)
                 active_conversation = conversation
                 if use_local is not None:
@@ -4112,18 +4642,32 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     from jshi.voice.streaming_asr import open_stream
                     if speakers is not None:
                         local_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-cloud-identity")
-                    if backend == 'bailian':
+                    if backend in {'bailian', 'online'}:
                         from jshi.voice.cloud_alignment import CloudSpeakerAlignment
                         try:
                             from jshi.voice.runtime import build_cloud_analyzer
                             model_root = Path(os.getenv('JSHI_VOICE_LOCAL_DIR', str(process.repository.path.parent/'voice_models')))
-                            analyzer = await asyncio.to_thread(build_cloud_analyzer, model_root, speakers,
+                            acoustic_analyzer = await asyncio.to_thread(build_cloud_analyzer, model_root, None,
                                 selected_model or os.getenv('JSHI_VOICE_SPEAKER_MODEL', 'cam++'))
-                            cloud_alignment = CloudSpeakerAlignment(audio, analyzer)
+                            from jshi.voice.segmentation_cache import SegmentationCache
+                            from jshi.voice.analysis import SpeakerAnalyzer, ParallelIdentity
+                            shared_segments = SegmentationCache(audio, acoustic_analyzer, conversation.record)
+                            identity_analyzer = SpeakerAnalyzer(None, speakers)
+                            conversation.parallel_identity = ParallelIdentity(speakers, conversation.personal_speakers,
+                                conversation.record, budget_s=config.candidate_timeout_s, segments=shared_segments)
+                            identity_analyzer.parallel_identity = conversation.parallel_identity
+                            shared_segments.identity = conversation.parallel_identity
+                            cloud_alignment = CloudSpeakerAlignment(audio, identity_analyzer,
+                                                                   segments=shared_segments)
+                            from jshi.voice.audio_timeline import AudioTimeline
+                            # 06 and 04 share one acoustic model and its cached windows.
+                            # With recovery disabled, 04 still precomputes every 6 s.
+                            audio_timeline = AudioTimeline(audio, shared_segments, conversation.record,
+                                step_ms=6000 if config.continuous_analysis == 'off' else 1000)
                             if local_executor is None:
                                 local_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='jshi-cloud-speakers')
                         except Exception as exc:
-                            speaker_split_error = '本地多人分段不可用，阿里输入保留人物不确定：' + type(exc).__name__
+                            speaker_split_error = '本地多人分段不可用：' + type(exc).__name__
                     if backend == 'online' and config.turn_strategy != 'eager':
                         from jshi.voice.online_turn import build_online_turn_gate
                         model_root = Path(os.getenv('JSHI_VOICE_LOCAL_DIR', str(process.repository.path.parent/'voice_models')))
@@ -4141,6 +4685,61 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     # The provider starts its audio-packet deadline on connect.
                     # Finish local cold starts before opening that connection.
                     asr = await open_stream(replace(config, asr_backend=backend), http, cloud)
+                from jshi.voice.transcription_recovery import RecoveryIntake, recognize_span
+                turn_assessment_job = None
+                async def deliver_voice_batch(rows, **arrival):
+                    nonlocal turn_assessment_job
+                    if online_turn is not None and not hasattr(online_turn, 'coordinator'):
+                        for row in rows:
+                            await online_turn.submit(row, **arrival)
+                        return
+                    from jshi.voice.utterance_organizer import coalesce_rows
+                    rows = coalesce_rows(rows)
+                    states = {}
+                    # One budget for the whole batch, not one budget per tiny
+                    # speaker fragment. Never stack unfinished model calls.
+                    # States only annotate utterance continuation material.
+                    if (config.utterance_material and online_turn is not None
+                            and (turn_assessment_job is None or turn_assessment_job.done())):
+                        samples_by_row = []
+                        import numpy as np
+                        for row in rows:
+                            if row.replaces or row.overlap:
+                                continue
+                            pcm = audio.segment(max(row.start_ms,row.end_ms-8000),row.end_ms)
+                            if pcm:
+                                samples_by_row.append((row, np.frombuffer(pcm,dtype='<i2').astype('float32')/32768))
+                        def assess_batch():
+                            policy = online_turn.coordinator.policy
+                            deadline = monotonic()+config.turn_timeout_s+config.semantic_turn_timeout_s
+                            result = {}
+                            for row,samples in samples_by_row:
+                                if monotonic() >= deadline:
+                                    break
+                                result[(row.start_ms,row.end_ms)] = policy.decide((row,),policy.analyze_audio(samples)).state
+                            return result
+                        if samples_by_row:
+                            turn_assessment_job = asyncio.get_running_loop().run_in_executor(local_executor, assess_batch)
+                            turn_assessment_job.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+                            try:
+                                states = await asyncio.wait_for(asyncio.shield(turn_assessment_job),
+                                    config.turn_timeout_s+config.semantic_turn_timeout_s+.1)
+                            except asyncio.TimeoutError:
+                                conversation.record('organized_turn_budget', {'parts':len(rows),'state':'unknown'})
+                            except Exception as exc:
+                                conversation.record('organized_turn_failed', {'error_type':type(exc).__name__})
+                    for (start,end),state in states.items():
+                        conversation.record('organized_turn_evidence', {'start_ms':start,'end_ms':end,'state':state})
+                    with stage(conversation.record, 'voice_batch_delivery',
+                               source_ranges=[[r.start_ms, r.end_ms] for r in rows]):
+                        await conversation.accept_batch(rows, turn_states=states, **arrival)
+                async def recognize_boundary(pcm, offset):
+                    return await recognize_span(replace(config,asr_backend=backend),http,cloud,pcm,offset,
+                                                report=conversation.record)
+                if audio_timeline is not None and config.continuous_analysis == 'active':
+                    recovery_intake = RecoveryIntake(audio,recognize_boundary,deliver_voice_batch,conversation.record,
+                        identity=conversation.parallel_identity)
+                    audio_timeline.on_window = recovery_intake.offer
                 async def receive():
                     failed = False
                     identity_pending = None
@@ -4150,23 +4749,41 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         detail_text = f'{type(detail).__name__}: {detail}' if detail is not None else '远端未提供关闭详情'
                         return f"ASR connection closed (code={getattr(asr, 'close_code', None)}, detail={detail_text})"
                     try:
-                        async for transcripts, final in asr.results():
+                        from jshi.voice.streaming_asr import buffered_results
+                        async for transcripts, final, received_mono, received_at_ms in buffered_results(asr, report=conversation.record):
                             for transcript in transcripts:
-                                received_mono, received_at_ms = monotonic(), time()*1000
+                                report_safely(conversation.record, 'voice_input_stage', {
+                                    'stage': 'asr_row_consumed', 'backend': backend,
+                                    'source_start_ms': transcript.start_ms, 'source_end_ms': transcript.end_ms,
+                                    'asr_received_at_ms': received_at_ms,
+                                    'received_to_row_ms': round((monotonic()-received_mono)*1000, 3),
+                                    'final': transcript.final})
                                 aligned = (transcript,)
-                                if backend == 'bailian' and transcript.final:
-                                    from jshi.voice.cloud_alignment import unknown
+                                if transcript.final and (backend == 'bailian' or cloud_alignment is not None):
+                                    from jshi.voice.cloud_alignment import unknown, complete_alignment
                                     if cloud_alignment is not None and transcript.replaces:
                                         aligned = cloud_alignment.process(transcript)  # remap existing ranges without audio analysis
-                                    elif cloud_alignment is None or identity_pending is not None and not identity_pending.done():
+                                    elif cloud_alignment is None:
                                         aligned = (unknown(transcript, '多人分段未就绪，不按整段确认人物'),)
                                     else:
-                                        identity_pending = asyncio.get_running_loop().run_in_executor(local_executor, cloud_alignment.process, transcript)
-                                        identity_pending.add_done_callback(lambda future: future.exception() if not future.cancelled() else None)
+                                        async def alignment_slow():
+                                            conversation.record('cloud_speaker_alignment_pending', {
+                                                'source_start_ms': transcript.start_ms,
+                                                'source_end_ms': transcript.end_ms})
+                                            await conversation.emit('notice', text='正在区分这段话里的不同声音，完成后再判断接话。')
                                         try:
-                                            aligned = await asyncio.wait_for(asyncio.shield(identity_pending), config.candidate_timeout_s)
-                                        except asyncio.TimeoutError:
-                                            aligned = (unknown(transcript, '多人分段超时，不把整段挂到一个人名下'),)
+                                            aligned = await complete_alignment(cloud_alignment, transcript,
+                                                local_executor, config.candidate_timeout_s, alignment_slow,
+                                                report=conversation.record, trace={'backend': backend,
+                                                    'asr_received_at_ms': received_at_ms,
+                                                    'received_to_submit_ms': round((monotonic()-received_mono)*1000, 3)})
+                                        except Exception as exc:
+                                            logging.getLogger(__name__).exception('Cloud speaker alignment failed')
+                                            conversation.record('cloud_speaker_alignment_failed', {
+                                                'source_start_ms': transcript.start_ms,
+                                                'source_end_ms': transcript.end_ms,
+                                                'error_type': type(exc).__name__})
+                                            aligned = (unknown(transcript, '多人分段失败，不把整段挂到一个人名下'),)
                                     if cloud_alignment is not None and not transcript.replaces:
                                         cloud_alignment.remember(transcript, aligned)
                                     conversation.record('cloud_speaker_alignment', {'backend': backend,
@@ -4179,10 +4796,24 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                                     transcript, identity_pending = await bounded_online_match(audio, transcript, speakers,
                                         local_executor, identity_pending, config.candidate_timeout_s)
                                     aligned = (transcript,)
-                                for part in aligned:
-                                    await (online_turn.submit if online_turn else conversation.accept)(part, asr_received_mono=received_mono,
-                                        asr_received_at_ms=received_at_ms,
-                                        online_identity_ms=round((monotonic()-received_mono)*1000,1))
+                                if transcript.final:
+                                    from jshi.voice.speaker_evidence import compare_evidence
+                                    aligned = compare_evidence(transcript, aligned)
+                                    if recovery_intake is not None:
+                                        with stage(conversation.record, 'main_reconcile_delivery',
+                                                   source_start_ms=transcript.start_ms, source_end_ms=transcript.end_ms,
+                                                   asr_received_at_ms=received_at_ms):
+                                            await recovery_intake.publish(aligned, source=transcript, asr_received_mono=received_mono,
+                                                asr_received_at_ms=received_at_ms,
+                                                online_identity_ms=round((monotonic()-received_mono)*1000,1))
+                                    else:
+                                        await deliver_voice_batch(aligned, asr_received_mono=received_mono,
+                                            asr_received_at_ms=received_at_ms)
+                                else:
+                                    if recovery_intake is not None:
+                                        recovery_intake.note_interim(transcript)
+                                    await conversation.accept(transcript, asr_received_mono=received_mono,
+                                        asr_received_at_ms=received_at_ms)
                             if final:
                                 if online_turn:
                                     await online_turn.flush()
@@ -4196,6 +4827,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         conversation.record('voice_asr_failure', {'error': str(exc),
                             'error_type': type(exc).__name__, 'close_code': getattr(asr, 'close_code', None)})
                         await conversation.emit("notice", text=f"语音识别失败：{exc}")
+                        if conversation.decisions.config.get('speech_hold'):
+                            await conversation.apply_schedule_effect(conversation.entry_scheduler.schedule.asr_failed())
                     finally:
                         if not ws.closed:
                             await ws.close(code=1011 if failed else 1000,
@@ -4203,7 +4836,13 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
 
                 if asr is not None:
                     receiver = asyncio.create_task(receive())
+                from jshi.voice.diagnostics import watch_event_loop
+                loop_watch = asyncio.create_task(watch_event_loop(conversation.record))
                 await conversation.emit("ready", session_id=conversation.session_id, identity_mode="local" if use_local else config.identity_mode,
+                    continuous_speaker_analysis=('disabled' if config.continuous_analysis == 'off' else
+                        ('shadow' if config.continuous_analysis == 'shadow' else 'enabled') if audio_timeline else 'unavailable'),
+                    independent_transcription='enabled' if recovery_intake else
+                        'disabled' if config.continuous_analysis != 'active' else 'unavailable',
                     acoustic_turn='enabled' if online_turn else 'unavailable' if online_turn_error else 'disabled',
                     acoustic_turn_error=online_turn_error,
                     speaker_split='enabled' if cloud_alignment else 'unavailable' if backend == 'bailian' else 'provider',
@@ -4225,6 +4864,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                             raise ValueError("invalid microphone PCM frame")
                         frame = capture_source.accept(message.data)
                         audio.append(frame.pcm)
+                        if audio_timeline is not None:
+                            audio_timeline.feed()
                         if online_turn:
                             online_turn.feed(frame.pcm)
                         intake_lag_ms = audio.clock_drift_ms()
@@ -4256,8 +4897,34 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                                 logging.getLogger(__name__).exception('Audio clock could not be saved')
                         elif kind == 'transcript_displayed':
                             await conversation.transcript_displayed(str(payload.get('input_id', '')), payload.get('render_ms'))
+                        elif kind == 'reply_displayed':
+                            conversation.record('voice_reply_displayed', {'reply_id':str(payload.get('reply_id','')),
+                                'browser_at_ms':payload.get('browser_at_ms'), 'received_at_ms':time()*1000})
                         elif kind == "speech_start":
-                            pass  # Sound energy alone never interrupts playback.
+                            settings = getattr(process, 'model_settings', None)
+                            if settings is not None:
+                                settings.prewarm()
+                            # Energy is only a temporary hold. Sustained speech is a separate signal.
+                            conversation.entry_scheduler.schedule.speech_hold = bool(conversation.decisions.config.get('speech_hold'))
+                            level = payload.get('level')
+                            effect = (conversation.entry_scheduler.schedule.sustained_voice() if level == 'sustained'
+                                      else conversation.entry_scheduler.schedule.short_voice())
+                            await conversation.apply_schedule_effect(effect)
+                        elif kind == "speech_end":
+                            schedule = conversation.entry_scheduler.schedule
+                            if payload.get('level') == 'sustained':
+                                effect = schedule.note_sustained_end()
+                                matter = schedule.current()
+                                if effect.kind == 'await_asr' and matter is not None:
+                                    task = asyncio.create_task(conversation._expire_asr_wait(matter.transient_token, effect.matter_id))
+                                    conversation.background_tasks.add(task)
+                                    task.add_done_callback(conversation.background_tasks.discard)
+                                await conversation.apply_schedule_effect(effect)
+                            else:
+                                token = schedule.note_short_end()
+                                task = asyncio.create_task(conversation._confirm_transient(token, schedule.current_id))
+                                conversation.background_tasks.add(task)
+                                task.add_done_callback(conversation.background_tasks.discard)
                         elif kind == "noise":
                             await conversation.noise()
                         elif kind == "stop":
@@ -4352,10 +5019,16 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 nonlocal cleanup_stage
                 cleanup_stage = stage
             async def cleanup():
+                if loop_watch:
+                    loop_watch.cancel()
                 if receiver:
                     receiver.cancel()
                     await asyncio.gather(receiver, return_exceptions=True)
                 actions = []
+                if recovery_intake is not None:
+                    actions.append(('关闭独立分段识别', recovery_intake.close))
+                if audio_timeline is not None:
+                    actions.append(('关闭连续声音分析', audio_timeline.close))
                 if online_turn is not None:
                     actions.append(('关闭在线声音整句判断', online_turn.close))
                 if asr:

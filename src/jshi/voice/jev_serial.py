@@ -10,7 +10,7 @@ from time import monotonic
 from jshi.core import SubjectState
 from jshi.models import ModelRequest
 from jshi.skill.base import parse_json_object, SkillError
-from .jev_material import build_snapshot, entry_text, preparation_text, blocks
+from .jev_material import build_snapshot, entry_text, preparation_text, blocks, SHORT_REPLY_LEVELS
 from .jev_prompts import ENTRY_INSTRUCTION, PREPARATION_INSTRUCTION, ENTRY_OUTPUT_RULES, PREPARATION_OUTPUT_RULES
 from .jev_errors import JEVStaleError, failure_details
 
@@ -26,14 +26,16 @@ def text_schema(limit, *, minimum=0):
 def preparation_schema():
     return object_schema({'route': {'enum': ['self_reply', 'main']},
                           'level': {'type': 'integer', 'enum': [1, 2, 3]},
-                          'recall_memory': {'type': 'boolean'}, 'main_image': {'enum': ['omit', 'include']},
+                          'recall_memory': {'type': 'boolean'}, 'recall_query': text_schema(40),
+                          'main_image': {'enum': ['omit', 'include']},
                           'reply': text_schema(160), 'waiting_reply': text_schema(16),
                           'reason': text_schema(100, minimum=1)})
 
 
 def entry_schema(lines, refs):
-    people = sorted({'unknown', *[r.get('p', 'unknown') for r in lines if r.get('identity') != 'unresolved'],
-                     *[c['p'] for r in lines for c in r.get('candidates', []) if c.get('source') != 'temporary_voice']})
+    # Every code shown in the material is selectable; temporary voices are limited to tentative later.
+    people = sorted({'unknown', *[r.get('p', 'unknown') for r in lines],
+                     *[c['p'] for r in lines for c in r.get('candidates', [])]})
     item = object_schema({'i': {'type': 'integer', 'enum': [r['i'] for r in lines]},
                           'person': {'enum': people}, 'certainty': {'enum': ['confirmed', 'tentative', 'unknown']},
                           'why': text_schema(80, minimum=1)})
@@ -51,17 +53,65 @@ def entry_schema(lines, refs):
                           'decision_refs': references(sorted(refs), 1, 6)})
 
 
-def exact_identity_duplicates(data):
-    """Only identical repeated rows can be removed without inventing a choice."""
+def unlisted_people_unknown(data, schema):
+    """An identity outside the shown candidates becomes unknown; other judgments stay."""
+    try:
+        allowed = set(schema['properties']['items']['items']['properties']['person']['enum'])
+    except (KeyError, TypeError):
+        return data, False
     if not isinstance(data, dict) or not isinstance(data.get('items'), list):
         return data, False
-    unique = []
+    changed = False
+    items = []
     for item in data['items']:
-        if item not in unique:
+        if isinstance(item, dict) and isinstance(item.get('person'), str) and item['person'] not in allowed:
+            item = {**item, 'person': 'unknown', 'certainty': 'unknown'}
+            changed = True
+        items.append(item)
+    return ({**data, 'items': items}, True) if changed else (data, False)
+
+
+def exact_identity_duplicates(data):
+    """Only rows repeating the same judgement can be removed without inventing a choice.
+
+    Rows differing only in the free-text reason keep the first reason.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get('items'), list):
+        return data, False
+    unique, seen = [], []
+    for item in data['items']:
+        key = {k: v for k, v in item.items() if k != 'why'} if isinstance(item, dict) else item
+        if key not in seen:
+            seen.append(key)
             unique.append(item)
     if len(unique) == len(data['items']):
         return data, False
     return {**data, 'items': unique}, True
+
+
+def entry_route_conflicts(data, schema):
+    """Remove a response-format echo and settle route conflicts that have one reading.
+
+    Only interaction=none is settled: no-interaction input stays in the background.
+    Conflicts for direct or uncertain input still fail validation.
+    """
+    if not isinstance(data, dict):
+        return data, ()
+    notes = []
+    if data.get('decision_refs_note') == '' and 'decision_refs_note' not in schema['properties']:
+        data = {k: v for k, v in data.items() if k != 'decision_refs_note'}
+        notes.append('empty_reference_note')
+    if data.get('type') in {'json_object', 'object'} and 'type' not in schema['properties']:
+        data = {k: v for k, v in data.items() if k != 'type'}
+        notes.append('response_format_echo')
+    if data.get('interaction') == 'none':
+        if data.get('route') == 'wait':
+            data = {**data, 'route': 'background'}
+            notes.append('none_not_waiting')
+        if data.get('route') == 'background' and data.get('process_refs'):
+            data = {**data, 'process_refs': []}
+            notes.append('none_background_without_process')
+    return data, tuple(notes)
 
 
 def validate(value, schema, path='$'):
@@ -98,6 +148,25 @@ def validate(value, schema, path='$'):
                 validate(v, schema['items'], f'{path}[{index}]')
         elif schema.get('minLength', 0) and not value.strip():
             raise ValueError('JEV依据为空')
+
+
+def protect_continuation(data, batch):
+    """A positively addressed terminal 'continue' cannot authorize a stop."""
+    if data.get('control') != 'stop' or data.get('interaction') != 'direct' or not batch:
+        return data, False
+    row = batch[-1]
+    text = str(row.get('text', '')).strip()
+    if any(ch in text for ch in '“”「」『』"'):
+        return data, False
+    match = re.search(r'(?:你|匠石)?(?:接着(?:说|讲|问)|继续(?:说|讲|问)?)(?:啊|呀|吧|呢|好吗)*[。！？?!]*$', text)
+    if not match or re.search(r'(?:不|别|不要|不能|不用|不许|不必|无需|没让)(?:你|再)?$', text[:match.start()]):
+        return data, False
+    if match.start() and not re.search(r'[，,。？！?!：:\s]$',text[:match.start()]):
+        return data, False  # e.g. 我不希望你继续: not an independent affirmative command
+    ref = f'I{row["n"]}'
+    return {**data, 'control':'redirect', 'route':'prepare', 'utterance_complete':'complete',
+            'process_refs':[ref], 'pending_refs':[], 'decision_refs':[ref],
+            'decision_reason':'当前明确要求继续交谈，不以反问中的停止词执行停说'}, True
 
 
 def combined_instruction():
@@ -203,6 +272,16 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                 data, repaired = exact_identity_duplicates(data)
                 if repaired:
                     record['normalization'] = 'identical_identity_rows'
+                data, unlisted = unlisted_people_unknown(data, output)
+                if unlisted:
+                    record['normalization'] = ','.join(filter(None, (record.get('normalization'), 'unlisted_person_unknown')))
+            if stage in {'voice_jev', 'voice_jev_entry'}:
+                data, notes = entry_route_conflicts(data, output)
+                data, continued = protect_continuation(data, batch)
+                if continued:
+                    notes = [*notes, 'positive_continuation_not_stop']
+                if notes:
+                    record['normalization'] = ','.join(filter(None, (record.get('normalization'), *notes)))
             validate(data, output)
             if not current():
                 raise JEVStaleError('JEV返回结果已过期')
@@ -241,6 +320,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                                'model': result.model, 'ms': result.elapsed_ms, 'answers': dict(result.answers)})
                 if not current(): raise JEVStaleError('JEV决策返回已失效')
                 fields = names.value(decode_entry(result, names.value(snapshot['lines']), questions, config['entry_thresholds'][config['provider']]['address']), reverse=True)
+                fields, _ = protect_continuation(fields, batch)
                 validate(fields, schema)
                 gate._from_current(fields['items'], batch, '')
                 used_decision = True
@@ -269,6 +349,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                     if not current():
                         raise JEVStaleError('JEV决策返回已失效')
                     if fields is not None:
+                        fields, _ = protect_continuation(fields, batch)
                         # Stop promptly without waiting for name recognition. Host callback is the
                         # sole control owner; remember its receipt across identity and fallback.
                         if fields['control'] == 'stop' and on_entry:
@@ -416,7 +497,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                     if not (short.get('allowed') is True and entry['interaction'] == 'direct'
                             and (control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed', 'idle'})
                             and not overlap and not pending and chosen
-                            and all(i.speaker_level == '确定' and i.speaker_pick == short.get('person_code') for i in chosen)
+                            and all(i.speaker_level in SHORT_REPLY_LEVELS and i.speaker_pick == short.get('person_code') for i in chosen)
                             and all(r.get('source') != 'visual_environment' for r in batch)):
                         raise ValueError('short_reply_permission')
                     generated = call('voice_jev_reply', REPLY_INSTRUCTION,
@@ -429,13 +510,16 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             except Exception as exc:
                 stages.append({'stage': 'decision_prepare_fallback', 'mode': mode, 'status': 'fallback',
                                'reason': type(exc).__name__ + ':' + str(exc)})
-        if mode != 'combined' and not native_prepare:
+        if (mode != 'combined' and not native_prepare) or (mode == 'combined' and preparation is None):
             preparation = call('voice_jev_prepare', PREPARATION_INSTRUCTION,
                                preparation_text(snapshot, entry), preparation_schema())
         if not isinstance(preparation, dict):
             raise ValueError('合并判断缺少回应准备')
         hint = {'level': preparation['level'], 'needs': [], 'recall_memory': preparation['recall_memory'],
                 'main_image': preparation['main_image']}
+        query = preparation.get('recall_query', '').strip()
+        if preparation['recall_memory'] and query:
+            hint['recall_query'] = query
         if not snapshot['availability']['image_available']:
             hint['main_image'] = 'omit'
         short, waiting = snapshot['short_chat'], snapshot['waiting']
@@ -444,10 +528,24 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             and (control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed', 'idle'})
             and not overlap and not pending
             and all(r.get('source') != 'visual_environment' for r in batch)
-            and all(i.speaker_level == '确定' and i.speaker_pick == short.get('person_code')
+            and all(i.speaker_level in SHORT_REPLY_LEVELS and i.speaker_pick == short.get('person_code')
                     for i in selected_items) and bool(selected_items)
-            and hint == {'level': 3, 'needs': [], 'recall_memory': False, 'main_image': 'omit'})
+            and {k: v for k, v in hint.items() if k != 'recall_query'}
+                == {'level': 3, 'needs': [], 'recall_memory': False, 'main_image': 'omit'})
         direct = preparation['reply'].strip() if preparation['route'] == 'self_reply' and direct_allowed else ''
+        if preparation['route'] == 'self_reply' and not direct_allowed:
+            checks = {
+                'short_chat_permission': short.get('allowed') is True,
+                'direct_interaction': entry['interaction'] == 'direct',
+                'playback_control': control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed','idle'},
+                'no_overlap': not overlap, 'no_pending_inputs': not pending,
+                'not_visual_environment': all(r.get('source') != 'visual_environment' for r in batch),
+                'selected_person_matches_permission': bool(selected_items) and all(
+                    i.speaker_level in SHORT_REPLY_LEVELS and i.speaker_pick == short.get('person_code') for i in selected_items),
+                'simple_without_extra_material': {k:v for k,v in hint.items() if k != 'recall_query'} ==
+                    {'level':3,'needs':[],'recall_memory':False,'main_image':'omit'}}
+            stages.append({'stage':'short_reply_permission','mode':mode,'status':'blocked',
+                           'reasons':[key for key,passed in checks.items() if not passed]})
         route = 'self_reply' if direct else 'main'
         brief = ''
         budget = waiting.get('levels', {}).get(f'L{hint["level"]}', {})

@@ -38,7 +38,8 @@ class ShortChatModel:
     (True, {'reply':'长'*161}, 'web_text', False, ''),
     (True, {}, 'visual_environment', False, ''),
     (True, {}, 'web_text', True, ''),
-    (True, {'items':[{'i':1,'person':'P1','certainty':'tentative','why':'还不确定'}]}, 'web_text', False, ''),
+        (True, {'items':[{'i':1,'person':'P1','certainty':'tentative','why':'还不确定'}]}, 'web_text', False, '嗯，我在。'),
+        (True, {'items':[{'i':1,'person':'unknown','certainty':'unknown','why':'无法判断'}]}, 'web_text', False, ''),
 ])
 def test_short_reply_requires_ready_person_and_minimal_route(ready, changes, source, overlap, expected):
     result = VoiceJEV(ShortChatModel(**changes), mode='legacy').decide_batch('stone',
@@ -77,7 +78,7 @@ def test_web_first_turn_main_then_short_reply_skips_main_and_memory(process, str
             assert (await first.json())['route'] == 'main'
             # Finish the first turn's deferred writes before taking the snapshot.
             await asyncio.sleep(.15)
-            history_before = process.repository.path.read_bytes()
+            history_before = len(process.repository.list_history('stone', limit=100000))
             ledger_before = tuple(process.activity_ledger.list_experiences('stone'))
             count = len(process.cognition.requests)
             root = process.repository.path.parent
@@ -100,7 +101,7 @@ def test_web_first_turn_main_then_short_reply_skips_main_and_memory(process, str
             assert entry['main_called'] is False and entry['memory_written'] is False
             assert entry['reply_ready_ms'] >= entry['jev_ms']
             assert len(process.cognition.requests) == count
-            assert process.repository.path.read_bytes() != history_before
+            assert len(process.repository.list_history('stone', limit=100000)) > history_before
             assert any(r.event_type=='jev_direct_reply' for r in process.repository.list_history('stone',limit=100))
             assert tuple(process.activity_ledger.list_experiences('stone')) == ledger_before
             assert {p.name:p.read_bytes() for p in root.glob('*scene*.json')} == scenes
@@ -114,6 +115,28 @@ def test_web_first_turn_main_then_short_reply_skips_main_and_memory(process, str
             assert response.status == 200, await response.text()
             assert (await response.json())['route'] == 'main'
             assert len(process.cognition.requests) > count
+    asyncio.run(run())
+
+
+def test_complete_jev_short_answer_is_not_overridden_by_acoustic_collection_flag(process):
+    async def run():
+        sent=[]
+        async def send(m):sent.append(m)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(mode='split',fallback_models=[]))
+        try:
+            speaker=SpeakerEvidence('A','lux-id','lux','recognized','voiceprint_match',1.0)
+            u=SceneUtterance('只做一个动作，你会做啥？',speaker,0,1000,input_id='complete-question')
+            c.scene.append(u)
+            call={'input_ids':[u.input_id],'route':'self_reply','direct_reply':'我就安静陪一会儿。',
+                  'collection_complete':False,'collection_trigger':'active_control',
+                  'utterance_complete':'complete','pending_refs':[],'judged':True,'ms':10}
+            c.enqueue_turn(InputEnvelope(c.session_id,'microphone',(InputPart('text',u.text),),speaker,
+                current_utterances=(u,),jev_calls=(call,)))
+            await asyncio.wait_for(c.turn_queue.join(),3)
+            assert not process.cognition.requests
+            assert any(m.get('type')=='reply' and m.get('text')==call['direct_reply'] for m in sent)
+            assert any(m.get('type')=='jev_reply' and m.get('main_called') is False for m in sent)
+        finally:await c.close()
     asyncio.run(run())
 
 
@@ -132,7 +155,7 @@ def test_voice_short_reply_and_playback_do_not_write_memories(process, source):
         try:
             if source == 'microphone_live':
                 c.identities.introduce('A', 'lux', basis='manual_selection')
-            before = process.repository.path.read_bytes()
+            before = len(process.repository.list_history('stone', limit=100000))
             if source == 'web_text':
                 await c.typed('谢谢', 'lux-id')
             elif source == 'microphone_live':
@@ -155,7 +178,7 @@ def test_voice_short_reply_and_playback_do_not_write_memories(process, source):
                 await c.acknowledge({'reply_id':reply['reply_id'],'segment':0,'phase':phase})
             assert len(process.cognition.requests) == count
             assert tuple(process.activity_ledger.list_experiences('stone')) == ledger
-            assert process.repository.path.read_bytes() != before
+            assert len(process.repository.list_history('stone', limit=100000)) > before
             records=c.jev_scene_store.snapshot()['events']
             assert any(r['payload'].get('text')=='谢谢' for r in records)
             assert any(r['payload'].get('text')=='嗯，我在。' for r in records)

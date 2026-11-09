@@ -9,6 +9,28 @@ from jshi.voice.turns import TurnDecision
 from tests.test_voice import process
 
 
+def test_turn_audio_preserves_real_pause_between_same_person_fragments():
+    async def run():
+        audio = SessionAudio()
+        audio.append(b'\0\0'*48000)
+        sizes = []
+        class Policy:
+            def analyze_audio(self, samples):
+                sizes.append(len(samples))
+                return TurnDecision('incomplete')
+            def decide(self, rows, result): return result
+        async def accept(row, **kw): pass
+        gate = OnlineTurnGate(audio, Policy(), SimpleNamespace(speech_active=lambda: True),
+                              accept, max_hold_s=10)
+        try:
+            await gate.submit(Transcript('我要去', 'a', 0, 1000, True, voiceprint_id='A'))
+            await gate.submit(Transcript('商店', 'a', 2000, 3000, True, voiceprint_id='A'))
+            assert sizes == [16000, 48000]  # includes the actual one-second pause
+        finally:
+            await gate.close()
+    asyncio.run(run())
+
+
 def test_short_unknown_same_track_cannot_overtake_or_inherit_named_fragment():
     async def run():
         from jshi.voice.online_completion import OnlineCompletionPolicy

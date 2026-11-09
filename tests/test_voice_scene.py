@@ -343,7 +343,7 @@ def test_targeted_segments_play_in_order_and_enter_actual_delivery(process):
             assert [m['segment'] for m in events if m['type']=='audio']==[0,1]
             await c.acknowledge({'reply_id':d.reply_id,'segment':0,'phase':'completed'})
             ledger=process.activity_ledger.list_experiences('stone')
-            assert any(s.text_raw=='（播放器确认此句播放完成）先说甲。' and s.mentioned_object_ids==('A',) for s in ledger)
+            assert any(s.text_raw=='先说甲。' and s.state_delta.get('delivery')=='played' and s.mentioned_object_ids==('A',) for s in ledger)
         finally:await c.close()
     asyncio.run(run())
 
@@ -380,10 +380,10 @@ def test_diarization_preserves_offsets_and_never_identifies_overlapping_mix():
         def decode_stream(self,s):pass
     speakers=Speakers()
     out=LocalDiarizer(Engine(),speakers,Recognizer()).transcribe(np.zeros(80000,dtype='float32'),10000)
-    assert [(t.start_ms,t.end_ms,t.overlap) for t in out]==[(10000,12000,True),(11000,13000,True),(13000,15000,False)]
-    assert speakers.calls==1
-    assert not out[0].voiceprint_id and not out[1].voiceprint_id
-    assert out[2].track_id=='known-B'
+    assert [(t.start_ms,t.end_ms,t.overlap) for t in out]==[(10000,11000,False),(11000,12000,True),(11000,12000,True),(12000,15000,False)]
+    assert speakers.calls==2
+    assert not out[1].voiceprint_id and not out[2].voiceprint_id
+    assert out[0].track_id==out[3].track_id=='known-B'
 
 
 def test_diarization_switches_segment_embedding_with_selected_voiceprint_model():

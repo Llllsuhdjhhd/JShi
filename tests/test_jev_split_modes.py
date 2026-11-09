@@ -23,7 +23,7 @@ def entry(route='prepare', control='redirect', **changes):
 
 
 def preparation(**changes):
-    data = {'route': 'main', 'level': 2, 'recall_memory': False,
+    data = {'route': 'main', 'level': 2, 'recall_memory': False, 'recall_query': '',
             'main_image': 'omit', 'reply': '', 'waiting_reply': '', 'reason': '需要展开理解'}
     data.update(changes)
     return data
@@ -90,6 +90,27 @@ def test_background_wait_and_stop_skip_preparation(mode, first):
     assert result.action == ('stop' if first['control'] == 'stop' else 'ignore')
 
 
+@pytest.mark.parametrize('mode',['split','combined'])
+def test_positive_continue_never_applies_stop_even_if_model_returns_stop(mode):
+    first=entry(route='background',control='stop')
+    if mode=='combined':first={**first,'preparation':None}
+    model=Model([first,preparation(route='self_reply',level=3,reply='好，我接着说。')])
+    gate=VoiceJEV(model,mode=mode,fallback_models=[])
+    controls=[]
+    result=gate.decide_batch('stone',[{'n':1,'who':'P1','text':'就这么停啊？你给他问他一个，你继续啊。'}],[],
+        {'state':'completed','short_chat':{'allowed':True,'person_code':'P1'}},
+        on_entry=lambda e:controls.append(e.control))
+    assert result.control!='stop' and 'stop' not in controls
+    assert result.direct_reply=='好，我接着说。' and not result.model_error
+
+
+@pytest.mark.parametrize('text',['别继续啊','不要继续说','不要你继续','我不希望你继续','他说“你继续啊”','你继续啊，别说了'])
+def test_stop_guard_does_not_override_negation_or_quotation(text):
+    from jshi.voice.jev_serial import protect_continuation
+    original=entry(route='background',control='stop')
+    assert protect_continuation(original,[{'n':1,'text':text}])==(original,False)
+
+
 def test_control_applied_before_second_call_and_survives_failure():
     controls = []
     def fail(_):
@@ -102,6 +123,12 @@ def test_control_applied_before_second_call_and_survives_failure():
     assert result.judged and result.items[0].speaker_pick == 'P1'
     assert result.control == 'redirect' and result.action == 'ignore' and result.model_error
     assert not result.direct_reply and not result.waiting_reply
+
+
+@pytest.mark.parametrize('recall,query,expected', [(True, '上周的出行约定', '上周的出行约定'), (False, '不该带上', None)])
+def test_recall_query_reaches_main_hint_only_when_recall_is_requested(recall, query, expected):
+    result, _ = run('split', entry(), preparation(recall_memory=recall, recall_query=query))
+    assert result.main_prompt_hint.get('recall_query') == expected
 
 
 def test_stop_and_independent_operation_is_silent_l1():
@@ -136,6 +163,16 @@ def test_direct_answer_permission_checked_by_program(mode):
     result, _ = run(mode, second=preparation(route='self_reply', level=3, reply='你好'),
                     delivery={'short_chat': {'allowed': True, 'person_code': 'P1'}})
     assert result.route == 'self_reply' and result.direct_reply == '你好'
+
+
+@pytest.mark.parametrize('mode', ['split', 'combined'])
+@pytest.mark.parametrize('certainty,person,spoken', [('tentative', 'P1', '你好'), ('unknown', 'unknown', '')])
+def test_tentative_person_may_get_short_reply_but_unknown_may_not(mode, certainty, person, spoken):
+    first = entry(items=[{'i': 1, 'person': person, 'certainty': certainty, 'why': '声纹未分档'}])
+    result, _ = run(mode, first, preparation(route='self_reply', level=3, reply='你好'),
+                    delivery={'short_chat': {'allowed': True, 'person_code': 'P1'}})
+    assert result.direct_reply == spoken
+    assert result.route == ('self_reply' if spoken else 'main')
 
 
 def test_mixed_completeness_keeps_identity_but_only_passes_complete_part():

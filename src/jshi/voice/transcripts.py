@@ -1,6 +1,6 @@
 """Normalize transcript revisions and session speaker tracks, independent of transport."""
 from dataclasses import replace
-from .contracts import Transcript
+from .contracts import Transcript, TimedWord
 
 class TranscriptAssembler:
     def __init__(self, *, identity_mode: str = "diarization") -> None:
@@ -102,7 +102,20 @@ class TranscriptAssembler:
                 # Only registered ids supplied by voiceprint mode can be used as
                 # permanent identity evidence. Diarization numbers are never ids.
                 vpid = sid if self.identity_mode == "voiceprint" and sid and sid not in {"-1", "unknown"} else ""
-                outputs.append(Transcript(text, track, start, end, final, overlap, vpid, replaces=replaces))
+                words = []
+                previous = start
+                for word in u.get('words') or ():
+                    if not isinstance(word, dict):
+                        words = []; break
+                    a, b, token = word.get('start_time'), word.get('end_time'), word.get('text')
+                    if (not isinstance(a, (int, float)) or not isinstance(b, (int, float))
+                            or not isinstance(token, str) or not token.strip()
+                            or not start <= a < b <= end or a < previous):
+                        words = []; break
+                    words.append(TimedWord(token, int(a), int(b)))
+                    previous = b
+                outputs.append(Transcript(text, track, start, end, final, overlap, vpid,
+                                          replaces=replaces, words=tuple(words)))
                 if final:
                     self.seen.add(key)
                     for old in replaces:
@@ -160,3 +173,54 @@ def cosmetic_revision(previous, current):
     def normalize(text):
         return ''.join(text.split()).rstrip('。.')
     return normalize(previous) == normalize(current)
+
+
+def same_request_wording(previous, current):
+    """Only formatting or the known vocative 石→匠石 is safe without interpretation.
+
+    Never use edit distance: a single negation, number or person can change a request.
+    The short name is accepted only before a vocative comma, not inside a sentence.
+    """
+    import re
+    def normalize(text):
+        text = re.sub(r'^\s*(?:匠石|石)\s*[,，]', '匠石，', text)
+        return ''.join(text.split()).rstrip('。.')
+    return normalize(previous) == normalize(current)
+
+
+def equivalent_input_revision(previous, current):
+    """Only the same input: typography and a vocative comma don't need a reply.
+
+    Do not strip all punctuation (1.5 / 15, 不，要 / 不要 can differ), or
+    equate arbitrary one-character edits. Semantic edits use JEV's revision context.
+    """
+    import re
+    import unicodedata
+    def punctuation_equivalent(a, b):
+        # ASR may punctuate an already lexical question only in its final packet.
+        # Preserve changes at negation/number/quote boundaries (不，要 vs 不要).
+        def key(text):
+            text=unicodedata.normalize('NFKC',''.join(text.split()))
+            if re.search(r'[“”"‘’\':;：；]',text):
+                return None
+            if re.search(r'(?:不|别|没|无|否|莫|勿|休|未|不要|不能|不用|不是|没有),|,(?:不|别|没|无|否|莫|勿|休|未)(?:[,。.!?]|$)|\d[,，]\d',text):
+                return None
+            # Merely adding ? to a plain statement is not necessarily cosmetic.
+            if re.search(r'(?:吗|么|呢|谁|什么|啥|怎么样|多少|哪里|哪儿)[?。.]*$',text):
+                text=text.rstrip('?。.')
+            else:
+                text=text.rstrip('。.')
+            return text.replace(',','')
+        ka,kb=key(a),key(b)
+        return ka is not None and ka==kb
+    if punctuation_equivalent(previous,current):
+        return True
+    def normalize(text):
+        text=unicodedata.normalize('NFKC',text)
+        text=re.sub(r'^\s*(?:匠石|石)\s*,', '匠石', text)
+        # Commas in ordinary positive prose may change without a new intent.
+        # Keep them around negation, quantities and quoted speech for review.
+        if not re.search(r'[不别没无否莫勿休未\d一二三四五六七八九十百千万零两“”"‘’]',text):
+            text=text.replace(',','').replace('，','')
+        return ''.join(text.split()).rstrip('。.')
+    return normalize(previous)==normalize(current)

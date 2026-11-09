@@ -103,7 +103,7 @@ def speech(text, n=0):
 def test_inflight_entry_waits_for_collision_and_preserves_originals(tmp_path, action, expected):
     async def scenario():
         service = DecisionService(tmp_path)
-        service.config['mode'] = 'active'
+        service.config.update(mode='active', collision_apply=True)
         decision_started, release_decision, started = asyncio.Event(), asyncio.Event(), asyncio.Event()
         old_finished = asyncio.Event()
         stopped=[]
@@ -133,14 +133,16 @@ def test_inflight_entry_waits_for_collision_and_preserves_originals(tmp_path, ac
         assert not task.done()
         release_decision.set()
         assert await asyncio.wait_for(task,1) == expected
-        assert bool(stopped) == (action=='stop')
+        effect = scheduler.take_effect()
+        assert effect.kind == {'continue': 'reapprove', 'merge': 'replace_entry', 'stop': 'cancel'}[action]
+        assert stopped == []
         await scheduler.close()
     asyncio.run(scenario())
 
 
 def test_newer_C_never_released_by_AB_decision(tmp_path):
     async def scenario():
-        service=DecisionService(tmp_path);service.config['mode']='active'
+        service=DecisionService(tmp_path);service.config.update(mode='active',collision_apply=True)
         started=asyncio.Event();releases=[asyncio.Event(),asyncio.Event()];counts=[]
         async def decide(purpose,state,revision):
             n=len(counts);counts.append(len(state['new']));started.set()
@@ -208,7 +210,7 @@ def test_cooldown_stays_inside_one_active_purpose(tmp_path, monkeypatch):
 def test_collision_report_uses_this_result_not_the_shared_last(tmp_path):
     async def scenario():
         service = DecisionService(tmp_path)
-        service.config['mode'] = 'active'
+        service.config.update(mode='active', collision_apply=True)
         reports = []
         async def decide(purpose, state, revision=0, **kwargs):
             service.last = {'purpose': 'entry', 'status': 'timeout', 'reason': 'other', 'model': 'stale'}
@@ -230,6 +232,36 @@ def test_collision_report_uses_this_result_not_the_shared_last(tmp_path):
         assert await asyncio.wait_for(task, 1) == 'ok'
         assert reports[0][1]['model'] == 'this-call' and reports[0][1]['status'] == 'success'
         assert reports[0][1]['reason'] == ''
+    asyncio.run(scenario())
+
+
+def test_unapplied_active_collision_is_recorded_without_holding_old_entry(tmp_path):
+    async def scenario():
+        service = DecisionService(tmp_path)
+        service.config['mode'] = 'active'
+        assert service.config['collision_apply'] is False
+        reports, release = [], asyncio.Event()
+        async def decide(purpose, state, revision=0, **kwargs):
+            await release.wait()
+            return DecisionResult('success', answers(COLLISION, {'relation': 'replace', 'old_work': 'stop'}))
+        service.decide = decide
+        scheduler = EntryScheduler(service, report=lambda *args: reports.append(args))
+        started = asyncio.Event()
+        async def operation():
+            started.set()
+            return 'old-result'
+        task = asyncio.create_task(scheduler.run((speech('A'),), operation))
+        await started.wait()
+        scheduler.notify((speech('B', 1),))
+        assert await asyncio.wait_for(task, 1) == 'old-result'
+        release.set()
+        for _ in range(20):
+            if reports:
+                break
+            await asyncio.sleep(0)
+        assert reports[0][0] == 'decision_collision' and reports[0][1]['shadow'] is True
+        assert scheduler.take_effect() is None
+        await scheduler.close()
     asyncio.run(scenario())
 
 
@@ -265,7 +297,7 @@ def test_real_voice_collision_rejudges_combined_input_once(process):
     async def scenario():
         async def send(message):pass
         voice=VoiceConversation(process,'stone',FakeCloud(),send,jev=VoiceJEV(model,mode='split',fallback_models=[]))
-        voice.decisions.config['mode']='active'
+        voice.decisions.config.update(mode='active',collision_apply=True)
         async def decide(*args):return DecisionResult('success',answers(COLLISION,{'relation':'replace','old_work':'stop'}))
         voice.decisions.decide=decide
         try:

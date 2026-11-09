@@ -118,6 +118,37 @@ def test_trace_log_rotates(tmp_path):
     assert json.loads(path.read_text())['stage'] == 'text_sent'
 
 
+def test_waiting_ack_has_its_own_timestamp_and_cannot_become_formal_reply(process):
+    async def run():
+        from jshi.models import ResponseItem
+        sent = []
+        async def send(message): sent.append(message)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send)
+        async def no_audio(delivery): pass
+        c._synthesize = no_audio
+        try:
+            c.input_records['question'] = {'pipeline': {}}
+            ack, answer = (c.epoch, -1), (c.epoch, 1)
+            c.reply_input_ids[ack] = ['question']
+            c.reply_input_ids[answer] = ['question']
+            c.voice_timings[ack] = (monotonic(), {'route': 'waiting_ack'})
+            await c._start_plan((ResponseItem('verbal', '嗯，我想想', ()),), 'person', c.epoch, ack)
+            pipe = c.input_records['question']['pipeline']
+            assert 'waiting_reply_sent_at_ms' in pipe
+            assert 'reply_sent_at_ms' not in pipe
+            ack_time = pipe['waiting_reply_sent_at_ms']
+            c.delivery.current.state = 'completed'
+            await c._start_plan((ResponseItem('verbal', '正式回答', ()),), 'person', c.epoch, answer)
+            assert pipe['waiting_reply_sent_at_ms'] == ack_time
+            assert pipe['reply_sent_at_ms'] >= ack_time
+            replies = [m for m in sent if m['type'] == 'reply']
+            assert [m['reply_kind'] for m in replies] == ['waiting_ack', 'answer']
+            assert all(m['input_ids'] == ['question'] for m in replies)
+        finally:
+            await c.close()
+    asyncio.run(run())
+
+
 def test_capture_pause_does_not_become_current_sentence_latency():
     audio = SessionAudio(seconds=.1)
     audio.append(b'\1\0' * 1600, received_at_ms=100000, received_mono=100)

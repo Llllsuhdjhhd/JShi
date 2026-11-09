@@ -20,6 +20,9 @@ def defaults():
     return {'provider': os.getenv('JSHI_DECISION_PROVIDER', 'bailian'),
         'mode': os.getenv('JSHI_DECISION_MODE', 'shadow'),
         'collision': True, 'continuation': True, 'preparation': False, 'entry': True,
+        # The 0.85 collision threshold is uncalibrated; until real samples set it, calls are only recorded.
+        'collision_apply': False,
+        'speech_hold': False,
         'entry_timeout_ms': 800,
         'entry_thresholds': {p: {k: .90 for k in ('address', 'expression', 'stop', 'background', 'wait')}
                              for p in ('bailian', 'typesafe')},
@@ -57,7 +60,7 @@ def validate(config):
             any(set(v) != {'address', 'expression', 'stop', 'background', 'wait'} or
                 not all(number(n, .5, 1) for n in v.values()) for v in config['entry_thresholds'].values())):
         raise ValueError('入口决策阈值无效')
-    for flag in ('collision', 'continuation', 'preparation', 'entry'):
+    for flag in ('collision', 'collision_apply', 'continuation', 'preparation', 'entry', 'speech_hold'):
         if type(config[flag]) is not bool:
             raise ValueError('功能开关无效')
     for name in ('bailian', 'typesafe'):
@@ -155,7 +158,7 @@ class DecisionService:
 
     def save(self, raw):
         config = json.loads(json.dumps(self.config))
-        for key in ('provider', 'mode', 'collision', 'continuation', 'preparation', 'timeout_ms', 'threshold', 'prepare_min_chars', 'entry', 'entry_timeout_ms', 'entry_thresholds'):
+        for key in ('provider', 'mode', 'collision', 'collision_apply', 'continuation', 'preparation', 'speech_hold', 'timeout_ms', 'threshold', 'prepare_min_chars', 'entry', 'entry_timeout_ms', 'entry_thresholds'):
             if key in raw:
                 config[key] = merge_settings(config[key], raw[key]) if isinstance(config[key], dict) else raw[key]
         for name, provider in raw.get('providers', {}).items():

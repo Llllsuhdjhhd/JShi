@@ -150,6 +150,11 @@ else {
   $('close-media').onclick=()=>$('media-view').close();
   $('media-view').onclose=()=>{$('media-video').srcObject=null;};
   $('typed').addEventListener('paste',e=>{const file=[...(e.clipboardData?.files||[])].find(f=>f.type.startsWith('image/'));if(file){e.preventDefault();visualChat.attachPhoto(file);}});
-  fetch('/status').then(r=>r.json()).then(s=>{$('attach-photo').hidden=$('camera-toggle').hidden=!s.vision_available});
+  window.refreshVisionAvailability=async()=>{
+    try{const r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw Error('服务暂不可用');const s=await r.json();
+      $('attach-photo').hidden=$('camera-toggle').hidden=!s.vision_available;
+    }catch(e){setTimeout(window.refreshVisionAvailability,3000);}
+  };
+  window.refreshVisionAvailability();
   window.addEventListener('pagehide',()=>visualChat.dispose());
 }

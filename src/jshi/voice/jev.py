@@ -21,6 +21,7 @@ from jshi.models.routing import (
 )
 from jshi.skill.base import parse_json_object
 from .jev_prompts import SINGLE_INSTRUCTION
+from .jev_material import SHORT_REPLY_LEVELS
 
 # Wall-clock budget for decide / decide_batch model calls (lite + one Qwen fallback).
 JEV_GATE_BUDGET_S = 8.0
@@ -348,9 +349,10 @@ class VoiceJEV:
         """An explicit unfinished expression cannot open a new response, even if routing conflicts."""
         if result.utterance_complete == 'incomplete':
             stopped = result.control == 'stop' or result.action == 'stop'
+            background = result.route == 'background' and result.action == 'ignore'
             return replace(result, control='stop' if stopped else 'keep',
-                action='stop' if stopped else 'ignore', route='background' if stopped else 'wait', direct_reply='', waiting_reply='',
-                reason=result.reason if stopped else 'JEV判断表达未完，等待后续接续')
+                action='stop' if stopped else 'ignore', route='background' if stopped or background else 'wait', direct_reply='', waiting_reply='',
+                reason=result.reason if stopped or background else 'JEV判断表达未完，等待后续接续')
         return result
 
     def _decide_batch(self, subject_id: str, batch: list, context: list, delivery: dict, *, overlap: bool = False, on_request=None) -> BatchDecision:
@@ -480,7 +482,7 @@ class VoiceJEV:
                         and isinstance(direct, str) and 0 < len(direct.strip()) <= 160
                         and all(row.speaker_pick == delivery['short_chat'].get('person_code', row.speaker_pick)
                                 for row in result.items)
-                        and all(row.speaker_level == '确定' for row in result.items)):
+                        and all(row.speaker_level in SHORT_REPLY_LEVELS for row in result.items)):
                     result = replace(result, direct_reply=direct.strip(), reason='短时聊天，由JEV我回答')
                 if result.route == 'self_reply' and not result.direct_reply:
                     result = replace(result, route='main', needs_main_review=True)
@@ -591,6 +593,8 @@ class VoiceJEV:
             line['evidence_ref'] = 'I' + str(line['i'])
         payload['conversation'] = [{**row, 'evidence_ref': f'C{i}'}
             for i, row in enumerate(delivery.get('conversation', []), 1)]
+        if delivery.get('utterance_context'):
+            payload['utterance_context'] = delivery['utterance_context']
         payload['playback'] = {k: delivery[k] for k in ('state', 'spoken', 'pending') if k in delivery}
         if delivery.get('environment'):
             payload['environment'] = delivery['environment']
@@ -627,14 +631,20 @@ class VoiceJEV:
             source = next(r for r in batch if r["n"] == row["i"])
             allowed = {c["who"] for c in source.get("candidates", [])}
             unresolved = '临时声音连续性' in str((source.get('voice_evidence') or {}).get('basis',''))
-            if unresolved:
-                allowed = {c['who'] for c in source.get('candidates',[]) if c.get('source') != 'temporary_voice'}
+            # Codes resting only on temporary voice continuity: shown and selectable, never confirmed.
+            supported = {c['who'] for c in source.get('candidates', []) if c.get('source') != 'temporary_voice'}
+            continuity_only = {c['who'] for c in source.get('candidates', []) if c.get('source') == 'temporary_voice'}
             who = str(source.get("who") or "").split("（", 1)[0]
-            if re.fullmatch(r"P\d+", who) and not unresolved:
+            if re.fullmatch(r"P\d+", who):
                 allowed.add(who)
+                if unresolved:
+                    continuity_only.add(who)
+            continuity_only -= supported
             bound = self._selected_text(source)
             pick = bound or row.get("person")
             certainty = "confirmed" if bound else row.get("certainty")
+            if not bound and pick in continuity_only and certainty == "confirmed":
+                certainty = "tentative"
             # Accept only exact labels supplied for this row; never guess a name's ID.
             if pick == source.get("who"):
                 pick = who if re.fullmatch(r"P\d+", who) else "unknown" if certainty == "unknown" else pick

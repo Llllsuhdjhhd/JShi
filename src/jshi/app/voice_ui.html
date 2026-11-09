@@ -123,6 +123,7 @@
   #vision-dock:has([data-display=hidden]){flex:0 0 auto;min-height:0}#vision-dock .media-message[data-display=hidden] .media-body{display:none}
   .conversation:has(#vision-dock [data-display=hidden]) .message-region{flex:1}
   @media(max-width:700px){#vision-dock{min-height:200px}#vision-dock:has([data-display=normal]){min-height:260px}#vision-dock .media-message{padding:8px}#vision-dock .media-header{gap:4px}#vision-dock .media-body{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto;gap:8px}#vision-dock .media-copy{max-height:100px;padding:10px 12px}#vision-dock .media-copy-label{margin-bottom:4px}#vision-dock .media-meta{margin-top:6px;padding-top:5px;font-size:10px}#vision-dock .media-description{font-size:12px}#vision-dock:has([data-display=hidden]){min-height:0}}
+.recording-settings{border:1px solid #e1e6ef;border-radius:14px;background:#fff;padding:18px 20px}.recording-settings>summary{cursor:pointer;font-weight:600}.recording-body{padding-top:16px}.recording-row{display:flex;align-items:center;justify-content:space-between;gap:16px}.recording-row strong{font-size:14px}.recording-row .tip{margin:6px 0;color:#738097}.recording-link{flex-shrink:0;background:#edf3ff;color:#2763c8;border:1px solid #dbe6ff;border-radius:9px;padding:8px 13px;text-decoration:none;font-size:13px}.recording-context{margin-top:18px;padding-top:15px;border-top:1px solid #edf0f5}.recording-context label{display:flex;align-items:center;gap:7px}.recording-context .tip{margin:7px 0;color:#738097}
 </style>
 <style>
   #log .training-label{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px;padding-top:7px;border-top:1px solid #dfe7f3;white-space:normal;font-size:11px;color:#7a879a}
@@ -171,7 +172,13 @@
 <details class="panel" id="person-links-panel"><summary>人物归属更正</summary><p class="tip">查看哪些发言后来确认属于某人。撤销只影响关联范围内的材料。</p><button type="button" class="secondary" id="refresh-person-links">刷新</button><div id="person-links-list" role="status">展开后查看</div></details>
 
   <details class="panel" open><summary>保存的数据</summary><p class="tip">查看历史记录，或按人物、任务与活动查找。</p><div class="data-shortcuts"><button id="open-memory">记忆与肖像</button><button id="open-work">工件与工具任务</button><button id="open-prompts">实际提示词</button><button id="open-timing">运行与耗时</button><button id="open-all-data" class="all-data">打开数据工作台 →</button></div></details>
-  <div class="panel"><a href="/recent-audio" target="_blank" rel="noopener">最近录音 · 回听与排查</a><p class="tip">最近24小时、音频最多512 MB；停止对话后仍保留。</p><label><input type="checkbox" id="include-unplayed"> 把未播出的回复也放入上下文</label><p class="tip">默认关闭，只按播放器确认已播出的内容接续；开启后会注明哪些内容尚未播出。</p><span id="voice-context-status" role="status"></span></div>
+  <details class="panel recording-settings">
+    <summary>录音与播放记录</summary>
+    <div class="recording-body">
+      <div class="recording-row"><div><strong>最近录音</strong><p class="tip">保留最近24小时，最多512 MB。结束对话后可回听。</p></div><a class="recording-link" href="/recent-audio" target="_blank" rel="noopener">回听录音 ↗</a></div>
+      <div class="recording-context"><label><input type="checkbox" id="include-unplayed"> 在上下文中保留未播回复</label><p class="tip">默认关闭。开启后会注明尚未播放的内容。</p><span id="voice-context-status" role="status"></span></div>
+    </div>
+  </details>
   <details class="panel"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20v-2a7 7 0 0 1 14 0v2"/></svg>声音与姓名</summary>
     <p><button id="open-enrollment" class="secondary">声纹登记与测试 →</button></p>
     <p class="tip">也可以在这里直接登记：在左侧点几句同一个人说的话的“选择声音”，填写姓名后点登记。</p>
@@ -353,14 +360,17 @@ inputMode('text');
 refreshPanels();
 let ws, mic, captureContext, outputContext, capture, ready = false;
 let replyId = '', paused = false, queue = [], playing = null, source = null;
+let permitSeq = 0; const holdReasons = new Set(), nextHolds = new Set();
+const speechLevel = 0.02, sustainFrames = 4;
+let speechFrames = 0, speechLevelSent = '', speechQuiet = 0;
 let audioDone = true, mainBusy = false;
 let mainSource='', outcomeHint='', mainStage='';
 const phaseNames={collect:'收集发言',prepare:'准备输入材料',jev:'JEV 判断',judged:'JEV 判断已结束',queued:'等待进入主流程',resolve:'主流程 · 识别对象与落位',assemble:'主流程 · 组装人物、回忆与工具材料',cognition:'主认知 · 模型思考',action:'主流程 · 处理语言与动作'};
 const phaseSteps={collect:['collect','收集发言'],prepare:['prepare','准备材料'],jev:['jev','接话判断'],judged:['jev','接话判断'],queued:['queued','等待主流程'],resolve:['resolve','主引擎开始'],assemble:['assemble','组装材料'],cognition:['main','主认知'],action:['action','行动']};
 phaseNames.reconsider='正在重新考虑';phaseSteps.reconsider=['main','重新考虑'];
-const liveStepKeys=new Set(['previous','speech','speechEnd','cut','sent','jev','resolve','main','reply','finished']);
-const pipelineNodes=[['session_started_at_ms','会话开始'],['previous_settled_at_ms','前一轮结束'],['audio_start_received_at_ms','语音起点送达'],['audio_end_received_at_ms','末尾音频送达'],['asr_returned_at_ms','识别结果到达'],['result_ready_at_ms','输入就绪'],['collect_at_ms','开始收集'],['text_sent_at_ms','文字发出'],['display_ack_at_ms','页面显示'],['jev_started_at_ms','接话判断开始'],['jev_finished_at_ms','接话判断结束'],['queued_at_ms','进入主流程队列'],['main_started_at_ms','主引擎开始'],['reply_sent_at_ms','回复发出'],['turn_complete_at_ms','本轮完成'],['write_started_at_ms','记忆整理开始'],['write_completed_at_ms','记忆整理结束']];
-function wallClock(ms){return Number.isFinite(ms)?new Date(ms).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,fractionalSecondDigits:3}):'';}
+const liveStepKeys=new Set(['previous','speech','speechEnd','cut','sent','jev','resolve','main','ack','reply','finished']);
+const pipelineNodes=[['session_started_at_ms','会话开始'],['previous_settled_at_ms','前一轮结束'],['audio_start_received_at_ms','语音起点送达'],['audio_end_received_at_ms','末尾音频送达'],['asr_returned_at_ms','识别结果到达'],['result_ready_at_ms','输入就绪'],['collect_at_ms','开始收集'],['text_sent_at_ms','文字发出'],['display_ack_at_ms','页面显示'],['jev_started_at_ms','接话判断开始'],['jev_finished_at_ms','接话判断结束'],['queued_at_ms','进入主流程队列'],['main_started_at_ms','主引擎开始'],['waiting_reply_sent_at_ms','过渡语发出'],['reply_sent_at_ms','回复发出'],['turn_complete_at_ms','本轮完成'],['write_started_at_ms','记忆整理开始'],['write_completed_at_ms','记忆整理结束']];
+function wallClock(ms){return Number.isFinite(ms)?new Date(ms).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';}
 const replyRows=new Map(), actionRows=new Map();
 function actionKey(key){return JSON.stringify(key||[]);}
 function showActions(actions,after=null){
@@ -560,12 +570,18 @@ function modelCallStatus(event,row=null){
   const states={calling:'调用中',completed:'完成',failed:'失败',cancelled:'已取消'};
   modelHistory(owner,(event.purpose||'模型')+' · '+event.model+' · '+(states[event.state]||event.state)+(event.state!=='calling'&&Number.isFinite(event.elapsed_ms)?' · '+(event.elapsed_ms/1000).toFixed(2)+'秒':''));
   const step=modelStage(event.purpose||'');
-  if(step)modelStep(owner,...step,states[event.state]||event.state,event);
+  // Unscoped global model callbacks may belong to another simultaneous turn.
+  if(step&&(row||event.input_ids?.length||!ui.pipeline))modelStep(owner,...step,states[event.state]||event.state,event);
   const active=[...ui.calls.values()].filter(call=>call.state==='calling');
   ui.button.textContent='模型 · '+(ui.outcome==='处理失败'?ui.outcome:active.length?'调用中':states[event.state]||event.state);
   ui.button.title=ui.records.textContent;
   updateModelPanel(owner);
   refreshMessageScroll();
+}
+function progressOwners(event){
+  // Explicit empty ownership (e.g. visual observation) is not the latest voice.
+  if(Array.isArray(event.input_ids))return [...new Set(event.input_ids.map(id=>inputRows.get(id)?.p).filter(Boolean))];
+  return latestModelInput?.modelUi?.pipeline?[]:[latestModelInput].filter(Boolean);
 }
 function modelProgress(row,stage,terminal=false,atMs=null){
   if(!row?.modelUi)return;
@@ -583,11 +599,11 @@ function modelProgress(row,stage,terminal=false,atMs=null){
   }
   if(mapped)modelStep(row,...mapped,/结束|完成|judged/.test(stage)?'完成':'进行中',null,atMs);
   if(terminal){
-    for(const step of ui.steps.values())if(!step.calls.size&&step.state==='进行中'){step.state=stage==='处理失败'?'中断':'完成';step.ended=Date.now();}
-    modelStep(row,'finished',stage==='处理失败'?'处理失败':'本轮完成',stage==='处理失败'?'失败':'完成');
+    for(const step of ui.steps.values())if(!step.calls.size&&step.state==='进行中'){step.state=stage==='处理失败'?'中断':'完成';step.ended=atMs??Date.now();}
+    modelStep(row,'finished',stage==='处理失败'?'处理失败':'本轮完成',stage==='处理失败'?'失败':'完成',null,atMs);
   }
-  if(terminal){ui.outcome=stage;ui.ended=Date.now();clearInterval(ui.timer);}
-  if(terminal||!ui.calls.size)ui.button.textContent='模型 · '+stage;
+  if(terminal){ui.outcome=stage;ui.ended=atMs??Date.now();clearInterval(ui.timer);}
+  if(terminal||!ui.calls.size)ui.button.textContent='模型 · '+label;
   updateModelPanel(row);
   refreshMessageScroll();
 }
@@ -636,11 +652,15 @@ function applyPipeline(row,pipe){
   if(!row.modelUi&&row.p?.modelUi)row.modelUi=row.p.modelUi;
   if(!row.modelUi)return;
   row.modelUi.pipeline={...(row.modelUi.pipeline||{}),...pipe};
-  const map=[['previous_settled_at_ms','previous','前一轮结束'],['audio_start_received_at_ms','speech','语音起点送达'],['audio_end_received_at_ms','speechEnd','末尾音频送达'],['asr_returned_at_ms','cut','识别结果到达'],['text_sent_at_ms','sent','文字发出'],['jev_started_at_ms','jev','接话判断'],['jev_finished_at_ms','jev','接话判断'],['main_started_at_ms','resolve','主引擎开始'],['reply_sent_at_ms','reply','回复发出'],['turn_complete_at_ms','finished','本轮完成']];
+  pipe=row.modelUi.pipeline;
+  const map=[['previous_settled_at_ms','previous','前一轮结束'],['audio_start_received_at_ms','speech','语音起点送达'],['audio_end_received_at_ms','speechEnd','末尾音频送达'],['asr_returned_at_ms','cut','识别结果到达'],['text_sent_at_ms','sent','文字发出'],['jev_started_at_ms','jev','接话判断'],['jev_finished_at_ms','jev','接话判断'],['main_started_at_ms','resolve','主引擎开始'],['waiting_reply_sent_at_ms','ack','过渡语发出'],['reply_sent_at_ms','reply','回复发出'],['turn_complete_at_ms','finished','本轮完成']];
   for(const [k,id,label] of map){
     if(!Number.isFinite(pipe[k]))continue;
     const state=k==='jev_started_at_ms'&&!Number.isFinite(pipe.jev_finished_at_ms)?'进行中':'完成';
     modelStep(row,id,label,state,null,pipe[k]);
+    if(id==='ack'||id==='reply'){
+      const step=row.modelUi.steps.get(id);step.at=pipe[k];step.ended=pipe[k];
+    }
     if(k==='jev_finished_at_ms'||k==='turn_complete_at_ms'){
       const step=row.modelUi.steps.get(id);if(step){step.ended=pipe[k];step.state='完成';}
     }
@@ -665,10 +685,11 @@ function updateModelPanel(row){
   ui.panelTitle.textContent='本轮流程';
   const shown=[...ui.steps.values()].filter(step=>liveStepKeys.has(step.key||'')).sort((a,b)=>(a.at||0)-(b.at||0));
   ui.panelBody.textContent=(shown.length?shown:[...ui.steps.values()]).map(step=>{
-    const time=wallClock(step.at);
+    const spanEnd=step.ended??(step.calls.size?Math.max(...[...step.calls.values()].map(c=>c.ended||0)):null);
+    const time=wallClock(step.at)+(step.state!=='进行中'&&Number.isFinite(spanEnd)&&spanEnd>step.at&&['jev','main'].includes(step.key)?' → '+wallClock(spanEnd):'');
     const duration=step.calls.size?[...step.calls.values()].reduce((sum,c)=>sum+(Number.isFinite(c.elapsed_ms)?c.elapsed_ms:((c.ended??Date.now())-c.started)),0):(step.ended??(step.state==='进行中'?Date.now():step.at))-step.at;
     const wait=Number.isFinite(duration)&&duration>0?' · '+(duration/1000).toFixed(1)+'秒':'';
-    return time+'  '+step.label+(['前一轮结束','语音起点送达','末尾音频送达','识别结果到达','文字发出','回复发出','收到输入','本轮完成','处理失败'].includes(step.label)?'':' · '+step.state)+wait;
+    return time+'  '+step.label+(['前一轮结束','语音起点送达','末尾音频送达','识别结果到达','文字发出','过渡语发出','回复发出','收到输入','本轮完成','处理失败'].includes(step.label)?'':' · '+step.state)+wait;
   }).join('\n');
   if((row.p||row)===latestModelInput){positionModelPanel();if(ui.follow)ui.panel.scrollTop=ui.panel.scrollHeight;}
 }
@@ -716,6 +737,24 @@ function log(text, kind='notice', atMs=null) {
   if(kind==='input')modelInput(p);
   return p;
 }
+const utteranceUpdates = new Map();
+function refreshUtteranceGroups(){
+  const states={unknown:'表达状态待定',paused:'停顿待续',interrupted:'被插话',complete:'表达结束'};
+  for(const update of utteranceUpdates.values()){
+    const parts=(update.parts||[]).filter(p=>p.input_id&&inputRows.has(p.input_id)&&!inputRows.get(p.input_id).mergedInto);
+    if(!parts.length)continue;
+    const first=inputRows.get(parts[0].input_id);
+    if(!first?.body)continue;
+    first.body.textContent=parts.map(p=>inputRows.get(p.input_id).finalRevisionText||p.text).join('');
+    first.p.dataset.utterance=update.utterance_id;
+    if(!first.utteranceState){first.utteranceState=document.createElement('small');first.utteranceState.className='jev-detail';first.extra.appendChild(first.utteranceState);}
+    first.utteranceState.textContent=states[update.state]||'表达状态待定';
+    if(parts.length>1){
+      if(!first.fragmentDetails){const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='同次发言的声音片段';details.appendChild(summary);first.extra.appendChild(details);first.fragmentDetails=details;}
+      for(const part of parts.slice(1)){const row=inputRows.get(part.input_id);if(row?.p&&row.p!==first.p)first.fragmentDetails.appendChild(row.p);}
+    }
+  }
+}
 function inputDetails(p){
   if(p.inputDetails)return p.inputDetails;
   const extra=document.createElement('div');extra.className='input-extra';extra.hidden=true;
@@ -750,7 +789,23 @@ async function devices() {
   const preferred = list.find(d=>d.kind==='audioinput' && d.deviceId!=='default' && d.deviceId!=='communications' && /lark|hollyland|猛玛|wireless microphone/i.test(d.label));
   $('device').value = previous || (preferred ? preferred.deviceId : '');
 }
-function ack(segment,phase) { send({type:'played',reply_id:replyId,segment,phase}); }
+const playbackClocks = new Map();
+function showPlaybackClock(id,phase,at=Date.now()) {
+  const entry=playbackClocks.get(id);if(!entry)return;
+  if(phase==='started'&&!entry.started)entry.started=at;
+  if(phase==='completed'&&!entry.completed)entry.completed=at;
+  const fmt=t=>Number.isFinite(t)?new Date(t).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3}):'待定';
+  for(const el of entry.nodes)el.textContent='生成 '+fmt(entry.generated)+' · 开始播放 '+(entry.started?fmt(entry.started):'尚未播放')+' · 播完 '+(entry.completed?fmt(entry.completed):'尚未播完');
+}
+function finishPlaybackClock() {
+  if(audioDone&&!playing&&!queue.length&&endedSegments.size>0&&
+     [...endedSegments].every(n=>finishedSegments.has(n)))showPlaybackClock(replyId,'completed');
+}
+function ack(segment,phase) {
+  const at=Date.now();
+  if(phase==='started')showPlaybackClock(replyId,'started',at);
+  send({type:'played',reply_id:replyId,segment,phase,browser_at_ms:at});
+}
 function refreshStatus() {
   $('status').textContent = paused ? '正在听你说' : (playing || queue.length) ? '匠石正在说话' :
     (replyId && !audioDone) ? '正在准备声音' : mainBusy ? (mainSource==='visual_environment'?'环境观察 · ':'发言 · ')+(phaseNames[mainStage]||'正在进入主流程') : ready ? '已连接，正在听'+(outcomeHint?' · '+outcomeHint:'') : '对话已结束';
@@ -758,12 +813,11 @@ function refreshStatus() {
 function complete(segment) {
   if (finishedSegments.has(segment) || !endedSegments.has(segment)) return;
   if ((playing && playing.segment === segment) || queue.some(x=>x.segment===segment)) return;
-  finishedSegments.add(segment); ack(segment,'completed');
+  finishedSegments.add(segment); ack(segment,'completed');finishPlaybackClock();
 }
 function play() {
-  if (paused || playing || !queue.length || !outputContext) return;
+  if (paused || playing || !queue.length || !outputContext || nextHolds.size) return;
   playing = queue.shift();
-  if (!startedSegments.has(playing.segment)) { startedSegments.add(playing.segment); ack(playing.segment,'started'); }
   const item = playing, rid = replyId;
   const buffer = outputContext.createBuffer(1,item.samples.length, item.rate);
   buffer.copyToChannel(item.samples,0);
@@ -774,7 +828,9 @@ function play() {
     if (rid !== replyId) return;
     playing = null; source = null; complete(item.segment); play(); refreshStatus();
   };
-  source.start(); $('status').textContent='匠石正在说话';
+  source.start();
+  if (!startedSegments.has(item.segment)) { startedSegments.add(item.segment); ack(item.segment,'started'); }
+  $('status').textContent='匠石正在说话';
 }
 function pause() {
   paused = true;
@@ -899,7 +955,7 @@ function message(m) {
     for(const id of m.input_ids){const row=inputRows.get(id);if(row){row.p.style.outline='';row.meta.textContent=m.label+' · 手动关联';row.who.textContent=displayedSpeaker({label:m.label,method:'manual_annotation',status:'recognized'})+'：';row.identityView={label:m.label,source:'人工',state:'确定',reason:'用户手动关联'};refreshIdentityDetails(row);row.p.classList.remove('selected');row.button.textContent='选择声音';}}
     selectedInputs.clear();selectionChanged();$('enroll-status').textContent='已关联 '+m.label+'：本次选择 '+m.clips+' 段，累计已保存 '+(m.reference_count ?? 1)+' 段（最多10段）；比对采用平均匹配分。兼容录音保留 '+m.seconds+' 秒。'+(m.min_similarity!=null ? '样本最低相似度 '+m.min_similarity+'（仅供参考）。' : '')+(m.warning || '');return;
   }
-  if (m.type==='ready') { try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true;voiceButton(true,'对话中'); $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '')+(m.speaker_split==='enabled'?' · 本地多人分段已启用':'');if(m.speaker_split_error)log(m.speaker_split_error);
+  if (m.type==='ready') { try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true;refreshTextPeople();if(window.refreshVisionAvailability)window.refreshVisionAvailability();voiceButton(true,'对话中'); $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '')+(m.speaker_split==='enabled'?' · 本地多人分段已启用':'');if(m.speaker_split_error)log(m.speaker_split_error);
     $('match-threshold').disabled=m.match_threshold==null;
     if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);$('match-status').textContent='单句确认至少 '+Number(m.single_confirmation_threshold ?? Math.max(.65,m.match_threshold)).toFixed(2)+'，与第二候选须相差 '+m.match_margin+'；较弱声音先收集多段核对，待定声音不参与姓名竞争。';}
     voiceprintAvailable=m.voiceprint_available!==false;selectionChanged();
@@ -935,14 +991,25 @@ function message(m) {
     $('live').textContent=m.final||!preview?'':'识别中：'+preview;
     // Final utterances appear once, with speaker and timestamps, in timeline.
   }
+  else if(m.type==='utterance_updates') {
+    for(const update of m.updates||[])utteranceUpdates.set(update.utterance_id,update);
+    while(utteranceUpdates.size>128)utteranceUpdates.delete(utteranceUpdates.keys().next().value);
+    refreshUtteranceGroups();
+  }
   else if(m.type==='transcript_revision') {
+    const first=inputRows.get((m.input_ids||[])[0]);
     (m.input_ids||[]).forEach((id,i)=>{const row=inputRows.get(id);if(!row?.body)return;
-      row.body.textContent=i===0?m.text:'（识别结果已合并修订到上一条）';
+      if(i===0){row.finalRevisionText=m.text;row.body.textContent=m.text;}
+      else if(first?.extra){
+        row.mergedInto=m.input_ids[0];
+        if(!first.fragmentDetails){const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='合并前的声音片段';details.appendChild(summary);first.extra.appendChild(details);first.fragmentDetails=details;}
+        if(row.p!==first.p)first.fragmentDetails.appendChild(row.p);
+      }
       row.body.title='服务端最终转写修订，同一段声音，不是新发言';});
   }
   else if(m.type==='flow_phase') {
     const label=phaseNames[m.stage]||m.stage;
-    modelProgress(latestModelInput,m.stage,false,m.at_ms);
+    for(const owner of progressOwners(m))modelProgress(owner,m.stage,false,m.at_ms);
     $(m.lane==='main'?'flow-main':'flow-input').textContent=(m.lane==='main'&&m.source==='visual_environment'?'环境观察 · ':'')+label;
     if(m.lane==='main'){mainStage=m.stage;if(m.stage==='resolve'&&$('flow-input').textContent===phaseNames.queued)$('flow-input').textContent='输入：已进入主流程';refreshStatus();}
   }
@@ -955,7 +1022,7 @@ function message(m) {
     outcomeHint=m.replied?'':m.source==='visual_environment'?'观察完成，无需开口':m.mode==='wait'?'本轮选择等待':m.mode==='think'?'本轮只思考':'本轮未开口';
     if(!m.replied&&m.source!=='visual_environment')log(outcomeHint+(m.reason?'：'+m.reason:''),'notice');
   }
-  else if(m.type==='turn_complete') {modelProgress(latestModelInput,'已完成',true);mainBusy=false;$('flow-main').textContent='主流程：已完成'+(outcomeHint?' · '+outcomeHint:'');refreshStatus();}
+  else if(m.type==='turn_complete') {for(const owner of progressOwners(m))modelProgress(owner,'已完成',true,m.at_ms);mainBusy=false;$('flow-main').textContent='主流程：已完成'+(outcomeHint?' · '+outcomeHint:'');refreshStatus();}
   else if(m.type==='input_pending') $('judge').textContent='主流程忙碌，新发言正在合并为下一批输入。';
   else if(m.type==='speaker') {
     const basis={self_introduction:'本次自我介绍关联',voiceprint_match:'已登记声纹匹配',personal_classifier:'个人声音辅助模型命中',unidentified:'身份未知',unassigned_audio:'本句暂不能归属，未新增访客',anonymous_voice_cluster:'匿名声纹轨迹，姓名未确认',voice_continuity:'沿用会话对象 · 本句姓名未确认',voice_scene:'多人现场',manual_annotation:'手动关联',context_attribution:'上下文推测，声纹未确认'};
@@ -1017,6 +1084,7 @@ function message(m) {
       applyPipeline(row,{audio_timing_expected:true,asr_returned_at_ms:m.received_at_ms,...(m.pipeline||{})});
     }
     p.appendChild(p.modelUi.panel);
+    refreshUtteranceGroups();
     if(m.input_id&&document.visibilityState==='visible')requestAnimationFrame(()=>requestAnimationFrame(()=>{
       if(document.visibilityState==='visible')send({type:'transcript_displayed',input_id:m.input_id,render_ms:performance.now()-renderingStarted});
     }));
@@ -1049,13 +1117,19 @@ function message(m) {
   else if(m.type==='jev_reply') {if(m.route==='self_reply')modelProgress(latestModelInput,'已完成',true);$('judge').textContent=m.route==='waiting_ack'?'JEV：等待接话 · 主认知正在处理':'JEV：我回答 · 短时聊天，本轮未进入主流程和记忆写入';}
   else if(m.type==='reply') {
     clearPlayback(); replyId=m.reply_id; paused=m.paused;audioDone=false;refreshStatus();
+    const clockEntry={generated:m.generated_at_ms,nodes:[]};playbackClocks.set(replyId,clockEntry);
+    while(playbackClocks.size>64)playbackClocks.delete(playbackClocks.keys().next().value);
     let lastRow;
     if(m.items) for(const item of m.items) {
       const named=(item.target_labels||[]).filter(name=>name && !String(name).startsWith('OBJ-'));
       const known=(item.target_ids||[]).map(id=>speakerLabels.get(id)).filter(name=>name && !String(name).startsWith('OBJ-'));
       const to=(named.length?named:known).join('、') || '现场';
       lastRow=log('匠石 → '+to+'：'+item.text,'reply',m.generated_at_ms);
-    } else lastRow=log('匠石：'+m.text,'reply',m.generated_at_ms);
+      clockEntry.nodes.push(lastRow.querySelector('time'));
+    } else {lastRow=log('匠石：'+m.text,'reply',m.generated_at_ms);clockEntry.nodes.push(lastRow.querySelector('time'));}
+    showPlaybackClock(replyId,'generated');
+    const displayedReply=replyId;
+    requestAnimationFrame(()=>send({type:'reply_displayed',reply_id:displayedReply,browser_at_ms:Date.now()}));
     if(m.turn_key){const key=actionKey(m.turn_key);replyRows.set(key,lastRow);const action=actionRows.get(key);if(action&&action.isConnected)lastRow.after(action);while(replyRows.size>64)replyRows.delete(replyRows.keys().next().value);}
   }
   else if(m.type==='audio' && m.reply_id===replyId && !invalidReplies.has(m.reply_id)) {
@@ -1066,10 +1140,32 @@ function message(m) {
     queue.push({segment:m.segment,samples,rate:m.rate}); play();
   }
   else if(m.type==='segment_end' && m.reply_id===replyId) { endedSegments.add(m.segment); complete(m.segment); }
-  else if(m.type==='audio_end' && m.reply_id===replyId) {audioDone=true;refreshStatus();}
-  else if(m.type==='pause' && m.reply_id===replyId) pause();
-  else if(m.type==='resume' && m.reply_id===replyId) { paused=false; play();refreshStatus(); }
-  else if(m.type==='stop' && (!m.reply_id || m.reply_id===replyId)) { clearPlayback(); $('status').textContent='已停止播放'; }
+  else if(m.type==='audio_end' && m.reply_id===replyId) {audioDone=true;finishPlaybackClock();refreshStatus();}
+  else if(m.type==='block_next' || m.type==='clear_block') {
+    if(Number.isFinite(m.permit_seq) && m.permit_seq < permitSeq) return;
+    if(Number.isFinite(m.permit_seq)) permitSeq=m.permit_seq;
+    if(m.type==='block_next') nextHolds.add(m.reason_id);
+    else {for(const id of m.cleared||[]) {nextHolds.delete(id);holdReasons.delete(id);} play();}
+  }
+  else if(m.type==='pause' && m.reply_id===replyId) {
+    if(Number.isFinite(m.permit_seq) && m.permit_seq < permitSeq) return;
+    if(Number.isFinite(m.permit_seq)) permitSeq = m.permit_seq;
+    if(m.reason_id) holdReasons.add(m.reason_id);
+    pause();
+  }
+  else if(m.type==='resume' && m.reply_id===replyId) {
+    if(Number.isFinite(m.permit_seq) && m.permit_seq < permitSeq) return;
+    if(Number.isFinite(m.permit_seq)) permitSeq = m.permit_seq;
+    for(const id of m.cleared||[]) {holdReasons.delete(id);nextHolds.delete(id);}
+    if(m.reason_id) holdReasons.delete(m.reason_id);
+    if(holdReasons.size) return;
+    paused=false; play(); refreshStatus();
+  }
+  else if(m.type==='stop' && (!m.reply_id || m.reply_id===replyId)) {
+    if(Number.isFinite(m.permit_seq) && m.permit_seq < permitSeq) return;
+    if(Number.isFinite(m.permit_seq)) permitSeq = m.permit_seq;
+    holdReasons.clear(); nextHolds.clear(); clearPlayback(); $('status').textContent='已停止播放';
+  }
 }
 async function end() {
   if(endingPromise)return endingPromise;
@@ -1134,7 +1230,7 @@ async function refreshTextPeople(){
  $('personal-person').add(new Option('其他（电视／电子设备，仅反例）','__negative_other__'));if(personalPrevious==='__negative_other__')$('personal-person').value=personalPrevious;
  if(d.people.some(p=>p.object_id===previous))$('text-person').value=previous;
  else{try{const saved=localStorage.getItem('jshi.text.person');if(d.people.some(p=>p.object_id===saved))$('text-person').value=saved;}catch{}}
- }catch(e){$('text-status').textContent='人物列表读取失败：'+e.message;}
+ }catch(e){$('text-status').textContent='人物列表读取失败：'+e.message;setTimeout(()=>refreshTextPeople(),3000);}
 }
 $('text-people-refresh').onclick=refreshTextPeople;
 $('text-person').onchange=()=>{try{localStorage.setItem('jshi.text.person',$('text-person').value);}catch{}};
@@ -1221,6 +1317,7 @@ $('test').onclick=async()=>{
   finally {if(stream) stream.getTracks().forEach(t=>t.stop()); if(testContext) await testContext.close(); $('test').textContent='录制 5 秒试听'; $('test').disabled=false; $('start').disabled=false;}
 };
 async function connectVoice(token) {
+  permitSeq=0;holdReasons.clear();nextHolds.clear();
   if(selectedMode!=='vision')inputMode('voice');
   voiceButton(true,'连接中');
   $('test').disabled=true; $('preview').pause();
@@ -1277,7 +1374,23 @@ async function connectVoice(token) {
     let clock=null;
     capture.port.onmessage=({data})=>{
       $('level').value=data.level;
-      if(!ready || !ws || ws.readyState!==WebSocket.OPEN) return;
+      if(!ready || !ws || ws.readyState!==WebSocket.OPEN) {
+        speechLevelSent = ''; speechFrames = 0; speechQuiet = 0;
+        return;
+      }
+      if(data.level >= speechLevel){
+        speechQuiet = 0; speechFrames++;
+        if(!speechLevelSent){ speechLevelSent = 'short'; send({type:'speech_start', level:'short'}); }
+        else if(speechLevelSent === 'short' && speechFrames >= sustainFrames){
+          speechLevelSent = 'sustained'; send({type:'speech_start', level:'sustained'});
+        }
+      } else if(speechLevelSent){
+        speechQuiet++;
+        if(speechQuiet >= 2){
+          send({type:'speech_end', level: speechLevelSent});
+          speechLevelSent = ''; speechFrames = 0; speechQuiet = 0;
+        }
+      }
       if(ws.bufferedAmount>32000) { log('连接发送过慢，已结束对话，避免丢失音频。'); end(); return; }
       ws.send(data.pcm);
       // Each frame is 100 ms; compare page delivery and the audio-thread clock with wall time.
@@ -1311,5 +1424,5 @@ function voiceButton(active,label){$('start').disabled=false;$('start').textCont
 $('start').onclick=()=>ready||connectionPromise?end():startVoice();
 </script>
 <script src="/vision_chat.js"></script>
-<script src="/model_settings.js"></script>
+<script src="/model_settings.js?v=20261105-effort"></script>
 </html>

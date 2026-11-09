@@ -137,17 +137,19 @@ def _ingest_from_dict(data: dict[str, Any]) -> MemoryIngestLedgerEntry:
     )
 
 
-def _state_to_dict(state: _SubjectLedgerState) -> dict[str, Any]:
+def _meta_to_dict(state: _SubjectLedgerState) -> dict[str, Any]:
     return {
-        "segments": [_segment_to_dict(segment) for segment in state.segments],
         "cursors": {kind.value: sequence for kind, sequence in state.cursors.items()},
-        "ingest_entries": [_ingest_to_dict(entry) for entry in state.ingest_entries],
         "context": _context_to_dict(state.context),
         "pending_sequences": list(state.pending_sequences),
     }
 
 
-def _state_from_dict(data: dict[str, Any]) -> _SubjectLedgerState:
+def _state_from_rows(
+    data: dict[str, Any],
+    segments: list[dict[str, Any]],
+    ingest_entries: list[dict[str, Any]],
+) -> _SubjectLedgerState:
     cursors = {
         ConsumerKind.ACTIVE_ZONE: 0,
         ConsumerKind.MEMORY: 0,
@@ -156,18 +158,19 @@ def _state_from_dict(data: dict[str, Any]) -> _SubjectLedgerState:
     for raw_kind, sequence in (data.get("cursors") or {}).items():
         cursors[ConsumerKind(raw_kind)] = int(sequence)
     return _SubjectLedgerState(
-        segments=[_segment_from_dict(item) for item in data.get("segments") or ()],
+        segments=[_segment_from_dict(item) for item in segments],
         cursors=cursors,
-        ingest_entries=[
-            _ingest_from_dict(item) for item in data.get("ingest_entries") or ()
-        ],
+        ingest_entries=[_ingest_from_dict(item) for item in ingest_entries],
         context=_context_from_dict(data.get("context")),
         pending_sequences=[int(item) for item in data.get("pending_sequences") or ()],
     )
 
 
 class SqliteExperienceLedger(InProcessExperienceLedger):
-    """与 subject.sqlite3 同库的经历账本。变更后落盘；新实例读回上一份活跃区。"""
+    """与 subject.sqlite3 同库的经历账本。一段一行，写入只落改动的行；新实例读回上一份活跃区。
+
+    experience_ledger 只存游标、现场和待处理序号；旧版整份 payload 在首次读取时迁移。
+    """
 
     def __init__(
         self,
@@ -193,25 +196,121 @@ class SqliteExperienceLedger(InProcessExperienceLedger):
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS experience_ledger (
-                    subject_id TEXT PRIMARY KEY,
-                    payload TEXT NOT NULL
-                )
-                """
+        connection = self._connect()
+        try:
+            with connection:
+                self._create_tables(connection)
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _create_tables(connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS experience_ledger (
+                subject_id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL
             )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS experience_segments (
+                subject_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                segment_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (subject_id, sequence)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS experience_ingest (
+                subject_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                ingest_id TEXT NOT NULL UNIQUE,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (subject_id, position)
+            )
+            """
+        )
 
     def _load(self, subject_id: str) -> _SubjectLedgerState | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT payload FROM experience_ledger WHERE subject_id = ?",
-                (subject_id,),
-            ).fetchone()
+        connection = self._connect()
+        try:
+            with connection:
+                return self._load_rows(connection, subject_id)
+        finally:
+            connection.close()
+
+    def _load_rows(self, connection, subject_id: str) -> _SubjectLedgerState | None:
+        row = connection.execute(
+            "SELECT payload FROM experience_ledger WHERE subject_id = ?",
+            (subject_id,),
+        ).fetchone()
         if row is None:
             return None
-        return _state_from_dict(json.loads(row["payload"]))
+        data = json.loads(row["payload"])
+        if "segments" in data or "ingest_entries" in data:
+            state = _state_from_rows(
+                data, data.get("segments") or [], data.get("ingest_entries") or []
+            )
+            # One transaction: the old payload is replaced only after every row is written.
+            self._write(connection, subject_id, state,
+                        segments=state.segments, ingest=state.ingest_entries)
+            return state
+        segments = [
+            json.loads(item["payload"])
+            for item in connection.execute(
+                "SELECT payload FROM experience_segments WHERE subject_id = ? ORDER BY sequence",
+                (subject_id,),
+            )
+        ]
+        ingest = [
+            json.loads(item["payload"])
+            for item in connection.execute(
+                "SELECT payload FROM experience_ingest WHERE subject_id = ? ORDER BY position",
+                (subject_id,),
+            )
+        ]
+        return _state_from_rows(data, segments, ingest)
+
+    @staticmethod
+    def _write(connection, subject_id, state, *, segments, ingest) -> None:
+        connection.executemany(
+            """
+            INSERT INTO experience_segments(subject_id, sequence, segment_id, payload)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(subject_id, sequence) DO UPDATE SET
+                segment_id = excluded.segment_id, payload = excluded.payload
+            """,
+            [
+                (subject_id, segment.sequence, segment.segment_id, _dump(_segment_to_dict(segment)))
+                for segment in segments
+            ],
+        )
+        positions = {entry.ingest_id: index for index, entry in enumerate(state.ingest_entries)}
+        connection.executemany(
+            """
+            INSERT INTO experience_ingest(subject_id, position, ingest_id, payload)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(subject_id, position) DO UPDATE SET
+                ingest_id = excluded.ingest_id, payload = excluded.payload
+            """,
+            [
+                (subject_id, positions[entry.ingest_id], entry.ingest_id, _dump(_ingest_to_dict(entry)))
+                for entry in ingest
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO experience_ledger(subject_id, payload)
+            VALUES (?, ?)
+            ON CONFLICT(subject_id) DO UPDATE SET payload = excluded.payload
+            """,
+            (subject_id, _dump(_meta_to_dict(state))),
+        )
 
     def _state(self, subject_id: str) -> _SubjectLedgerState:
         if subject_id not in self._hydrated:
@@ -223,13 +322,15 @@ class SqliteExperienceLedger(InProcessExperienceLedger):
 
     def _after_write(self, subject_id: str) -> None:
         state = self._states[subject_id]
-        payload = _dump(_state_to_dict(state))
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO experience_ledger(subject_id, payload)
-                VALUES (?, ?)
-                ON CONFLICT(subject_id) DO UPDATE SET payload = excluded.payload
-                """,
-                (subject_id, payload),
-            )
+        segments = [s for s in state.segments if s.sequence in state.dirty_segments] \
+            if state.dirty_segments else []
+        ingest = [entry for entry in state.ingest_entries if entry.ingest_id in state.dirty_ingest] \
+            if state.dirty_ingest else []
+        connection = self._connect()
+        try:
+            with connection:
+                self._write(connection, subject_id, state, segments=segments, ingest=ingest)
+        finally:
+            connection.close()
+        state.dirty_segments.clear()
+        state.dirty_ingest.clear()

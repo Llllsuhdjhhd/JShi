@@ -16,7 +16,7 @@ class Element {
 }
 const nodes=new Map(),node=id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id);};
 const sent=[];
-const ctx=vm.createContext({document:{getElementById:node,createElement:()=>new Element()},navigator:{},setTimeout,clearTimeout,setInterval,clearInterval,console,fetch:async()=>({ok:true,json:async()=>({people:[]})}),
+const ctx=vm.createContext({document:{getElementById:node,createElement:()=>new Element()},navigator:{},performance,setTimeout,clearTimeout,setInterval,clearInterval,console,fetch:async()=>({ok:true,json:async()=>({people:[]})}),
   Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},WebSocket:{OPEN:1},sent,
 });
 require('./helpers/browser_environment.cjs')(ctx);
@@ -177,7 +177,7 @@ assert.notEqual(vm.runInContext('newerStatus.modelUi.panel.hidden',ctx),true);
 console.log('Visible latest-input status panel: model/stage and previous panel hiding passed');
 // Full timeline is preserved; bottom-positioned input moves the panel upward.
 vm.runInContext(`var longStatus=log('过程测试','input');modelProgress(longStatus,'JEV 判断');modelProgress(longStatus,'主认知 · 模型思考');modelProgress(longStatus,'已完成',true);`,ctx);
-assert.match(vm.runInContext('longStatus.modelUi.panelBody.textContent',ctx),/收到输入[\s\S]*接话判断[\s\S]*主认知[\s\S]*本轮完成/);
+assert.match(vm.runInContext('longStatus.modelUi.panelBody.textContent',ctx),/接话判断[\s\S]*主认知[\s\S]*本轮完成/);
 vm.runInContext(`window.innerHeight=800;$('log').getBoundingClientRect=()=>({left:520});messageScroll.getBoundingClientRect=()=>({left:520});longStatus.getBoundingClientRect=()=>({left:600,top:730});longStatus.modelUi.panel.scrollHeight=500;positionModelPanel();`,ctx);
 assert.equal(vm.runInContext('longStatus.modelUi.panel.style.top',ctx),'284px');
 assert.equal(vm.runInContext('longStatus.modelUi.panel.style.width',ctx),'440px');
@@ -351,3 +351,27 @@ assert.match(vm.runInContext(`inputRows.get('preferred-mlp').identityDetails.tex
 assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').identityConflict.hidden`,ctx),true);
 
 assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').who.textContent`,ctx),'qf[MLP可能0.99]：');
+
+vm.runInContext(`message({type:'utterance_updates',updates:[{utterance_id:'U1',state:'paused',parts:[{input_id:'one',text:'我要去一下'},{input_id:'two',text:'商店买鸡蛋'}]}]})`,ctx);
+assert.equal(vm.runInContext("inputRows.get('one').body.textContent",ctx),'第一句的最终修订商店买鸡蛋');
+assert.equal(vm.runInContext("inputRows.get('one').utteranceState.textContent",ctx),'停顿待续');
+assert.equal(vm.runInContext("inputRows.get('one').fragmentDetails.children.includes(inputRows.get('two').p)",ctx),true);
+console.log('Organized utterance: continuous text, state and original audio controls passed');
+vm.runInContext(`message({type:'transcript_revision',input_ids:['one','two'],text:'我要去一下商店买鸡蛋。'});refreshUtteranceGroups()`,ctx);
+assert.equal(vm.runInContext("inputRows.get('one').body.textContent",ctx),'我要去一下商店买鸡蛋。');
+assert.equal(vm.runInContext("inputRows.get('two').mergedInto",ctx),'one');
+assert.equal(vm.runInContext("inputRows.get('one').fragmentDetails.children.includes(inputRows.get('two').p)",ctx),true);
+console.log('Final merged sentence survives old organizer updates; original fragments stay collapsed');
+
+// Late completion belongs to its original input, never the latest speaker.
+vm.runInContext(`
+message({type:'timeline',input_id:'clock-old',start_ms:0,end_ms:1000,text:'旧轮',speaker:{label:'A',track_id:'A'}});
+message({type:'timeline',input_id:'clock-new',start_ms:1000,end_ms:2000,text:'新轮',speaker:{label:'B',track_id:'B'}});
+message({type:'flow_phase',lane:'main',stage:'resolve',input_ids:['clock-old'],at_ms:1793970000000});
+message({type:'turn_complete',input_ids:['clock-old'],at_ms:1793970009000});
+`,ctx);
+assert.equal(vm.runInContext(`inputRows.get('clock-old').p.modelUi.steps.get('finished').at`,ctx),1793970009000);
+assert.equal(vm.runInContext(`inputRows.get('clock-new').p.modelUi.steps.has('finished')`,ctx),false);
+assert.match(vm.runInContext(`wallClock(1793970000010)`,ctx),/^\d{2}:\d{2}:\d{2}$/);
+assert.ok(vm.runInContext(`inputRows.get('clock-old').p.modelUi.panelBody.textContent.indexOf('主引擎开始')<inputRows.get('clock-old').p.modelUi.panelBody.textContent.indexOf('本轮完成')`,ctx));
+console.log('Pipeline ownership: delayed completion stays with original input; full wall clock passed');

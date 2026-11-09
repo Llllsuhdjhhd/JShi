@@ -69,7 +69,12 @@ def test_unknown_audio_converses_without_using_device_owner(process):
     inbound = next(r for r in facts if r.event_type == "external_input")
     assert inbound.content["envelope"]["speaker"]["status"] == "unknown"
     ledger = process.activity_ledger.list_experiences("stone")
-    assert any("实际交付待播放器反馈" in (s.text_raw or "") for s in ledger)
+    from jshi.experienceledger.port import segment_view_text
+    from jshi.memorycontrol.inprocess import _experience_text
+    planned = [s for s in ledger if (s.state_delta or {}).get("delivery") == "planned_audio"]
+    assert planned and not planned[0].text_raw.startswith("（")
+    assert segment_view_text(planned[0]).startswith("（准备说，未确认播出）")
+    assert "动作" in _experience_text(planned[0]) or _experience_text(planned[0]) == ""
 
 
 def test_final_and_matching_envelope_required(process):
@@ -518,8 +523,10 @@ def test_player_completion_enters_ledger_and_survives_reconnect(process):
         try:
             assert "第一句。" in reconnected.delivery.context_note()
             assert "第二句。" in reconnected.delivery.context_note()
+            from jshi.experienceledger.port import segment_delivery, segment_view_text
             segments=process.activity_ledger.list_experiences("stone")
-            assert any(s.text_raw=="（播放器确认此句播放完成）第一句。" for s in segments)
+            assert any(s.text_raw=="第一句。" and segment_delivery(s)=="played"
+                       and segment_view_text(s)=="（已播）第一句。" for s in segments)
         finally:
             await reconnected.close()
     asyncio.run(run())

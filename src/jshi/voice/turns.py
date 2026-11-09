@@ -131,10 +131,11 @@ def fuse_decisions(audio, semantic=None):
 
 class TurnCoordinator:
     def __init__(self, policy, *, semantic=None, timeout_s=.6, semantic_timeout_s=.2,
-                 max_hold_s=2, max_audio_s=12):
+                 max_hold_s=2, max_audio_s=12, audio_source=None):
         self.policy, self.semantic = policy, semantic
         self.timeout_s, self.semantic_timeout_s = timeout_s, semantic_timeout_s
         self.max_hold_s, self.max_audio_s = max_hold_s, max_audio_s
+        self.audio_source = audio_source
         self.pending = {}
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='jshi-turn')
         self.semantic_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='jshi-semantic') if semantic else None
@@ -182,7 +183,14 @@ class TurnCoordinator:
                         parts = []
                     parts.append((item,item.samples))
             if parts:
-                contexts[key] = np.concatenate([a for r,a in parts])[-8*16000:]
+                if self.audio_source is not None:
+                    start = max(parts[0][0].start_ms, parts[-1][0].end_ms-8000)
+                    pcm = self.audio_source(start, parts[-1][0].end_ms)
+                    if pcm is not None:
+                        contexts[key] = np.frombuffer(pcm, dtype='<i2').astype('float32') / 32768
+                    # Missing real audio is unknown, never concatenate away the gap.
+                else:
+                    contexts[key] = np.concatenate([a for r,a in parts])[-8*16000:]
         if self.future is not None and not self.future.done():
             return TurnTicket(grouped,None,monotonic(),self.generation)
         def analyze():

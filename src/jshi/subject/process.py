@@ -262,6 +262,7 @@ class ActivityTiming:
     steps: tuple[tuple[str, float], ...]
     total_ms: float
     end_to_end: dict = field(default_factory=dict)
+    substeps: tuple[tuple[str, float], ...] = ()
 
 
 class StepClock:
@@ -270,12 +271,21 @@ class StepClock:
         self.monotonic_started = time.monotonic()
         self._last = time.perf_counter()
         self._started = self._last
+        self._sub_last = self._last
         self.steps: list[tuple[str, float]] = []
+        self.substeps: list[tuple[str, float]] = []
 
     def mark(self, name: str) -> None:
         now = time.perf_counter()
         self.steps.append((name, round((now - self._last) * 1000, 1)))
         self._last = now
+        self._sub_last = now
+
+    def sub(self, name: str) -> None:
+        """Part of the current step; the step total is unchanged."""
+        now = time.perf_counter()
+        self.substeps.append((name, round((now - self._sub_last) * 1000, 1)))
+        self._sub_last = now
 
     def finish(self, activity_id: str) -> ActivityTiming:
         return ActivityTiming(
@@ -283,6 +293,7 @@ class StepClock:
             started_at=self.started_at.isoformat(),
             steps=tuple(self.steps),
             total_ms=round((time.perf_counter() - self._started) * 1000, 1),
+            substeps=tuple(self.substeps),
         )
 
 
@@ -540,12 +551,15 @@ class SubjectProcess:
         stimulus: str = STIMULUS_SPEECH,
         prompt_profile=None,
         recall_request: RecallRequestContext | None = None,
+        recall_prefetch=None,
         consume_gap: bool = False,
+        clock: StepClock | None = None,
     ) -> AssembledCurrentState:
         """单一路径组装（只读已有记录）：
         委托组装器收集各装载源，源内去重、生成快照与报告；
         不调用模型、不写长期记录、不再解析对象。
         """
+        mark = clock.sub if clock is not None else (lambda name: None)
         view = view or self.active_zone.load(subject_id)
         if recall_request is not None and recall_request.mode == 2:
             view = _recall_context_projection(view)
@@ -554,6 +568,7 @@ class SubjectProcess:
         assembly_speaker = self._assembly_speaker(speaker, object_id)
         strategy = self.recall_strategy.get(subject_id)
         gap = (self.effectiveness.pending_gap_query(subject_id) or "").strip()
+        mark("③召回策略与缺口")
         # 【工具相关】每次组装只选一次：ToolSource 的报告与送进 05 的是同一份。
         speaker_oid = (
             assembly_speaker.object_id if assembly_speaker is not None else ""
@@ -563,6 +578,7 @@ class SubjectProcess:
             tool_entries = self.tool_service.list_tool_related_entries(
                 subject_id, speaker_oid, query=input_text
             )
+        mark("③工具相关")
         ctx = AssemblyContext(
             subject_id=subject_id,
             input_text=input_text,
@@ -575,8 +591,10 @@ class SubjectProcess:
             recall_enabled=profile.recall_memory,
             portrait_budget_chars={1:800, 2:400, 3:200}[profile.level],
             recall_request=recall_request,
+            recall_prefetch=recall_prefetch,
         )
         working_set = self.assembler.assemble(ctx)
+        mark("③装载源")
         batch = working_set.recall_batch
         gap_executed = (any(q['query'] == gap and q['status'] in {'completed', 'empty'} for q in batch.query_runs)
                         if batch is not None else not any(r.source == 'memory' and r.error for r in working_set.report))
@@ -704,6 +722,7 @@ class SubjectProcess:
         speaker = resolved_speaker or self.recognition.resolve(
             subject_id, text, object_ref, channel, carriers
         )
+        clock.sub("①对象解析")
         if not speaker.object_id:
             raise ValueError("object candidate must be referenceable (object_id)")
         if envelope is None and speaker.confidence < MIN_OBJECT_CONFIDENCE:
@@ -768,10 +787,17 @@ class SubjectProcess:
             },
         )
         self.repository.add_history(fact)
+        clock.sub("①输入事实")
+        from jshi.core.prompt_profile import select_profile, PromptProfile
+        profile = select_profile((u.input_id for u in envelope.current_utterances), envelope.jev_calls) if envelope is not None else PromptProfile()
+        activity_id = new_id()
+        recall_request = self._recall_request(subject_id, text, speaker, envelope, profile, activity_id, fact.id)
+        recall_prefetch = self._start_recall_prefetch(subject_id, speaker, profile, recall_request)
         if envelope is not None:
             from jshi.recognition.acquaintance import acquaintance_store
             ids=[u.input_id for u in envelope.current_utterances if u.input_id]
             acquaintance_store(self).provenance(subject_id,fact.id,ids or (envelope.input_id,))
+            clock.sub("①相识来源")
         observed_environment = visual_snapshot
         if self.vision and observed_environment is None:
             observed_environment = (self.vision.store.snapshot(envelope.visual_snapshot_id, subject_id)
@@ -780,6 +806,7 @@ class SubjectProcess:
             retained = self.vision.store.bind(subject_id, fact.id, observed_environment['id'])
             if not retained and observed_environment.get('change_degree') in ('medium', 'high'):
                 self.vision.store.error(subject_id, '记忆照片预算已满或媒体不可用，本轮未新增照片关联')
+        clock.sub("①视觉关联")
         inbound = None
         if not idle:
             inbound = self.activity_ledger.append_external(
@@ -790,6 +817,7 @@ class SubjectProcess:
                 source_ids=(fact.id,),
                 mentioned_object_ids=mentioned_object_ids,
             )
+        clock.sub("①活动账本")
 
         # 新对象落库（通过门禁后）：暂定档案，来源 = 输入事实 id
         if self.profiles.get(speaker.object_id) is None and speaker.reason != "voice_pending" and not (envelope and envelope.speaker.status == "unknown"):
@@ -837,41 +865,14 @@ class SubjectProcess:
         phase('assemble')
         # 组装只读；清理超时策划与僵尸记挂放在组装之前，由主流程显式做。
         self._tool_reap_stale(subject_id, speaker.object_id)
+        clock.sub("③工具清理")
         # 阶段③ 当前状态组装（单一路径，只读已有记录）
-        from jshi.core.prompt_profile import select_profile, PromptProfile
-        profile = select_profile((u.input_id for u in envelope.current_utterances), envelope.jev_calls) if envelope is not None else PromptProfile()
-        from jshi.core.params import reflection_param
-        activity_id = new_id()
-        recall_request = None
-        if int(reflection_param('RECALL_FLOW_MODE')) >= 1:
-            known = speaker.status == 'confirmed' or bool(envelope and envelope.speaker.method == 'user_selected')
-            scope = tuple(dict.fromkeys((
-                *((speaker.object_id,) if known else ()),
-                *(getattr(speaker, 'mentioned_object_ids', ()) or ()),
-                *self._voice_party_ids,
-            )))
-            if envelope and envelope.current_utterances:
-                multi_actor = len({u.speaker.object_id for u in envelope.current_utterances}) > 1
-                raw_query = '\n'.join(f'{u.speaker.label}：{u.text}' if multi_actor else u.text
-                                      for u in envelope.current_utterances)
-            else:
-                raw_query = '\n'.join(line for line in text.splitlines()
-                                      if not line.startswith('JEV 初判：人物归属见标注')).strip()
-            recall_request = RecallRequestContext(
-                subject_id=subject_id, activity_id=activity_id,
-                session_id=envelope.session_id if envelope and envelope.session_id else 'text',
-                query_text=raw_query, object_ids=scope,
-                interlocutor_object_id=speaker.object_id if known else None,
-                level=self.recall_strategy.get(subject_id).default_level,
-                candidate_limit=int(reflection_param('RECALL_CANDIDATE_LIMIT')),
-                enabled=profile.recall_memory, input_revision=fact.id, created_at=time.time(),
-                mode=int(reflection_param('RECALL_FLOW_MODE')))
-            recall_request = replace(recall_request, selected_limit=self.recall_strategy.get(subject_id).limit)
         current = self.assemble_current_state(
             subject_id, text, view, speaker=speaker, stimulus=stimulus, prompt_profile=profile,
-            recall_request=recall_request,
-            consume_gap=True,
+            recall_request=recall_request, recall_prefetch=recall_prefetch,
+            consume_gap=True, clock=clock,
         )
+        clock.sub("③组装收尾")
         current = replace(current, preparation_context=preparation_context, light_finalize=light_finalize,
                           on_reconsider=(lambda: on_phase('reconsider')) if on_phase else None)
         # A just-recorded input can be returned by the memory source. It is
@@ -931,6 +932,7 @@ class SubjectProcess:
             current = replace(current, prompt_level=profile.level, prompt_modules=profile.modules, recall_memory=profile.recall_memory,
                               main_image=profile.main_image, media_context=envelope.session_id,
                               media_source_ids=(fact.id,), force_image_review=bool(re.search(r'(?:重新|重|再)(?:看|检查|观察).{0,12}(?:图|照片|画面)|(?:图|照片|画面).{0,12}(?:重新|再)(?:看|检查|观察)', text)))
+        clock.sub("③输入与视觉整理")
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -1149,17 +1151,20 @@ class SubjectProcess:
         }
         if spoke:
             reply_text = spoken_text
-            if current.audio_delivery:
-                reply_text = f"（准备通过语音说，实际交付待播放器反馈）{reply_text}"
             embodied_text = plan.embodied_text().strip()
             if embodied_text:
                 reply_text = f"{reply_text}（动作：{embodied_text}）"
+            from jshi.experienceledger.port import DELIVERY_PLANNED_AUDIO
+            delivery_state = ({"delivery": DELIVERY_PLANNED_AUDIO,
+                               **({"embodied": embodied_text} if embodied_text else {})}
+                              if current.audio_delivery else None)
             self.activity_ledger.append_subject_reply(
                 subject_id,
                 text_raw=code_restore(reply_text) if code_restore else reply_text,
                 objects=objects,
                 mentioned_object_ids=mentioned_object_ids,
                 source_ids=(activity.id, *(item for item in (action_id,) if item)),
+                state_delta=delivery_state,
                 response_plan=plan_payload,
                 response_statuses=final_statuses,
             )
@@ -1348,6 +1353,7 @@ class SubjectProcess:
                 total_ms=timing.total_ms,
                 steps=timing.steps,
                 end_to_end=timing.end_to_end,
+                substeps=timing.substeps,
             )
         except Exception:
             logger.exception("activity timing persist failed")
@@ -1690,8 +1696,9 @@ class SubjectProcess:
         # 只取最近一段素材窗口，避免拿全量历史拖慢 boot / 触发超时。
         recent: list[tuple[datetime | None, str]] = []
         total = 0
+        from jshi.experienceledger.port import segment_view_text
         for segment in reversed(self.activity_ledger.list_experiences(subject_id)):
-            text = (segment.text_raw or "").strip()
+            text = segment_view_text(segment).strip()
             if not text:
                 continue
             total += len(text)
@@ -2083,6 +2090,7 @@ class SubjectProcess:
             purpose="subject_activity",
             preparation_context=current.preparation_context,
             light_finalize=current.light_finalize,
+            thinking_off=self._prompt_profile(current).level == 3,
             input_text=current.input_text,
             subject_state=current.subject_state,
             speaker=speaker,
@@ -2812,6 +2820,50 @@ class SubjectProcess:
         if second > 0 and best_score < second * 2:
             return None
         return best, best_score
+
+    def _recall_request(self, subject_id, text, speaker, envelope, profile, activity_id, input_revision):
+        from jshi.core.params import reflection_param
+        if int(reflection_param('RECALL_FLOW_MODE')) < 1:
+            return None
+        known = speaker.status == 'confirmed' or bool(envelope and envelope.speaker.method == 'user_selected')
+        scope = tuple(dict.fromkeys((
+            *((speaker.object_id,) if known else ()),
+            *(getattr(speaker, 'mentioned_object_ids', ()) or ()),
+            *self._voice_party_ids,
+        )))
+        if envelope and envelope.current_utterances:
+            multi_actor = len({u.speaker.object_id for u in envelope.current_utterances}) > 1
+            raw_query = '\n'.join(f'{u.speaker.label}：{u.text}' if multi_actor else u.text
+                                  for u in envelope.current_utterances)
+        else:
+            raw_query = '\n'.join(line for line in text.splitlines()
+                                  if not line.startswith('JEV 初判：人物归属见标注')).strip()
+        strategy = self.recall_strategy.get(subject_id)
+        return RecallRequestContext(
+            subject_id=subject_id, activity_id=activity_id,
+            session_id=envelope.session_id if envelope and envelope.session_id else 'text',
+            query_text=profile.recall_query or raw_query, object_ids=scope,
+            interlocutor_object_id=speaker.object_id if known else None,
+            level=strategy.default_level,
+            candidate_limit=int(reflection_param('RECALL_CANDIDATE_LIMIT')),
+            enabled=profile.recall_memory, input_revision=input_revision, created_at=time.time(),
+            mode=int(reflection_param('RECALL_FLOW_MODE')), selected_limit=strategy.limit)
+
+    def _start_recall_prefetch(self, subject_id, speaker, profile, request):
+        """Run recall alongside placement; assembly reuses it only if its inputs are unchanged."""
+        if request is None or request.mode != 2 or not request.enabled or not request.query_text.strip():
+            return None
+        try:
+            from jshi.memory.recall_flow import RecallPrefetch
+            gap = (self.effectiveness.pending_gap_query(subject_id) or "").strip()
+            view = self.active_zone.load(subject_id)
+            assembly_speaker = self._assembly_speaker(speaker, None)
+            legacy = (view.recall_excerpts if assembly_speaker is not None
+                      and view.speaker_object_id == assembly_speaker.object_id else ())
+            return RecallPrefetch(self.recall_flow, request, (gap,) if gap else (), legacy)
+        except Exception:
+            logger.exception('recall prefetch could not start')
+            return None
 
     def _assembly_speaker(
         self,

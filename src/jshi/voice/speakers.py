@@ -71,6 +71,8 @@ class LocalSpeakers:
         if not -1 <= enrollment_threshold <= 1:
             raise ValueError('invalid enrollment similarity threshold')
         self.lock = RLock()
+        self.feature_lock = RLock()
+        self.feature_cache = {}
         self.known: dict[str, dict] = {}
         if path.is_file():
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -116,8 +118,27 @@ class LocalSpeakers:
             return self.threshold
 
     def embedding(self, samples):
-        from .features import speaker_features
-        return speaker_features(self.extractor, samples)
+        if len(samples) < 24000:
+            return None
+        return self.raw_embedding(samples)
+
+    def raw_embedding(self, samples):
+        """Share expensive features, not identity decisions, between both scorers."""
+        import numpy as np
+        from .features import SherpaSpeakerEmbedder
+        values = np.asarray(samples, dtype='float32')
+        key = (self.model_id, id(self.extractor), hashlib.sha256(values.tobytes()).digest())
+        with self.feature_lock:
+            if key not in self.feature_cache:
+                adapter = self.extractor if hasattr(self.extractor, 'embed') else SherpaSpeakerEmbedder(self.extractor)
+                result = adapter.embed(values) if self.extractor is not None else None
+                if result is not None and (not len(result) or not all(math.isfinite(x) for x in result)):
+                    result = None
+                self.feature_cache[key] = tuple(result) if result is not None else None
+                while len(self.feature_cache) > 64:
+                    self.feature_cache.pop(next(iter(self.feature_cache)))
+            result = self.feature_cache[key]
+            return list(result) if result is not None else None
 
     def rank_known(self, samples, limit: int = 3) -> list[dict]:
         """得分最高的已知声纹。未达门槛也返回，供上下文复判；提不出特征时返回空列表。"""

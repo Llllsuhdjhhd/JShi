@@ -283,3 +283,86 @@ def test_sqlite_unmerged_pending_survives_reopen(tmp_path):
     merged = second.apply_context_assessment("stone")
     assert "还没编进活跃区。" in merged.context_text
 
+
+def _legacy_payload(ledger, subject_id):
+    from jshi.experienceledger.sqlite import _context_to_dict, _ingest_to_dict, _segment_to_dict
+    state = ledger._states[subject_id]
+    return {
+        "segments": [_segment_to_dict(s) for s in state.segments],
+        "cursors": {k.value: v for k, v in state.cursors.items()},
+        "ingest_entries": [_ingest_to_dict(e) for e in state.ingest_entries],
+        "context": _context_to_dict(state.context),
+        "pending_sequences": list(state.pending_sequences),
+    }
+
+
+def test_sqlite_ledger_migrates_whole_payload_to_rows(tmp_path):
+    import json
+    import sqlite3
+    from jshi.experienceledger import InProcessExperienceLedger, SqliteExperienceLedger
+
+    source = InProcessExperienceLedger()
+    first = source.append_external("stone", actor_object_id="OBJ-A", text_raw="旧格式第一段。")
+    second = source.append_subject_reply("stone", text_raw="旧格式第二段。")
+    view = source.apply_context_assessment("stone", speaker_object_id="OBJ-A")
+    source.advance_consumer_cursor("stone", ConsumerKind.MEMORY, first.sequence)
+    entry = source.register_ingest(MemoryBatch(batch_id="B1", subject_id="stone", experiences=(),
+                                               from_sequence=1, to_sequence=2))
+    source.mark_ingested(entry.ingest_id, memory_event_ids=("E1",))
+    path = tmp_path / "subject.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE experience_ledger (subject_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+        conn.execute("INSERT INTO experience_ledger VALUES (?, ?)",
+                     ("stone", json.dumps(_legacy_payload(source, "stone"), ensure_ascii=False)))
+
+    ledger = SqliteExperienceLedger(path)
+    assert [s.segment_id for s in ledger.list_experiences("stone")] == [first.segment_id, second.segment_id]
+    assert ledger.current_context_view("stone") == view
+    assert ledger.consumer_cursor("stone", ConsumerKind.MEMORY) == first.sequence
+    assert ledger.list_ingest_entries("stone")[0].memory_event_ids == ("E1",)
+    with sqlite3.connect(path) as conn:
+        meta = json.loads(conn.execute("SELECT payload FROM experience_ledger").fetchone()[0])
+        assert "segments" not in meta and "ingest_entries" not in meta
+        assert conn.execute("SELECT count(*) FROM experience_segments").fetchone()[0] == 2
+        assert conn.execute("SELECT count(*) FROM experience_ingest").fetchone()[0] == 1
+
+    reopened = SqliteExperienceLedger(path)
+    assert [s.text_raw for s in reopened.list_experiences("stone")] == ["旧格式第一段。", "旧格式第二段。"]
+    assert reopened.current_context_view("stone") == view
+
+
+def test_sqlite_ledger_append_writes_only_the_new_row(tmp_path, monkeypatch):
+    from jshi.experienceledger import SqliteExperienceLedger
+
+    ledger = SqliteExperienceLedger(tmp_path / "subject.sqlite3")
+    for index in range(5):
+        ledger.append_external("stone", actor_object_id="OBJ-A", text_raw=f"第{index}段")
+    written = []
+    original = SqliteExperienceLedger._write
+    def spy(connection, subject_id, state, *, segments, ingest):
+        written.append([s.sequence for s in segments])
+        return original(connection, subject_id, state, segments=segments, ingest=ingest)
+    monkeypatch.setattr(SqliteExperienceLedger, "_write", staticmethod(spy))
+    ledger.append_subject_reply("stone", text_raw="新一段")
+    ledger.advance_consumer_cursor("stone", ConsumerKind.MEMORY, 3)
+    assert written == [[6], []]
+
+
+def test_sqlite_ledger_failed_write_retries_the_row_next_time(tmp_path, monkeypatch):
+    import pytest
+    from jshi.experienceledger import SqliteExperienceLedger
+
+    path = tmp_path / "subject.sqlite3"
+    ledger = SqliteExperienceLedger(path)
+    ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="先写入")
+    original = SqliteExperienceLedger._write
+    def fail(*args, **kwargs):
+        raise OSError("disk")
+    monkeypatch.setattr(SqliteExperienceLedger, "_write", staticmethod(fail))
+    with pytest.raises(OSError):
+        ledger.append_external("stone", actor_object_id="OBJ-A", text_raw="写入失败的一段")
+    monkeypatch.setattr(SqliteExperienceLedger, "_write", staticmethod(original))
+    ledger.advance_consumer_cursor("stone", ConsumerKind.MEMORY, 1)
+    reopened = SqliteExperienceLedger(path)
+    assert [s.text_raw for s in reopened.list_experiences("stone")] == ["先写入", "写入失败的一段"]
+

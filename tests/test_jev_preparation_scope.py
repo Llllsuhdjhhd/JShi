@@ -9,9 +9,10 @@ def test_background_conversation_cannot_hold_for_completion():
     from tests.test_jev_split_modes import run, entry
     result, model = run('split', entry('wait', 'keep', interaction='none',
                                       utterance_complete='incomplete'))
-    assert result.model_error
+    assert not result.model_error
     assert len(model.requests) == 1
-    assert result.route != 'wait'
+    assert result.route == 'background'
+    assert 'none_not_waiting' in result.stage_records[0]['normalization']
 
 
 def test_preparation_scope_preserves_pending_identity_and_source_records():

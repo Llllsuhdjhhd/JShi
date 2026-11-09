@@ -52,7 +52,7 @@ def test_other_requests_and_providers_keep_existing_format():
 
 def test_valid_json_still_rejects_wrong_field_type():
     with pytest.raises(ValueError):
-        validate({'route': 'main', 'level': '2', 'recall_memory': False, 'main_image': 'omit',
+        validate({'route': 'main', 'level': '2', 'recall_memory': False, 'recall_query': '', 'main_image': 'omit',
                   'reply': '', 'waiting_reply': '', 'reason': '需要理解'}, preparation_schema())
 
 

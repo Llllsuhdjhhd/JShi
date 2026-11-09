@@ -78,4 +78,4 @@ def model_key(process):
 def ack_context(text, *, channel='voice'):
     """A provisional utterance is neither a user instruction nor a delivery fact."""
     status = '已安排语音，未确认播出，可能跳过' if channel == 'voice' else '已提交页面显示，未确认已读'
-    return f'【本轮过渡语】{status}：{json.dumps(text, ensure_ascii=False)}。这是匠石的预先接话，不是用户要求或执行结果；合适则自然承接，不合适可忽略，确需纠正时简短说明。'
+    return f'【本轮过渡语】{status}：{json.dumps(text, ensure_ascii=False)}。这是匠石的预先接话，不是用户要求或执行结果；合适则自然承接，不重复其中已说的内容，正式回应从下一层意思接着说；不合适可忽略，确需纠正时简短说明。'

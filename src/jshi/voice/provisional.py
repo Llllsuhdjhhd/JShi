@@ -127,6 +127,13 @@ class PreparationManager:
         except Exception:
             return None, 'normal'
         action = continuation_action(result, voice.decisions.config['threshold'])
+        from jshi.voice.turn_schedule import correction_grade
+        grade = correction_grade(bool(getattr(voice, 'premise_changed', False)), True,
+                                 action if action in {'reuse', 'revise', 'restart'} else None)
+        if grade == 'restart':
+            action = 'restart'
+        elif grade == 'reconstruct':
+            action = 'normal'
         voice.record('decision_continuation', {'purpose': 'continuation', 'status': result.status,
             'provider': result.provider, 'model': result.model, 'elapsed_ms': result.elapsed_ms,
             'server_ms': result.server_ms, 'reason': result.reason, 'answers': dict(result.answers),

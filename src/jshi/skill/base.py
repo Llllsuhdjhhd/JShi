@@ -230,7 +230,7 @@ class Skill(ABC, Generic[T]):
         返回值仍是完整 ``T``（主流程后续照常消费），只有"提前开口"这一疗效不同。
         任何解析失败走 ``_fallback``，不影响主流程。
         """
-        from jshi.models.base import _verbal_text, iter_top_level_json_values
+        from jshi.models.base import _verbal_text, finish_stream, iter_top_level_json_values
 
         model = self._model
         if not hasattr(model, "generate_stream"):
@@ -245,10 +245,9 @@ class Skill(ABC, Generic[T]):
                 yield chunk
 
         data: dict[str, Any] = {}
+        stream = model.generate_stream(req)
         try:
-            for key, value_json in iter_top_level_json_values(
-                _capture(model.generate_stream(req))
-            ):
+            for key, value_json in iter_top_level_json_values(_capture(stream)):
                 value = json.loads(value_json)
                 data[key] = value
                 if key == "response_plan" and on_reply is not None and isinstance(value, Mapping):
@@ -258,6 +257,7 @@ class Skill(ABC, Generic[T]):
         except Exception:
             text = "".join(raw)
             return self._fallback(text)
+        finish_stream(stream)
         text = "".join(raw)
         try:
             parsed = self.parse(data)

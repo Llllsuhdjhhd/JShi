@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from threading import RLock
 from time import monotonic
@@ -13,7 +14,7 @@ from jshi.models.base import ModelResponse
 from jshi.models.routing import ProviderModel, RoutedModel
 
 LABELS = {'cognition':'主认知／回应','voice_jev':'JEV入口判断','write_zone':'后台写场',
-          'introspection':'自省','vision':'视觉理解','tool_plan':'工具规划','tool_wrap':'工具结果整理'}
+          'introspection':'自省','vision':'视觉理解','tool_plan':'工具规划','tool_wrap':'工具结果整理','memory':'记忆整理与人物经验'}
 MODELS = {'deepseek':['deepseek-v4-flash','deepseek-v4-pro'],
           'qwen':['qwen3.5-flash','qwen3.5-flash-2026-02-23'],
           # Hot path prefers gemini-3-flash-preview (empirically ~1s); flash-lite is slow/fallback only.
@@ -31,12 +32,29 @@ SLOW_FALLBACK_MODELS = frozenset({
     'qwen3.5-flash-2026-02-23',
 })
 DEGRADED_TIMEOUT_S = 25.0
+# Speech-start events arrive many times per minute; one connection check per interval is enough.
+PREWARM_INTERVAL_S = 5.0
+
+
+def effort_options(service, model):
+    if service == 'deepseek':
+        return {'off':'不思考', 'low':'低（low）', 'high':'高（high）', 'max':'最高（max）'}
+    if service == 'qwen':
+        return {'off':'关闭思考', 'low':'预算 512 tokens', 'high':'预算 8192 tokens'}
+    if service == 'gemini':
+        levels = {'minimal':'最低（minimal）','low':'低（low）','medium':'中（medium）','high':'高（high）'}
+        if model == 'gemini-3.8-flash': levels.pop('minimal')
+        return levels
+    return {'off':'服务默认（未配置思考参数）'}
 
 
 class ModelSettings:
     def __init__(self, root, process, jev, on_paid=None, on_status=None):
         self.path = Path(root)/'model_settings.local.json'
+        from jshi.models.call_log import configure
+        configure(Path(root)/'model_calls.jsonl')
         self.lock = RLock()
+        self.prewarmed_at = float('-inf')
         self.jev = jev
         from jshi.decision import decision_service
         self.decision = decision_service(process)
@@ -79,11 +97,45 @@ class ModelSettings:
                 result=route.chat(payload['messages'],payload.get('max_tokens'), **options)
                 return {'choices':[{'message':{'content':result.text}}]}
             visual.model.transport=send
+        # Memory services share this provider object; route its complete method
+        # so existing JSON parsing and all retained service references stay intact.
+        backend = getattr(getattr(process, 'memory', None), '_backend', None)
+        seen = set()
+        while backend is not None and id(backend) not in seen:
+            seen.add(id(backend))
+            pipeline = getattr(backend, '_pipeline', None)
+            provider = getattr(pipeline, 'llm', None)
+            if provider is not None and hasattr(provider, 'complete'):
+                original_complete = provider.complete
+                class OriginalMemory:
+                    name = provider._get_model('default')
+                    def chat(self, messages, max_tokens=None, *, response_format=None):
+                        return ModelResponse(text=original_complete('default', messages,
+                            json_output=response_format == 'json_object'), model=self.name)
+                memory_route = RoutedModel(OriginalMemory())
+                self.routes['memory'] = memory_route
+                original_memory_chain = memory_route.chain
+                def memory_complete(task_type, messages, *, temperature=None, model=None, json_output=False):
+                    if memory_route.chain == original_memory_chain:
+                        return original_complete(task_type, messages, temperature=temperature, model=model, json_output=json_output)
+                    from rems.utils.simplified_text import LANGUAGE_RULE, simplify_text
+                    from rems.llm.metrics import LLMInvocationMetrics
+                    began = monotonic()
+                    material = [*messages, {'role':'system','content':LANGUAGE_RULE}]
+                    if json_output:
+                        material.append({'role':'user','content':'只输出一个JSON对象。'})
+                    result = memory_route.chat(material, response_format='json_object' if json_output else None)
+                    provider._invocations.append(LLMInvocationMetrics(task_type=task_type, model=result.model,
+                        latency_ms=(monotonic()-began)*1000, response_model=result.model))
+                    return result.text if json_output else simplify_text(result.text)
+                provider.complete = memory_complete
+                break
+            backend = getattr(backend, 'base', None) or getattr(backend, '_backend', None)
         self.originals = {name:route.chain for name,route in self.routes.items()}
         for name, route in self.routes.items():
             route.on_status = lambda event, name=name: on_status(dict(event, purpose=LABELS[name])) if on_status else None
             route.on_paid = lambda model, name=name: on_paid(LABELS[name],model) if on_paid else None
-        self.services = {'deepseek':{'label':'DeepSeek（付费兜底）','paid':True,'protocol':'chat','thinking_supported':True,
+        self.services = {'deepseek':{'label':'DeepSeek','paid':True,'protocol':'chat','thinking_supported':True,
             'endpoint':os.getenv('JSHI_API_DEEPSEEK_ENDPOINT') or os.getenv('JSHI_MODEL_ENDPOINT',''),
             'api_key':os.getenv('JSHI_API_DEEPSEEK_API_KEY') or os.getenv('JSHI_MODEL_API_KEY','')},
           'gemini':{'label':'Gemini网关','protocol':'gemini','endpoint':'','api_key':''},
@@ -107,9 +159,17 @@ class ModelSettings:
             self.profiles=saved.get('profiles',{})
             self.global_profile=saved.get('global_profile')
             if self.global_profile:
-                self.profiles={name:self.global_profile for name in self.routes}
+                self.profiles={**{name:self.global_profile for name in self.routes}, **self.profiles}
             for name,profile in self.profiles.items():
                 if name in self.routes: self.routes[name].replace(self._chain(profile,self.services,name))
+
+        if not self.global_profile and not self.profiles and self.services['deepseek'].get('api_key') and self.services['deepseek'].get('endpoint'):
+            self.global_profile={'choices':[{'service':'deepseek','model':'deepseek-v4-flash'}],'effort':'low'}
+            for name in self.routes:
+                if name == 'vision':
+                    continue
+                self.profiles[name]=self.global_profile
+                self.routes[name].replace(self._chain(self.global_profile,self.services,name))
 
     def public(self):
         with self.lock:
@@ -122,8 +182,10 @@ class ModelSettings:
                 base=store.profile(name)
                 effort='off' if base.thinking=='disabled' else base.reasoning_effort
                 rows[name]={'label':LABELS[name],'current':route.name,'last':dict(route.last),
-                    'profile':self.profiles.get(name,{'choices':[], 'effort':effort})}
-            services={k:{field:v for field,v in s.items() if field!='api_key'}|{'has_key':bool(s.get('api_key')),'models':MODELS.get(k,[])} for k,s in self.services.items()}
+                    'profile':self.profiles.get(name,{'choices':[], 'effort':effort}),
+                    'inherited':name not in self.profiles or self.profiles[name]==self.global_profile,
+                    'effective_effort':getattr(route.chain[0], 'effort', effort)}
+            services={k:{field:v for field,v in s.items() if field!='api_key'}|{'has_key':bool(s.get('api_key')),'models':MODELS.get(k,[]),'efforts':{m:effort_options(k,m) for m in MODELS.get(k,[])}} for k,s in self.services.items()}
             return {'rows':rows,'services':services,'global_profile':self.global_profile, 'jev_mode':self.jev_mode,
                     'decision': self.decision.public()}
 
@@ -131,7 +193,7 @@ class ModelSettings:
         choices=profile.get('choices',[])
         if not isinstance(choices,list) or not 1<=len(choices)<=4: raise ValueError('请选择1至4个模型')
         effort=profile.get('effort','low')
-        if effort not in {'off','minimal','low','high'}: raise ValueError('思考强度无效')
+        if effort not in {'off','minimal','low','medium','high','max'}: raise ValueError('思考强度无效')
         chain=[]
         for index,choice in enumerate(choices):
             service=services.get(choice.get('service'))
@@ -142,10 +204,14 @@ class ModelSettings:
             if choice['service']=='openrouter' and not model.endswith(':free'): raise ValueError('OpenRouter备用只允许选择:free模型')
             if service['protocol']=='gemini' and model.startswith('gemini-3') and (effort=='off' or model=='gemini-3.8-flash' and effort=='minimal'):
                 raise ValueError('所选Gemini不支持该思考强度，请选轻量或充分')
-            selected='off' if service.get('thinking_supported') and effort=='minimal' else effort
+            selected=effort
+            if profile.get('effort_explicit') and effort not in effort_options(choice['service'],model):
+                raise ValueError('所选模型不支持此思考档位，请重新选择；支持：'+ '、'.join(effort_options(choice['service'],model).values()))
+            if choice['service']=='deepseek' and effort=='minimal':
+                selected='off'  # Compatibility for historical profiles only; explicit saves reject this.
             # Entry judgment used to be non-thinking. Global model choice must
             # not turn it into a slow reasoning call on every utterance.
-            if purpose=='voice_jev':
+            if purpose=='voice_jev' and not profile.get('effort_explicit', False):
                 selected=('low' if model=='gemini-3.8-flash' else 'minimal') if service['protocol']=='gemini' and model.startswith('gemini-3') else 'off'
             # Interactive routes: hard-cap HTTP wait so one slow call cannot push p95 past ~8s.
             # Background write/introspection keep the longer ceiling.
@@ -158,8 +224,34 @@ class ModelSettings:
                 timeout = DEGRADED_TIMEOUT_S
             else:
                 timeout = ProviderModel.DEFAULT_TIMEOUT_S
-            chain.append(ProviderModel(service, model, selected, timeout=timeout))
+            chain.append(ProviderModel(service, model, selected, timeout=timeout, route=purpose or ''))
         return chain
+
+    def prewarm(self, names=('voice_jev', 'cognition')):
+        """At speech onset, open TLS to the first model of each live route before its call needs it."""
+        now = monotonic()
+        with self.lock:
+            if now - self.prewarmed_at < PREWARM_INTERVAL_S:
+                return False
+            self.prewarmed_at = now
+            urls = {}
+            for name in names:
+                route = self.routes.get(name)
+                model = route.chain[0] if route else None
+                endpoint = getattr(model, 'service', {}).get('endpoint', '')
+                if endpoint:
+                    # Routes sharing a host may call at the same time; each needs its own connection.
+                    host = urlsplit(endpoint).netloc
+                    first, _, count = urls.get(host, (name, endpoint, 0))
+                    urls[host] = (first, endpoint, count + 1)
+        def work():
+            from jshi.models.call_log import record
+            from jshi.models.http_pool import prewarm
+            for host, (name, endpoint, count) in urls.items():
+                record({'kind': 'prewarm', 'route': name, 'host': host, 'count': count, **prewarm(endpoint, count=count)})
+        if urls:
+            threading.Thread(target=work, name='jshi-model-prewarm', daemon=True).start()
+        return bool(urls)
 
     def save(self, data):
         with self.lock:
@@ -184,15 +276,27 @@ class ModelSettings:
                 if name=='all':
                     if profile.get('choices'):
                         self._chain(profile,services)
+                        previous_global=global_profile
                         global_profile=profile
-                        profiles={n:profile for n in self.routes}
+                        profiles={n:(profiles[n] if n in profiles and profiles[n]!=previous_global else profile)
+                                  for n in self.routes}
                     else:
-                        global_profile=None
-                        profiles={}
+                        if services['deepseek'].get('api_key') and services['deepseek'].get('endpoint'):
+                            global_profile={'choices':[{'service':'deepseek','model':'deepseek-v4-flash'}],
+                                            'effort':profile.get('effort','low')}
+                            profiles={n:global_profile for n in self.routes}
+                        else:
+                            global_profile=None
+                            profiles={}
                 else:
                     if name not in self.routes: raise ValueError('此用途当前不可配置')
                     if profile.get('choices'): chain=self._chain(profile,services,name);profiles[name]=profile
-                    else: profiles.pop(name,None);chain=self.originals[name]
+                    else:
+                        if global_profile:
+                            profiles[name]=global_profile
+                            chain=self._chain(global_profile,services,name)
+                        else:
+                            profiles.pop(name,None);chain=self.originals[name]
             # Changed credentials also replace affected chains for subsequent calls.
             updates={n:self._chain(p,services,n) for n,p in profiles.items() if n in self.routes}
             if name=='all' and global_profile is None: updates=self.originals
@@ -220,6 +324,7 @@ class ModelSettings:
 def install_model_settings(app, process, jev, on_paid=None, on_status=None):
     from aiohttp import web
     settings=ModelSettings(process.repository.path.parent,process,jev,on_paid,on_status)
+    process.model_settings = settings
     def same_origin(request):
         origin=request.headers.get('Origin')
         return origin==f'{request.scheme}://{request.host}' and request.headers.get('Sec-Fetch-Site')!='cross-site'
@@ -251,6 +356,6 @@ def install_model_settings(app, process, jev, on_paid=None, on_status=None):
     async def close_decision(app):
         await settings.decision.close()
     app.on_cleanup.append(close_decision)
-    async def script(request): return web.FileResponse(Path(__file__).with_name('model_settings.js'))
+    async def script(request): return web.FileResponse(Path(__file__).with_name('model_settings.js'), headers={'Cache-Control':'no-store'})
     app.router.add_get('/model_settings.js',script)
     return settings

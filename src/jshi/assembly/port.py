@@ -37,6 +37,7 @@ class AssemblyContext:
     recall_enabled: bool = True
     portrait_budget_chars: int = 800
     recall_request: RecallRequestContext | None = None
+    recall_prefetch: Any = None
 
 
 @dataclass(frozen=True)

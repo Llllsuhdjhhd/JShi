@@ -26,7 +26,7 @@ def unpack_tts(frame: bytes) -> tuple[int, int, str, bytes]:
     def integer():
         nonlocal offset
         if offset + 4 > len(frame):
-            raise ValueError('truncated TTS field')
+            raise ValueError(f'truncated TTS field (frame {len(frame)}B: {frame[:24].hex()})')
         value = struct.unpack_from('>I', frame, offset)[0]
         offset += 4
         return value
@@ -34,7 +34,7 @@ def unpack_tts(frame: bytes) -> tuple[int, int, str, bytes]:
         nonlocal offset
         size = integer()
         if offset + size > len(frame):
-            raise ValueError('truncated TTS payload')
+            raise ValueError(f'truncated TTS payload (frame {len(frame)}B: {frame[:24].hex()})')
         value = frame[offset:offset+size]
         offset += size
         return value

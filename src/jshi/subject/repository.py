@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import atexit
 import json
 import logging
+import queue
 import sqlite3
+import threading
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -35,8 +39,9 @@ class SubjectRepository:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
+        connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 
     def _initialize(self) -> None:
@@ -139,6 +144,16 @@ class SubjectRepository:
                 connection.execute(
                     "ALTER TABLE personal_items ADD COLUMN entry_type TEXT NOT NULL DEFAULT ''"
                 )
+        try:
+            # Readers no longer wait behind the frequent diagnostic writes.
+            with closing(sqlite3.connect(self.path, timeout=30)) as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:
+            logger.warning("WAL mode unavailable for %s", self.path)
+        self._history = _history_writer(self.path)
+
+    def flush_history(self) -> None:
+        self._history.flush()
 
     def add_personal_item(self, item: PersonalItem) -> None:
         with self._connect() as connection:
@@ -442,27 +457,21 @@ class SubjectRepository:
         return tuple(_transition(row) for row in rows)
 
     def add_history(self, record: HistoryRecord) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO histories
-                (id, subject_id, kind, event_type, content, source_ids, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.id,
-                    record.subject_id,
-                    record.kind.value,
-                    record.event_type,
-                    json.dumps(record.content, ensure_ascii=False),
-                    _dump_ids(record.source_ids),
-                    record.created_at.isoformat(),
-                ),
-            )
+        """Queued in order; list_history sees every record added before it."""
+        self._history.put((
+            record.id,
+            record.subject_id,
+            record.kind.value,
+            record.event_type,
+            json.dumps(record.content, ensure_ascii=False),
+            _dump_ids(record.source_ids),
+            record.created_at.isoformat(),
+        ))
 
     def list_history(
         self, subject_id: str, kind: HistoryKind | None = None, limit: int = 100
     ) -> Sequence[HistoryRecord]:
+        self._history.flush()
         query = "SELECT * FROM histories WHERE subject_id = ?"
         arguments: list[object] = [subject_id]
         if kind:
@@ -473,6 +482,78 @@ class SubjectRepository:
         with self._connect() as connection:
             rows = connection.execute(query, arguments).fetchall()
         return tuple(reversed([_history(row) for row in rows]))
+
+
+_HISTORY_INSERT = """
+    INSERT INTO histories
+    (id, subject_id, kind, event_type, content, source_ids, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+class _HistoryWriter:
+    """One ordered writer per database file; callers never wait for disk or locks."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.queue: queue.Queue = queue.Queue()
+        self.thread = threading.Thread(target=self._run, name="jshi-history-writer", daemon=True)
+        self.thread.start()
+
+    def put(self, row: tuple) -> None:
+        self.queue.put(row)
+
+    def flush(self) -> None:
+        if threading.current_thread() is not self.thread:
+            self.queue.join()
+
+    def _run(self) -> None:
+        while True:
+            rows = [self.queue.get()]
+            while len(rows) < 256:
+                try:
+                    rows.append(self.queue.get_nowait())
+                except queue.Empty:
+                    break
+            try:
+                self._write(rows)
+            finally:
+                for _ in rows:
+                    self.queue.task_done()
+
+    def _write(self, rows: list[tuple]) -> None:
+        try:
+            with closing(sqlite3.connect(self.path, timeout=30)) as connection, connection:
+                connection.executemany(_HISTORY_INSERT, rows)
+            return
+        except sqlite3.Error:
+            pass
+        # One bad row must not drop the rest of the batch.
+        for row in rows:
+            try:
+                with closing(sqlite3.connect(self.path, timeout=30)) as connection, connection:
+                    connection.execute(_HISTORY_INSERT, row)
+            except sqlite3.Error:
+                logger.exception("history write failed: %s %s", row[3], row[0])
+
+
+_HISTORY_WRITERS: dict[str, _HistoryWriter] = {}
+_HISTORY_WRITERS_LOCK = threading.Lock()
+
+
+def _history_writer(path: Path) -> _HistoryWriter:
+    key = str(Path(path).resolve())
+    with _HISTORY_WRITERS_LOCK:
+        writer = _HISTORY_WRITERS.get(key)
+        if writer is None:
+            writer = _HISTORY_WRITERS[key] = _HistoryWriter(Path(path))
+        return writer
+
+
+@atexit.register
+def _flush_history_writers() -> None:
+    for writer in list(_HISTORY_WRITERS.values()):
+        writer.flush()
 
 
 def _dump_ids(values: tuple[str, ...]) -> str:

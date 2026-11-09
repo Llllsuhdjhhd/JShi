@@ -184,7 +184,19 @@ def test_main_path_records_actual_visibility_and_clean_query(tmp_path):
                             SimpleNamespace(name='model', generate=lambda req: ModelResponse(text='同一个人', model='model')),
                             memory=MemoryShell(backend))
     process.profiles.create(ObjectProfile(object_id='person', label='user', source='test', status='confirmed'))
-    result = process.experience('stone', 'QF和小秦是什么关系？\nJEV 初判：人物归属见标注', object_ref='user')
+    from jshi.memory import recall_flow
+    taken = []
+    original_take = recall_flow.RecallPrefetch.take
+    def take(self, *args):
+        batch = original_take(self, *args)
+        taken.append(batch is not None)
+        return batch
+    recall_flow.RecallPrefetch.take = take
+    try:
+        result = process.experience('stone', 'QF和小秦是什么关系？\nJEV 初判：人物归属见标注', object_ref='user')
+    finally:
+        recall_flow.RecallPrefetch.take = original_take
+    assert taken == [True] and len(backend.calls) == 1
     assert backend.calls[0][0] == 'QF和小秦是什么关系？'
     row = process.reflection_memory.pending('stone')
     assert row['activity_id'] == result.activity.id
@@ -489,3 +501,27 @@ def test_generic_main_renders_conflict_as_evidence_status(tmp_path):
     context = process._model_context('stone', (), (
         AssemblyFragment('memory', 'memory:event', '原判断与新陈述不一致', 'fact', status='conflict'),))
     assert next(item for item in context if item['id'] == 'M1')['content'].startswith('（存在冲突）')
+
+
+def test_prefetch_is_used_only_when_assembly_inputs_match(flow):
+    import threading
+    from jshi.memory.recall_flow import RecallPrefetch
+    runner, backend, _ = flow
+    threads = []
+    original = backend.recall
+    def recall(subject, query, **kwargs):
+        threads.append(threading.current_thread().name)
+        return original(subject, query, **kwargs)
+    backend.recall = recall
+    req = request()
+    source = MemorySource(SimpleNamespace(), memory=runner.memory)
+    source.recall_flow = runner
+    early = RecallPrefetch(runner, req)
+    result = source.load(AssemblyContext('stone', 'q', recall_request=req, recall_prefetch=early))
+    assert [f.id for f in result.fragments] and result.recall_batch.request is req
+    assert len(threads) == 1 and threads[0].startswith('recall-prefetch')
+
+    threads.clear()
+    stale = RecallPrefetch(runner, req, ('old gap',))
+    source.load(AssemblyContext('stone', 'q', recall_request=req, recall_prefetch=stale))
+    assert sum(not name.startswith('recall-prefetch') for name in threads) == 1

@@ -180,8 +180,7 @@ PERSONA_OUTPUT_RULES = """【你的输出】
 - unsaid：未对对象说出口、须留下的明确事项；用连贯叙述点名当前说话人。没有则写 ""。不要把 unsaid 写进 reply。不要另加「（名字）」标签。
 - edit：任务2「写场」。未超限且无改动为 []；已超限必须列出 del/mod（可加 add）。不要输出整份片场。edit 可多条，但整段仍必须是一个合法 JSON；宁肯少改几条，也不要输出半截。
 正例：{"mode":"respond","action":"微微点头","reply":"好，我展开说。","unsaid":"","reason":"对方要我展开","edit":[]}
-反例：把「微微点头」写进 reply；或把未说出口的话写进 reply；或 reply 没合上引号就写 unsaid / reason / edit。
-只输出这一个 JSON 对象，枚举字段只取允许值，不得输出任何解释文字。"""
+反例：把「微微点头」写进 reply；或把未说出口的话写进 reply；或 reply 没合上引号就写 unsaid / reason / edit。"""
 
 
 def format_zone_budget_note(
@@ -498,8 +497,7 @@ def _persona_reply_instruction(style_note: str, *, task1: str, interpretation_no
         "- action：只写给执行层的短意图；没有动作必须写「无动作」。不要把动作写进 reply。\n"
         "- reply：只写要说出口的话；不要写动作、神态、舞台说明。\n"
         "- unsaid：未对对象说出口、须留下的明确事项；用连贯叙述点名当前说话人。没有则写 \"\"。"
-        "不要把 unsaid 写进 reply。不要另加「（名字）」标签。\n"
-        "只输出这一个 JSON 对象，枚举字段只取允许值，不得输出任何解释文字。"
+        "不要把 unsaid 写进 reply。不要另加「（名字）」标签。"
     )
 
 

@@ -83,6 +83,7 @@ class Transcript:
     replaces: tuple[tuple[int, int], ...] = ()  # corrected audio ranges, not new speech
     audio_kind: str = 'original'  # original, mixed, or separately extracted source
     words: tuple[TimedWord, ...] = ()  # optional provider word times, session-relative ms
+    replaces_input_ids: tuple[str, ...] = ()  # stable input association; word bounds may change
 
 
 

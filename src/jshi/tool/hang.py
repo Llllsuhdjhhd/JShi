@@ -652,18 +652,21 @@ class HangStore:
             self._append(updated)
             return updated
 
-    def _linked_owner(self, record):
+    def _linked_owner(self, record, project=None):
         links=getattr(self,'person_links',None)
         if links is None: return record.object_id
         refs=[str(v) for k,v in record.field_ref.items() if k in {'input_id','source_input_id','activity_id'} and v]
+        if project is not None: return project(record.object_id,refs)
         return links.project(record.subject_id,record.object_id,refs)
 
     def list_for(self, subject_id: str, object_id: str) -> tuple[HangRecord, ...]:
+        links=getattr(self,'person_links',None)
+        project=links.projector(subject_id) if hasattr(links,'projector') else None
         with self._lock:
             items = [
                 record
                 for record in self._records.values()
-                if record.subject_id == subject_id and self._linked_owner(record) == object_id
+                if record.subject_id == subject_id and self._linked_owner(record, project) == object_id
             ]
         items.sort(key=lambda item: item.updated_at, reverse=True)
         return tuple(replace(item,object_id=object_id) for item in items)

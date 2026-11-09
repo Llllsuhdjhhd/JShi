@@ -6,10 +6,37 @@ from uuid import uuid4
 import re
 
 
+_CLOSERS = "”’」』）)》〉】\"'"
+_SENTENCE = re.compile(rf"[^。！？!?\n]+[。！？!?\n…]*[{re.escape(_CLOSERS)}]*")
+_PAUSES = "，,；;：:、 "
+_MAX_SEGMENT = 180
+
+
+def _bounded(part: str) -> list[str]:
+    chunks = []
+    while len(part) > _MAX_SEGMENT:
+        cut = max(part.rfind(mark, 0, _MAX_SEGMENT) for mark in _PAUSES)
+        cut = cut + 1 if cut > 0 else _MAX_SEGMENT
+        while cut < len(part) and part[cut] in _PAUSES + "。！？!?…" + _CLOSERS:
+            cut += 1
+        chunks.append(part[:cut])
+        part = part[cut:]
+    return [*chunks, part]
+
+
 def sentences(text: str) -> tuple[str, ...]:
-    """Keep sentence order and punctuation; bound very long synthesis requests."""
-    parts = re.findall(r"[^。！？!?\n]+[。！？!?\n]*", text.strip())
-    return tuple(part[i:i + 180] for part in parts for i in range(0, len(part), 180) if part[i:i + 180].strip())
+    """Keep sentence order and punctuation; bound very long synthesis requests.
+
+    A segment never starts with punctuation: the TTS service rejects such requests.
+    """
+    parts = _SENTENCE.findall(text.strip())
+    merged: list[str] = []
+    for part in parts:
+        if merged and not re.search(r"\w", part):
+            merged[-1] += part
+        else:
+            merged.append(part)
+    return tuple(chunk for part in merged for chunk in _bounded(part) if chunk.strip())
 
 
 @dataclass
