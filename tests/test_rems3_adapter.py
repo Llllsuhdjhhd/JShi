@@ -29,7 +29,7 @@ from jshi.memory.rems3 import (
 from jshi.subject import SubjectRepository
 
 
-def test_prepare_local_recall_loads_cached_weights_once_without_network(monkeypatch):
+def test_prepare_local_recall_loads_cached_weights_once_without_network(monkeypatch, tmp_path):
     from threading import Lock
     provider_type = type('SentenceTransformerEmbedding', (), {})
     provider = provider_type()
@@ -43,6 +43,7 @@ def test_prepare_local_recall_loads_cached_weights_once_without_network(monkeypa
         return model
     monkeypatch.setitem(sys.modules, 'sentence_transformers', SimpleNamespace(SentenceTransformer=load))
     backend = object.__new__(Rems3MemoryBackend)
+    backend._simplified_pending_path = tmp_path / 'simplified-reindex.json'
     backend._semantic_disabled = False
     backend._pipeline = SimpleNamespace(recall_pipeline=SimpleNamespace(_embedding=provider))
     backend.prepare_local_recall()

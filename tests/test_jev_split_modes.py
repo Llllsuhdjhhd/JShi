@@ -29,6 +29,10 @@ def preparation(**changes):
     return data
 
 
+def main_preparation(**changes):
+    return {k: v for k, v in preparation(**changes).items() if k not in {'route', 'reply', 'waiting_reply'}}
+
+
 class Model:
     def __init__(self, answers):
         self.answers, self.requests = list(answers), []
@@ -52,7 +56,11 @@ def run(mode, first=None, second=None, **kwargs):
         first = {**first, 'preparation': second if first['route'] == 'prepare' else None}
         answers = [first]
     else:
-        answers = [first, second]
+        # Speech belongs to the first response; stage two supplies only needs.
+        if isinstance(second, dict) and (second.get('route') == 'self_reply' or second.get('waiting_reply')):
+            first = {**first, 'front': second}
+        answers = [first, {k: v for k, v in second.items() if k not in {'route', 'reply', 'waiting_reply'}}
+                   if isinstance(second, dict) else second]
     model = Model(answers)
     gate = VoiceJEV(model, mode=mode, fallback_models=[])
     batch = [{'n': 1, 'who': 'P1', 'text': '请解释一下', 'at': time()*1000,
@@ -77,6 +85,35 @@ def test_same_decision_and_only_needed_calls(mode):
         assert model.requests[0].purpose == 'voice_jev_entry'
         assert model.requests[1].purpose == 'voice_jev_prepare'
         assert '人物证据' not in model.requests[1].input_text
+        assert 'short_chat' not in model.requests[1].input_text
+        assert 'waiting' not in model.requests[1].input_text
+
+
+def test_split_second_stage_rejects_legacy_speech_fields():
+    model = Model([entry(), preparation(route='self_reply', level=3, reply='不能在第二阶段说的话')])
+    result = VoiceJEV(model, mode='split', fallback_models=[]).decide_batch(
+        'stone', [{'n': 1, 'who': 'P1', 'text': '请解释一下'}], [],
+        {'state': 'completed', 'short_chat': {'allowed': True, 'person_code': 'P1'}})
+    assert result.model_error and not result.direct_reply and not result.waiting_reply
+
+
+def test_history_retains_fallible_addressee_judgment_separately_from_identity():
+    from jshi.voice.scene_material import dialogue_row
+    row = dialogue_row({'p': 'P1', 'text': '几点走', 'entry_interaction': 'none',
+                        'judgment': {'person': 'P1', 'certainty': '确定'}})
+    assert row['entry_interaction'] == 'none'
+    assert row['identity']['certainty'] == '确定'
+
+
+def test_revision_alternative_reaches_entry_and_main_without_becoming_new_speech():
+    from jshi.voice.jev_material import support_for_main
+    model = Model([entry(front=preparation())])
+    result = VoiceJEV(model, mode='split', fallback_models=[]).decide_batch(
+        'stone', [{'n': 1, 'who': 'P1', 'text': 'You should get enough sleep.',
+                   'asr_previous': ['你看是不是会背了？']}], [], {'state': 'completed'})
+    assert not result.model_error
+    assert '你看是不是会背了？' in model.requests[0].input_text
+    assert any('后到不保证更准确' in note for row in result.entry_support for note in row['notes'])
 
 
 @pytest.mark.parametrize('mode', ['split', 'combined'])
@@ -94,14 +131,19 @@ def test_background_wait_and_stop_skip_preparation(mode, first):
 def test_positive_continue_never_applies_stop_even_if_model_returns_stop(mode):
     first=entry(route='background',control='stop')
     if mode=='combined':first={**first,'preparation':None}
-    model=Model([first,preparation(route='self_reply',level=3,reply='好，我接着说。')])
+    retry = main_preparation() if mode == 'split' else preparation(route='self_reply',level=3,reply='好，我接着说。')
+    model=Model([first,retry])
     gate=VoiceJEV(model,mode=mode,fallback_models=[])
     controls=[]
     result=gate.decide_batch('stone',[{'n':1,'who':'P1','text':'就这么停啊？你给他问他一个，你继续啊。'}],[],
         {'state':'completed','short_chat':{'allowed':True,'person_code':'P1'}},
         on_entry=lambda e:controls.append(e.control))
     assert result.control!='stop' and 'stop' not in controls
-    assert result.direct_reply=='好，我接着说。' and not result.model_error
+    assert not result.model_error
+    if mode == 'split':
+        assert result.route == 'main' and not result.direct_reply
+    else:
+        assert result.direct_reply == '好，我接着说。'
 
 
 @pytest.mark.parametrize('text',['别继续啊','不要继续说','不要你继续','我不希望你继续','他说“你继续啊”','你继续啊，别说了'])
@@ -203,7 +245,7 @@ def test_tentative_person_may_get_short_reply_but_unknown_may_not(mode, certaint
 def test_mixed_completeness_keeps_identity_but_only_passes_complete_part():
     first = entry(utterance_complete='uncertain', pending_refs=['I2'])
     first['items'].append({'i': 2, 'person': 'unknown', 'certainty': 'unknown', 'why': '没有有效证据'})
-    model = Model([first, preparation()])
+    model = Model([first, main_preparation()])
     gate = VoiceJEV(model, mode='split', fallback_models=[])
     result = gate.decide_batch('stone', [{'n': 1, 'who': 'P1', 'text': '解释一下'},
         {'n': 2, 'text': '还有那个……'}], [], {})
@@ -350,7 +392,7 @@ def test_voice_pipeline_runs_main_once_in_both_modes(process, mode):
     from jshi.voice.volc import Transcript
     from jshi.models import ResponsePlan
     first = entry(items=[{'i': 1, 'person': 'unknown', 'certainty': 'unknown', 'why': '声音证据不足，交往明确'}])
-    answers = [first, preparation()] if mode == 'split' else [{**first, 'preparation': preparation()}]
+    answers = [first, main_preparation()] if mode == 'split' else [{**first, 'preparation': preparation()}]
     model = Model(answers)
     class Quiet(MainModel):
         def generate(self, request):
@@ -369,6 +411,10 @@ def test_voice_pipeline_runs_main_once_in_both_modes(process, mode):
             await asyncio.wait_for(c.turn_queue.join(), 4)
             assert len(process.cognition.requests) == 1
             assert c.epoch == 1  # redirect applied once, before preparation
+            assert all(r.get('entry_interaction') == 'direct' for r in c.input_records.values())
+            snapshot = c.jev_scene_store.snapshot()
+            captured = snapshot['events'] + [e for r in snapshot['revisions'] for e in r['events']]
+            assert any(e['payload'].get('entry_interaction') == 'direct' for e in captured)
             assert len([r for r in model.requests if r.purpose != 'voice_jev_scene']) == (2 if mode == 'split' else 1)
         finally:
             await c.close()
@@ -435,7 +481,7 @@ def test_mode_switch_persists_and_reuses_model_route(tmp_path):
 
 
 def test_scene_can_supply_identity_candidate_without_voice_match():
-    model = Model([entry(), preparation()])
+    model = Model([entry(), main_preparation()])
     result = VoiceJEV(model, mode='split', fallback_models=[]).decide_batch('stone',
         [{'n':1,'text':'这一步还要加盐','who':'unknown','candidates':[]}], [],
         {'jev_scene':'【话题：做饭】P1持续讲述，前句已确认。','people':{'P1':'小林'}})
@@ -608,7 +654,7 @@ def test_control_default_does_not_hide_route_conflict():
 def test_missing_ambient_addressee_does_not_swallow_stop_and_cancel_operation(mode):
     first=entry(control='stop')
     second=preparation(level=1)
-    model=Model([{**first,'preparation':second}] if mode=='combined' else [first,second])
+    model=Model([{**first,'preparation':second}] if mode=='combined' else [first,main_preparation(level=1)])
     controls=[]
     result=VoiceJEV(model,mode=mode,fallback_models=[]).decide_batch('stone',
         [{'n':1,'who':'P1','text':'别说了，把下载也取消','source':'voice'}],[],

@@ -218,6 +218,31 @@ def test_missing_word_times_preserves_new_content_as_unresolved_revision_context
     asyncio.run(run())
 
 
+def test_unaligned_cross_voice_final_cannot_consume_later_recovery_tail():
+    """Archived English-scene bounds: original Chinese and later English differ in voice."""
+    async def run():
+        delivered=[]
+        async def deliver(rows,**kw):delivered.extend(rows)
+        intake=RecoveryIntake(None,None,deliver,lambda *a:None)
+        try:
+            a=Transcript('你看是不是会背了？','A',53860,54852,True,speaker_cluster_id='A')
+            b=Transcript('You should get enough.','B',54898,56899,True,speaker_cluster_id='B')
+            await intake.publish((a,),preliminary=True,source_span=(53860,54855))
+            await intake.publish((b,),preliminary=True,source_span=(54898,56906))
+            before=tuple(intake.covered)
+            whole=Transcript('You should get enough sleep. You should get enough sleep.',
+                             'provider',53672,59301,True)
+            await intake.publish((whole,),source=whole)
+            assert delivered[-1].audio_kind == 'revision_context'
+            assert tuple(intake.covered) == before
+            assert not intake.covered_span(56906,58889)
+            tail=Transcript('sleep. You should get enough sleep.','B',56906,58889,True)
+            await intake.publish((tail,),preliminary=True,source_span=(56906,58889))
+            assert delivered[-1].text == tail.text and not delivered[-1].replaces
+        finally:await intake.close()
+    asyncio.run(run())
+
+
 def test_partially_overlapping_checkpoint_does_not_repeat_old_suffix():
     async def run():
         received=[]

@@ -891,7 +891,13 @@ class SubjectProcess:
                 source="text" if "文字输入" in u.identity_note else "audio",
                 level=annotations.get(u.input_id, {}).get("speaker_level") or ("确定" if u.speaker.status == "recognized" or u.speaker.method == "manual_annotation" else (
                     "可能" if u.speaker.method in {"self_report", "context_attribution"} else "不确定")),
-                evidence={"self_report": "对方自报称呼，尚未核定", "context_attribution": "入口上下文推测", "voiceprint_match": "入口声纹匹配", "manual_annotation": "人工关联", "user_selected": "文字输入由用户选择人物"}.get(u.speaker.method, "入口未确认姓名"),
+                evidence={"self_report": "对方自报称呼，尚未核定", "context_attribution": "入口上下文推测",
+                    "voiceprint_match": "入口声纹匹配", "manual_annotation": "人工关联",
+                    "user_selected": "文字输入由用户选择人物", "jev_attribution": "JEV入口人物判断，证据与缺口见入口材料",
+                    "personal_classifier": "个人声音分类器判断，不是身份概率",
+                    "voice_continuity": "声音连续性，仅关联同一声音",
+                    "unassigned_audio": "声音归属未确认", "unidentified": "入口未确认姓名"
+                }.get(u.speaker.method, "入口提供的对象归属，未提供具体依据"),
                 parts=parts, number=annotations.get(u.input_id, {}).get('n', ''),
                 direction='yes' if u.speaker.method == 'user_selected' else annotations.get(u.input_id, {}).get('direction', ''),
                 relevance=annotations.get(u.input_id, {}).get('relevance', '')) for u in incoming)
@@ -1060,6 +1066,9 @@ class SubjectProcess:
             tool_handling=tuple({**item, "task_id": tool_ids.get(item.get("task_id"), item.get("task_id"))}
                                 for item in response.tool_handling))
         response = replace(response, speaker_judgments=(), next_jev_note='', object_assessment=None)
+        self.pending_scene.append_updates(subject_id, activity.id, response.scene_updates,
+            input_ids=tuple(u.input_id for u in envelope.current_utterances) if envelope else (fact.id,),
+            restore=code_restore)
         if on_conversation_review is not None and envelope is not None:
             response, envelope, reviewed_speaker = on_conversation_review(response, envelope)
             if reviewed_speaker is not None:
@@ -1635,7 +1644,7 @@ class SubjectProcess:
         ]
         if current.interaction_scene and not live_zone:
             parts.append('【JEV情境参考】\n' + current.interaction_scene +
-                         '\n这是此前完成的情境及复核建议，可能滞后；本批原话优先。由你判断受话对象与是否回应，不重新裁定人物归属。')
+                         '\n这是此前完成的情境及快判断，可能滞后；结合原始证据独立判断受话对象与是否回应。有反证可更新理解，不直接回写人物档案或声音归属。')
         if not graded:
             parts.append(format_zone_budget_note(
                 self._zone_body_chars_now(subject_id),

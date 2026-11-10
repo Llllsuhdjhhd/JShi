@@ -632,6 +632,14 @@ def _interactive_subject_id(data_dir: Path, requested: str | None, identities=No
 
 
 def main() -> None:
+    from jshi.memory.factory import MemoryStorageInUseError
+    try:
+        _main()
+    except MemoryStorageInUseError as exc:
+        raise SystemExit(str(exc)) from None
+
+
+def _main() -> None:
     _load_local_env()
     args = _parser().parse_args()
     if args.command == "voice-setup":

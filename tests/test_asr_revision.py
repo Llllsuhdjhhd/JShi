@@ -35,11 +35,11 @@ def test_hotwords_serialized_inside_real_asr_first_packet(monkeypatch):
     monkeypatch.setenv('JSHI_VOICE_ASR_HOTWORDS', '匠石，MLP,声纹;匠石')
     config = VoiceConfig.from_env(asr='local', tts='local')
     req = VolcVoice(config,None).asr_request()['request']
-    assert req['end_window_size'] == 500 and req['enable_nonstream']
-    assert json.loads(req['corpus']['context']) == {'hotwords': [
-        {'word':'匠石'}, {'word':'MLP'}, {'word':'声纹'}]}
+    assert req['end_window_size'] == 500 and not req['enable_nonstream']
+    assert json.loads(req['corpus']['context'])['hotwords'] == [
+        {'word':'匠石'}, {'word':'MLP'}, {'word':'声纹'}]
     monkeypatch.setenv('JSHI_VOICE_ASR_HOTWORDS', '')
-    assert 'corpus' not in VolcVoice(VoiceConfig.from_env(asr='local',tts='local'),None).asr_request()['request']
+    assert 'hotwords' not in json.loads(VolcVoice(VoiceConfig.from_env(asr='local',tts='local'),None).asr_request()['request']['corpus']['context'])
     assert 'JEV' in ASR_HOTWORDS
 
 
@@ -60,6 +60,8 @@ def test_revision_updates_original_input_and_does_not_queue_second_turn(process)
             assert '声文识别' not in c.dialogue.note('stone')
             event=next(m for m in sent if m['type']=='transcript_revision')
             assert event['input_ids']==[iid]
+            assert event['previous']==['声文识别']
+            assert c.input_records[iid]['asr_previous']==['声文识别']
             c.input_records[iid]['processing_started']=True
             await c.accept(Transcript('声纹识别模型','1',100,2000,True,replaces=((100,2000),)))
             assert c.queue.qsize()==1
@@ -72,7 +74,8 @@ def test_revision_updates_original_input_and_does_not_queue_second_turn(process)
 
 def test_cross_speaker_revision_preserves_original_rows(process):
     async def run():
-        async def send(message): pass
+        messages=[]
+        async def send(message):messages.append(message)
         c = VoiceConversation(process, 'stone', FakeCloud(), send)
         try:
             await c.accept(Transcript('我讲这题。', 'a', 0, 1000, True))
@@ -82,6 +85,8 @@ def test_cross_speaker_revision_preserves_original_rows(process):
                 replaces=((0, 1000), (1000, 2000))))
             assert [(iid, r['transcript']) for iid, r in c.input_records.items()] == before
             assert c.queue.qsize() == 2
+            pending=next(m for m in messages if m['type']=='transcript_revision_pending')
+            assert pending['text']=='我讲这题。为什么呀？'
             assert any('跨声音转写修订' in e['payload']['text']
                 for e in c.jev_scene_store.snapshot()['events'])
         finally:

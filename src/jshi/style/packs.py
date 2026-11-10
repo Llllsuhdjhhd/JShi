@@ -715,8 +715,14 @@ def reply_instruction_for(
         text = smith_reply(text, PromptProfile(valid_level(prompt_level), prompt_modules))
     if zone_chars:
         text = text.replace("{zone_chars}", str(zone_chars))
-    boundary = '沿用入口对象归属，只处理当前输入与反应；人物复判由独立流程处理，本轮不输出人物判断。'
-    return text if text.rstrip().endswith(boundary) else text + '\n' + boundary
+    from jshi.core.scene_updates import SCENE_UPDATE_NOTE
+    text = text.replace('字段为mode、reply、action、unsaid、reason、reply_targets。',
+                        '字段为mode、reply、action、unsaid、reason、reply_targets、scene_updates；无认识更新时scene_updates填[]。')
+    text = text.replace('"reason":"","reply_targets":[]}',
+                        '"reason":"","reply_targets":[],"scene_updates":[]}')
+    text = text.replace('沿用入口对象归属，只处理当前输入与反应；人物复判由独立流程处理，本轮不输出人物判断。', '')
+    boundary = '入口归属是输入标注；有具体反证可保留不同理解，不能直接改档案或声音归属。是否接话、如何理解及行动由主认知独立判断。'
+    return text + '\n' + boundary + '\n' + SCENE_UPDATE_NOTE
 
 
 def boot_instruction_for(
@@ -742,7 +748,8 @@ def write_instruction_for(
         text += "\n\n" + SCENE_TIER_NOTE
     if zone_chars:
         text = text.replace("{zone_chars}", str(zone_chars))
-    return text
+    from jshi.core.scene_updates import SCENE_UPDATE_READING
+    return text + '\n' + SCENE_UPDATE_READING
 
 
 def schema_for(
@@ -760,10 +767,13 @@ def _without_edit(schema: Mapping | None) -> Mapping | None:
     props = schema.get("properties") or {}
     if not isinstance(props, Mapping):
         return None
+    from jshi.core.scene_updates import SCENE_UPDATES_SCHEMA
     return {
         "type": "object",
         "properties": {**{key: value for key, value in props.items() if key not in {'edit', 'object_assessment', 'speaker_judgments', 'next_jev_note'}},
-                       'reply_targets': {'type': 'array', 'items': {'type': 'string'}}},
+                       'reply_targets': {'type': 'array', 'items': {'type': 'string'}},
+                       'scene_updates': SCENE_UPDATES_SCHEMA},
+        'required': ['scene_updates'],
     }
 
 
@@ -788,12 +798,12 @@ def reply_schema_for(
         return None
     result = _without_edit(pack.schema)
     if pack.pack_id == SMITH and result:
-        result['required'] = ['mode', 'reply', 'action', 'unsaid', 'reason', 'reply_targets']
+        result['required'] = ['mode', 'reply', 'action', 'unsaid', 'reason', 'reply_targets', 'scene_updates']
         result['additionalProperties'] = False
         from jshi.core.prompt_profile import valid_level
         if valid_level(prompt_level) != 1:
             result["properties"] = {k:v for k,v in result["properties"].items()
-                if k in {"mode", "reply", "action", "unsaid", "reason", "reply_targets"}}
+                if k in {"mode", "reply", "action", "unsaid", "reason", "reply_targets", "scene_updates"}}
             result["additionalProperties"] = False
     return result
 

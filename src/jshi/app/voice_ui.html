@@ -1002,8 +1002,32 @@ function message(m) {
     while(utteranceUpdates.size>128)utteranceUpdates.delete(utteranceUpdates.keys().next().value);
     refreshUtteranceGroups();
   }
+  else if(m.type==='transcript_revision_pending') {
+    const first=inputRows.get((m.input_ids||[])[0]);
+    if(first?.extra){
+      if(!first.pendingRevision){
+        first.pendingRevision=document.createElement('small');first.pendingRevision.className='jev-detail';
+        first.p.appendChild(first.pendingRevision);
+      }
+      first.pendingRevision.textContent='有一段整体转写尚未分清说话人，原发言保留；详见详情';
+      detailLine(first.extra,'待对齐的整体转写（可能与以上发言重叠，不是新增发言）：'+m.text);
+    }
+  }
   else if(m.type==='transcript_revision') {
     const first=inputRows.get((m.input_ids||[])[0]);
+    if(first?.extra){
+      if(!first.revisionHistory){
+        const details=document.createElement('details'),summary=document.createElement('summary');
+        summary.textContent='转写已修订 · 查看原文字';details.appendChild(summary);
+        first.extra.appendChild(details);first.revisionHistory=details;
+        const notice=document.createElement('small');notice.className='jev-detail';
+        notice.textContent='转写有修订，原文字保留在详情';first.p.appendChild(notice);
+      }
+      const previous=m.previous||(m.input_ids||[]).map(id=>inputRows.get(id)?.finalRevisionText||inputRows.get(id)?.body?.textContent||'');
+      const revision=document.createElement('p');
+      revision.textContent='修订前：'+previous.join(' / ')+'\n修订后：'+m.text;
+      first.revisionHistory.appendChild(revision);
+    }
     (m.input_ids||[]).forEach((id,i)=>{const row=inputRows.get(id);if(!row?.body)return;
       if(i===0){row.finalRevisionText=m.text;row.body.textContent=m.text;}
       else if(first?.extra){
@@ -1011,7 +1035,7 @@ function message(m) {
         if(!first.fragmentDetails){const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='合并前的声音片段';details.appendChild(summary);first.extra.appendChild(details);first.fragmentDetails=details;}
         if(row.p!==first.p)first.fragmentDetails.appendChild(row.p);
       }
-      row.body.title='服务端最终转写修订，同一段声音，不是新发言';});
+      row.body.title='同一音频范围的后到转写，不是新发言；后到不保证更准确，原文字见详情';});
   }
   else if(m.type==='flow_phase') {
     const label=phaseNames[m.stage]||m.stage;
@@ -1118,7 +1142,12 @@ function message(m) {
     const row=inputRows.get(m.input_id);
     if(row && !row.meta.textContent.includes('未交主流程')) row.meta.textContent+=' · 未交主流程';
   }
-  else if(m.type==='jev_completeness') {const labels={complete:'表达完整',incomplete:'表达未完，保留接续',uncertain:'完整度不确定'}; $('judge').textContent='JEV：'+(labels[m.utterance_complete] || labels.uncertain);}
+  else if(m.type==='jev_completeness') {
+    const labels={complete:'表达完整',incomplete:'表达未完，保留接续',uncertain:'完整度不确定'};
+    $('judge').textContent='JEV：'+(labels[m.utterance_complete] || labels.uncertain);
+    if(m.failed||['background','wait'].includes(m.route))
+      for(const owner of progressOwners(m))modelProgress(owner,m.failed?'处理失败':'已完成',true,m.at_ms);
+  }
   else if(m.type==='jev') {const labels={ignore:'只记录现场',resume:'继续当前状态',stop:'停止',respond:'接话',clarify:'澄清'}; $('judge').textContent='JEV：'+(m.direct_reply?'我回答':(labels[m.action] || m.action))+' · '+m.reason;}
   else if(m.type==='jev_reply') {if(m.route==='self_reply')modelProgress(latestModelInput,'已完成',true);$('judge').textContent=m.route==='waiting_ack'?'JEV：等待接话 · 主认知正在处理':'JEV：我回答 · 短时聊天，本轮未进入主流程和记忆写入';}
   else if(m.type==='reply') {

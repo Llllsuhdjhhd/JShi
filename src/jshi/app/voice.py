@@ -1175,7 +1175,8 @@ class VoiceConversation:
             return
         ids = [iid for iid, _ in rows]
         old = [row['transcript'].text for _, row in rows]
-        if len({row['transcript'].speaker_cluster_id or row['transcript'].track_id for _, row in rows}) > 1:
+        if (transcript.audio_kind == 'revision_context' or
+                len({row['transcript'].speaker_cluster_id or row['transcript'].track_id for _, row in rows}) > 1):
             correction = '【跨声音转写修订】原多段声音收到整体修订：“' + transcript.text + '”；字词与各人物尚未重新对齐，不把修订全文归给某一人。'
             self.record('voice_asr_cross_speaker_revision', {'input_ids': ids, 'text': transcript.text,
                 'start_ms': transcript.start_ms, 'end_ms': transcript.end_ms})
@@ -1183,12 +1184,18 @@ class VoiceConversation:
             self.jev_scene_store.append('asr-cross-revision:' + uuid4().hex,
                 {'text': correction, 'at': time()*1000, 'basis': 'asr_revision'},
                 codes=self.code_owner, labels=self.code_labels)
+            await self.emit('transcript_revision_pending', input_ids=ids, text=transcript.text)
             return
         first_id, first = rows[0]
         from jshi.voice.transcripts import equivalent_input_revision
         cosmetic = equivalent_input_revision(''.join(old), transcript.text)
         if not cosmetic:
             first['revision_version'] = first.get('revision_version', 0) + 1
+            previous = list(first.get('asr_previous', ()))
+            old_text = ' / '.join(old)
+            if old_text and old_text != transcript.text and old_text not in previous:
+                previous.append(old_text)
+            first['asr_previous'] = previous[-2:]
         try:
             preserve_sentence = json.loads(transcript.identity_note or '{}').get('preserve_utterance') is True
         except (ValueError, TypeError, AttributeError):
@@ -1237,7 +1244,7 @@ class VoiceConversation:
             self.jev_scene_store.append('asr-revision:'+uuid4().hex,
                 {'text': correction, 'at': time()*1000, 'basis': 'asr_revision'},
                 codes=self.code_owner, labels=self.code_labels)
-        await self.emit('transcript_revision', input_ids=ids, text=transcript.text)
+        await self.emit('transcript_revision', input_ids=ids, text=transcript.text, previous=old)
         changed = tuple(self._latest_utterances([u for u in self.scene if u.input_id == first_id]))
         if changed:
             self.scene = deque((changed[0] if u.input_id == first_id else u
@@ -1489,7 +1496,7 @@ class VoiceConversation:
         for u in utterances:
             self.process.note_entry_background(self.subject_id, u)
 
-    def _capture_jev_inputs(self, current, items=(), *, entry_status=None):
+    def _capture_jev_inputs(self, current, items=(), *, entry_status=None, interaction=None):
         marks = {r.n: r for r in items}
         evidence_rows = self._jev_batch(current)
         for n, u in enumerate(current, 1):
@@ -1517,6 +1524,12 @@ class VoiceConversation:
                                    "source": c.get('source'), "verified":c.get('verified'),
                                    "names": c.get('names', [])} for c in evidence_rows[n-1]['candidates']],
                    "short_voice_hint": evidence_rows[n-1]['short_voice_hint']}
+            source_record = self.input_records.get(u.input_id, {})
+            if interaction in {'direct', 'uncertain', 'none'}:
+                source_record['entry_interaction'] = interaction
+            if source_record.get('entry_interaction') in {'direct', 'uncertain', 'none'}:
+                # Recapturing the same input for main must not erase its prior direction.
+                row['entry_interaction'] = source_record['entry_interaction']
             initial = self.source_speakers.get(u.input_id, u.speaker)
             row["voice_initial"] = {"p": self.assign_code(initial.object_id, initial.label) if initial.method not in {"unassigned_audio", "visual_scene"} else "unknown",
                 "basis": initial.method, "similarity": initial.confidence}
@@ -1559,6 +1572,7 @@ class VoiceConversation:
             try:
                 passes = 0
                 while not self.closed:
+                    self._sync_scene_updates()
                     snapshot = self.jev_scene_store.snapshot()
                     if not snapshot["events"] or self.person_reviewer is None:
                         break
@@ -1583,6 +1597,7 @@ class VoiceConversation:
                     started = monotonic()
                     self._last_scene_attempt = started
                     scene, raw = await loop.run_in_executor(self.person_review_executor, run)
+                    self._sync_scene_updates()
                     accepted = not self.closed and self.jev_scene_store.commit(snapshot, scene)
                     self.record("voice_jev_scene", {"review_id": review_id, "accepted": accepted,
                         "trigger": trigger,
@@ -2077,6 +2092,8 @@ class VoiceConversation:
                           "seconds": round(max(0, utterance.end_ms - utterance.start_ms) / 1000, 2),
                           "basis": utterance.speaker.method, "at": utterance.received_at_ms, "at_ms": utterance.start_ms, "candidates": candidates,
                           "short_voice_hint": self.input_records.get(utterance.input_id, {}).get('short_voice_hint', {}),
+                          "asr_previous": [s if len(s) <= 300 else s[:300]+'…（此前转写较长，此处截取）'
+                                           for s in check.get('asr_previous', ())],
                           "joint_evidence":joint,"voice_evidence": voice})
         return batch
 
@@ -2250,6 +2267,18 @@ class VoiceConversation:
             'chars':sum(ch.isalnum() for u in utterances for ch in u.text)}
         return result
 
+    def _shared_scene_revision(self):
+        return self.process.pending_scene.shared_revision(self.subject_id,
+            since_ms=self.session_started_at_ms - 300000)
+
+    def _sync_scene_updates(self):
+        # Only a recent window is loaded when a connection starts. Subsequent
+        # updates remain available for its lifetime, even after main writes.
+        events = self.process.pending_scene.shared_events(
+            self.subject_id, since_ms=self.session_started_at_ms - 300000)
+        self.jev_scene_store.sync_shared_events(events)
+        return tuple(event['id'] for event in events)
+
     async def _judge(self, utterances, speaker, overlap, envelope=None) -> tuple[InterruptDecision, dict, tuple]:
         """A judgement invalidated only by scene bookkeeping or its own stop is judged once more."""
         decision, record, items = await self._judge_once(utterances, speaker, overlap, envelope)
@@ -2292,9 +2321,10 @@ class VoiceConversation:
         if self.active_turn and (not snapshot or snapshot.get("state") in {"completed", "stopped", "failed"}):
             snapshot = self.active_turn
         context, spoken = self._jev_context(utterances)
+        shared_revision = self._sync_scene_updates()
         material = self.jev_scene_store.material_view(
             min((u.received_at_ms for u in utterances if u.received_at_ms is not None), default=time()*1000),
-            {u.input_id for u in utterances})
+            {u.input_id for u in utterances}, knowledge_cutoff_ms=time()*1000)
         # Held half-sentences may already be summarized, so retain those separately.
         held = [r for r in context if r.get('entry_status') == 'pending_continuation']
         context = list(material['events'])
@@ -2443,7 +2473,8 @@ class VoiceConversation:
         def is_current():
             return ((entry_job is None or entry_job.valid) and same_sources() and not validity['expired'] and not self.closed
                     and self._epoch_current(validity['epoch'], own_inputs)
-                    and self.jev_scene_store.state['generation'] == validity['generation'])
+                    and self.jev_scene_store.state['generation'] == validity['generation']
+                    and self._shared_scene_revision() == shared_revision)
 
         async def apply_entry(result):
             nonlocal entry_result
@@ -2497,6 +2528,9 @@ class VoiceConversation:
                         route='background', direct_reply='', waiting_reply='', model_error='JEV1_2超时，保留入口判断')
                 else:
                     result = open_batch("未能初判")
+        # A correction arriving during the model call invalidates its result,
+        # even if the asynchronous writer has not run yet.
+        self._sync_scene_updates()
         stale_causes = [cause for cause, failed in (
             ('source', not same_sources()), ('closed', self.closed),
             ('entry_job', entry_job is not None and not entry_job.valid),
@@ -2562,12 +2596,16 @@ class VoiceConversation:
             record['action'] = 'stop'
             decision = InterruptDecision('stop', record['decision_reason'] or 'withheld stop')
             result = replace(result, control='stop', action='stop', route='background', reason=decision.reason)
-        await self.emit('jev_completeness', utterance_complete=result.utterance_complete, control=record['control'])
+        await self.emit('jev_completeness', utterance_complete=result.utterance_complete, control=record['control'],
+                        route=record.get('route') or result.route, input_ids=[u.input_id for u in utterances],
+                        failed=bool(result.model_error), at_ms=time()*1000)
         record['direct_reply'] = result.direct_reply if not timed_out else ''
         record['waiting_reply'] = result.waiting_reply if not timed_out else ''
         record['front_choice'] = result.front_choice if not timed_out else 'background'
         record['route'] = record.get('route') or result.route
         record['decision_refs'] = list(result.decision_refs)
+        record['shared_scene_revision'] = list(shared_revision)
+        record['entry_support'] = list(result.entry_support)
         record['visual_snapshot_id'] = envelope.visual_snapshot_id
         record['input_parts'] = [asdict(p) for p in envelope.parts]
         self.record('voice_jev_diagnostics', {**record, 'model_raw': result.model_raw,
@@ -3019,7 +3057,8 @@ class VoiceConversation:
                     await self.stop('semantic_' + control)
                     input_epoch = self.epoch
                     active = busy = False
-                self._capture_jev_inputs(current, items, entry_status='rule' if explicit_stop else None)
+                self._capture_jev_inputs(current, items, entry_status='rule' if explicit_stop else None,
+                                         interaction=record.get('interaction'))
                 if jev_calls:
                     self._update_jev_continuation(current, jev_calls[-1])
                 if control == 'stop' and not record.get('silent_operation'):
@@ -3504,6 +3543,10 @@ class VoiceConversation:
         await self._start_plan((ResponseItem("verbal", text, (object_id,)),), object_id, epoch, epoch)
 
     async def _direct_reply(self, text, object_id, epoch, envelope, current, call):
+        if ('shared_scene_revision' in call and
+                tuple(call['shared_scene_revision']) != self._shared_scene_revision()):
+            self.record('jev_reply_withheld', {'reason': '主认知认识更新已到达，旧短答不再交付'})
+            return
         from jshi.core.contracts import utc_now
         from jshi.effectiveness.timings import append_timing
         from jshi.subject.process import ActivityTiming
@@ -3621,6 +3664,13 @@ class VoiceConversation:
             await self.apply_schedule_effect(effect)
 
     async def _start_plan(self, items, object_id, epoch, turn_key) -> None:
+        metrics = self.voice_timings.get(turn_key, (None, {}))[1]
+        if metrics.get('route') == 'self_reply':
+            call = next(iter(metrics.get('jev_calls', ())), {})
+            if ('shared_scene_revision' in call and
+                    tuple(call['shared_scene_revision']) != self._shared_scene_revision()):
+                self.record('jev_reply_withheld', {'reason': '排队期间认识已更新，旧短答不再交付'})
+                return
         if self.closed or epoch != self.epoch or turn_key in self.retired_turns:
             self.record('voice_answer_discarded', {'turn_key': turn_key,
                 'input_ids': self.reply_input_ids.get(turn_key, []),
@@ -3981,6 +4031,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         from jshi.voice.jev_scene import JEVSceneStore
         import hashlib
         scene_store = text_jev_store
+        shared = process.pending_scene.shared_events(subject_id)
+        shared_revision = tuple(row['id'] for row in shared)
+        scene_store.sync_shared_events([row for row in shared if row['at'] >= time()*1000 - 300000])
         saved = scene_store.snapshot()
         codes, labels = dict(saved['codes']), dict(saved['labels'])
         selected_code = next((p for p, oid in codes.items() if oid == envelope.speaker.object_id), '')
@@ -4018,11 +4071,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
              'waiting':wait_timing(process).guidance(model_key(process), allowed=waiting_allowed, mode='text'),
              'short_chat':{**text_direct_replies.context(subject_id, [envelope.speaker.object_id], allow_general=judge.mode != "legacy"),
                            'person_code':selected_code or 'unknown'}}, vision=visual, on_request=capture,
-            is_current=lambda: scene_store.state['generation'] == generation)
+            is_current=lambda: scene_store.state['generation'] == generation
+                and process.pending_scene.shared_revision(subject_id) == shared_revision)
         jev_finished = monotonic()
         record = {'main_prompt_hint':result.main_prompt_hint, 'judged':result.judged,
                   'model_error':result.model_error, 'items':[asdict(i) for i in result.items],
-                  'input_ids':[envelope.input_id],
+                  'input_ids':[envelope.input_id], 'entry_support':list(result.entry_support),
                   'direct_reply':result.direct_reply,
                   'waiting_reply':result.waiting_reply,
                   'front_choice':result.front_choice, 'route':result.route,
@@ -4061,6 +4115,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         scene_store.append(envelope.input_id, {'text':envelope.text, 'at':time()*1000,
             'p': selected_code or 'unknown', 'source':envelope.source, 'basis':'统一输入信封',
             'entry_status':'completed' if result.judged else 'failed',
+            'entry_interaction':result.interaction,
             'judgment': {'person':judgment.speaker_pick,'certainty':judgment.speaker_level,
                          'why':judgment.speaker_reason} if judgment else {}}, codes=codes, labels=labels)
         schedule_text_jev()
@@ -4080,6 +4135,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         text_jev_writer.model = model
         writer = text_jev_writer
         for _ in range(4):
+            text_jev_store.sync_shared_events(process.pending_scene.shared_events(subject_id,
+                since_ms=time()*1000 - 300000))
             snapshot = text_jev_store.snapshot()
             if not snapshot['events']:
                 return
@@ -4092,6 +4149,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 scene, _ = await asyncio.to_thread(writer.run, subject_id, snapshot, main_scene,
                     on_request=lambda request: process._record_step_input(request, model,
                         subject_id=subject_id, activity_id=prompt_activity_id))
+                text_jev_store.sync_shared_events(process.pending_scene.shared_events(subject_id,
+                    since_ms=time()*1000 - 300000))
                 accepted = await asyncio.to_thread(text_jev_store.commit, snapshot, scene)
                 text_jev_error = '' if accepted else '片场结果过期，事件保留'
             except Exception as exc:

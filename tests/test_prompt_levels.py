@@ -20,7 +20,8 @@ def test_defaults_preserve_full_prompt_and_levels_remove_functions():
     assert texts[0] == reply_instruction_for('smith')
     # Shared continuity and mixed-speaker rules also apply to the short profile.
     from jshi.style.prompt_levels import FIRST_MEETING_NOTE
-    assert 2000 <= len(texts[2]) - len(FIRST_MEETING_NOTE) <= 3500
+    # The optional understanding-update contract also applies to the short profile.
+    assert 2000 <= len(texts[2]) - len(FIRST_MEETING_NOTE) <= 3750
     assert all(FIRST_MEETING_NOTE in text for text in texts)
     assert len(texts[0]) > len(texts[1]) > len(texts[2])
     assert '【任务2 · 工具】' in texts[0]
@@ -29,11 +30,11 @@ def test_defaults_preserve_full_prompt_and_levels_remove_functions():
     for level in (1, 2, 3):
         schema = reply_schema_for('smith', prompt_level=level)
         assert schema['additionalProperties'] is False
-        assert set(schema['required']) == {'mode', 'reply', 'action', 'unsaid', 'reason', 'reply_targets'}
+        assert set(schema['required']) == {'mode', 'reply', 'action', 'unsaid', 'reason', 'reply_targets', 'scene_updates'}
     for level, text in enumerate(texts[1:], 2):
         assert '【任务2 · 工具】' not in text
         assert PERSONA_TOOL_NOTE not in text
-        assert set(reply_schema_for('smith', prompt_level=level)['properties']) == {'mode','reply','action','unsaid','reason','reply_targets'}
+        assert set(reply_schema_for('smith', prompt_level=level)['properties']) == {'mode','reply','action','unsaid','reason','reply_targets','scene_updates'}
     assert '正文“一年前”才是事件时间' in texts[2]
     assert '记录写入时间' in texts[2]
     assert '刚召回不等于刚发生' in texts[2]

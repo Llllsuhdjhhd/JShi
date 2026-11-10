@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from jshi.models import ModelPort, ModelRequest, ModelResponse
 
 from .base import Skill, SkillError, parse_json_object
+from jshi.core.scene_updates import SCENE_UPDATE_READING
 
 # 木头写场 schema：整份重写。
 WOOD_WRITE_SCHEMA: Mapping[str, Any] = {
@@ -70,7 +71,7 @@ class WriteZoneSkill(Skill[ModelResponse]):
     """
 
     name = "write_zone"
-    instruction = WOOD_WRITE_INSTRUCTION
+    instruction = WOOD_WRITE_INSTRUCTION + '\n' + SCENE_UPDATE_READING
     schema: Mapping[str, Any] = WOOD_WRITE_SCHEMA
 
     def __init__(

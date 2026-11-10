@@ -283,6 +283,7 @@ class ModelResponse:
     tool_handling: tuple[Mapping[str, Any], ...] = ()
     speaker_judgments: tuple[Mapping[str, Any], ...] = ()
     next_jev_note: str = ""
+    scene_updates: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def text(self) -> str:
@@ -320,6 +321,7 @@ class ModelResponse:
         tool_handling: tuple[Mapping[str, Any], ...] = (),
         speaker_judgments: tuple[Mapping[str, Any], ...] = (),
         next_jev_note: str = "",
+        scene_updates: tuple[Mapping[str, Any], ...] = (),
         text: str | None = None,
         response_statuses: tuple[str, ...] = (),
     ) -> None:
@@ -357,6 +359,8 @@ class ModelResponse:
         object.__setattr__(self, "raw_text", raw_text or "")
         object.__setattr__(self, "speaker_judgments", tuple(speaker_judgments))
         object.__setattr__(self, "next_jev_note", str(next_jev_note or "")[:120])
+        from jshi.core.scene_updates import parse_scene_updates
+        object.__setattr__(self, "scene_updates", parse_scene_updates(scene_updates))
         object.__setattr__(self, "tool_intent", tool_intent)
         from jshi.core.tool_handling import parse_tool_handling
         object.__setattr__(self, "tool_handling", parse_tool_handling(tool_handling))

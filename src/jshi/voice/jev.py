@@ -136,6 +136,7 @@ class BatchDecision:
     pending_refs: tuple[str, ...] = ()
     entry_route: str = ""
     stage_records: tuple[dict, ...] = ()
+    entry_support: tuple[dict, ...] = ()
     control_applied: bool = False
     applied_epoch: int | None = None
     silent_operation: bool = False
@@ -582,6 +583,8 @@ class VoiceJEV:
                 thin['overlap'] = True
             if row.get('person_scope'):
                 thin['person_scope'] = row['person_scope']
+            if row.get('asr_previous'):
+                thin['asr_previous'] = row['asr_previous']
             if self._selected_text(row):
                 thin['binding'] = {'person': thin['p'], 'certainty': 'confirmed', 'to_jiangshi': 'yes'}
             thin_batch.append(thin)

@@ -66,6 +66,12 @@ def entry_assessments(calls, input_ids):
         # are local to another request and must not collide with main references.
         reason = re.sub(r'(?<![A-Za-z0-9])[CEQ]\d+(?![A-Za-z0-9])', '入口所见历史材料', reason)
         rows.append('第' + '、'.join(selected) + '条：' + relation + '；依据与缺口：' + reason)
+        for support in call.get('entry_support', ()):
+            index = support.get('n', 0) - 1
+            ids = call.get('input_ids', ())
+            number = numbers.get(ids[index]) if 0 <= index < len(ids) else None
+            if number and support.get('notes'):
+                rows.append(f'第{number}条补充证据：' + '；'.join(support['notes']))
     if not rows:
         return ''
     return ('【本轮入口判断·可推翻，不是人物原话】\n' + '\n'.join(rows) +

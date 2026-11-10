@@ -340,6 +340,17 @@ class RecoveryIntake:
                     continue
                 contained = [(a,b) for a,b in overlapping
                              if row.start_ms <= a+80 and row.end_ms >= b-80]
+                prior = [e['row'] for e in self.events.values()
+                         if e['bounds'][0] < row.end_ms and e['bounds'][1] > row.start_ms]
+                voices = {p.speaker_cluster_id or p.track_id for p in prior}
+                if not preliminary and not row.words and len(voices) > 1 and contained:
+                    # A whole packet spanning multiple early voices is only
+                    # context. The host cannot align it to either person; it
+                    # must not consume the unheard tail before recovery arrives.
+                    ready.append(replace(row, replaces=tuple(contained), audio_kind='revision_context'))
+                    self.report('recovery_cross_voice_context', {'start_ms':row.start_ms,
+                        'end_ms':row.end_ms,'previous_parts':len(prior),'coverage_committed':False})
+                    continue
                 if (not preliminary and overlapping and len(contained) == len(overlapping)
                         and all(span in self.preliminary_spans for span in overlapping)):
                     # Final text owns the entire old span: replace text as a unit.
@@ -389,6 +400,8 @@ class RecoveryIntake:
                 ready = [replace(r,input_id=r.input_id or uuid4().hex) for r in ready]
                 self.covered = deque(previous_coverage, maxlen=256)
                 for part in ready:
+                    if part.audio_kind == 'revision_context':
+                        continue  # Context is not a delivered, aligned transcript.
                     for old in part.replaces:
                         if old in self.covered:
                             self.covered.remove(old)

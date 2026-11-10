@@ -123,7 +123,7 @@ def test_instruction_keeps_rules_without_examples():
     assert "rewritten_context" not in text
     assert "才提出 recall_requests" not in text
     assert "追加评价与召回" not in text
-    assert "人物复判由独立流程处理" in text
+    assert "有具体反证可保留不同理解" in text
     assert "【正例】" not in text
     assert "【反例】" not in text
     assert "【本轮材料】" not in text

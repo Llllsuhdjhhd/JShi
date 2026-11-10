@@ -133,6 +133,29 @@ class JEVSceneStore:
             result['history_candidates'] = candidates
             return result
 
+    def sync_shared_events(self, events):
+        """Import shared facts once; each scene acknowledges them independently."""
+        with self.lock:
+            state = deepcopy(self.state)
+            added = 0
+            for event in events:
+                event_id = event['id']
+                if event_id in state['event_refs']:
+                    continue  # Covered by this writer, not by the main writer.
+                payload = {k: deepcopy(event[k]) for k in ('kind', 'source', 'at', 'text')}
+                state['sequence'] += 1
+                state['event_refs'][event_id] = f"E{len(state['event_refs'])+1}"
+                state.setdefault('event_versions', {})[event_id] = 1
+                state.setdefault('event_fingerprints', {})[event_id] = hashlib.sha256(
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                state['events'].append({'id': event_id, 'seq': state['sequence'],
+                                        'queued_at': time()*1000, 'payload': payload})
+                added += 1
+            if added:
+                state['generation'] += 1  # Reject in-flight decisions and scene writes using older understanding.
+                self._save(state)
+            return added
+
     @staticmethod
     def _history_key(row):
         return [row['version'], row['generation'], row['at'], row['reason']]
@@ -201,7 +224,7 @@ class JEVSceneStore:
                 return None
             return deepcopy(found)
 
-    def material_view(self, cutoff_ms, current_ids=()):
+    def material_view(self, cutoff_ms, current_ids=(), *, knowledge_cutoff_ms=None):
         """Read scene and uncovered events atomically; age never implies coverage."""
         with self.lock:
             scene, version = '', 0
@@ -217,7 +240,9 @@ class JEVSceneStore:
                     continue
                 at = row['payload'].get('at')
                 timestamp = at if type(at) in (int, float) and math.isfinite(at) and at > 0 else row.get('queued_at')
-                if timestamp is None or timestamp > cutoff_ms:
+                limit = (knowledge_cutoff_ms if row['payload'].get('kind') == 'understanding_update'
+                         and knowledge_cutoff_ms is not None else cutoff_ms)
+                if timestamp is None or timestamp > limit:
                     continue
                 seen.add(row['id'])
                 result = deepcopy(row['payload'])

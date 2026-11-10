@@ -39,6 +39,7 @@ from jshi.style.packs import (
 
 # Shared interaction rules, expressed using Wood's actual input headings.
 from jshi.style.prompt_levels import DIALOGUE_DIRECTION_NOTE
+from jshi.core.scene_updates import SCENE_UPDATES_SCHEMA, SCENE_UPDATE_NOTE
 
 WOOD_INTERACTION_NOTE = DIALOGUE_DIRECTION_NOTE.replace(
     "【此时的输入】", "【本轮】"
@@ -60,7 +61,9 @@ _NEXT_KEY = re.compile(
 # 认知 skill 的结构化输出契约（JSON Schema 形状）。
 COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
     "type": "object",
+    "required": ["scene_updates"],
     "properties": {
+        "scene_updates": SCENE_UPDATES_SCHEMA,
         "response_plan": {
             "type": "object",
             "properties": {
@@ -334,6 +337,7 @@ def _to_model_response(data: Mapping[str, Any], model: str) -> ModelResponse:
         context_assessment=context_assessment,
         importance_ranking=tuple(importance_ranking),
         memory_ratings=_parse_memory_ratings(data),
+        scene_updates=data.get('scene_updates', ()),
         tool_intent=_parse_tool_intent(data),
         tool_consumed=_parse_tool_consumed(data),
         tool_handling=parse_tool_handling(data.get("tool_handling")),
@@ -472,6 +476,7 @@ def _persona_to_model_response(
         response_plan=ResponsePlan(
             mode=mode, reason=reason, items=tuple(items), unsaid=unsaid
         ),
+        scene_updates=data.get('scene_updates', ()),
         tool_intent=_parse_tool_intent(data),
         tool_consumed=_parse_tool_consumed(data),
         tool_handling=parse_tool_handling(data.get("tool_handling")),
@@ -540,7 +545,7 @@ class CognitionSkill(Skill[ModelResponse]):
 区分事件发生、记录写入和本轮载入时间，不把刚召回当刚发生或多日经历压成同一现场；其余归属和事实状态按下文规则处理。
 本次认知不直接查询或修改记忆，召回由前置流程和入口开关决定；主流程不执行同轮recall_requests。记忆评价与反馈仍按现有接口处理，回应、留存事项或后台建议不等于已写入长期记忆。
 
-''' + WOOD_INTERACTION_NOTE + '''
+''' + WOOD_INTERACTION_NOTE + '\n' + SCENE_UPDATE_NOTE + '''
 
 【价值】
 你的价值：你的回应应当遵循你的价值。比如你喜欢孔子的「学而时习之，不亦乐乎」，意味着你是一个好学也好交友的人。下面这些条目都是你遵循的价值：
@@ -551,7 +556,7 @@ class CognitionSkill(Skill[ModelResponse]):
 {style_instruction}
 
 【本轮职责】
-- 沿用入口给出的对象归属，理解当前输入并产生反应。人物复判由独立流程处理，本轮不输出人物判断或登记建议。
+- 入口归属是输入标注，有具体反证可保留不同理解；不直接改人物档案或声音归属。结合原始证据独立决定是否回应、如何理解和行动。
 - 本轮以回应为先，不要求填写memory_ratings；缺乏依据时留空，不编造评分。不要整理现场，写场由独立调用处理。
 
 ''' + TOOL_TASK_NOTE + '''

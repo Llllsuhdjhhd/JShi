@@ -10,8 +10,8 @@ def encoded_size(value):
 
 
 def dialogue_row(payload):
-    keys = ('ref', 'p', 'text', 'at', 'basis', 'status', 'track', 'entry_status', 'targets',
-            'scope', 'corrected_events', 'environment')
+    keys = ('ref', 'p', 'text', 'at', 'basis', 'status', 'track', 'entry_status', 'entry_interaction', 'targets',
+            'scope', 'corrected_events', 'environment', 'kind', 'source')
     row = {k: deepcopy(payload[k]) for k in keys if k in payload}
     judgment = payload.get('judgment') or {}
     if judgment:

@@ -29,6 +29,14 @@ assert.equal(node('enroll-count').textContent,'已选 2 段声音');
 vm.runInContext(`message({type:'transcript_revision',input_ids:['one'],text:'第一句的最终修订'});`,ctx);
 assert.equal(vm.runInContext("inputRows.get('one').body.textContent",ctx),'第一句的最终修订');
 assert.equal(vm.runInContext('inputRows.size',ctx),2);
+vm.runInContext(`message({type:'transcript_revision_pending',input_ids:['one','two'],text:'跨人整体候选文字'});`,ctx);
+assert.equal(vm.runInContext("inputRows.get('one').body.textContent",ctx),'第一句的最终修订');
+assert.equal(vm.runInContext("inputRows.get('two').body.textContent",ctx),'第二句');
+assert.match(vm.runInContext("inputRows.get('one').pendingRevision.textContent",ctx),/尚未分清说话人/);
+assert.match(vm.runInContext("inputRows.get('one').revisionHistory.children[1].textContent",ctx),/修订前：第一句\n修订后：第一句的最终修订/);
+vm.runInContext(`message({type:'transcript_revision',input_ids:['one'],previous:['第一句的最终修订'],text:'又一次修订'});`,ctx);
+assert.equal(vm.runInContext("inputRows.get('one').revisionHistory.children.length",ctx),3);
+assert.match(vm.runInContext("inputRows.get('one').revisionHistory.children[2].textContent",ctx),/第一句的最终修订/);
 node('enroll-name').value='lux';node('enroll').onclick();
 assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))),{type:'enroll_inputs',input_ids:['one','two'],name:'lux'});
 vm.runInContext(`message({type:'enrollment',input_ids:['one','two'],object_id:'lux-id',label:'lux',clips:2,seconds:3.9});`,ctx);
@@ -365,7 +373,7 @@ assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').identityConflict.hi
 assert.equal(vm.runInContext(`inputRows.get('preferred-mlp').who.textContent`,ctx),'qf[MLP可能0.99]：');
 
 vm.runInContext(`message({type:'utterance_updates',updates:[{utterance_id:'U1',state:'paused',parts:[{input_id:'one',text:'我要去一下'},{input_id:'two',text:'商店买鸡蛋'}]}]})`,ctx);
-assert.equal(vm.runInContext("inputRows.get('one').body.textContent",ctx),'第一句的最终修订商店买鸡蛋');
+assert.equal(vm.runInContext("inputRows.get('one').body.textContent",ctx),'又一次修订商店买鸡蛋');
 assert.equal(vm.runInContext("inputRows.get('one').utteranceState.textContent",ctx),'停顿待续');
 assert.equal(vm.runInContext("inputRows.get('one').fragmentDetails.children.includes(inputRows.get('two').p)",ctx),true);
 console.log('Organized utterance: continuous text, state and original audio controls passed');
@@ -374,6 +382,9 @@ assert.equal(vm.runInContext("inputRows.get('one').body.textContent",ctx),'我�
 assert.equal(vm.runInContext("inputRows.get('two').mergedInto",ctx),'one');
 assert.equal(vm.runInContext("inputRows.get('one').fragmentDetails.children.includes(inputRows.get('two').p)",ctx),true);
 console.log('Final merged sentence survives old organizer updates; original fragments stay collapsed');
+vm.runInContext(`message({type:'jev_completeness',route:'background',input_ids:['one'],utterance_complete:'complete',at_ms:1793970000000});`,ctx);
+assert.equal(vm.runInContext("inputRows.get('one').p.modelUi.ended",ctx),1793970000000);
+assert.equal(vm.runInContext("inputRows.get('two').p.modelUi.ended",ctx),null);
 
 // Late completion belongs to its original input, never the latest speaker.
 vm.runInContext(`

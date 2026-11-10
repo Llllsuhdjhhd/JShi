@@ -23,7 +23,8 @@ def test_related_background_kept_unrelated_dropped_and_memory_clean(process):
             ]}))
 
     async def run():
-        async def send(message): pass
+        messages = []
+        async def send(message): messages.append(message)
         c = VoiceConversation(process, 'stone', FakeCloud(), send, jev=VoiceJEV(Judge(), mode='legacy'), input_pause_s=.02)
         try:
             await c.accept(Transcript('下午博物馆关门', 'A', 0, 1800, True))
@@ -31,6 +32,7 @@ def test_related_background_kept_unrelated_dropped_and_memory_clean(process):
             await c.accept(Transcript('你的快递在楼下', 'C', 3900, 5500, True))
             await asyncio.wait_for(c.queue.join(), 2)
             await asyncio.wait_for(c.turn_queue.join(), 3)
+            assert process.cognition.requests, messages
             text = process.cognition.requests[0].input_text
             assert '下午博物馆关门' in text and '匠石，那我们该去哪' in text
             assert '你的快递在楼下' not in text

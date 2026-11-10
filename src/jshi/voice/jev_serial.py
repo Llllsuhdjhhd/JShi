@@ -10,7 +10,7 @@ from time import monotonic
 from jshi.core import SubjectState
 from jshi.models import ModelRequest
 from jshi.skill.base import parse_json_object, SkillError
-from .jev_material import build_snapshot, entry_text, preparation_text, blocks, SHORT_REPLY_LEVELS
+from .jev_material import build_snapshot, entry_text, preparation_text, blocks, SHORT_REPLY_LEVELS, support_for_main
 from .jev_prompts import ENTRY_INSTRUCTION, PREPARATION_INSTRUCTION, ENTRY_OUTPUT_RULES, PREPARATION_OUTPUT_RULES
 from .jev_errors import JEVStaleError, failure_details
 
@@ -35,9 +35,8 @@ def split_instruction():
 
 
 def split_preparation_instruction():
-    return PREPARATION_INSTRUCTION.replace(
-        '可处理内容涉及人物均为confirmed或tentative，unknown不可短答。',
-        '人物材料须对应confirmed或tentative；单条完整输入、scope=general且无人物材料或历史接续时，unknown也可作不依赖身份的通用短答，不必仅因姓名未知进入主认知。')
+    from .jev_prompts import SPLIT_MAIN_PREPARATION_INSTRUCTION
+    return SPLIT_MAIN_PREPARATION_INSTRUCTION
 
 
 def object_schema(properties):
@@ -94,6 +93,13 @@ def preparation_schema():
                           'main_image': {'enum': ['omit', 'include']},
                           'reply': text_schema(160), 'waiting_reply': text_schema(16),
                           'reason': text_schema(100, minimum=1)})
+
+
+def main_preparation_schema():
+    # Split stage two cannot emit speech or choose the front-stage route.
+    full = preparation_schema()['properties']
+    return object_schema({key: full[key] for key in
+                          ('level', 'recall_memory', 'recall_query', 'main_image', 'reason')})
 
 
 def entry_schema(lines, refs):
@@ -236,6 +242,7 @@ def protect_continuation(data, batch):
 
 def combined_instruction():
     # One output contract, not two complete instructions pasted together.
+    from jshi.core.scene_updates import SCENE_UPDATE_READING
     def section(text, name, end):
         return text.split(f'【{name}】\n', 1)[1].split(f'【{end}】', 1)[0].strip()
     return ('【用途】\n你是匠石的JEV1合并判断。先完成入口判断，仅在route=prepare时完成回应准备。'
@@ -252,7 +259,8 @@ def combined_instruction():
               '两种route各属于自己的对象，不得互换。所有引用、人物范围及长度服从Schema。\n'
             + '入口字段关联约束：' + ENTRY_OUTPUT_RULES
             + '\n本合并对象另允许preparation字段，仍按上述条件填写或为null。'
-            + '\n仅preparation内部的输出约束：' + PREPARATION_OUTPUT_RULES)
+            + '\n仅preparation内部的输出约束：' + PREPARATION_OUTPUT_RULES
+            + '\n\n' + SCENE_UPDATE_READING)
 
 
 def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
@@ -287,6 +295,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             if r.get('person_scope') != 'unaligned_cloud_span' else r for r in batch]
     thin, payload, packed = gate._build_material(batch, context, delivery)
     snapshot = build_snapshot(payload, batch, delivery)
+    main_support = support_for_main(snapshot)
     refs = {r['evidence_ref'] for r in thin}
     refs.update(r.get('ref', r.get('evidence_ref')) for r in snapshot['events'])
     refs.update(r.get('ref') for r in snapshot['task_context'])
@@ -577,7 +586,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         if route != 'prepare':
             if preparation is not None:
                 raise ValueError('背景或等待不能附带回应准备')
-            return replace(accepted, stage_records=tuple(stages), model_raw=raw)
+            return replace(accepted, stage_records=tuple(stages), model_raw=raw, entry_support=main_support)
         if mode == 'split' and preparation is not None:
             if (control == 'stop' or entry['interaction'] != 'direct'
                     or entry['utterance_complete'] != 'complete' or overlap or pending
@@ -619,7 +628,10 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                                'reason': type(exc).__name__ + ':' + str(exc)})
         if preparation is None and not native_prepare:
             preparation = call('voice_jev_prepare', split_preparation_instruction() if mode == 'split' else PREPARATION_INSTRUCTION,
-                               preparation_text(snapshot, entry), preparation_schema())
+                               preparation_text(snapshot, entry, main_only=mode == 'split'),
+                               main_preparation_schema() if mode == 'split' else preparation_schema())
+            if mode == 'split':
+                preparation = {**preparation, 'route': 'main', 'reply': '', 'waiting_reply': ''}
         if not isinstance(preparation, dict):
             raise ValueError('合并判断缺少回应准备')
         hint = {'level': preparation['level'], 'needs': [], 'recall_memory': preparation['recall_memory'],
@@ -666,7 +678,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             hint['level'] = 1
         return replace(accepted, route=route, direct_reply=direct, waiting_reply=brief,
                        main_prompt_hint=hint, needs_main_review=route == 'main',
-                       stage_records=tuple(stages), model_raw=raw)
+                       stage_records=tuple(stages), model_raw=raw, entry_support=main_support)
     except Exception as exc:
         status = getattr(exc, 'status', None) or getattr(exc, 'code', None)
         if status in {401, 402, 403}:
@@ -680,11 +692,11 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             # Keep valid identity and already-applied controls; a failed preparation never speaks.
             return replace(accepted, action='stop' if accepted.control == 'stop' else 'ignore',
                 route='background', direct_reply='', waiting_reply='', main_prompt_hint=None,
-                routing_error=message, model_error=message, stage_records=tuple(stages), model_raw=raw)
+                routing_error=message, model_error=message, stage_records=tuple(stages), model_raw=raw, entry_support=main_support)
         action, reason = gate._unavailable_hold(delivery, batch_reason='JEV1_1未能判断')
         items = gate._items_for(batch, 'no', reason)
         items = tuple(replace(i, speaker_pick=gate._selected_text(r), speaker_level='确定',
                               speaker_reason='文字输入由用户选择人物') if gate._selected_text(r) else i
                       for i, r in zip(items, batch))
         return BatchDecision(action=action, reason=reason, items=items, route='background', control='keep',
-                             model_error=message, stage_records=tuple(stages), model_raw=raw)
+                             model_error=message, stage_records=tuple(stages), model_raw=raw, entry_support=main_support)

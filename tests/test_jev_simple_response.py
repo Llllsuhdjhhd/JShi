@@ -56,7 +56,7 @@ def test_ack_budget_and_address_are_enforced(tmp_path, seconds, interaction, sta
 
 
 def test_first_turn_split_short_answer_reaches_delivery_without_main(process):
-    model = Model([entry(control='keep'), preparation(route='self_reply', level=3, reply='星期六是Saturday。')])
+    model = Model([entry(control='keep', front=preparation(route='self_reply', level=3, reply='星期六是Saturday。'))])
     async def check():
         before = len(process.cognition.requests)
         async with TestClient(TestServer(create_app(process, 'stone', VoiceConfig(api_key=''),
@@ -67,6 +67,6 @@ def test_first_turn_split_short_answer_reaches_delivery_without_main(process):
             body = await response.json()
             assert body['route'] == 'self_reply' and body['reply'] == '星期六是Saturday。'
             assert len(process.cognition.requests) == before
-            assert '仅可用当前材料或通用知识短答' in model.requests[1].input_text
-            assert '"activity_state":"completed"' in model.requests[1].input_text
+            assert len([r for r in model.requests if r.purpose != 'voice_jev_scene']) == 1
+            assert '"scope":"general"' in model.requests[0].input_text
     asyncio.run(check())

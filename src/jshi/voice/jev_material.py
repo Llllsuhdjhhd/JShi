@@ -82,7 +82,10 @@ def build_snapshot(payload, batch, delivery):
     # Keep each real event once. Stable E references win over local C references.
     events, seen, size, deferred = [], set(), 0, 0
     name_codes = {name: code for code, name in delivery.get('named_people', {}).items()}
-    for row in [*payload['input'].get('unwritten', []), *payload.get('conversation', [])]:
+    candidates = [*payload['input'].get('unwritten', []), *payload.get('conversation', [])]
+    # A correction must not disappear behind a backlog of ordinary speech.
+    candidates.sort(key=lambda row: row.get('kind') != 'understanding_update')
+    for row in candidates:
         person = row.get('p', row.get('speaker', row.get('who')))
         if isinstance(person, str):
             person = name_codes.get(person, person)
@@ -173,7 +176,37 @@ def entry_text(snapshot):
                    ('材料范围', snapshot['scope'])])
 
 
-def preparation_text(snapshot, entry):
+def support_for_main(snapshot):
+    """Small provenance delta, not another copy of the scene or classifier table."""
+    result = []
+    for line in snapshot.get('lines', []):
+        if line.get('source') in {'web_text', 'visual_environment'}:
+            continue  # No missing voice evidence in an explicitly non-audio input.
+        evidence = next((r for r in snapshot['evidence'] if r.get('ref') == line.get('evidence_ref')), {})
+        if evidence.get('same_as'):
+            evidence = next((r for r in snapshot['evidence'] if r.get('ref') == evidence['same_as']), {})
+        voice = evidence.get('voice', {})
+        notes = []
+        basis = voice.get('basis', '')
+        if isinstance(basis, str) and basis:
+            notes.append(basis.replace('本句候选比较见candidates；', ''))
+        if line.get('short_voice_hint'):
+            notes.append(line['short_voice_hint'])
+        if line.get('continuity'):
+            notes.append('声音连续性只支持同一声音，不确认姓名')
+        if line.get('overlap'):
+            notes.append('本句含叠音，不据转写补造清楚的意图')
+        if line.get('person_scope') == 'unaligned_cloud_span':
+            notes.append('整句声音未可靠分人，不能把局部人物扩展到整句')
+        if line.get('asr_previous'):
+            notes.append('同一音频此前转写：'+ ' / '.join(line['asr_previous'])+
+                         '；与当前文字是不同识别版本，不是重复发言；后到不保证更准确，意思冲突仍须核对')
+        if notes:
+            result.append({'n': line['i'], 'notes': list(dict.fromkeys(notes))})
+    return tuple(result)
+
+
+def preparation_text(snapshot, entry, *, main_only=False):
     selected = set(entry['process_refs'])
     # Keep pending participants for continuation safety, but do not send unrelated
     # identity decisions. Full entry and raw evidence remain with the caller.
@@ -200,7 +233,7 @@ def preparation_text(snapshot, entry):
                        if snapshot.get('state', {}).get('answer_handling') else {}),
                     **({'utterance_context': snapshot['state']['utterance_context']}
                        if snapshot.get('state', {}).get('utterance_context') else {})}),
-                   ('处理许可与材料可用性', {'short_chat': short,
+                   ('处理许可与材料可用性', snapshot['availability'] if main_only else {'short_chat': short,
                     'waiting': snapshot['waiting'] if direct else {'allowed': False}, 'activity_state': snapshot.get('state', {}).get('state', 'unknown'),
                     **snapshot['availability']}),
                    ('有效观察', snapshot['environment']), ('相关任务', snapshot['task_context']),
