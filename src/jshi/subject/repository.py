@@ -118,6 +118,10 @@ class SubjectRepository:
                 );
                 CREATE INDEX IF NOT EXISTS ix_history_subject
                     ON histories(subject_id, kind, sequence);
+                -- Recent history across all kinds must not scan and sort the
+                -- subject's entire history at every post-activity hook.
+                CREATE INDEX IF NOT EXISTS ix_history_subject_sequence
+                    ON histories(subject_id, sequence);
                 """
             )
             columns = {

@@ -41,6 +41,29 @@ def runtime(tmp_path):
     return process, repository
 
 
+def test_recent_history_all_kinds_uses_ordered_index_on_existing_database(tmp_path):
+    from jshi.subject import HistoryRecord
+    path = tmp_path / 'history.sqlite3'
+    repo = SubjectRepository(path)
+    for n in range(8):
+        repo.add_history(HistoryRecord(subject_id='stone' if n != 6 else 'other',
+            kind=HistoryKind.FACT if n % 2 else HistoryKind.SUBJECT,
+            event_type=str(n), content={}, source_ids=()))
+    expected = repo.list_history('stone', limit=3)
+    with repo._connect() as db:
+        db.execute('DROP INDEX ix_history_subject_sequence')
+    migrated = SubjectRepository(path)
+    assert migrated.list_history('stone', limit=3) == expected
+    assert [r.event_type for r in expected] == ['4', '5', '7']
+    assert [r.event_type for r in migrated.list_history('stone', HistoryKind.FACT, limit=2)] == ['5', '7']
+    with migrated._connect() as db:
+        plan = [r['detail'] for r in db.execute(
+            'EXPLAIN QUERY PLAN SELECT * FROM histories WHERE subject_id=? ORDER BY sequence DESC LIMIT ?',
+            ('stone', 50))]
+    assert any('ix_history_subject_sequence' in line for line in plan)
+    assert not any('TEMP B-TREE' in line for line in plan)
+
+
 def test_external_activity_records_fact_and_subject_histories(tmp_path):
     process, repository = runtime(tmp_path)
 
@@ -72,6 +95,7 @@ def test_external_activity_records_fact_and_subject_histories(tmp_path):
     assert "①落位" in names
     assert "⑤认知" in names
     assert "⑦收尾" in names
+    assert "300自省入队" in names
     assert timing.total_ms >= 0
     assert process.last_activity_timing == timing
 

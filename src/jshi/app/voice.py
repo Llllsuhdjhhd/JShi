@@ -2016,7 +2016,14 @@ class VoiceConversation:
 
     @input_stage('jev_people_material')
     def _jev_batch(self, utterances):
+        utterances = tuple(utterances)
         batch = []
+        ids = {r['object_id'] for u in utterances for r in (
+            *self.candidate_cache.get(u.input_id, []),
+            *self.input_records.get(u.input_id, {}).get('personal_classifier', {}).get('ranking', []))}
+        profiles = self.process.profiles
+        names = (profiles.name_material(ids) if hasattr(profiles, 'name_material') else
+                 {oid:(profiles.get(oid),profiles.address_line(oid)) for oid in ids})
         for index, utterance in enumerate(utterances, start=1):
             if utterance.speaker.method == 'visual_scene':
                 batch.append({'n':index,'input_id':utterance.input_id,'track':'','sound':'',
@@ -2028,11 +2035,11 @@ class VoiceConversation:
             candidates = []
             for item in self.candidate_cache.get(utterance.input_id, []):
                 code = self.assign_code(item["object_id"], item.get("label") or "")
-                profile = self.process.profiles.get(item["object_id"])
+                profile, address = names.get(item['object_id'], (None, ''))
                 candidates.append({"who": code, "score": item.get("score"), "source": item.get("source") or "voiceprint",
                     **{key:item[key] for key in ('reference_count', 'stddev', 'sample_limited') if key in item},
                     "names": [profile.label, *profile.aliases] if profile else [],
-                    "portrait_names": self.process.profiles.address_line(item["object_id"])})
+                    "portrait_names": address})
             personal=self.input_records.get(utterance.input_id,{}).get('personal_classifier',{})
             for item in personal.get('ranking',[]):
                 code=self.assign_code(item['object_id'],item.get('label',''))
@@ -2042,7 +2049,7 @@ class VoiceConversation:
                     if item.get('repeated_short_audio'):
                         existing['applicability'] = '同一短句重复拼接的MLP参考，只支持可能人物；原声未变长，不是独立证据'
                     continue
-                profile=self.process.profiles.get(item['object_id'])
+                profile=names.get(item['object_id'], (None, ''))[0]
                 if profile is None or profile.status=='rejected':continue
                 candidates.append({'who':self.assign_code(item['object_id'],profile.label),'score':item['score'],
                     'source':'personal_classifier','verified':item.get('verified',True),

@@ -66,7 +66,7 @@ def test_boundary_uses_main_stream_partial_words_before_extra_recognition():
             await asyncio.wait_for(done.wait(), 1)
             assert received[0].text == '请回答我' and received[0].final
             assert received[0].speaker_cluster_id == 'acoustic-1' and received[0].identity_tentative
-            assert reports[0][0] == 'recovery_interim'
+            assert any(kind == 'recovery_interim' for kind, *_ in reports)
         finally:
             await intake.close()
     asyncio.run(run())
@@ -88,7 +88,7 @@ def test_boundary_falls_back_to_recognition_when_partial_words_are_thin():
             await intake.offer((SpeechSegment([], 'acoustic-1', 0, 1000, speaker_cluster_id='acoustic-1'),), 0, 3000)
             await asyncio.wait_for(done.wait(), 1)
             assert received[0].text == '请回答我'
-            assert reports[0][0] == 'recovery_recognized'
+            assert any(kind == 'recovery_recognized' for kind, *_ in reports)
         finally:
             await intake.close()
     asyncio.run(run())

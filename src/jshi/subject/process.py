@@ -1323,6 +1323,13 @@ class SubjectProcess:
                     source_ids=(fact.id,),
                 )
             )
+        clock.mark("连续性检查")
+        # Detection may read recent history even though model execution is only
+        # queued. Include that work before declaring the main process complete.
+        self._maybe_introspect_after_activity(
+            subject_id, completed, plan, action_id, speaker
+        )
+        clock.mark("300自省入队")
         timing = clock.finish(completed.id)
         entry = envelope.entry_timing if envelope is not None else {}
         if entry.get('received_mono') is not None:
@@ -1357,10 +1364,6 @@ class SubjectProcess:
             )
         except Exception:
             logger.exception("activity timing persist failed")
-        # 300：事件结果钩子——只入队，不等待；执行由宿主在两拍之间 drain
-        self._maybe_introspect_after_activity(
-            subject_id, completed, plan, action_id, speaker
-        )
         return SubjectActivityResult(
             completed,
             perception,

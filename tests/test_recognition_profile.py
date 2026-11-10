@@ -57,6 +57,32 @@ def test_repository_roundtrip(tmp_path):
     assert repo.get("OBJ-A").status == "confirmed"
 
 
+def test_name_material_matches_individual_reads_and_refreshes(tmp_path, monkeypatch):
+    repo = ObjectProfileRepository(tmp_path / "names.sqlite3")
+    for oid, label in (("a", "张三"), ("b", "李四")):
+        repo.create(ObjectProfile(object_id=oid, label=label, aliases=(label + "同学",), source="test"))
+        for kind in ("calls_subject", "called_by_others"):
+            for n in range(7):
+                repo.note_term(oid, kind, f"{oid}-{kind}-{n}")
+            repo.note_term(oid, kind, f"{oid}-{kind}-0")
+    expected = {oid: (repo.get(oid), repo.address_line(oid)) for oid in ("a", "b")}
+    connect = repo._connect
+    connections = []
+    def counted():
+        connections.append(True)
+        return connect()
+    monkeypatch.setattr(repo, "_connect", counted)
+    assert repo.name_material(["a", "b", "a", "missing"]) == expected
+    assert len(connections) == 1
+    assert repo.name_material([]) == {}
+    assert len(connections) == 1
+    repo.rename("a", "新名字")
+    repo.note_term("a", "calls_subject", "新的称呼")
+    fresh = repo.name_material(["a"])["a"]
+    assert fresh == (repo.get("a"), repo.address_line("a"))
+    assert fresh != expected["a"]
+
+
 def test_experience_requires_object_ref(tmp_path):
     process, repository = runtime(tmp_path)
 

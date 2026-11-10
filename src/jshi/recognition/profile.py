@@ -284,13 +284,38 @@ class ObjectProfileRepository:
         profile = self.get(object_id)
         if profile is None:
             return ""
+        return self._address_line(profile, self.terms_of(object_id, "calls_subject"),
+                                  self.terms_of(object_id, "called_by_others"))
+
+    def name_material(self, object_ids):
+        """Read one fresh name snapshot for a voice batch, without per-person connections."""
+        from contextlib import closing
+        ids = tuple(dict.fromkeys(object_ids))
+        if not ids:
+            return {}
+        placeholders = ','.join('?' for _ in ids)
+        with closing(self._connect()) as connection, connection:
+            connection.execute('BEGIN')
+            profiles = {r['object_id']: _profile(r) for r in connection.execute(
+                f'SELECT * FROM object_profiles WHERE object_id IN ({placeholders})', ids)}
+            terms = {}
+            for row in connection.execute(
+                    f'SELECT object_id,kind,text FROM object_terms WHERE object_id IN ({placeholders}) '
+                    "AND kind IN ('calls_subject','called_by_others') ORDER BY count DESC,last_seen DESC", ids):
+                values = terms.setdefault((row['object_id'], row['kind']), [])
+                if len(values) < 5:
+                    values.append(row['text'])
+        return {oid: (profile, self._address_line(profile, terms.get((oid, 'calls_subject'), ()),
+                                                 terms.get((oid, 'called_by_others'), ())))
+                for oid, profile in profiles.items()}
+
+    @staticmethod
+    def _address_line(profile, terms, other_terms):
         parts: list[str] = [f"人物：{profile.label}"]
         if profile.aliases:
             parts.append(f"{profile.label}，又名{'、'.join(profile.aliases)}")
-        terms = self.terms_of(object_id, "calls_subject")
         if terms:
             parts.append("常称匠石为" + "、".join(f"「{item}」" for item in terms))
-        other_terms = self.terms_of(object_id, "called_by_others")
         if other_terms:
             parts.append("别人称此人为" + "、".join(f"「{item}」" for item in other_terms))
         return "称呼：" + "；".join(parts) if parts else ""

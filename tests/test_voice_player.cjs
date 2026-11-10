@@ -12,8 +12,10 @@ function node(id) {
 }
 const sent = [], sources = [];
 const context = vm.createContext({
-  document:{getElementById:node,createElement:()=>({prepend(){},scrollIntoView(){}})},
-  navigator:{},setTimeout,clearTimeout,console,fetch:async()=>({ok:true,json:async()=>({people:[]})}),
+  document:{getElementById:node,createElement:()=>({prepend(){},scrollIntoView(){},
+    querySelector(selector){return selector==='time'?(this.timeNode??={textContent:''}):null;}})},
+  navigator:{},performance,setTimeout:(fn,...args)=>{const timer=setTimeout(fn,...args);timer.unref();return timer;},
+  clearTimeout,console,fetch:async()=>({ok:true,json:async()=>({people:[]})}),
   WebSocket:{OPEN:1},Uint8Array,Float32Array,DataView,Set,
   atob:s=>Buffer.from(s,'base64').toString('binary'),
   audio:{currentTime:0,createBuffer:(n,length,rate)=>({copyToChannel(){}}),
