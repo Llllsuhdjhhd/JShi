@@ -13,6 +13,22 @@ from jshi.models import ModelRequest, ModelResponse, ResponseItem, ResponsePlan,
 from jshi.core import SubjectState
 from jshi.voice.config import VoiceConfig
 from jshi.voice.dialogue import VoiceDialogue
+
+
+def test_legacy_delivery_close_does_not_refresh_old_playback(tmp_path):
+    from types import SimpleNamespace
+    from datetime import datetime, timezone
+    state=VoiceDialogue(tmp_path/'legacy-clock.json')
+    def row(kind,at,**content):
+        return SimpleNamespace(event_type=kind,created_at=datetime.fromtimestamp(at/1000,timezone.utc),content=content)
+    common={'reply_id':'r','session_id':'old','played_text':'我在呢。','state':'completed'}
+    state.import_history('stone',[
+        row('voice_delivery',1000000,**common),
+        row('voice_playback_clock',1001000,reply_id='r',segment=0,phase='completed',received_at_ms=1001000),
+        row('voice_delivery',2000000,**common)])
+    assert state.state['replies'][0]['played_at']['0']==1001000
+    assert state.recent('stone',cutoff=2000001,session='new')==[]
+    assert state.recent('stone',cutoff=1002000,session='new')[0]['scope']=='previous_session'
 from jshi.voice.direct_reply import reply_state
 from jshi.voice.jev import VoiceJEV, promote_withheld_stop
 from jshi.voice.volc import Transcript

@@ -59,6 +59,7 @@ class BidirectionalTTS:
         self.ws = None
         self.lock = asyncio.Lock()
         self.last_used = 0.0
+        self.last_metrics = {}
 
     async def receive(self):
         import aiohttp
@@ -83,9 +84,23 @@ class BidirectionalTTS:
         await self.ws.send_bytes(pack_tts(1))
         if (await self.receive())[1] != 50:
             raise RuntimeError('TTS connection not acknowledged')
+        self.last_used = monotonic()
+
+    async def prepare(self):
+        # Establish only the transport; no text, synthesis session or playback.
+        if self.lock.locked():
+            return
+        async with self.lock:
+            try:
+                await asyncio.wait_for(self.connect(), 1.0)
+            except BaseException:
+                await self.close()
+                raise
 
     async def stream(self, texts):
+        requested = monotonic()
         async with self.lock:
+            metrics = self.last_metrics = {'lock_ms':round((monotonic()-requested)*1000,1)}
             sender = None
             sid = uuid4().hex
             finished = False
@@ -97,9 +112,13 @@ class BidirectionalTTS:
                 import aiohttp
                 for attempt in range(2):
                     try:
+                        connecting = monotonic()
                         await self.connect()
+                        metrics['connect_ms'] = round((monotonic()-connecting)*1000,1)
+                        opening = monotonic()
                         await self.ws.send_bytes(pack_tts(100, request, sid))
                         response = await self.receive()
+                        metrics['session_ms'] = round((monotonic()-opening)*1000,1)
                         break
                     except (aiohttp.ClientConnectionError, ConnectionError, asyncio.TimeoutError):
                         if not reused or attempt:
@@ -120,6 +139,7 @@ class BidirectionalTTS:
                         body = self.request(text)
                         body.update(event=200, namespace='BidirectionalTTS')
                         await self.ws.send_bytes(pack_tts(200, body, sid))
+                        metrics.setdefault('text_sent_mono',monotonic())
                     await self.ws.send_bytes(pack_tts(102, session_id=sid))
                 sender = asyncio.create_task(send_texts())
                 got_audio = False
@@ -130,6 +150,8 @@ class BidirectionalTTS:
                     if response_sid != sid:
                         raise RuntimeError('TTS session id mismatch')
                     if kind == 11 and event == 352 and payload:
+                        if not got_audio:
+                            metrics['text_to_first_audio_ms'] = round((monotonic()-metrics.get('text_sent_mono',requested))*1000,1)
                         got_audio = True
                         yield payload
                     elif event == 152:

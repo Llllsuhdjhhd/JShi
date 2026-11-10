@@ -107,3 +107,15 @@ def test_stale_transport_retry_happens_before_text():
         assert len(http.connections)==2
         await cloud.close()
     asyncio.run(run())
+
+
+def test_prewarm_sends_no_text_and_reuses_transport():
+    async def run():
+        http=HTTP();cloud=VolcVoice(VoiceConfig('secret'),http)
+        await cloud.prepare_synthesis()
+        assert http.connections[0].events==[1]
+        assert [p async for p in cloud.synthesize('我在呢。')]
+        assert len(http.connections)==1
+        assert cloud._tts.last_metrics['connect_ms'] < 1
+        await cloud.close()
+    asyncio.run(run())

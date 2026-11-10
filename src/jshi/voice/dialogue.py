@@ -43,10 +43,19 @@ class VoiceDialogue:
             loaded = self.state.setdefault('legacy_loaded', [])
             if subject in loaded:
                 return
-            latest = {}
+            latest, first_at, played_clocks = {}, {}, {}
             for record in records:
                 if record.event_type == 'voice_delivery' and record.content.get('reply_id'):
-                    latest[record.content['reply_id']] = record
+                    rid=record.content['reply_id']
+                    if rid not in latest or record.created_at > latest[rid].created_at:
+                        latest[rid] = record
+                    at=record.created_at.timestamp()*1000
+                    first_at[rid]=min(first_at.get(rid,at),at)
+                elif record.event_type == 'voice_playback_clock' and record.content.get('phase') == 'completed':
+                    value=record.content
+                    at=value.get('received_at_ms')
+                    if type(at) in (int,float) and 0 < at < 1e15:
+                        played_clocks.setdefault(value.get('reply_id'),{})[str(value.get('segment'))]=at
             existing = {r['reply_id'] for r in self.state['replies']}
             for reply_id, record in latest.items():
                 if reply_id in existing:
@@ -54,7 +63,9 @@ class VoiceDialogue:
                 value = record.content
                 played = value.get('played_text') or ''
                 texts = sentences(played + (value.get('partial_text') or '') + (value.get('pending_text') or ''))
-                at = record.created_at.timestamp()*1000
+                # A later stop/connection-close snapshot is not a new playback.
+                # Prefer actual receipts; otherwise retain the earliest evidence.
+                at = first_at[reply_id]
                 length, completed = 0, []
                 for i, text in enumerate(texts):
                     length += len(text)
@@ -63,7 +74,7 @@ class VoiceDialogue:
                 self.state['replies'].append({'subject':subject,'key':'legacy:'+reply_id,
                     'session':value.get('session_id','legacy'),'reply_id':reply_id,
                     'texts':list(texts),'played':completed,'state':value.get('state','generated'),
-                    'at':at,'played_at':{str(i):at for i in completed}})
+                    'at':at,'played_at':{str(i):played_clocks.get(reply_id,{}).get(str(i),at) for i in completed}})
             self.state['replies'] = self.state['replies'][-128:]
             loaded.append(subject)
             self._save()
@@ -135,7 +146,7 @@ class VoiceDialogue:
                     row['state'] = 'stopped'
             self._save()
 
-    def recent(self, subject, *, cutoff=None, exclude=()):
+    def recent(self, subject, *, cutoff=None, exclude=(), session=None):
         cutoff = time()*1000 if cutoff is None else cutoff
         with self.lock:
             rows = [{'who': list(r.get('person_links', {}).values())[-1]['who'] if r.get('person_links') else r['who'], 'text': r['text'], 'at': r['at'], 'basis': '收到的原话'}
@@ -150,7 +161,8 @@ class VoiceDialogue:
                     if played or self.state['include_unplayed']:
                         rows.append({'who': '匠石', 'text': text, 'at': at if played else r['at'],
                             'basis': ('文字回复已发送，未确认阅读' if r['state'] == 'shown' else '已播') if played
-                                     else '已生成但未确认播出' + ('，已中断' if r['state'] == 'stopped' else '')})
+                                     else '已生成但未确认播出' + ('，已中断' if r['state'] == 'stopped' else ''),
+                            **({'scope':'previous_session'} if session and r.get('session') != session else {})})
             rows.sort(key=lambda r: r['at'])
             selected, size = [], 0
             for row in reversed(rows[-24:]):

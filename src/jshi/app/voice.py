@@ -682,8 +682,10 @@ class VoiceConversation:
         return next((u.speaker for u in reversed(self.scene)
                      if u.speaker.object_id and u.speaker.method != 'unassigned_audio'), None)
 
-    async def typed(self, text, object_id='') -> None:
+    async def typed(self, text, object_id='', *, receipt=None) -> None:
         """Text from the voice page speaks as the current person, and can correct a name."""
+        typed_started, typed_wall = monotonic(), time()*1000
+        receipt = receipt or {}
         self.feedback.changed()
         self.preparation.cancel()
         text = str(text or '').strip()
@@ -702,7 +704,7 @@ class VoiceConversation:
             if profile is None or profile.status == 'rejected' or profile.source == 'voice_scene':
                 await self.emit('typed_error', text='所选人物不存在，请刷新人物列表。')
                 return
-            at = time()*1000
+            at = receipt.get('received_at_ms', typed_wall)
             iid = uuid4().hex
             start = max((u.end_ms for u in self.scene), default=0)
             if self.sample_source is not None:
@@ -725,10 +727,15 @@ class VoiceConversation:
                                        identity_note='文字输入；人物由用户选择，不是声纹确认')
             self.scene.append(utterance)
             self.input_records[iid] = {'pcm': None, 'received_at_ms': at, 'at': monotonic()}
+            self.record('typed_input_timing', {
+                'input_id':iid, **receipt, 'typed_started_at_ms':typed_wall,
+                'task_queue_ms':round((typed_started-receipt.get('received_mono',typed_started))*1000,1),
+                'prepare_ms':round((monotonic()-typed_started)*1000,1),
+                'input_ready_at_ms':time()*1000})
             self.stamp_pipeline(iid,
                 previous_settled_at_ms=self.last_settled_at_ms,
                 session_started_at_ms=self.session_started_at_ms,
-                asr_returned_at_ms=at, text_sent_at_ms=at)
+                server_received_at_ms=at, result_ready_at_ms=time()*1000, text_sent_at_ms=time()*1000)
             while len(self.input_records) > 128:
                 old = next(iter(self.input_records))
                 self.sample_bytes -= len(self.input_records.pop(old).get('pcm') or b'')
@@ -2254,6 +2261,20 @@ class VoiceConversation:
 
     async def _judge_once(self, utterances, speaker, overlap, envelope=None) -> tuple[InterruptDecision, dict, tuple]:
         preparation_mono, preparation_wall = monotonic(), time()*1000
+        # Hide cold TTS transport setup under semantic judgment. It sends no text
+        # and never authorizes speech; actual synthesis still follows JEV/control.
+        warmer = getattr(self.cloud, 'prepare_synthesis', None)
+        if (warmer and any(u.speaker.method != 'visual_scene' for u in utterances)
+                and self.delivery.snapshot().get('state') not in {'playing','paused','queued'}
+                and (getattr(self, '_tts_warming', None) is None or self._tts_warming.done())):
+            async def prepare_voice():
+                try:
+                    await warmer()
+                except Exception as exc:
+                    self.record('voice_tts_prepare', {'status':'deferred','error_type':type(exc).__name__})
+            self._tts_warming = asyncio.create_task(prepare_voice())
+            self.background_tasks.add(self._tts_warming)
+            self._tts_warming.add_done_callback(self.background_tasks.discard)
         schedule_scope = self.entry_scheduler.schedule.capture()
         entry_job = self.entry_scheduler.current
         if entry_job and tuple(u.input_id for u in utterances) != tuple(u.input_id for u in entry_job.rows):
@@ -2302,7 +2323,7 @@ class VoiceConversation:
         if self.utterance_material:
             delivery['utterance_context'] = self.utterance_organizer.material()
         delivery['conversation'] = self.dialogue.recent(self.subject_id, cutoff=cutoff,
-            exclude={u.input_id for u in utterances})
+            exclude={u.input_id for u in utterances}, session=self.session_id)
         delivery = self.dialogue.clean(delivery, subject=self.subject_id)
         delivery['answer_handling'] = self._answer_handling_context()
         from jshi.voice.wait_ack import model_key
@@ -3685,6 +3706,11 @@ class VoiceConversation:
                         if measured and 'first_audio_ms' not in measured[1]:
                             measured[1]['first_audio_ms'] = round((monotonic() - measured[0]) * 1000)
                             measured[1]['synthesis_first_packet_ms'] = round((monotonic() - synthesis_started) * 1000)
+                            self.record('voice_tts_first_packet', {
+                                'reply_id':d.reply_id, 'segment':segment, 'at_ms':time()*1000,
+                                'synthesis_first_packet_ms':measured[1]['synthesis_first_packet_ms'],
+                                'reply_ready_at_ms':measured[1].get('reply_ready_at_ms'),
+                                'transport':{k:v for k,v in getattr(getattr(self.cloud,'_tts',None),'last_metrics',{}).items() if k.endswith('_ms')}})
                         await self.emit("audio", reply_id=d.reply_id, segment=segment,
                                         text=text, pcm=base64.b64encode(pcm).decode(), rate=self.cloud.config.template.sample_rate)
                 finally:
@@ -3716,7 +3742,9 @@ class VoiceConversation:
         if self.delivery.acknowledge(str(payload.get("reply_id", "")), int(payload.get("segment", -1)), payload.get("phase", "")):
             self.record('voice_playback_clock', {'reply_id':payload.get('reply_id'),
                 'segment':payload.get('segment'), 'phase':payload.get('phase'),
-                'browser_at_ms':payload.get('browser_at_ms'), 'received_at_ms':time()*1000})
+                'browser_at_ms':payload.get('browser_at_ms'), 'received_at_ms':time()*1000,
+                'audio_received_at_ms':payload.get('audio_received_at_ms'),
+                'audio_wait_ms':payload.get('audio_wait_ms')})
             key = self.reply_epochs.get(str(payload.get('reply_id', '')))
             self.answer_status[key] = ('completed' if len(self.delivery.current.completed) == len(self.delivery.current.texts) else 'playing')
             if payload.get('phase') == 'completed':
@@ -4977,9 +5005,14 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                                 await conversation.emit('voice_settings_error', text=str(exc), match_threshold=getattr(speakers, 'threshold', None),
                                     single_confirmation_threshold=getattr(speakers, 'confirmation_threshold', None))
                         elif kind == 'text':
-                            async def submit_text(text=payload.get('text', ''), oid=payload.get('object_id', '')):
+                            receipt = {'received_at_ms':time()*1000, 'received_mono':monotonic()}
+                            for key in ('client_submitted_at_ms','client_sent_at_ms','client_prepare_ms','client_buffered_bytes'):
+                                value = payload.get(key)
+                                if type(value) in (int,float) and 0 <= value < 1e15:
+                                    receipt[key] = value
+                            async def submit_text(text=payload.get('text', ''), oid=payload.get('object_id', ''), receipt=receipt):
                                 try:
-                                    await conversation.typed(text, oid)
+                                    await conversation.typed(text, oid, receipt=receipt)
                                 except Exception as exc:
                                     await conversation.emit('typed_error', text=str(exc))
                             task = asyncio.create_task(submit_text())

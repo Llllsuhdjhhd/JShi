@@ -585,3 +585,42 @@ def test_missing_ambient_addressee_does_not_swallow_stop_and_cancel_operation(mo
         {'state':'completed'},on_entry=lambda value:controls.append(value.control))
     assert controls==['stop'] and result.silent_operation and result.route=='main'
     assert not result.direct_reply and not result.waiting_reply
+
+@pytest.mark.parametrize('text', ['我有点累，只想安静一会儿。', '给我一个放松的小建议。'])
+def test_split_first_call_can_answer_beyond_greetings(text):
+    first=entry(front=preparation(route='self_reply',level=3,reply='先放松肩膀，慢慢呼吸。'))
+    model=Model([first])
+    result=VoiceJEV(model,mode='split',fallback_models=[]).decide_batch('stone',
+        [{'n':1,'who':'P1','source':'web_text','text':text}],[],
+        {'state':'completed','short_chat':{'allowed':True,'person_code':'P1'}})
+    assert not result.model_error and result.direct_reply=='先放松肩膀，慢慢呼吸。'
+    assert len(model.requests)==1 and model.requests[0].purpose=='voice_jev_entry'
+
+
+def test_split_first_call_can_prepare_main_and_waiting_reply():
+    first=entry(front=preparation(level=1,waiting_reply='我核对一下。'))
+    model=Model([first])
+    result=VoiceJEV(model,mode='split',fallback_models=[]).decide_batch('stone',
+        [{'n':1,'who':'P1','source':'web_text','text':'查一下杭州这周天气'}],[],
+        {'state':'completed','waiting':{'allowed':True,'levels':{'L1':{'expected_seconds':3,'max_chars':16}}}})
+    assert not result.model_error and result.route=='main'
+    assert result.waiting_reply=='我核对一下。' and len(model.requests)==1
+
+
+def test_combined_does_not_accept_split_front_field():
+    result,model=run('combined',entry(front=preparation()))
+    assert result.model_error and not result.direct_reply
+
+
+@pytest.mark.parametrize('state,control,overlap', [('playing','redirect',False),('completed','stop',False),('completed','redirect',True)])
+def test_split_front_cannot_skip_preparation_during_control_or_overlap(state,control,overlap):
+    result,model=run('split',entry(control=control,front=preparation(route='self_reply',level=3,reply='不能提前说出')),
+                     preparation(level=1),delivery={'state':state},overlap=overlap)
+    assert not result.model_error and not result.direct_reply
+    assert len(model.requests)==2 and model.requests[1].purpose=='voice_jev_prepare'
+
+
+def test_split_front_cannot_use_another_persons_cached_context():
+    result,model=run('split',entry(front=preparation(route='self_reply',level=3,reply='不能提前说出')),
+        delivery={'state':'completed','short_chat':{'allowed':True,'scope':'person','person_code':'P2','person':{'name':'其他人'}}})
+    assert not result.model_error and result.route=='main' and not result.direct_reply

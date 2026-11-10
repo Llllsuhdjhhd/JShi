@@ -173,6 +173,14 @@ class VolcVoice:
         finally:
             await stream.aclose()
 
+    async def prepare_synthesis(self):
+        if self.config.tts_transport != 'websocket':
+            return
+        from .tts_ws import BidirectionalTTS
+        if self._tts is None:
+            self._tts = BidirectionalTTS(self.http, lambda: self.headers(self.config.tts_resource), self.tts_request)
+        await self._tts.prepare()
+
     async def close(self):
         if self._tts is not None:
             await self._tts.close()

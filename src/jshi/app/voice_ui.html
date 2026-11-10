@@ -370,6 +370,7 @@ const phaseSteps={collect:['collect','收集发言'],prepare:['prepare','准备�
 phaseNames.reconsider='正在重新考虑';phaseSteps.reconsider=['main','重新考虑'];
 const liveStepKeys=new Set(['previous','speech','speechEnd','cut','sent','jev','resolve','main','ack','reply','finished']);
 const pipelineNodes=[['session_started_at_ms','会话开始'],['previous_settled_at_ms','前一轮结束'],['audio_start_received_at_ms','语音起点送达'],['audio_end_received_at_ms','末尾音频送达'],['asr_returned_at_ms','识别结果到达'],['result_ready_at_ms','输入就绪'],['collect_at_ms','开始收集'],['text_sent_at_ms','文字发出'],['display_ack_at_ms','页面显示'],['jev_started_at_ms','接话判断开始'],['jev_finished_at_ms','接话判断结束'],['queued_at_ms','进入主流程队列'],['main_started_at_ms','主引擎开始'],['waiting_reply_sent_at_ms','过渡语发出'],['reply_sent_at_ms','回复发出'],['turn_complete_at_ms','本轮完成'],['write_started_at_ms','记忆整理开始'],['write_completed_at_ms','记忆整理结束']];
+pipelineNodes.push(['server_received_at_ms','服务收到文字']);
 function wallClock(ms){return Number.isFinite(ms)?new Date(ms).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';}
 const replyRows=new Map(), actionRows=new Map();
 function actionKey(key){return JSON.stringify(key||[]);}
@@ -807,7 +808,9 @@ function finishPlaybackClock() {
 function ack(segment,phase) {
   const at=Date.now();
   if(phase==='started')showPlaybackClock(replyId,'started',at);
-  send({type:'played',reply_id:replyId,segment,phase,browser_at_ms:at});
+  const clock=playbackClocks.get(replyId);
+  send({type:'played',reply_id:replyId,segment,phase,browser_at_ms:at,
+    audio_received_at_ms:clock?.firstAudio, audio_wait_ms:clock?.firstAudioMono!=null?performance.now()-clock.firstAudioMono:null});
 }
 function refreshStatus() {
   $('status').textContent = paused ? '正在听你说' : (playing || queue.length) ? '匠石正在说话' :
@@ -1046,7 +1049,7 @@ function message(m) {
     const verdict=m.speaker.method==='manual_annotation' ? '手动关联' : done ? 'JEV 最终判断：'+(m.certainty || '不确定') : 'JEV 判断失败，保留声纹初判';
     speakerLabels.set(m.speaker.object_id,m.speaker.label);
     if(row)row.identityVerdict={certainty:done?(m.certainty||'不确定'):'未完成',reason:m.reason||'未提供依据'};
-    if(row&&row.training?.savedSource!=='manual'){
+    if(row?.meta&&row?.who&&row?.jevNote&&row.training?.savedSource!=='manual'){
       const routed=row.meta.textContent.includes('未交主流程') ? ' · 未交主流程' : '';
       row.who.textContent=displayedSpeaker(m.speaker,m.certainty,row.voiceprintCandidates,m.identity_display)+'：';
       row.identityView=m.identity_display;row.who.title=(m.identity_display?.label||m.speaker.label)+'：'+(m.identity_display?.reason||m.reason||'');
@@ -1136,6 +1139,8 @@ function message(m) {
     if(m.turn_key){const key=actionKey(m.turn_key);replyRows.set(key,lastRow);const action=actionRows.get(key);if(action&&action.isConnected)lastRow.after(action);while(replyRows.size>64)replyRows.delete(replyRows.keys().next().value);}
   }
   else if(m.type==='audio' && m.reply_id===replyId && !invalidReplies.has(m.reply_id)) {
+    const clock=playbackClocks.get(replyId);
+    if(clock&&clock.firstAudio==null){clock.firstAudio=Date.now();clock.firstAudioMono=performance.now();}
     const raw=atob(m.pcm), bytes=new Uint8Array(raw.length);
     for(let i=0;i<raw.length;i++) bytes[i]=raw.charCodeAt(i);
     const view=new DataView(bytes.buffer), samples=new Float32Array(Math.floor(bytes.length/2));
@@ -1240,12 +1245,17 @@ $('text-person').onchange=()=>{try{localStorage.setItem('jshi.text.person',$('te
 refreshTextPeople();
 $('typed').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){e.preventDefault();$('composer').onsubmit(e);}};
 $('composer').onsubmit=async event=>{
- event.preventDefault();if(textSending)return;const text=$('typed').value.trim(),object_id=$('text-person').value;
+ event.preventDefault();if(textSending)return;const submitted=Date.now(),submitMono=performance.now();const text=$('typed').value.trim(),object_id=$('text-person').value;
  if(!text){$('typed').focus();return;}if(!object_id){$('text-status').textContent='先选择这段文字由谁说。';$('text-person').focus();return;}
- const actor=Array.from($('text-person').options).find(p=>p.value===object_id)?.textContent||speakerLabels.get(object_id)||'对方';
- const row=log(actor+'（文字）：'+text,'input'),badge=document.createElement('span');badge.className='send-state';badge.textContent='正在发送…';row.appendChild(badge);const extra=typedDetails(row,actor);modelProgress(row,'准备中');$('typed').value='';$('typed').focus();
+ const viaVoice=ready&&ws&&ws.readyState===WebSocket.OPEN;
  textSending=true;$('send-text').disabled=true;
- if(ready&&ws&&ws.readyState===WebSocket.OPEN){pendingTyped={text,badge,row};send({type:'text',text,object_id});$('text-status').textContent='已显示输入，等待接收确认。';return;}
+ // Send before building the message/details panel: layout must not hold up input.
+ const payload={text,object_id,client_submitted_at_ms:submitted,client_sent_at_ms:Date.now(),client_prepare_ms:performance.now()-submitMono,client_buffered_bytes:viaVoice?ws.bufferedAmount:0};
+ const textRequest=viaVoice?null:fetch('/text-input',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/x-ndjson'},body:JSON.stringify(payload)});
+ if(viaVoice)send({type:'text',...payload});
+ const actor=Array.from($('text-person').options).find(p=>p.value===object_id)?.textContent||speakerLabels.get(object_id)||'对方';
+ const row=log(actor+'（文字）：'+text,'input',submitted),badge=document.createElement('span');badge.className='send-state';badge.textContent='正在发送…';row.appendChild(badge);const extra=typedDetails(row,actor);modelProgress(row,'准备中');$('typed').value='';$('typed').focus();
+ if(viaVoice){pendingTyped={text,badge,row};$('text-status').textContent='已显示输入，等待接收确认。';return;}
  let phase='正在生成回应',started=Date.now(),timer,shown=false,complete=false,replyRow;
  function progress(){const seconds=Math.floor((Date.now()-started)/1000);$('text-status').textContent=phase+(seconds?' · 已用时 '+seconds+' 秒':'…');timer=setTimeout(progress,1000);}progress();
  function eventReceived(d){
@@ -1265,7 +1275,7 @@ $('composer').onsubmit=async event=>{
   if(d.type==='reply'){phase=shown?'回复已显示，正在完成本轮处理':'正在完成本轮处理';badge.textContent='已接收';$('text-status').textContent=phase;}
   if(d.type==='complete'){modelProgress(row,'已完成',true);if(d.timing&&timingSummary(d.timing)){modelHistory(row,'服务端耗时：'+timingSummary(d.timing));updateModelPanel(row);}detailLine(extra,(d.route==='self_reply'?'JEV直接回答，未进入主认知。':d.route==='control'?'入口判断结束，本轮未进入主认知。':d.jev_fallback?'入口判断失败后，已转交主认知处理。':'已进入主认知。')+(d.timing&&timingSummary(d.timing)?'\n'+timingSummary(d.timing):''));showActions(d.actions,replyRow);complete=true;badge.textContent=d.route==='self_reply'?'JEV 我回答':d.route==='control'?'未进入主认知':'已处理';phase=d.route==='self_reply'?'短时聊天，本轮未进入主流程和记忆写入。':(shown?'本轮已完成。':'本轮已完成，未开口（'+d.mode+'）。')+(d.scene_write==='background'?'记忆在后台整理，可继续发送。':'');}
  }
- try{const r=await fetch('/text-input',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/x-ndjson'},body:JSON.stringify({text,object_id})});if(!r.ok)throw Error(await r.text());
+ try{const r=await textRequest;if(!r.ok)throw Error(await r.text());
   if((r.headers.get('Content-Type')||'').includes('application/x-ndjson')){const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(line.trim())eventReceived(JSON.parse(line));}}buffer+=decoder.decode();if(buffer.trim())eventReceived(JSON.parse(buffer));if(!complete)throw Error('连接中断，未收到处理完成确认');}
   else eventReceived({...(await r.json()),type:'complete'});
   $('text-status').textContent=phase;

@@ -341,6 +341,18 @@ assert.equal(vm.runInContext(`personalPredictionText({ranking:[{label:'lux',scor
   assert.equal(vm.runInContext('latestModelInput.modelUi.button.textContent',ctx),'模型 · 处理失败');
   assert.match(vm.runInContext('latestModelInput.modelUi.extra.children.at(-1).textContent',ctx),/read operation timed out/);
   console.log('Text stream: live stage, calling notice and timeout failure passed');
+  vm.runInContext(`
+    ready=true;textSending=false;sent.length=0;
+    ws={readyState:1,bufferedAmount:0,send:x=>sent.push(JSON.parse(x))};
+    $('typed').value='给我一个简单建议';
+    globalThis.originalTypedLog=log;globalThis.sentBeforeLayout=false;
+    log=(...args)=>{if(args[1]==='input')sentBeforeLayout=sent.some(m=>m.type==='text'&&m.text==='给我一个简单建议');return originalTypedLog(...args);};
+  `,ctx);
+  await vm.runInContext(`$('composer').onsubmit({preventDefault(){}})`,ctx);
+  assert.equal(vm.runInContext('sentBeforeLayout',ctx),true);
+  vm.runInContext(`log=originalTypedLog;pendingTyped.row.querySelector=()=>null;message({type:'typed_input',text:'给我一个简单建议',label:'lux',input_id:'early-sent'});`,ctx);
+  assert.equal(vm.runInContext('textSending',ctx),false);
+  console.log('Text sends before message layout, then binds the actual receive confirmation');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 
 assert.match(vm.runInContext(`personalPredictionText({overlap:true,ranking:[{label:'lux',score:.97}]})`,ctx),/MLP（重叠参考）：lux 0.970/);
@@ -389,3 +401,7 @@ assert.match(vm.runInContext('rankElement.textContent',ctx),/文字与声音尚�
 assert.doesNotMatch(vm.runInContext('rankElement.textContent',ctx),/存在多个声音段/);
 vm.runInContext(`voiceRanking(rankElement,'{}',[{label:'lux',score:.9,source:'repeated_short_audio'}])`,ctx);
 assert.match(vm.runInContext('rankElement.textContent',ctx),/同一短句重复拼接，不能单独确认身份/);
+
+vm.runInContext(`const typed=log('lux（文字）：哈喽匠石','input');typedDetails(typed,'lux');bindPipelineRow(typed,'typed-final',{});
+message({type:'identity_final',input_id:'typed-final',jev_status:'completed',certainty:'确定',reason:'文字选择',speaker:{object_id:'lux-id',label:'lux',method:'user_selected'},voice_initial:{label:'lux'}});`,ctx);
+console.log('Typed identity result preserves text row without accessing voice-only fields');

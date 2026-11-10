@@ -24,6 +24,14 @@ def short_reply_people_allowed(short, items):
     ) and len({i.speaker_pick for i in items}) == 1
 
 
+def split_instruction():
+    from .jev_prompts import SPLIT_FRONT_INSTRUCTION
+    opening = ENTRY_INSTRUCTION.replace(
+        '不生成回复；需要回应的内容交下一阶段准备。',
+        '先独立完成入口结论；仅在下述front条件满足时同时给短答或主认知准备，其余交下一阶段。')
+    return opening + '\n\n' + SPLIT_FRONT_INSTRUCTION
+
+
 def object_schema(properties):
     return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
 
@@ -45,7 +53,7 @@ def voice_interaction_has_basis(snapshot):
     if state.get('state') in {'thinking', 'playing', 'paused', 'queued'} or state.get('spoken'):
         return True
     names = [n for n in state.get('names', ['匠石']) if isinstance(n, str) and n.strip()]
-    events = snapshot.get('events', [])
+    events = [r for r in snapshot.get('events', []) if r.get('scope') != 'previous_session']
     if any(name in str(row.get('text', '')) for name in names for row in [*lines, *events]):
         return True
     if any(row.get('p', row.get('who')) in names for row in events):
@@ -266,6 +274,8 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
     refs.update(re.findall(r'(?<![A-Za-z0-9_])E\d+(?![A-Za-z0-9_])', snapshot['scene']))
     refs.discard(None)
     schema = entry_schema(thin, refs)
+    if mode == 'split':
+        schema['properties']['front'] = {'anyOf': [preparation_schema(), {'type': 'null'}]}
     if mode == 'combined':
         schema['properties']['preparation'] = {'anyOf': [preparation_schema(), {'type': 'null'}]}
         schema['required'].append('preparation')
@@ -470,8 +480,11 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             entry = call('voice_jev', combined_instruction(), user, schema)
             preparation = entry.pop('preparation')
         else:
-            entry = call('voice_jev_entry', ENTRY_INSTRUCTION, entry_text(snapshot), schema)
-            preparation = None
+            user = entry_text(snapshot) + '\n\n' + blocks([
+                ('回应许可与材料可用性', {'short_chat': snapshot['short_chat'],
+                 'waiting': snapshot['waiting'], **snapshot['availability']})])
+            entry = call('voice_jev_entry', split_instruction(), user, schema)
+            preparation = entry.pop('front', None)
         accepted = gate._from_current(entry['items'], batch, '')
         bound = {r['n']: gate._selected_text(r) for r in batch if gate._selected_text(r)}
         if bound:
@@ -546,6 +559,16 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             if preparation is not None:
                 raise ValueError('背景或等待不能附带回应准备')
             return replace(accepted, stage_records=tuple(stages), model_raw=raw)
+        if mode == 'split' and preparation is not None:
+            if (control == 'stop' or entry['interaction'] != 'direct'
+                    or entry['utterance_complete'] != 'complete' or overlap or pending
+                    or snapshot['state'].get('state') in {'thinking', 'playing', 'paused', 'queued'}):
+                preparation = None
+                stages.append({'stage':'split_front','mode':mode,'status':'deferred',
+                               'reason':'当前控制、完整度或忙碌状态需要继续准备'})
+            else:
+                stages.append({'stage':'split_front','mode':mode,'status':'accepted',
+                               'route':preparation['route']})
         native_prepare = False
         bridge = delivery.get('_decision_entry')
         if mode == 'decision' and used_decision and getattr(bridge, 'protocol', '') == 'native-v3':
@@ -575,7 +598,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             except Exception as exc:
                 stages.append({'stage': 'decision_prepare_fallback', 'mode': mode, 'status': 'fallback',
                                'reason': type(exc).__name__ + ':' + str(exc)})
-        if (mode != 'combined' and not native_prepare) or (mode == 'combined' and preparation is None):
+        if preparation is None and not native_prepare:
             preparation = call('voice_jev_prepare', PREPARATION_INSTRUCTION,
                                preparation_text(snapshot, entry), preparation_schema())
         if not isinstance(preparation, dict):
