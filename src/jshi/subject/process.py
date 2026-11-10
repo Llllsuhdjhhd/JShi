@@ -923,8 +923,11 @@ class SubjectProcess:
                               transport_context=(current.transport_context + '\n' + note).strip())
         if envelope is not None:
             # 信封只留在入口和记录里。主流程看到的是已经整理好的文字。
+            from jshi.core.main_input import entry_assessments
+            entry_context = entry_assessments(envelope.jev_calls,
+                [u.input_id for u in envelope.current_utterances])
             current = replace(current, audio_delivery=envelope.voice_delivery or any(p.kind == "audio" for p in envelope.parts), input_review_text='',
-                              transport_context=(current.transport_context + '\n' + envelope.delivery_context).strip(),
+                              transport_context='\n'.join(filter(None, (current.transport_context, envelope.delivery_context, entry_context))),
                               interaction_scene=envelope.interaction_scene,
                               object_codes=tuple((object_codes or {}).items()))
             from jshi.core.prompt_profile import select_profile

@@ -168,3 +168,34 @@ def test_media_aliases_are_local_consistent_and_preserve_sources():
     assert 'session:' not in text and 'long-frame-id' not in text
     assert text.count('媒体1') == 2 and text.count('媒体2') == 1
     assert items[0]['parts'][0]['reference'] == a['reference']
+
+
+def test_entry_uncertainty_survives_merged_batches_without_alias_collisions():
+    from jshi.core.main_input import entry_assessments
+    calls = [{'input_ids': ['a', 'removed'], 'interaction': 'uncertain',
+              'decision_reason': 'I1意思含糊；I2未完；E3仅为自身插话'},
+             {'input_ids': ['b'], 'interaction': 'direct', 'decision_reason': 'I1明确呼唤'},
+             {'input_ids': ['other'], 'interaction': 'direct', 'decision_reason': '其他输入'}]
+    text = entry_assessments(calls, ['b', 'a'])
+    assert '第2条：是否对匠石说尚不确定' in text
+    assert '本轮第2条意思含糊' in text and '本轮第1条明确呼唤' in text
+    assert 'I1' not in text and 'E3' not in text and '其他输入' not in text
+    assert '可以不回应' in text
+    assert entry_assessments(calls, ['unrelated']) == ''
+
+
+def test_interaction_origin_preserves_age_without_program_ids():
+    from jshi.voice.jev_material import build_snapshot
+    payload = {'input': {'lines': []}, 'now': 100000}
+    origin = {'text': '你好', 'basis': '有效面对面招呼', 'at_ms': 97500, 'input_id': 'private-long-id'}
+    state = build_snapshot(payload, [], {'interaction_origin': origin})['state']
+    assert state['interaction_origin'] == {'text': '你好', 'basis': '有效面对面招呼', 'age_seconds': 2}
+    assert origin['input_id'] == 'private-long-id'
+
+
+def test_visual_description_alone_does_not_establish_human_contact():
+    from jshi.voice.jev_serial import voice_interaction_origin
+    assert voice_interaction_origin({'lines': [{'source': 'visual_environment', 'text': '有人看着匠石的屏幕'}],
+        'availability': {'image_available': True}}) is None
+    assert voice_interaction_origin({'lines': [{'source': 'voice', 'text': '你好'}],
+        'environment': {'description': '近处一人面向设备'}, 'availability': {'image_available': True}})

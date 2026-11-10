@@ -15,10 +15,12 @@ from .jev_prompts import ENTRY_INSTRUCTION, PREPARATION_INSTRUCTION, ENTRY_OUTPU
 from .jev_errors import JEVStaleError, failure_details
 
 
-def short_reply_people_allowed(short, items):
+def short_reply_people_allowed(short, items, *, allow_unknown=False):
     # General replies carry no cached person material. Re-attribution by JEV
     # therefore need not force another main call; personal context stays bound.
     general = short.get('scope') == 'general' and short.get('person') is None and not short.get('recent')
+    if allow_unknown and general and len(items) == 1 and items[0].speaker_level == '不确定':
+        return True  # Single anonymous addressee, no personal facts; direction is checked separately.
     return bool(items) and all(i.speaker_level in SHORT_REPLY_LEVELS and
         (i.speaker_pick == short.get('person_code') or general) for i in items
     ) and len({i.speaker_pick for i in items}) == 1
@@ -32,12 +34,36 @@ def split_instruction():
     return opening + '\n\n' + SPLIT_FRONT_INSTRUCTION
 
 
+def split_preparation_instruction():
+    return PREPARATION_INSTRUCTION.replace(
+        '可处理内容涉及人物均为confirmed或tentative，unknown不可短答。',
+        '人物材料须对应confirmed或tentative；单条完整输入、scope=general且无人物材料或历史接续时，unknown也可作不依赖身份的通用短答，不必仅因姓名未知进入主认知。')
+
+
 def object_schema(properties):
     return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
 
 
 def text_schema(limit, *, minimum=0):
     return {'type': 'string', 'minLength': minimum, 'maxLength': limit}
+
+
+def voice_interaction_origin(snapshot):
+    """Independent material that can establish contact; never assistant output."""
+    lines = [row for row in snapshot.get('lines', []) if row.get('source') != 'visual_environment']
+    if not lines:
+        return None
+    names = [n for n in snapshot.get('state', {}).get('names', ['匠石']) if isinstance(n, str) and n.strip()]
+    for row in lines:
+        if row.get('source') not in {'voice', 'visual_environment'} or any(name in str(row.get('text', '')) for name in names):
+            return {'text': str(row.get('text', ''))[:200], 'basis': '本批人类文字输入或称呼；仍须JEV判断是否在交往'}
+    environment = snapshot.get('environment') or {}
+    if (snapshot.get('availability', {}).get('image_available') or
+            isinstance(environment, dict) and environment.get('status') not in {'description_stale', 'description_time_unknown'}
+            and (environment.get('description') or environment.get('analysis'))):
+        return {'text': '\n'.join(str(row.get('text', '')) for row in lines)[:200],
+                'basis': '本批有有效视觉材料；仍须JEV核对是否面向设备交往'}
+    return None
 
 
 def voice_interaction_has_basis(snapshot):
@@ -50,22 +76,14 @@ def voice_interaction_has_basis(snapshot):
     if not lines or any(row.get('source') != 'voice' for row in lines):
         return True
     state = snapshot.get('state', {})
-    if state.get('state') in {'thinking', 'playing', 'paused', 'queued'} or state.get('spoken'):
+    if voice_interaction_origin(snapshot) or state.get('interaction_origin'):
         return True
     names = [n for n in state.get('names', ['匠石']) if isinstance(n, str) and n.strip()]
     events = [r for r in snapshot.get('events', []) if r.get('scope') != 'previous_session']
-    if any(name in str(row.get('text', '')) for name in names for row in [*lines, *events]):
+    if any(name in str(row.get('text', '')) for name in names for row in events
+           if row.get('p', row.get('who')) not in names
+           and row.get('basis') in {'收到的原话', 'user_selected', 'voiceprint_match', 'unassigned_audio', 'jev_attribution', 'manual_annotation'}):
         return True
-    if any(row.get('p', row.get('who')) in names for row in events):
-        return True
-    if any(name in snapshot.get('scene', '') for name in names):
-        return True  # The model must interpret the retained scene, including negations.
-    environment = snapshot.get('environment') or {}
-    if snapshot.get('availability', {}).get('image_available'):
-        return True
-    if isinstance(environment, dict) and environment.get('status') not in {'description_stale', 'description_time_unknown'}:
-        if environment.get('description') or environment.get('analysis'):
-            return True
     return False
 
 
@@ -89,8 +107,9 @@ def entry_schema(lines, refs):
     def references(values, minimum=0, maximum=None):
         return {'type': 'array', 'items': {'type': 'string', 'enum': values}, 'uniqueItems': True,
                 'minItems': minimum, 'maxItems': maximum if maximum is not None else len(values)}
-    return object_schema({'items': {'type': 'array', 'items': item, 'minItems': len(lines), 'maxItems': len(lines)},
-                          'interaction': {'enum': ['direct', 'uncertain', 'none']},
+    return object_schema({'interaction': {'enum': ['direct', 'uncertain', 'none'],
+                                         'description': '是否向匠石交往，与姓名身份确定程度独立；不知道是谁也可以明确在呼唤匠石'},
+                          'items': {'type': 'array', 'items': item, 'minItems': len(lines), 'maxItems': len(lines)},
                           'utterance_complete': {'enum': ['complete', 'incomplete', 'uncertain']},
                           'control': {'enum': ['keep', 'stop', 'redirect']},
                           'route': {'enum': ['background', 'wait', 'prepare']},
@@ -599,7 +618,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                 stages.append({'stage': 'decision_prepare_fallback', 'mode': mode, 'status': 'fallback',
                                'reason': type(exc).__name__ + ':' + str(exc)})
         if preparation is None and not native_prepare:
-            preparation = call('voice_jev_prepare', PREPARATION_INSTRUCTION,
+            preparation = call('voice_jev_prepare', split_preparation_instruction() if mode == 'split' else PREPARATION_INSTRUCTION,
                                preparation_text(snapshot, entry), preparation_schema())
         if not isinstance(preparation, dict):
             raise ValueError('合并判断缺少回应准备')
@@ -612,7 +631,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             hint['main_image'] = 'omit'
         short, waiting = snapshot['short_chat'], snapshot['waiting']
         selected_items = [i for i in accepted.items if f'I{i.n}' in selected]
-        person_allowed = short_reply_people_allowed(short, selected_items)
+        person_allowed = short_reply_people_allowed(short, selected_items, allow_unknown=mode == 'split')
         direct_allowed = (short.get('allowed') is True and entry['interaction'] == 'direct'
             and (control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed', 'idle'})
             and not overlap and not pending

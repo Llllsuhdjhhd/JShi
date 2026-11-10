@@ -2463,7 +2463,8 @@ class VoiceConversation:
             return asyncio.run_coroutine_threadsafe(apply_entry(result), loop).result()
 
         from jshi.voice.jev_decision import entry_bridge
-        delivery = {**delivery, '_decision_entry': entry_bridge(self.decisions)}
+        delivery = {**delivery, '_decision_entry': entry_bridge(self.decisions),
+                    'interaction_origin': getattr(self, 'jev_interaction_origin', None)}
         from copy import copy
         gate_snapshot = copy(self.jev)
         gate_snapshot._cooldown_owner = self.jev
@@ -2534,6 +2535,17 @@ class VoiceConversation:
         record['utterance_complete'] = result.utterance_complete
         record['decision_reason'] = result.decision_reason
         if result.interaction == 'direct' and not result.routing_error and result.judged:
+            # Store only a human-originated contact that JEV actually accepted.
+            # Assistant playback, inferred scene summaries and mere topic overlap
+            # cannot bootstrap a conversation. This state is connection-local.
+            from jshi.voice.jev_serial import voice_interaction_origin
+            origin = voice_interaction_origin({
+                'lines': [{'text': u.text, 'source': 'web_text' if u.speaker.method == 'user_selected'
+                           else 'visual_environment' if u.speaker.method == 'visual_scene' else 'voice'} for u in utterances],
+                'state': {'names': names}, 'environment': delivery.get('environment'),
+                'availability': {'image_available': bool((delivery.get('environment') or {}).get('image_available'))}})
+            if origin and result.control != 'stop':
+                self.jev_interaction_origin = {**origin, 'at_ms': cutoff}
             for u in utterances:
                 if u.speaker.method not in {'unassigned_audio','visual_scene','voice_scene'}:
                     acquaintances.record(self.subject_id, 'encounter:'+self.session_id+':'+u.speaker.object_id,

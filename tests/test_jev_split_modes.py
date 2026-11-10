@@ -266,13 +266,17 @@ def test_ambient_question_needs_interaction_evidence_but_keeps_real_continuation
     assert not voice_interaction_has_basis(base)
     for change in [
         {'lines':[{'source':'voice','text':'匠石，你看得到吗？'}]},
-        {'events':[{'p':'匠石','text':'你想让我看什么？'}]},
-        {'events':[{'p':'P1','text':'匠石，先听我说。'}]},
+        {'events':[{'p':'P1','text':'匠石，先听我说。','basis':'收到的原话'}]},
         {'availability':{'image_available':True}},
-        {'state':{'state':'playing','names':['匠石']}},
+        {'state':{'state':'playing','names':['匠石'],'interaction_origin':{'text':'你好','basis':'有效面对面交往'}}},
         {'lines':[{'source':'web_text','text':'你看得到吗？'}]}]:
         assert voice_interaction_has_basis({**base,**change})
     assert not voice_interaction_has_basis({**base,'environment':{'status':'description_stale','description':'面对电脑'}})
+    assert not voice_interaction_has_basis({**base,'events':[{'p':'匠石','text':'你想让我看什么？','basis':'已播'}],
+        'scene':'匠石和此人持续交谈，匠石说能调参数。',
+        'state':{'state':'playing','spoken':'我帮你调','names':['匠石']}})
+    assert not voice_interaction_has_basis({**base,'events':[{'p':'P1','text':'匠石，先听我说。',
+        'basis':'收到的原话','scope':'previous_session'}]})
 
 
 @pytest.mark.parametrize('mode',['split','combined'])
@@ -287,6 +291,32 @@ def test_unfounded_ambient_direct_result_never_generates_or_applies_redirect(mod
     assert result.route=='background' and result.control=='keep'
     assert len(model.requests)==1 and controls==['keep']
     assert any(r['stage']=='interaction_grounding' for r in result.stage_records)
+
+
+def test_old_self_interjections_cannot_bootstrap_another_short_reply():
+    first = entry(front=preparation(route='self_reply', level=3, reply='可以'))
+    model = Model([first])
+    controls = []
+    result = VoiceJEV(model, mode='split', fallback_models=[]).decide_batch('stone',
+        [{'n': 1, 'who': 'P1', 'source': 'voice', 'text': '这样调可以吧？'}],
+        [{'p': '匠石', 'text': '我按这个顺序调整。', 'basis': '已播', 'at': time()*1000-1000}],
+        {'state': 'completed', 'spoken': '我按这个顺序调整。', 'now': time()*1000,
+         'jev_scene': '匠石承诺调整，P1持续讨论参数。',
+         'short_chat': {'allowed': True, 'scope': 'general', 'person': None, 'recent': []}},
+        on_entry=lambda r: controls.append(r.control))
+    assert result.route == 'background' and not result.direct_reply
+    assert controls == ['keep'] and len(model.requests) == 1
+
+
+@pytest.mark.parametrize('scope,expected', [('general', 'self_reply'), ('person', 'main')])
+def test_split_anonymous_single_addressee_can_only_use_general_material(scope, expected):
+    first = entry(items=[{'i': 1, 'person': 'unknown', 'certainty': 'unknown', 'why': '未确认姓名'}],
+                  front=preparation(route='self_reply', level=3, reply='我在。'))
+    result, model = run('split', first, delivery={'state': 'completed', 'now': time()*1000,
+        'short_chat': {'allowed': True, 'scope': scope, 'person': None, 'recent': [], 'person_code': 'P1'}})
+    assert result.route == expected and len(model.requests) == 1
+    assert result.items[0].speaker_pick == 'unknown' and result.items[0].speaker_level == '不确定'
+    assert bool(result.direct_reply) == (scope == 'general')
 
 
 def test_old_uncovered_event_survives_idle_window(tmp_path):

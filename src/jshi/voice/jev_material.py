@@ -131,6 +131,12 @@ def build_snapshot(payload, batch, delivery):
         snapshot['state']['utterance_context'] = deepcopy(payload['utterance_context'])
     if delivery.get('answer_handling'):
         snapshot['state']['answer_handling'] = delivery['answer_handling']
+    if delivery.get('interaction_origin'):
+        origin = delivery['interaction_origin']
+        snapshot['state']['interaction_origin'] = {k: origin[k] for k in ('text', 'basis') if k in origin}
+        now, at = payload.get('now'), origin.get('at_ms')
+        if type(now) in (int, float) and type(at) in (int, float):
+            snapshot['state']['interaction_origin']['age_seconds'] = round(max(0, now-at)/1000)
     return snapshot
 
 
