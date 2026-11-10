@@ -102,7 +102,11 @@ class DeepgramProtocol:
 
 class StreamingASRSession:
     def __init__(self, ws, protocol):
+        from hashlib import sha256
         self.ws, self.protocol = ws, protocol
+        self.report = None
+        self.sent_bytes = 0
+        self.sent_sha256 = sha256()
 
     @property
     def close_code(self):
@@ -117,6 +121,8 @@ class StreamingASRSession:
 
     async def send_audio(self, pcm):
         await self.protocol.send(self.ws, pcm)
+        self.sent_bytes += len(pcm)
+        self.sent_sha256.update(pcm)
 
     async def finish(self):
         await self.protocol.finish(self.ws)
@@ -132,7 +138,19 @@ class StreamingASRSession:
             decoded = self.protocol.decode(message)
             if decoded is not None:
                 payload, final = decoded
-                yield self.protocol.assembler.accept(payload), final
+                rows = self.protocol.assembler.accept(payload)
+                if self.report is not None and (final or any(r.final for r in rows)):
+                    from .timing import report_safely
+                    # Preserve provider text before any downstream alignment or
+                    # recovery. No audio, credentials, or request headers here.
+                    report_safely(self.report, 'asr_provider_final', {
+                        'protocol': type(self.protocol).__name__,
+                        'sent_bytes': self.sent_bytes,
+                        'sent_sha256': self.sent_sha256.hexdigest(),
+                        'stream_final': final, 'payload': payload,
+                        'assembled': [{'text': r.text, 'start_ms': r.start_ms,
+                                       'end_ms': r.end_ms, 'final': r.final} for r in rows]})
+                yield rows, final
 
 
 async def open_stream(config, http, cloud) -> StreamingRecognitionSession:

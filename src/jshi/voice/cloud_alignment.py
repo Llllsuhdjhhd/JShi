@@ -96,6 +96,11 @@ def align_words(row, segments):
         if covered >= .8 * (row.end_ms - row.start_ms):
             return (_attributed(row, segment),)
     if not row.words:
+        if len(segments) == 1:
+            if segments[0].overlap:
+                return (unknown(row, '声音段存在重叠且缺少可靠字词时间戳，不能将整段归给一个人'),)
+            return (unknown(row, f'单一声音段仅覆盖整句时间范围的{covered / max(1, row.end_ms-row.start_ms):.1%}，'
+                            '未达80%且缺少可靠字词时间戳，不能确认整句归属'),)
         return (unknown(row, '存在多个声音段但缺少可靠字词时间戳，不能将整段归给一个人'),)
     # Locate provider tokens in the actual transcript, preserving all text and spaces.
     positioned = []
@@ -182,6 +187,25 @@ class CloudSpeakerAlignment:
         self.segment_source = segments
         self.children = {}
 
+    def _with_short_edges(self, row, segments):
+        """Use original edge audio for one voice, never repeat or bridge speakers."""
+        segments = tuple(segments)
+        if len(segments) != 1 or row.overlap or segments[0].overlap:
+            return segments, False
+        segment = segments[0]
+        covered = max(0, min(segment.end_ms, row.end_ms)-max(segment.start_ms, row.start_ms))
+        if not (covered >= 1000 and covered < .8*(row.end_ms-row.start_ms)
+                and 0 <= segment.start_ms-row.start_ms <= 300
+                and 0 <= row.end_ms-segment.end_ms <= 300):
+            return segments, False
+        pcm = self.audio.segment(row.start_ms, row.end_ms)
+        if pcm is None or len(pcm) != (row.end_ms-row.start_ms)*32:
+            return segments, False
+        import numpy as np
+        return (replace(segment, samples=np.frombuffer(pcm, dtype='<i2').astype('float32')/32768,
+                        start_ms=row.start_ms, end_ms=row.end_ms, voiceprint_id='', confidence=None,
+                        identity_note='', identity_tentative=False),), True
+
     def process(self, row):
         if not row.final:
             return (row,)
@@ -190,6 +214,7 @@ class CloudSpeakerAlignment:
             return (unknown(replace(row, replaces=ranges), '云端整体修订，沿用原分段归属或保留跨人修订缺口'),)
         if self.segment_source is not None:
             segments = self.segment_source.for_range(row.start_ms, row.end_ms)
+            segments, padded = self._with_short_edges(row, segments)
             segments = self.analyzer.identify_segments(segments)
             with phase('word_alignment_ms'):
                 return align_words(row, segments)
@@ -201,6 +226,9 @@ class CloudSpeakerAlignment:
         with phase('pcm_convert_ms'):
             samples = np.frombuffer(pcm, dtype='<i2').astype('float32') / 32768
         segments = self.analyzer.analyze(samples, row.start_ms)
+        segments, padded = self._with_short_edges(row, segments)
+        if padded:
+            segments = self.analyzer.identify_segments(segments)
         with phase('word_alignment_ms'):
             return align_words(row, segments)
 

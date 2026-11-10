@@ -8,6 +8,7 @@ import threading
 # Observation streams: written per window or per ASR final. Rare failures and
 # anything conversation logic reads back stay in subject history.
 DIAGNOSTIC_EVENTS = frozenset({
+    'asr_provider_final',
     'cloud_alignment_timing', 'asr_batch_timing', 'voice_input_stage',
     'voice_identity_work', 'recovery_whole_revision',
     'voice_answer_deferred', 'recovery_event_revision', 'recovery_asr_timing', 'recovery_work_timing',

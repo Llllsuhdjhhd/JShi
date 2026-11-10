@@ -355,3 +355,37 @@ def test_asr_final_can_deliver_without_waiting_for_a_recovery_boundary():
             assert not intake.pending
         finally:await intake.close()
     asyncio.run(run())
+
+
+def test_matching_independent_decode_owns_audio_tail_without_repeating_call():
+    async def run():
+        delivered=[]
+        async def deliver(rows,**kw):delivered.extend(rows)
+        intake=RecoveryIntake(None,None,deliver,lambda *a:None)
+        try:
+            # Exact clocks from the full 28-second online reproduction.
+            await intake.publish((Transcript('匠石','a',25041,25441,True),))
+            await intake.publish((Transcript('匠石。','a',24962,25804,True),),
+                                 preliminary=True,source_span=(24962,25806))
+            assert len(delivered)==1
+            assert next(iter(intake.events.values()))['bounds']==(24962,25806)
+            await intake.offer((SpeechSegment([], 'a',24962,25810),),24000,27000)
+            assert not intake.pending  # the 369ms trailing '石' is not re-decoded
+            await intake.publish((Transcript('匠石','a',28000,28800,True),),
+                                 preliminary=True,source_span=(28000,28800))
+            assert len(delivered)==2  # real second call stays a distinct event
+        finally:await intake.close()
+    asyncio.run(run())
+
+
+def test_different_overlap_text_does_not_extend_recognized_audio_scope():
+    async def run():
+        async def deliver(rows,**kw):pass
+        intake=RecoveryIntake(None,None,deliver,lambda *a:None)
+        try:
+            await intake.publish((Transcript('匠石','a',100,500,True),))
+            await intake.publish((Transcript('匠石开灯','a',100,1200,True),),
+                                 preliminary=True,source_span=(0,1300))
+            assert next(iter(intake.events.values()))['bounds']==(100,500)
+        finally:await intake.close()
+    asyncio.run(run())

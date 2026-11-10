@@ -69,12 +69,16 @@ class VolcVoice:
         return headers
 
     def asr_request(self) -> dict:
-        request = {"model_name": "bigmodel", "enable_nonstream": True,
+        request = {"model_name": "bigmodel", "enable_nonstream": self.config.asr_two_pass,
                    "show_utterances": True, "enable_speaker_info": True,
                    "enable_ddc": False, "end_window_size": self.config.end_window_ms}
+        context = {}
         if self.config.asr_hotwords:
-            request['corpus'] = {'context': json.dumps({'hotwords': [
-                {'word': word} for word in self.config.asr_hotwords]}, ensure_ascii=False)}
+            context['hotwords'] = [{'word': word} for word in self.config.asr_hotwords]
+        if self.config.asr_context:
+            context.update(context_type='dialog_ctx', context_data=[{'text': self.config.asr_context[:500]}])
+        if context:
+            request['corpus'] = {'context': json.dumps(context, ensure_ascii=False)}
         if self.config.identity_mode == "voiceprint":
             request.update(ssd_mode=2, voiceprints=[{"id": "", "group_id": self.config.voiceprint_group}])
         else:

@@ -57,6 +57,7 @@ class DirectReplyState:
             ready = len(ids) == 1 and bool(ids[0]) and (subject, ids[0]) in self.people
             general = allow_general and len(ids) == 1 and bool(ids[0])
             return {'allowed':bool(ready or general), 'reason':'人物材料已由主流程加载' if ready else '仅可用当前材料或通用知识短答，不补造人物经历' if general else '人物材料尚未加载或当前多人/身份未明',
+                'scope':'person' if ready else 'general' if general else 'unavailable',
                 'person': self.people.get((subject, ids[0])) if ready else None,
                 'recent':[r for r in self.recent if ready and r['subject']==subject and r['object_id']==ids[0]][-4:]}
 

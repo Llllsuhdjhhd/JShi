@@ -15,12 +15,50 @@ from .jev_prompts import ENTRY_INSTRUCTION, PREPARATION_INSTRUCTION, ENTRY_OUTPU
 from .jev_errors import JEVStaleError, failure_details
 
 
+def short_reply_people_allowed(short, items):
+    # General replies carry no cached person material. Re-attribution by JEV
+    # therefore need not force another main call; personal context stays bound.
+    general = short.get('scope') == 'general' and short.get('person') is None and not short.get('recent')
+    return bool(items) and all(i.speaker_level in SHORT_REPLY_LEVELS and
+        (i.speaker_pick == short.get('person_code') or general) for i in items
+    ) and len({i.speaker_pick for i in items}) == 1
+
+
 def object_schema(properties):
     return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
 
 
 def text_schema(limit, *, minimum=0):
     return {'type': 'string', 'minLength': minimum, 'maxLength': limit}
+
+
+def voice_interaction_has_basis(snapshot):
+    """A live ambient voice question alone cannot establish an addressee.
+
+    This is a missing-evidence guard, not a positive wake-word decision. When
+    any basis exists the model still compares side conversation and media.
+    """
+    lines = snapshot.get('lines', [])
+    if not lines or any(row.get('source') != 'voice' for row in lines):
+        return True
+    state = snapshot.get('state', {})
+    if state.get('state') in {'thinking', 'playing', 'paused', 'queued'} or state.get('spoken'):
+        return True
+    names = [n for n in state.get('names', ['匠石']) if isinstance(n, str) and n.strip()]
+    events = snapshot.get('events', [])
+    if any(name in str(row.get('text', '')) for name in names for row in [*lines, *events]):
+        return True
+    if any(row.get('p', row.get('who')) in names for row in events):
+        return True
+    if any(name in snapshot.get('scene', '') for name in names):
+        return True  # The model must interpret the retained scene, including negations.
+    environment = snapshot.get('environment') or {}
+    if snapshot.get('availability', {}).get('image_available'):
+        return True
+    if isinstance(environment, dict) and environment.get('status') not in {'description_stale', 'description_time_unknown'}:
+        if environment.get('description') or environment.get('analysis'):
+            return True
+    return False
 
 
 def preparation_schema():
@@ -203,7 +241,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
     mode = gate.mode if gate.mode in {'combined', 'decision'} else 'split'
     early_stop = None
     used_decision = False
-    syntax_retry_used = False
+    output_retry_used = False
     if mode == 'decision':
         gate._entry_deadline = monotonic() + 2 * gate.budget_s
     if monotonic() < cooldown_owner._unavailable_until:
@@ -236,7 +274,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
     names = PersonNames(delivery.get('named_people', {}))
 
     def call(stage, system, user, output, *, retry_budget=None):
-        nonlocal raw, syntax_retry_used
+        nonlocal raw, output_retry_used
         raw = ''
         if not current():
             raise JEVStaleError('JEV材料或播放代次已失效')
@@ -250,6 +288,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         record = {'stage': stage, 'mode': mode, 'status': 'failed'}
         stages.append(record)
         phase = 'request_record'
+        retry_control = False
         try:
             if on_request:
                 on_request(request)
@@ -268,6 +307,13 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             phase = 'output_json'
             data = names.value(parse_json_object(raw), reverse=True)
             phase = 'output_schema'
+            # Some JSON-mode responses echo the transport's format marker.
+            # It carries no decision. Remove only this exact, undeclared marker;
+            # validate every actual decision field as usual and retain raw text.
+            if (isinstance(data, dict) and data.get('type') == 'json_object'
+                    and 'type' not in output.get('properties', {})):
+                data = {k:v for k,v in data.items() if k != 'type'}
+                record['normalization'] = 'transport_json_object_marker'
             if stage in {'voice_jev', 'voice_jev_entry', 'voice_jev_identity'}:
                 data, repaired = exact_identity_duplicates(data)
                 if repaired:
@@ -276,6 +322,19 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                 if unlisted:
                     record['normalization'] = ','.join(filter(None, (record.get('normalization'), 'unlisted_person_unknown')))
             if stage in {'voice_jev', 'voice_jev_entry'}:
+                if isinstance(data, dict) and data.get('control') not in ('keep', 'stop', 'redirect'):
+                    # Only control may be missing/invalid. Never guess identity,
+                    # references, routes or a combined preparation result.
+                    fallback = {**data, 'control': 'keep'}
+                    validate(fallback, output)
+                    record['control_fallback'] = {'original': data.get('control'), 'replacement': 'keep'}
+                    if delivery.get('state') in {'idle', 'completed'}:
+                        data = fallback
+                        record['control_fallback']['applied'] = True
+                    else:
+                        retry_control = True
+                        record['control_fallback']['applied'] = False
+                        raise ValueError('JEV控制无效；当前非明确空闲，重新判断，不执行控制')
                 data, notes = entry_route_conflicts(data, output)
                 data, continued = protect_continuation(data, batch)
                 if continued:
@@ -290,11 +349,11 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         except Exception as exc:
             record.update(failure_details(exc, phase), raw=raw)
             remaining = gate.budget_s - (monotonic() - started)
-            if (phase == 'output_json' and isinstance(exc, SkillError)
-                    and not syntax_retry_used and remaining > .1 and current()):
+            if ((phase == 'output_json' and isinstance(exc, SkillError) or retry_control)
+                    and not output_retry_used and remaining > .1 and current()):
                 # One fresh generation, never string repair or schema coercion.
                 # No controls have been applied at this point. Keep both attempts.
-                syntax_retry_used = True
+                output_retry_used = True
                 record.update(status='retried', ms=round((monotonic()-started)*1000,1))
                 return call(stage, system, user, output, retry_budget=remaining)
             raise
@@ -431,6 +490,12 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                         entry['control'] = 'redirect'
         # Playback control has its own validity boundary. A downstream routing
         # contradiction must not swallow a valid stop grounded in this batch.
+        if entry['route'] == 'prepare' and entry['control'] != 'stop' and not voice_interaction_has_basis(snapshot):
+            stages.append({'stage': 'interaction_grounding', 'mode': mode, 'status': 'background',
+                           'reason': '环境语音只有对人提问，未提供称呼、有效视觉或既有匠石交往依据'})
+            entry.update(interaction='none', route='background', control='keep', process_refs=[],
+                         decision_reason='缺少与匠石交往的具体依据，保留原话为背景')
+            preparation = None
         current_refs = {f'I{r["n"]}' for r in batch if r.get('source') != 'visual_environment'}
         if (early_stop is None and entry['control'] == 'stop'
                 and entry['interaction'] == 'direct'
@@ -497,7 +562,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                     if not (short.get('allowed') is True and entry['interaction'] == 'direct'
                             and (control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed', 'idle'})
                             and not overlap and not pending and chosen
-                            and all(i.speaker_level in SHORT_REPLY_LEVELS and i.speaker_pick == short.get('person_code') for i in chosen)
+                            and short_reply_people_allowed(short, chosen)
                             and all(r.get('source') != 'visual_environment' for r in batch)):
                         raise ValueError('short_reply_permission')
                     generated = call('voice_jev_reply', REPLY_INSTRUCTION,
@@ -524,12 +589,12 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             hint['main_image'] = 'omit'
         short, waiting = snapshot['short_chat'], snapshot['waiting']
         selected_items = [i for i in accepted.items if f'I{i.n}' in selected]
+        person_allowed = short_reply_people_allowed(short, selected_items)
         direct_allowed = (short.get('allowed') is True and entry['interaction'] == 'direct'
             and (control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed', 'idle'})
             and not overlap and not pending
             and all(r.get('source') != 'visual_environment' for r in batch)
-            and all(i.speaker_level in SHORT_REPLY_LEVELS and i.speaker_pick == short.get('person_code')
-                    for i in selected_items) and bool(selected_items)
+            and person_allowed
             and {k: v for k, v in hint.items() if k != 'recall_query'}
                 == {'level': 3, 'needs': [], 'recall_memory': False, 'main_image': 'omit'})
         direct = preparation['reply'].strip() if preparation['route'] == 'self_reply' and direct_allowed else ''
@@ -540,8 +605,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                 'playback_control': control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed','idle'},
                 'no_overlap': not overlap, 'no_pending_inputs': not pending,
                 'not_visual_environment': all(r.get('source') != 'visual_environment' for r in batch),
-                'selected_person_matches_permission': bool(selected_items) and all(
-                    i.speaker_level in SHORT_REPLY_LEVELS and i.speaker_pick == short.get('person_code') for i in selected_items),
+                'selected_person_matches_permission': person_allowed,
                 'simple_without_extra_material': {k:v for k,v in hint.items() if k != 'recall_query'} ==
                     {'level':3,'needs':[],'recall_memory':False,'main_image':'omit'}}
             stages.append({'stage':'short_reply_permission','mode':mode,'status':'blocked',

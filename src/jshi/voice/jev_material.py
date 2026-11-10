@@ -81,9 +81,13 @@ def build_snapshot(payload, batch, delivery):
                             'candidates': list(shared.values())})
     # Keep each real event once. Stable E references win over local C references.
     events, seen, size, deferred = [], set(), 0, 0
+    name_codes = {name: code for code, name in delivery.get('named_people', {}).items()}
     for row in [*payload['input'].get('unwritten', []), *payload.get('conversation', [])]:
-        key = (row.get('at'), row.get('text'), json_text(row.get('p', row.get('speaker'))))
-        if not row.get('at'):
+        person = row.get('p', row.get('speaker', row.get('who')))
+        if isinstance(person, str):
+            person = name_codes.get(person, person)
+        key = (row.get('at'), row.get('text'), json_text(person))
+        if row.get('at') is None:
             key = (*key, row.get('ref', row.get('evidence_ref', len(events))))
         if key in seen:
             continue
@@ -94,6 +98,11 @@ def build_snapshot(payload, batch, delivery):
             continue
         size += cost
         events.append(deepcopy(row))
+    # Store events and dialogue are two views, not two chronological blocks.
+    # Otherwise an old assistant question appended from dialogue appears after
+    # the latest human-to-human question and invites a spurious continuation.
+    events.sort(key=lambda row: (not (type(row.get('at')) in (int,float) and math.isfinite(row['at'])),
+                                row['at'] if type(row.get('at')) in (int,float) and math.isfinite(row['at']) else 0))
     short = deepcopy(payload.get('short_chat', {'allowed': False}))
     waiting = deepcopy(payload.get('waiting', {'allowed': False}))
     if short.get('allowed') is not True:

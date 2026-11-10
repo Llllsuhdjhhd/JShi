@@ -669,9 +669,11 @@ class VoiceConversation:
             score = row.get('score')
             if type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= 1:
                 continue
-            ranking.append({key: row[key] for key in ('object_id', 'label', 'score', 'threshold', 'verified', 'stale_labels') if key in row})
+            ranking.append({key: row[key] for key in ('object_id', 'label', 'score', 'threshold', 'verified', 'stale_labels', 'repeated_short_audio') if key in row})
         view = {'status': result.get('status', 'not_called'), 'matched': result.get('matched', ''),
                 'ranking': ranking, 'overlap': result.get('overlap', False)}
+        if result.get('short_audio_hint'):
+            view['short_audio_hint'] = result['short_audio_hint']
         if result.get('status') == 'error':
             view['detail'] = str(result.get('detail', ''))[:180]
         return view
@@ -2030,11 +2032,15 @@ class VoiceConversation:
                 existing=next((c for c in candidates if c['source']=='personal_classifier' and c['who']==code),None)
                 if existing is not None:
                     existing.update(verified=item.get('verified',True),threshold=item.get('threshold',.8))
+                    if item.get('repeated_short_audio'):
+                        existing['applicability'] = '同一短句重复拼接的MLP参考，只支持可能人物；原声未变长，不是独立证据'
                     continue
                 profile=self.process.profiles.get(item['object_id'])
                 if profile is None or profile.status=='rejected':continue
                 candidates.append({'who':self.assign_code(item['object_id'],profile.label),'score':item['score'],
                     'source':'personal_classifier','verified':item.get('verified',True),
+                    **({'applicability':'同一短句重复拼接的MLP参考，只支持可能人物；原声未变长，不是独立证据'}
+                       if item.get('repeated_short_audio') else {}),
                     'threshold':item.get('threshold',.8),'names':[profile.label,*profile.aliases]})
             comparison=self.identity_comparison(utterance.input_id)
             joint={k:v for k,v in comparison.items() if k not in {'voice','mlp'}}
@@ -2049,7 +2055,7 @@ class VoiceConversation:
             voice = self.voice_evidence(utterance, candidates)
             voice['measurement'] = {
                 'status': check.get('candidate_status', 'not_recorded'),
-                'result': '已取得相似度，未确认身份' if measured else '本轮未取得可用相似度；检查status原因，不能等同未运行',
+                'result': '已取得相似度；是否确认以本句voice结论为准' if measured else '本轮未取得可用相似度；检查status原因，不能等同未运行',
                 'repeated_short_audio': bool(check.get('short_voice_hint'))}
             batch.append({"n": index, "input_id": utterance.input_id, "track": utterance.speaker.track_id,
                           "sound": self.sound_code(utterance),
@@ -4685,6 +4691,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     # The provider starts its audio-packet deadline on connect.
                     # Finish local cold starts before opening that connection.
                     asr = await open_stream(replace(config, asr_backend=backend), http, cloud)
+                    if hasattr(asr, 'report'):
+                        asr.report = conversation.record
                 from jshi.voice.transcription_recovery import RecoveryIntake, recognize_span
                 turn_assessment_job = None
                 async def deliver_voice_batch(rows, **arrival):

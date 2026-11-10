@@ -7,6 +7,7 @@ from jshi.core.params import VOICE_INPUT_PAUSE_MS, VISUAL_TURN_IDLE_SECONDS
 from .backends import ASR_BACKENDS
 
 ASR_HOTWORDS = ('陆广', '陆兴', '秦奋', '广', '广广', 'JEV', '匠石', '匠匠', '声纹', '未来城', '匠')
+ASR_CONTEXT = '语音助手的名字是匠石，工匠的匠，石头的石。现场也有人与人交谈，不是每句话都在呼唤助手。'
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,9 @@ class VoiceConfig:
     semantic_turn_threshold: float = .5
     semantic_turn_timeout_s: float = .2
     asr_hotwords: tuple[str, ...] = ASR_HOTWORDS
+    asr_context: str = ASR_CONTEXT
+    # Final two-pass rewrites can undo correctly recognized assistant names.
+    asr_two_pass: bool = False
     tts_transport: str = 'websocket'
     # Legacy collection settings: accepted for configuration compatibility only.
     # Ready final transcripts are dispatched immediately; these do not add a wait.
@@ -158,9 +162,13 @@ class VoiceConfig:
         if diarize not in {'true','false','1','0','on','off'}:
             raise ValueError('JSHI_DEEPGRAM_DIARIZE必须为true或false')
         material = os.getenv('JSHI_VOICE_UTTERANCE_MATERIAL', 'off').strip().lower()
+        two_pass = os.getenv('JSHI_VOICE_ASR_TWO_PASS', 'off').strip().lower()
+        if two_pass not in {'true','false','1','0','on','off'}:
+            raise ValueError('JSHI_VOICE_ASR_TWO_PASS必须为on或off')
         if material not in {'true','false','1','0','on','off'}:
             raise ValueError('JSHI_VOICE_UTTERANCE_MATERIAL必须为on或off')
         return cls(
+            asr_two_pass=two_pass in {'true','1','on'},
             continuous_analysis=os.getenv('JSHI_VOICE_CONTINUOUS_ANALYSIS', 'active').strip().lower(),
             utterance_material=material in {'true','1','on'},
             api_key=key,
@@ -197,6 +205,7 @@ class VoiceConfig:
             semantic_turn_timeout_s=float(os.getenv('JSHI_VOICE_SEMANTIC_TIMEOUT_MS','200'))/1000,
             asr_hotwords=tuple(dict.fromkeys(w.strip() for w in re.split(r'[,，;；\n]',
                 os.getenv('JSHI_VOICE_ASR_HOTWORDS', ','.join(ASR_HOTWORDS))) if w.strip())),
+            asr_context=os.getenv('JSHI_VOICE_ASR_CONTEXT', ASR_CONTEXT).strip()[:500],
             tts_transport=os.getenv('JSHI_VOICE_TTS_TRANSPORT', 'websocket'),
             input_pause_s=int(os.getenv('JSHI_VOICE_INPUT_PAUSE_MS', str(VOICE_INPUT_PAUSE_MS))) / 1000,
             environment_idle_s=int(os.getenv('JSHI_VOICE_ENVIRONMENT_IDLE_MS', str(int(VISUAL_TURN_IDLE_SECONDS*1000)))) / 1000,

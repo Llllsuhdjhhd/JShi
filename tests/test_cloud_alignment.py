@@ -124,3 +124,42 @@ def test_recorded_204643_overlap_keeps_correct_sentence():
         segment(457144,457616,'mixed',True),segment(457616,459287,'a')])
     assert len(parts)==1 and parts[0].text==source.text
     assert parts[0].identity_uncertain and parts[0].overlap
+
+
+def test_one_short_segment_reports_coverage_not_multiple_speakers():
+    source = Transcript('hello，将士。', '1', 39652, 41542, True)
+    result, = align_words(source, [segment(39882, 41309, 'lux')])
+    reason = json.loads(result.identity_note)['reason']
+    assert '75.5%' in reason and '未达80%' in reason
+    assert '多个声音' not in reason
+    assert result.identity_uncertain and not result.voiceprint_id
+
+
+@pytest.mark.parametrize('start,end,overlap,extra,available,accepted', [
+    (39882,41309,False,False,True,True),
+    (39953,41309,False,False,True,False),
+    (39882,41241,False,False,True,False),
+    (39882,41309,True,False,True,False),
+    (39882,41309,False,True,True,False),
+    (39882,41309,False,False,False,False),
+])
+def test_single_voice_short_edges_use_real_audio_before_identification(start,end,overlap,extra,available,accepted):
+    import numpy as np
+    source = Transcript('hello，将士。', '1', 39652, 41542, True)
+    pcm = (np.arange(30240, dtype=np.int16)).tobytes()
+    spans = [replace(segment(start,end,'local',overlap), voiceprint_id='', confidence=None)]
+    if extra:
+        spans.append(segment(39652,39800,'other'))
+    seen = []
+    def identify(rows):
+        seen.extend(rows)
+        return tuple(replace(r,voiceprint_id='lux-voice',confidence=.441) if len(r.samples)>=24000 else r for r in rows)
+    aligner = CloudSpeakerAlignment(SimpleNamespace(segment=lambda *a: pcm if available else None),
+        SimpleNamespace(identify_segments=identify), segments=SimpleNamespace(for_range=lambda *a:spans))
+    result, = aligner.process(source)
+    if accepted:
+        assert result.voiceprint_id == 'lux-voice' and not result.identity_uncertain
+        assert (seen[0].start_ms,seen[0].end_ms)==(39652,41542)
+        np.testing.assert_array_equal(seen[0].samples,np.frombuffer(pcm,dtype='<i2').astype('float32')/32768)
+    else:
+        assert not result.voiceprint_id and result.identity_uncertain

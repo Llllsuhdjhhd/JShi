@@ -161,7 +161,7 @@ def test_publish_rollback_conflicts_feature_versions_and_correction(process, tmp
         engine.select_targets(['lux-id', 'other'])
         first = publish(engine, 'lux-id', tmp_path, 6)
         other = publish(engine, 'other', tmp_path, -6)
-        assert engine.predict(audio(.3), s)['matched'] == 'lux-id'
+        assert engine.predict(audio(2), s)['matched'] == 'lux-id'
         s.model_id = 'different'
         assert engine.predict(audio(), s)['status'] == 'no_ready_models'
         s.model_id = 'fixture-encoder'
@@ -430,8 +430,8 @@ def test_actual_personal_model_outputs_reach_the_input_row(process, tmp_path, ov
             event = next(m for m in sent if m['type'] == 'timeline')
             prediction = [m for m in sent if m['type'] == 'personal_prediction'
                           and m['input_id'] == event['input_id']][-1]['personal_prediction']
-            assert prediction['status'] == 'matched'
-            assert prediction['matched'] == ('' if overlap else 'lux-id')
+            assert prediction['status'] == 'uncertain'
+            assert prediction['matched'] == ''  # Repeated short audio never confirms.
             assert prediction['overlap'] is overlap
             if overlap:
                 comparison = c.identity_comparison(event['input_id'])
@@ -506,13 +506,13 @@ def test_background_subprocess_trains_and_publishes_a_real_mlp(process, tmp_path
             'min_train_negative': 2, 'min_eval_positive': 2, 'min_eval_negative': 2})
         engine.select_targets(['lux-id'])
         for row in make_training_records():
-            engine.capture(audio(.5, 1000 if row['label'] else -1000),
+            engine.capture(audio(2, 1000 if row['label'] else -1000),
                 'lux-id' if row['label'] else 'other', row['session_id'], row['id'], s, source='manual')
         assert engine.request_training('lux-id', s, force=True)
         engine.trainer.submit(lambda: None).result(timeout=60)
         state = engine.status()['targets'][0]
         assert state['available'] and state['status'] == 'ready', state
-        assert engine.predict(audio(.3), s)['matched'] == 'lux-id'
+        assert engine.predict(audio(2), s)['matched'] == 'lux-id'
         assert not engine.predict(audio(.3, -1000), s)['matched']
     finally:
         engine.close()
@@ -633,5 +633,32 @@ def test_pending_training_cannot_overwrite_explicit_rollback_or_pause(process, t
         engine.store.configure({'enabled': False})
         with pytest.raises(ValueError, match='暂停'):
             engine.publish('lux-id', snapshot, candidate, result)
+    finally:
+        engine.close()
+
+
+def test_short_mlp_repeats_only_for_inference_and_never_confirms(process, tmp_path):
+    engine = PersonalSpeakers(tmp_path/'personal', process.profiles)
+    s = speakers()
+    try:
+        engine.select_targets(['lux-id'])
+        publish(engine, 'lux-id', tmp_path, 6)
+        result = engine.predict(audio(.3), s)
+        assert result['matched'] == '' and result['status'] == 'uncertain'
+        assert result['short_audio_hint']['original_seconds'] == .3
+        assert result['short_audio_hint']['feature_seconds'] == 3
+        assert s.extractor.lengths[-1] == 48000
+        top = result['ranking'][0]
+        assert top['score'] > .92 and top['repeated_short_audio']
+        assert not top['verified'] and not top['identity_enabled']
+        from jshi.voice.identity_comparison import compare_identity, identity_display
+        comparison = compare_identity([], result)
+        shown = identity_display({'status':'unknown','label':'待定'}, comparison)
+        assert shown['label'] == 'lux' and shown['state'] == '可能'
+        assert '重复拼接' in shown['reason']
+        view = VoiceConversation.personal_prediction_view({'personal_classifier':result})
+        assert view['short_audio_hint'] == result['short_audio_hint']
+        engine.make_features(audio(.3), s)
+        assert s.extractor.lengths[-1] == 4800  # training still uses real duration
     finally:
         engine.close()

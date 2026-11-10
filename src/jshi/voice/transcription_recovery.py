@@ -18,6 +18,9 @@ async def recognize_span(config, http, cloud, pcm, offset_ms, *, report=None):
     trace('connecting')
     try:
         session = await open_stream(replace(config, identity_mode='diarization'), http, cloud)
+        if hasattr(session, 'report'):
+            session.report = lambda event, payload: report_safely(report, event, {
+                **payload, 'source': 'recovery', 'request_id': request_id, 'offset_ms': offset_ms})
     except BaseException as exc:
         trace('connect_failed', error_type=type(exc).__name__)
         raise
@@ -318,6 +321,22 @@ class RecoveryIntake:
                 if preliminary and overlapping:
                     # A second short-context decode must not overwrite or crop a
                     # transcript already delivered from this audio.
+                    # The main final may have narrower word times than the
+                    # acoustic request. A matching decode still accounts for
+                    # its full audio; otherwise its tail is decoded yet again.
+                    import re
+                    normalized = lambda text: ''.join(re.findall(r'\w', text)).casefold()
+                    matches = [e for e in self.events.values()
+                               if min(e['bounds'][1],row.end_ms) > max(e['bounds'][0],row.start_ms)]
+                    if (source_span and len(matches) == 1 and normalized(row.text)
+                            and normalized(row.text) == normalized(matches[0]['row'].text)
+                            and not row.overlap and not matches[0]['row'].overlap):
+                        event = matches[0]
+                        event['bounds'] = (min(event['bounds'][0],source_span[0]),
+                                           max(event['bounds'][1],source_span[1]))
+                        self.report('recovery_same_audio_scope', {
+                            'input_id':event['row'].input_id,
+                            'start_ms':source_span[0], 'end_ms':source_span[1]})
                     continue
                 contained = [(a,b) for a,b in overlapping
                              if row.start_ms <= a+80 and row.end_ms >= b-80]

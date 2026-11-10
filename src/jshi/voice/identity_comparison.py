@@ -36,7 +36,7 @@ def compare_identity(voice_candidates, classifier,*,voice_threshold=.33,voice_ma
         return max(MLP_SCORE_FLOOR, value) if type(value) in (int,float) and math.isfinite(value) else MLP_SCORE_FLOOR
     high=(model['score']>=threshold(model) and all(r['score']<threshold(r) for r in models[1:])
         and (len(models)==1 or model['score']-models[1]['score']+1e-9>=.1))
-    mlp={k:model[k] for k in ('object_id','label','score','threshold','verified') if k in model}
+    mlp={k:model[k] for k in ('object_id','label','score','threshold','verified','repeated_short_audio') if k in model}
     if not voices:
         return {'state':'mlp_only','mlp_high':high,'mlp_priority':high,'mlp':mlp}
     voice=voices[0]
@@ -82,6 +82,7 @@ def identity_display(speaker,comparison,*,certainty='',original=None,classifier=
                 '混合录音中MLP单一高分领先，仅显示可能候选；未确认所有声音来自此人；分数不是身份概率')
     if comparison.get('mlp_priority'):
         return view(mlp.get('label',''),'MLP','可能',mlp['score'],
+            '短句重复拼接的MLP参考，仅为可能人物，交JEV结合上下文判断；不是新增独立证据' if mlp.get('repeated_short_audio') else
             '声纹未可靠命中，MLP单一高分领先；句首仅显示优先候选，尚未确认；分数不是身份概率')
     if speaker.get('status')=='provisional' or certainty=='可能':
         source='JEV' if method in {'jev_attribution','context_attribution'} else 'MLP' if method.startswith('personal_classifier') else '声纹'

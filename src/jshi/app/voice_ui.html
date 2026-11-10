@@ -443,7 +443,10 @@ function voiceRanking(element,identityNote,candidates){
     const original=Array.isArray(d.candidates)&&d.candidates.length?d.candidates:Array.isArray(candidates)&&candidates.length?candidates:hint?.candidates||[];
     ranked=original.filter(x=>x&&Number.isFinite(x.score)&&x.source!=='personal_classifier').sort((a,b)=>b.score-a.score);
     const hits=ranked.slice(0,2),repeated=hits.length&&(hits[0].source==='repeated_short_audio'||original===hint?.candidates);
-    element.textContent=hits.length ? (repeated ? '短句重复拼接参考（原 '+Number(hint?.original_seconds).toFixed(2)+' 秒，重复 '+hint?.repeat_count+' 次）：' : '声纹排名：')+hits.map((x,i)=>(i===0 ? '第一名：' : '第二名：')+(x.label || speakerLabels.get(x.object_id) || '名称未提供')+' '+Number(x.score).toFixed(3)).join(' · ')+(hits.length>1?' · 差距：'+(hits[0].score-hits[1].score).toFixed(3):' · 差距：暂无第二名')+'（相似度，不是身份概率；仅排名不确认身份）' : '本句没有有效声纹排名';
+    const threshold=d.single_confirmation_threshold??d.threshold;
+    const limits=Number.isFinite(threshold)?'；当时确认门槛 '+Number(threshold).toFixed(3)+(Number.isFinite(d.margin)?'、领先差距要求 '+Number(d.margin).toFixed(3):''):'';
+    const result=d.person_scope==='unaligned_cloud_span'?'文字与声音尚未可靠对齐，整段排名不用于自动确认人物':repeated?'同一短句重复拼接，不能单独确认身份':(d.reason||'本条未提供声纹匹配结论');
+    element.textContent=hits.length ? (repeated ? '短句重复拼接参考（原 '+Number(hint?.original_seconds).toFixed(2)+' 秒，重复 '+hint?.repeat_count+' 次）：' : '声纹排名：')+hits.map((x,i)=>(i===0 ? '第一名：' : '第二名：')+(x.label || speakerLabels.get(x.object_id) || '名称未提供')+' '+Number(x.score).toFixed(3)).join(' · ')+(hits.length>1?' · 差距：'+(hits[0].score-hits[1].score).toFixed(3):' · 差距：暂无第二名')+'（相似度，不是身份概率；归属依据：'+result+limits+'；最终人物归属见句首）' : '本句没有有效声纹排名';
   }catch{element.textContent='本句没有有效声纹排名';}
   return ranked;
 }
@@ -502,7 +505,7 @@ async function trainSelectedPerson(row){
 }
 function personalPredictionText(result){
   const rows=(result?.ranking||[]).filter(r=>Number.isFinite(r.score)&&r.score>=0&&r.score<=1);
-  if(rows.length)return 'MLP'+(result.overlap?'（重叠参考）':'')+'：'+rows.map(r=>(r.label||'未命名人物')+' '+r.score.toFixed(3)+(r.stale_labels?'（旧版参考）':r.verified===false?'（试用）':'')).join(' · ');
+  if(rows.length)return 'MLP'+(result.short_audio_hint?'（短句重复拼接，仅供可能人物参考）':result.overlap?'（重叠参考）':'')+'：'+rows.map(r=>(r.label||'未命名人物')+' '+r.score.toFixed(3)+(r.stale_labels?'（旧版参考）':r.verified===false?'（试用）':'')).join(' · ');
   const states={pending:'计算中',queued:'排队计算中',not_configured:'未启用',skipped_manual:'人工标注，未调用',skipped_overlap:'重叠声音，未调用',skipped_identified:'本句已有归属，未调用',no_audio:'缺少音频',busy:'忙碌，本句未调用',disabled:'已暂停',no_ready_models:'暂无适用模型',timeout:'本次计算超时',error:'本次计算失败',not_called:'未提供结果'};
   return 'MLP：'+(states[result?.status]||'本次无有效输出')+(result?.status==='error'&&result.detail?'（'+result.detail+'）':'');
 }

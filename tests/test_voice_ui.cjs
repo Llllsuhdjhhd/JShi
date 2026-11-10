@@ -375,3 +375,17 @@ assert.equal(vm.runInContext(`inputRows.get('clock-new').p.modelUi.steps.has('fi
 assert.match(vm.runInContext(`wallClock(1793970000010)`,ctx),/^\d{2}:\d{2}:\d{2}$/);
 assert.ok(vm.runInContext(`inputRows.get('clock-old').p.modelUi.panelBody.textContent.indexOf('主引擎开始')<inputRows.get('clock-old').p.modelUi.panelBody.textContent.indexOf('本轮完成')`,ctx));
 console.log('Pipeline ownership: delayed completion stays with original input; full wall clock passed');
+
+// Match evidence and alignment restrictions must not be a blanket denial of identity.
+vm.runInContext(`
+  globalThis.rankElement=document.createElement('small');
+  globalThis.rankCandidates=[{label:'lux',score:.441,source:'voiceprint'},{label:'qf',score:.109,source:'voiceprint'}];
+  voiceRanking(rankElement,JSON.stringify({reason:'已匹配登记声纹',single_confirmation_threshold:.33,margin:.08}),rankCandidates);
+`,ctx);
+assert.match(vm.runInContext('rankElement.textContent',ctx),/已匹配登记声纹.*0.330.*0.080/);
+assert.doesNotMatch(vm.runInContext('rankElement.textContent',ctx),/仅排名不确认身份/);
+vm.runInContext(`voiceRanking(rankElement,JSON.stringify({person_scope:'unaligned_cloud_span',reason:'存在多个声音段'}),rankCandidates)`,ctx);
+assert.match(vm.runInContext('rankElement.textContent',ctx),/文字与声音尚未可靠对齐/);
+assert.doesNotMatch(vm.runInContext('rankElement.textContent',ctx),/存在多个声音段/);
+vm.runInContext(`voiceRanking(rankElement,'{}',[{label:'lux',score:.9,source:'repeated_short_audio'}])`,ctx);
+assert.match(vm.runInContext('rankElement.textContent',ctx),/同一短句重复拼接，不能单独确认身份/);

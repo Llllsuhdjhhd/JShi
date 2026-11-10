@@ -304,6 +304,29 @@ def test_cloud_requests_keep_multispeaker_and_identity_modes_separate():
     assert multi.tts_request("你好")["req_params"]["audio_params"]["format"] == "pcm"
 
 
+def test_asr_name_context_keeps_hotwords_and_can_be_disabled():
+    from dataclasses import replace
+    config=VoiceConfig('secret')
+    body=VolcVoice(config,None).asr_request()['request']
+    assert body['enable_nonstream'] is False
+    assert VolcVoice(replace(config,asr_two_pass=True),None).asr_request()['request']['enable_nonstream'] is True
+    context=json.loads(body['corpus']['context'])
+    assert {'word':'匠石'} in context['hotwords']
+    assert context['context_type']=='dialog_ctx'
+    assert '工匠的匠，石头的石' in context['context_data'][0]['text']
+    assert 'corpus' not in VolcVoice(replace(config,asr_hotwords=(),asr_context=''),None).asr_request()['request']
+
+
+def test_asr_two_pass_environment_is_explicit(monkeypatch):
+    monkeypatch.delenv('JSHI_VOICE_ASR_TWO_PASS', raising=False)
+    assert VoiceConfig.from_env(asr='local',tts='local').asr_two_pass is False
+    monkeypatch.setenv('JSHI_VOICE_ASR_TWO_PASS','on')
+    assert VoiceConfig.from_env(asr='local',tts='local').asr_two_pass is True
+    monkeypatch.setenv('JSHI_VOICE_ASR_TWO_PASS','auto')
+    with pytest.raises(ValueError,match='ASR_TWO_PASS'):
+        VoiceConfig.from_env(asr='local',tts='local')
+
+
 def test_cloud_history_regrouping_does_not_deliver_old_audio_again():
     assembler = TranscriptAssembler()
     def row(text, start, end, speaker):

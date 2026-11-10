@@ -462,7 +462,10 @@ class PersonalSpeakers:
                         self.weights(person.object_id, entry)))
         if not models:
             return {'status': 'no_ready_models', 'matched': '', 'ranking': []}
-        vectors, durations = self.make_features(pcm, speakers)
+        repeated = 6400 <= len(pcm) < 48000 and len(pcm) % 2 == 0
+        repeats = math.ceil(96000 / len(pcm)) if repeated else 1
+        feature_pcm = (pcm * repeats)[:96000] if repeated else pcm
+        vectors, durations = self.make_features(feature_pcm, speakers)
         if any(entry['dimension'] != len(vectors[0]) for _, entry, _ in models):
             raise ValueError('当前音频特征与个人模型维度不一致')
         key = tuple((person.object_id, entry['version']) for person, entry, _ in models)
@@ -480,6 +483,9 @@ class PersonalSpeakers:
                                and entry.get('duration_reports', {}).get(bucket, {}).get('identity_enabled', entry.get('verified', True)),
                            'threshold': max(entry['threshold'], MLP_SCORE_FLOOR), 'version': entry['version'], 'source': 'personal_classifier'}
                           for (person, entry, _), score in zip(models, scores)], key=lambda r: r['score'], reverse=True)
+        if repeated:
+            for row in ranking:
+                row.update(verified=False, identity_enabled=False, repeated_short_audio=True)
         hits = [r for r in ranking if r['verified'] and r['identity_enabled'] and r['score'] >= r['threshold']]
         matched = ''
         if len(hits) == 1 and all(r['threshold']-r['score'] >= config['conflict_margin']
@@ -496,6 +502,9 @@ class PersonalSpeakers:
                 matched = ''
         return {'status': 'matched' if matched else 'uncertain', 'matched': matched,
                 'ranking': ranking, 'segments': len(vectors),
+                **({'short_audio_hint': {'original_seconds': len(pcm)/32000,
+                    'repeat_count': repeats, 'feature_seconds': len(feature_pcm)/32000,
+                    'basis': '同一短句重复拼接，仅供可能人物参考，不增加独立证据'}} if repeated else {}),
                 'debug_features':{'model_id':model_id,'vectors':vectors,'durations':durations}}
 
     def submit_predict(self, pcm, speakers):

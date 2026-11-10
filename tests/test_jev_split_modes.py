@@ -165,6 +165,31 @@ def test_direct_answer_permission_checked_by_program(mode):
     assert result.route == 'self_reply' and result.direct_reply == '你好'
 
 
+@pytest.mark.parametrize('mode', ['split','combined'])
+@pytest.mark.parametrize('scope,person,recent,allowed', [
+    ('general',None,[],True), ('person',{'name':'其他人'},[],False),
+    ('general',{'name':'其他人'},[],False), ('general',None,[{'reply':'旧人物经历'}],False)])
+def test_general_short_reply_survives_attribution_but_cannot_borrow_personal_context(mode,scope,person,recent,allowed):
+    first=entry(items=[{'i':1,'person':'P1','certainty':'tentative','why':'仅候选'}])
+    result,_=run(mode,first,preparation(route='self_reply',level=3,reply='我在，你说。'),
+        delivery={'short_chat':{'allowed':True,'person_code':'P2','scope':scope,'person':person,'recent':recent}})
+    assert bool(result.direct_reply) is allowed
+
+
+@pytest.mark.parametrize('mode', ['split','combined'])
+def test_exact_transport_marker_is_not_a_decision_field(mode):
+    first=entry()
+    second=preparation()
+    if mode=='split':second['type']='json_object'
+    else:first['type']='json_object'
+    result,_=run(mode,first,second)
+    assert result.route=='main' and not result.model_error
+    assert any(s.get('normalization')=='transport_json_object_marker' for s in result.stage_records)
+    first=entry(type='other')
+    result,_=run(mode,first,preparation())
+    assert result.model_error and not result.direct_reply
+
+
 @pytest.mark.parametrize('mode', ['split', 'combined'])
 @pytest.mark.parametrize('certainty,person,spoken', [('tentative', 'P1', '你好'), ('unknown', 'unknown', '')])
 def test_tentative_person_may_get_short_reply_but_unknown_may_not(mode, certainty, person, spoken):
@@ -206,6 +231,62 @@ def test_task_reference_and_clock_survive_shared_snapshot():
     assert result['task_context'][0]['ref'] == 'Q1'
     assert result['task_context'][0]['updated_at'] == -10000
     assert source['task_context'][0]['updated_at'] == 190.
+
+
+def test_snapshot_merges_duplicate_history_views_without_merging_people_or_times():
+    from jshi.voice.jev_material import build_snapshot
+    payload = {'input': {'lines': [], 'unwritten': [
+        {'ref':'E1','p':'P1','text':'你看得到吗？','at':0}]},
+        'conversation': [
+            {'evidence_ref':'C1','who':'qf','text':'你看得到吗？','at':0},
+            {'evidence_ref':'C2','who':'P2','text':'你看得到吗？','at':0},
+            {'evidence_ref':'C3','who':'P1','text':'你看得到吗？','at':-1000}]}
+    events=build_snapshot(payload, [], {'named_people':{'P1':'qf'}})['events']
+    assert len(events)==3
+    assert events[1]['ref']=='E1'
+    assert [r.get('evidence_ref') for r in events]==['C3',None,'C2']
+
+
+def test_latest_human_question_follows_older_assistant_question_across_history_views():
+    from jshi.voice.jev_material import build_snapshot
+    payload={'input':{'lines':[],'unwritten':[
+        {'ref':'E10','p':'lux','text':'你今天还玩游戏，是吧？','at':-3374}]},
+        'conversation':[{'evidence_ref':'C5','who':'匠石','text':'有什么事？','at':-15471},
+                        {'evidence_ref':'C6','who':'qf','text':'时间未提供','at':None}]}
+    events=build_snapshot(payload,[],{})['events']
+    assert [r['text'] for r in events[:2]]==['有什么事？','你今天还玩游戏，是吧？']
+    assert events[-1]['at'] is None
+
+
+def test_ambient_question_needs_interaction_evidence_but_keeps_real_continuations():
+    from jshi.voice.jev_serial import voice_interaction_has_basis
+    base={'lines':[{'source':'voice','text':'你看得到吗？'}],
+          'state':{'state':'completed','names':['匠石']},'events':[],
+          'availability':{'image_available':False},'environment':None}
+    assert not voice_interaction_has_basis(base)
+    for change in [
+        {'lines':[{'source':'voice','text':'匠石，你看得到吗？'}]},
+        {'events':[{'p':'匠石','text':'你想让我看什么？'}]},
+        {'events':[{'p':'P1','text':'匠石，先听我说。'}]},
+        {'availability':{'image_available':True}},
+        {'state':{'state':'playing','names':['匠石']}},
+        {'lines':[{'source':'web_text','text':'你看得到吗？'}]}]:
+        assert voice_interaction_has_basis({**base,**change})
+    assert not voice_interaction_has_basis({**base,'environment':{'status':'description_stale','description':'面对电脑'}})
+
+
+@pytest.mark.parametrize('mode',['split','combined'])
+def test_unfounded_ambient_direct_result_never_generates_or_applies_redirect(mode):
+    first=entry()
+    if mode=='combined':first={**first,'preparation':preparation()}
+    model=Model([first])
+    controls=[]
+    result=VoiceJEV(model,mode=mode,fallback_models=[]).decide_batch('stone',
+        [{'n':1,'who':'P1','source':'voice','text':'你看得到吗？'}],[],
+        {'state':'completed','now':time()*1000},on_entry=lambda r:controls.append(r.control))
+    assert result.route=='background' and result.control=='keep'
+    assert len(model.requests)==1 and controls==['keep']
+    assert any(r['stage']=='interaction_grounding' for r in result.stage_records)
 
 
 def test_old_uncovered_event_survives_idle_window(tmp_path):
@@ -284,7 +365,7 @@ def test_voice_applies_control_while_preparation_still_running(process, invalida
         task = None
         try:
             speaker = SpeakerEvidence('A')
-            utterance = SceneUtterance('换个话题', speaker, 0, 1000, input_id='a', received_at_ms=time()*1000)
+            utterance = SceneUtterance('匠石，换个话题', speaker, 0, 1000, input_id='a', received_at_ms=time()*1000)
             task = asyncio.create_task(c._judge((utterance,), speaker, False))
             async def wait_started():
                 while not started.is_set():
@@ -445,3 +526,62 @@ def test_stale_stop_does_not_reach_control_callback():
         'stone', [{'n':1,'text':'不用解释了'}], [], {},
         is_current=lambda: state['current'], on_entry=lambda value: applied.append(value))
     assert not applied and result.control != 'stop'
+
+
+@pytest.mark.parametrize('mode', ['split', 'combined'])
+@pytest.mark.parametrize('bad_control', ['prepare', None, [], False])
+def test_invalid_control_defaults_only_when_idle(mode, bad_control):
+    result, model = run(mode, entry(control=bad_control))
+    assert result.judged and not result.model_error and result.control == 'keep'
+    assert len(model.requests) == (2 if mode == 'split' else 1)
+    assert result.stage_records[0]['control_fallback']['applied'] is True
+    assert json.loads(result.stage_records[0]['raw'])['control'] == bad_control
+
+
+@pytest.mark.parametrize('state', ['thinking', 'playing', 'paused', 'queued', 'unknown'])
+@pytest.mark.parametrize('mode', ['split', 'combined'])
+@pytest.mark.parametrize('recovers', [True, False])
+def test_busy_control_error_retries_once_before_any_effect(state, mode, recovers):
+    invalid = entry(control='prepare')
+    valid = entry(route='background', control='keep', interaction='none')
+    if mode == 'combined':
+        invalid = {**invalid, 'preparation': preparation()}
+        valid = {**valid, 'preparation': None}
+    model = Model([invalid, valid if recovers else invalid])
+    gate = VoiceJEV(model, mode=mode, fallback_models=[])
+    controls = []
+    result = gate.decide_batch('stone', [{'n': 1, 'who': 'P1', 'text': '你好'}], [],
+                              {'state': state}, on_entry=lambda r: controls.append(r.control))
+    assert len(model.requests) == 2
+    assert result.stage_records[0]['status'] == 'retried'
+    assert result.stage_records[0]['control_fallback']['applied'] is False
+    assert controls == (['keep'] if recovers else [])
+    assert bool(result.model_error) is (not recovers)
+    assert not result.direct_reply and result.control == 'keep'
+
+
+@pytest.mark.parametrize('change', [{'route': 'oops'}, {'decision_refs': ['MISSING']},
+                                   {'extra': True}, {'utterance_complete': 123}])
+def test_control_default_does_not_hide_other_schema_errors(change):
+    result, model = run('split', entry(control='prepare', **change))
+    assert result.model_error and not result.direct_reply
+    assert len(model.requests) == 1
+
+
+def test_control_default_does_not_hide_route_conflict():
+    result, model = run('split', entry(control='prepare', utterance_complete='incomplete'))
+    assert result.model_error and not result.direct_reply
+    assert len(model.requests) == 1
+
+
+@pytest.mark.parametrize('mode',['split','combined'])
+def test_missing_ambient_addressee_does_not_swallow_stop_and_cancel_operation(mode):
+    first=entry(control='stop')
+    second=preparation(level=1)
+    model=Model([{**first,'preparation':second}] if mode=='combined' else [first,second])
+    controls=[]
+    result=VoiceJEV(model,mode=mode,fallback_models=[]).decide_batch('stone',
+        [{'n':1,'who':'P1','text':'别说了，把下载也取消','source':'voice'}],[],
+        {'state':'completed'},on_entry=lambda value:controls.append(value.control))
+    assert controls==['stop'] and result.silent_operation and result.route=='main'
+    assert not result.direct_reply and not result.waiting_reply
