@@ -1268,7 +1268,7 @@ $('debug-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('deb
 let textSending=false,pendingTyped=null;
 let initiativePolling=false;
 setInterval(async()=>{
- if(initiativePolling||textSending||document.hidden||ready||$('typed').value.trim()||!$('text-person').value)return;
+ if(initiativePolling||textSending||document.hidden||ready||$('text-dock').hidden||(ws&&ws.readyState===WebSocket.OPEN)||$('typed').value.trim()||!$('text-person').value)return;
  const owner=$('text-person').value;initiativePolling=true;
  try{
   const response=await fetch('/initiative-results',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({object_id:owner})});

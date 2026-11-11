@@ -200,7 +200,7 @@ def format_turn_input(label: str, text: str, *, stimulus: str = STIMULUS_SPEECH)
     """【本轮】/【此时的输入】正文。闲时直写时间流过，不写成「名字：原话」。"""
     name = (label or "").strip() or "对方"
     if stimulus == STIMULUS_IDLE:
-        return "定时自主审视，没有对方新发言；实际间隔以本轮唤起材料为准。"
+        return "自主审视，没有对方新发言；实际来源与间隔以本轮唤起材料为准。"
     return f"{name}：{text}"
 
 
@@ -224,6 +224,10 @@ DEPLOYMENT_CAPABILITIES = (
 
 RESULT_EVIDENCE_RULE = (
     '【结果依据与当前交往】\n'
+    '工具事件是内部事项变化，不是用户再次发言或再次授权。按对应事项交代结果、询问必要信息或暂缓；本轮工具事件回报仅交代、必要询问或暂缓，不通过use_tool发起执行或重试；已有计划由工具调度推进，不承诺本轮没有发起的后续操作。'
+    '对应人物有应交代的新结果且程序提供当前交付机会时，主动交代有效结果，不以没有新的人物发言为由等待追问；语音仍结合现场避免打断，文字定向回报不要求对方再次开口。'
+    '执行返回与目标达成分开：有结果核验时按核验说明已经做到的部分，未核验不能仅凭成功话术宣称已创建或已写入。'
+    '交付文件须保留可定位的实际保存路径，不能用“产物目录”等概称替代；说明当前写入的范围，不把一次写入说成持续记录。'
     '任务成功或结果可用只说明状态，不能代替结果正文。具体数值、日期及结论须有本次提供的对应来源；'
     '自己的旧回答、承诺、未开口事项及片场摘要不是独立核实依据。没有结果正文时不凭常识补齐，不把旧结果当当前结果。'
     '本轮未追问的旧任务不挤占当前交往；先回答本轮问题。确需交付时使用已有正文并核对对象与时间，'
@@ -278,9 +282,10 @@ def _build_user_body(request: ModelRequest) -> str:
         return persona
     if not _is_cognition(request):
         return request.input_text
-    speaker = request.speaker
+    internal_tool = any(item.get('source') == 'tool' for item in request.input_items)
+    speaker = None if internal_tool else request.speaker
     label = speaker.label.strip() if speaker and speaker.label.strip() else "对方"
-    parts: list[str] = ([] if request.cognition_mode == "initiative" else [f"【说话人】{label}"])
+    parts: list[str] = ([] if request.cognition_mode == "initiative" or internal_tool else [f"【说话人】{label}"])
     if speaker is not None and speaker.reason == "voice_scene":
         parts.append("这是现场观察，没有唯一说话人；按语音现场各段证据理解，不要求先确定一个对象，不把现场拟人。")
     elif speaker is not None and speaker.reason == "voice_unknown":

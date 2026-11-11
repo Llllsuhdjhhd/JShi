@@ -62,8 +62,8 @@ class InputEnvelope:
     interaction_scene: str = ""  # Completed JEV scene, a fallible contextual reference.
     cognition_mode: str = "conversation"
     wake_context: str = ""
-    internal_task_ids: tuple[str, ...] = ()
     visual_snapshot_id: str = ""  # Optional observation version; independent of speech identity.
+    tool_event_ids: tuple[str, ...] = ()  # Internal references, never user utterances.
     entry_timing: dict = field(default_factory=dict)  # Observability only; never a model instruction.
 
     def __post_init__(self) -> None:

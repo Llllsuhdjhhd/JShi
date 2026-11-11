@@ -775,7 +775,7 @@ class VoiceConversation:
                 self._update_jev_continuation(current, record)
                 if (control == 'stop' and not record.get('silent_operation')) or (control == 'keep' and record.get('route') not in {'main', 'self_reply'}):
                     return
-                if not record.get('judged'):
+                if not record.get('judged') and not record.get('fallback_to_main'):
                     self._preserve_background(current)
                     return
                 envelope = replace(envelope, current_utterances=current, deferred_interrupt=False, jev_calls=(record,))
@@ -1939,6 +1939,7 @@ class VoiceConversation:
             await asyncio.sleep(.5)
             if (self.turn_busy or self.active_turn or not self.input_idle.is_set()
                     or not self.turn_queue.empty() or not self.queue.empty() or self.judging
+                    or self.output_disconnected or self.judge_pending or self.pending_voice
                     or runtime_for(self.process, self.subject_id).state != "idle"
                     or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}):
                 continue
@@ -1957,12 +1958,15 @@ class VoiceConversation:
                         continue
                     if monotonic() < self.tool_wake_retry.get(person.object_id, 0):
                         continue
+                    if self.process.profiles.get(person.object_id) is None:
+                        continue
                     ids = claim(self.subject_id, person.object_id)
                     if ids:
                         mode = tool_mode(self.conversation_active(person.object_id))
                         envelope = InputEnvelope(session_id=self.session_id, source='tool_event',
                             parts=(InputPart('text', '工具事项有新的结果，不是人物新发言。'),),
-                            speaker=replace(person, method='tool_recipient'), internal_task_ids=tuple(ids),
+                            speaker=replace(person, method='tool_recipient'), tool_event_ids=tuple(ids),
+                            voice_delivery=True, delivery_context=self.dialogue.note(self.subject_id),
                             cognition_mode=mode, wake_context='沿当前交谈交代结果。' if mode == 'conversation' else
                             '内部事项变化；上次交谈对象不证明当前在场，结合现场决定告知或暂缓。')
                         break
@@ -1973,7 +1977,8 @@ class VoiceConversation:
                 if not batch:
                     continue
                 envelope = InputEnvelope(session_id=self.session_id, source='initiative',
-                    parts=(), speaker=SpeakerEvidence('initiative', object_id='scene:'+self.subject_id,
+                    parts=(), voice_delivery=True, delivery_context=self.dialogue.note(self.subject_id),
+                    speaker=SpeakerEvidence('initiative', object_id='scene:'+self.subject_id,
                         label='现场', status='unknown', method='voice_scene'), cognition_mode='initiative',
                     wake_context='\n'.join(x.description for x in batch))
             self.wake_batches[envelope.input_id] = (batch, ids, envelope.speaker.object_id)
@@ -2005,6 +2010,8 @@ class VoiceConversation:
                 self._finish_wakeup(previous.input_id, False)
             elif previous.source == 'visual_environment':
                 self.defer_environment(previous)
+            elif previous.source == 'tool_event':
+                self.process.tool_service.release_notices(previous.tool_event_ids)
             else:
                 pending.append(previous)
         self.turn_queue.put_nowait((self.merge_envelopes([*pending, envelope]), self.epoch))
@@ -2427,6 +2434,9 @@ class VoiceConversation:
         # 还没有交付记录时，状态是空的。空状态不能当成正在播放，
         # 否则没有模型的初判会一律选择继续播放，话进不了主流程。
         state = (snapshot or {}).get("state") or "completed"
+        # Terminal delivery failure does not mean the next turn is still busy.
+        if state in {'failed', 'stopped'}:
+            state = 'completed'
         from jshi.subject.cognition_runtime import runtime_for
         if runtime_for(self.process, self.subject_id).state != "idle" and state == "completed":
             state = "thinking"
@@ -2459,7 +2469,8 @@ class VoiceConversation:
         delivery['answer_handling'] = self._answer_handling_context()
         from jshi.voice.wait_ack import model_key
         delivery['waiting'] = self.wait_ack_timing.guidance(model_key(self.process),
-            allowed=state == 'completed' and not overlap and not self.pending_voice and not self.output_disconnected
+            allowed=delivery['state'] in {'idle', 'completed'} and not overlap and not self.pending_voice and not self.output_disconnected,
+            mode='text' if utterances and all(u.speaker.method == 'user_selected' for u in utterances) else 'voice'
                     )
         if delivery['short_chat']['allowed']:
             delivery['short_chat']['person_code'] = self.assign_code(speaker.object_id, speaker.label)
@@ -2635,10 +2646,22 @@ class VoiceConversation:
                              direct_reply='', waiting_reply='', items=(), judged=False,
                              routing_error=result.routing_error or 'JEV结果过期，不提交回应')
         validity['expired'] = True
+        # Match the standalone text endpoint: an invalid gate must not swallow
+        # explicitly submitted text. Main still judges meaning and may stay silent.
+        text_fallback = bool(result.model_error and not stale_causes and result.control != 'stop'
+                             and not any(s.get('error_kind') == 'stale' for s in result.stage_records)
+                             and utterances and all(u.speaker.method == 'user_selected' for u in utterances))
+        if text_fallback:
+            result = replace(result, action='respond', route='main', control='keep',
+                utterance_complete='uncertain', direct_reply='', waiting_reply='', main_prompt_hint=None,
+                items=tuple(BatchItem(i + 1, 'maybe', reason='明确提交的文字，入口失败交主认知复核',
+                    relevance='uncertain') for i, u in enumerate(utterances)),
+                process_refs=tuple(f'I{i+1}' for i in range(len(utterances))), pending_refs=())
         result = VoiceJEV.enforce_completeness(result)
         decision = InterruptDecision(result.action, result.reason, result.claimed_name)
         await self.emit('flow_phase', lane='input', stage='judged', input_ids=[u.input_id for u in utterances if u.input_id])
         record = {"ms": round((monotonic() - started) * 1000), "action": decision.action,
+                  'fallback_to_main': text_fallback,
                   "input_prepare_ms": input_prepare_ms,
                   "path": path, "timed_out": timed_out, "reason": decision.reason[:80],
                   "items": [asdict(item) for item in result.items], "needs_main_review": result.needs_main_review,
@@ -2717,7 +2740,8 @@ class VoiceConversation:
                           'output_json':'JSON解析失败', 'output_schema':'输出格式不符合约定',
                           'routing':'路由校验失败', 'stale':'材料已过期', 'cooldown':'接口冷却中'}
             message = ('入口判断'+categories.get(record['failure_kind'], '失败')+
-                       '；本轮不开口，原话与诊断记录已保留。')
+                       ('；已将明确提交的文字交主认知复核，诊断已保留。' if text_fallback
+                        else '；本轮不开口，原话与诊断记录已保留。'))
             await self.emit('notice', text=message)
         elif result.routing_error and monotonic() - self._last_jev_notice >= 30:
             self._last_jev_notice = monotonic()
@@ -3226,6 +3250,8 @@ class VoiceConversation:
             # Each queued envelope is already a completed speech group. New
             # speech must not hold ready groups hostage via a global idle flag.
             envelope, epoch = await self.turn_queue.get()
+            if envelope.source == 'tool_event':
+                self.wake_batches.setdefault(envelope.input_id, ((), envelope.tool_event_ids, envelope.speaker.object_id))
             # Writing is independent; cognition sees committed scene + pending events.
             write_wait_ms = 0
             if epoch != self.epoch:
@@ -3233,6 +3259,8 @@ class VoiceConversation:
             pending = [envelope] if epoch == self.epoch else []
             while not self.turn_queue.empty():
                 newer, newer_epoch = self.turn_queue.get_nowait()
+                if newer.source == 'tool_event':
+                    self.wake_batches.setdefault(newer.input_id, ((), newer.tool_event_ids, newer.speaker.object_id))
                 if newer_epoch == self.epoch:
                     pending.append(newer)
                 else:
@@ -3416,7 +3444,7 @@ class VoiceConversation:
     async def _respond(self, envelope, epoch: int) -> None:
         loop = asyncio.get_running_loop()
         preparation_started = monotonic()
-        prepared, preparation_route = await self.preparation.finish(envelope)
+        prepared, preparation_route = (None, 'tool_event') if envelope.source == 'tool_event' else await self.preparation.finish(envelope)
         preparation_finish_ms = round((monotonic() - preparation_started) * 1000)
         if self.closed or epoch != self.epoch:
             return
@@ -3603,9 +3631,9 @@ class VoiceConversation:
             with generation_scope(lambda: not self.closed and epoch == self.epoch and turn_key not in self.retired_turns):
                 call = self.process.experience
                 args = (self.subject_id, envelope.text)
-                if envelope.internal_task_ids:
+                if envelope.tool_event_ids:
                     call = self.process.experience_tool_results
-                    args = (self.subject_id, envelope.speaker.object_id, envelope.internal_task_ids)
+                    args = (self.subject_id, envelope.speaker.object_id, envelope.tool_event_ids)
                 result = call(*args, envelope=envelope,
                     objects={u.speaker.label:u.speaker.object_id for u in (*envelope.utterances, *envelope.current_utterances) if u.speaker.status in {"introduced", "recognized"}},
                     resolved_speaker=self.identities.candidate(envelope.speaker), on_voice_plan=plan_ready,
@@ -4043,6 +4071,11 @@ class VoiceConversation:
         self.turn_worker.cancel()
         self.person_review_worker.cancel()
         await asyncio.gather(self.worker, self.judge_worker, self.turn_worker, self.person_review_worker, return_exceptions=True)
+        while not self.turn_queue.empty():
+            queued, _ = self.turn_queue.get_nowait()
+            if queued.source == 'tool_event':
+                self.process.tool_service.release_notices(queued.tool_event_ids)
+            self.turn_queue.task_done()
         if self.input_carry is not None:
             self.input_carry = None
             self.queue.task_done()
@@ -4050,8 +4083,7 @@ class VoiceConversation:
         self.audio_preparer.close()
         if self.tts_task:
             await asyncio.gather(self.tts_task, return_exceptions=True)
-        # Running synchronous cognition finishes its write; stale callbacks are
-        # suppressed. Python cannot forcibly cancel a running HTTP request.
+        # Wait for cancellation and any in-progress local commit to finish.
         progress('等待已启动的主认知结束并保存')
         await asyncio.to_thread(self.turn_executor.shutdown, wait=True, cancel_futures=True)
         progress('保存待写片场')
@@ -4573,24 +4605,29 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             for p in process.profiles.list() if p.status != 'rejected' and p.source != 'voice_scene']},
             headers={'Cache-Control': 'no-store'})
 
+    initiative_cancelled = False
+
     async def initiative_results(request):
-        nonlocal registry_busy, initiative_processing
+        nonlocal registry_busy, initiative_processing, initiative_cancelled
         from jshi.subject.cognition_runtime import runtime_for
         if request.headers.get('Origin', '') != f'http://{request.host}':
             raise web.HTTPForbidden(text='需要同源请求')
         if busy or registry_busy or active_conversation is not None:
             return web.json_response({'reply': ''})
         payload = await request.json()
+        if busy or registry_busy or active_conversation is not None:
+            return web.json_response({'reply': ''})
         owner = str(payload.get('object_id') or '')
         person = process.profiles.get(owner)
-        if person is None or runtime_for(process, subject_id).state != 'idle':
+        if (person is None or person.status == 'rejected' or person.source == 'voice_scene'
+                or runtime_for(process, subject_id).state != 'idle'):
             return web.json_response({'reply': ''})
         active = monotonic() - text_interactions.get(owner, float('-inf')) < 90
         service = process.tool_service
         claim = getattr(service, 'claim_notices', None)
         tool_entry = getattr(process, 'experience_tool_results', None)
         ids = claim(subject_id, owner) if callable(claim) and callable(tool_entry) and monotonic() >= text_tool_retry.get(owner,0) else ()
-        batch = () if ids or active else text_wakes.claim()
+        batch = () if ids or active or request.path == '/tool-results' else text_wakes.claim()
         if not ids and not batch:
             return web.json_response({'reply': ''})
         mode = tool_mode(active) if ids else 'initiative'
@@ -4599,23 +4636,32 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             speaker=SpeakerEvidence('tool-recipient' if ids else 'initiative',
                 object_id=owner if ids else 'scene:'+subject_id, label=person.label if ids else '现场',
                 status='recognized' if ids else 'unknown', method='tool_recipient' if ids else 'voice_scene'),
-            cognition_mode=mode, internal_task_ids=tuple(ids), wake_context=
+            cognition_mode=mode, tool_event_ids=tuple(ids),
+            delivery_context=dialogue.note(subject_id), wake_context=
             ('沿当前交谈交代结果。' if active else '当前页面可交付文字；人物选择不证明仍在场，结合现场决定是否发起。')
             + '\n' + '\n'.join(x.description for x in batch))
         registry_busy = initiative_processing = True
+        initiative_cancelled = False
         success = False
         try:
-            if ids:
-                result = await asyncio.to_thread(tool_entry, subject_id, owner, ids, envelope=envelope, defer_write=True)
-            else:
-                result = await asyncio.to_thread(process.experience, subject_id, '', envelope=envelope, defer_write=True)
+            def run():
+                from jshi.subject.cancellation import generation_scope, check
+                with generation_scope(lambda: not initiative_cancelled):
+                    check()
+                    if ids:
+                        return tool_entry(subject_id, owner, ids, envelope=envelope, defer_write=True)
+                    return process.experience(subject_id, '', envelope=envelope, defer_write=True)
+            result = await asyncio.to_thread(run)
             success = True
             schedule_text_scene()
             reply = result.response_plan.verbal_text()
             if reply:
                 dialogue.plan(subject_id, result.activity.id, 'web-text', [reply], shown=True, hide_until_played=False)
-            return web.json_response({'reply': reply, 'activity_id': result.activity.id})
+            return web.json_response({'reply': reply, 'label': person.label, 'activity_id': result.activity.id})
         except TurnCancelled:
+            return web.json_response({'reply': ''})
+        except Exception:
+            logging.getLogger(__name__).exception('Initiative notification failed')
             return web.json_response({'reply': ''})
         finally:
             if ids:
@@ -4626,12 +4672,13 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             registry_busy = initiative_processing = False
 
     async def text_input(request):
-        nonlocal registry_busy, model_notice_sink, model_status_sink
+        nonlocal registry_busy, model_notice_sink, model_status_sink, initiative_cancelled
         received_mono, received_at_ms = monotonic(), time()*1000
         if request.headers.get('Origin', '') != f'http://{request.host}':
             raise web.HTTPForbidden(text='文字输入需要同源请求')
         if initiative_processing:
             from jshi.subject.cognition_runtime import runtime_for
+            initiative_cancelled = True
             runtime_for(process, subject_id).interrupt()
             while initiative_processing:
                 await asyncio.sleep(.025)
@@ -5194,6 +5241,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         elif kind == 'transcript_displayed':
                             await conversation.transcript_displayed(str(payload.get('input_id', '')), payload.get('render_ms'))
                         elif kind == 'reply_displayed':
+                            conversation.dialogue.displayed(str(payload.get('reply_id', '')))
                             conversation.record('voice_reply_displayed', {'reply_id':str(payload.get('reply_id','')),
                                 'browser_at_ms':payload.get('browser_at_ms'), 'received_at_ms':time()*1000})
                         elif kind == "speech_start":
@@ -5371,6 +5419,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     app.router.add_get("/status", status)
     app.router.add_get('/vision_chat.js', vision_chat_script)
     app.router.add_get('/text-people', text_people)
+    app.router.add_post('/tool-results', initiative_results)
     app.router.add_get('/person-links',person_links)
     app.router.add_post('/person-links',person_links)
     from jshi.app.model_settings import install_model_settings

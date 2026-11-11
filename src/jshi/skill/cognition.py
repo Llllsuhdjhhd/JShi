@@ -143,6 +143,8 @@ COGNITION_JSON_SCHEMA: Mapping[str, Any] = {
         "tool_consumed": {"type": "array", "items": {"type": "string"}},
         "tool_handling": TOOL_HANDLING_SCHEMA,
         "refresh_reason": {"type": "string"},
+        "waiting_for": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 200}},
+        "expires_at": {"type": "string"},
         "work_id": {"type": "string"},
         "step_id": {"type": "string"},
     },
@@ -221,6 +223,7 @@ def _as_bool(value: Any) -> bool | None:
 
 def _parse_tool_intent(data: Mapping[str, Any]) -> ToolUseIntent | None:
     """可选 use_tool + need。旧键 tool_request 忽略。过短 need 仍解析，交给 200 策划失败。"""
+    from jshi.tool.validity import pending_information
     use_tool = _as_bool(data.get("use_tool"))
     need = str(data.get("need") or "").strip()
     nested = data.get("tool")
@@ -234,11 +237,15 @@ def _parse_tool_intent(data: Mapping[str, Any]) -> ToolUseIntent | None:
     if use_tool is True:
         return ToolUseIntent(need=need, refresh_reason=str(data.get("refresh_reason") or "").strip(),
                              work_id=str(data.get("work_id") or "").strip(),
-                             step_id=str(data.get("step_id") or "").strip())
+                             step_id=str(data.get("step_id") or "").strip(),
+                             waiting_for=pending_information(data.get("waiting_for")),
+                             expires_at=data.get("expires_at"))
     if need:
         return ToolUseIntent(need=need, refresh_reason=str(data.get("refresh_reason") or "").strip(),
                              work_id=str(data.get("work_id") or "").strip(),
-                             step_id=str(data.get("step_id") or "").strip())
+                             step_id=str(data.get("step_id") or "").strip(),
+                             waiting_for=pending_information(data.get("waiting_for")),
+                             expires_at=data.get("expires_at"))
     return None
 
 

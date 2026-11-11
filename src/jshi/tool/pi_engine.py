@@ -34,6 +34,8 @@ from .contract import (
 
 logger = logging.getLogger(__name__)
 
+FILE_VERIFICATION_NOTE = "文件任务必须实际创建或写入并回读；仅口头声称完成不算结果。使用 shell 写文件时，最后由脚本输出 JSON，artifacts 列出实际绝对 path 与从实际文件计算的 sha256，供程序核验；不要编造校验值。"
+
 
 def _result_payload(text: str) -> dict[str, Any]:
     """Preserve a tool's explicit coverage contract alongside its original output."""
@@ -518,6 +520,8 @@ class PiEngine:
         proc = self._spawn()
         active_calls: set[str] = set()
         completed_calls: set[str] = set()
+        call_args: dict[str, dict] = {}
+        observed_calls: list[dict] = []
         started = time.monotonic()
         usage: Mapping[str, Any] = {}
         self._last_stop = ""
@@ -556,10 +560,14 @@ class PiEngine:
                         assistant_text = text
                 if event_type == "tool_execution_start":
                     active_calls.add(_tool_call_key(event, len(active_calls)))
+                    call_args[str(event.get("toolCallId") or "")] = dict(event["args"]) if isinstance(event.get("args"), Mapping) else {}
                 elif event_type == "tool_execution_end":
                     completed_calls.add(_tool_call_key(event, len(active_calls)))
                     content, is_error = self._tool_end_content(event)
                     tool_name = str(event.get("toolName") or "").strip().lower()
+                    observed_calls.append({"name": tool_name, "error": is_error,
+                        "args": call_args.get(str(event.get("toolCallId") or ""), {}), "output": content,
+                        "substantive": tool_name in _SHELL_TOOLS and not _shell_output_is_exploration(content)})
                     if is_error:
                         if content:
                             last_tool_error = content
@@ -666,6 +674,8 @@ class PiEngine:
                 )
                 return
         if full:
+            from .verification import assess_pi
+            assessment = assess_pi(observed_calls, base=self._scratch_dir, created=request.create is not None)
             yield ToolFeedback(
                 request_id=request.request_id,
                 kind=FeedbackKind.RESULT,
@@ -673,7 +683,9 @@ class PiEngine:
                     status=ToolStatus.OK,
                     result=_result_payload(full),
                     summary=short,
-                    ideal=True,
+                    ideal=assessment["verdict"] == "passed",
+                    ideal_note=assessment["reason"],
+                    execution=(assessment,),
                     cost=_usage_cost(usage),
                     time_ms=elapsed_ms,
                     resource=_usage_resource(usage),
@@ -714,10 +726,10 @@ class PiEngine:
             return self._build_create_prompt(request)
         agent_plan = request.meta.get("agent_plan")
         if isinstance(agent_plan, Mapping):
-            return self._build_agent_loop_prompt(request, agent_plan)
+            return self._build_agent_loop_prompt(request, agent_plan) + '\n' + FILE_VERIFICATION_NOTE
         skill_prompt = self._skill_slash_command(request.command, request)
         if skill_prompt:
-            return skill_prompt
+            return skill_prompt + '；' + FILE_VERIFICATION_NOTE
         params = json.dumps(request.params, ensure_ascii=False) if request.params else "{}"
         command = (request.command or "").strip() or "（由你选用）"
         field_ref = (
@@ -755,6 +767,7 @@ class PiEngine:
                 "",
                 "【约束】",
                 "只做这次工具使用，不要扩展到无关任务。",
+                FILE_VERIFICATION_NOTE,
                 "按反馈要求输出关键阶段；没有要求就只输出必要结果。",
                 "临时下载和中间文件只放在当前工作目录，不要写到仓库根目录。",
             ]

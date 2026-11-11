@@ -32,6 +32,9 @@ SLOW_FALLBACK_MODELS = frozenset({
     'qwen3.5-flash-2026-02-23',
 })
 DEGRADED_TIMEOUT_S = 25.0
+# Main cognition may reason and assemble a tool request before returning JSON.
+# This is a socket inactivity limit, not a delay or an end-to-end deadline.
+COGNITION_TIMEOUT_S = 45.0
 # Speech-start events arrive many times per minute; one connection check per interval is enough.
 PREWARM_INTERVAL_S = 5.0
 
@@ -184,7 +187,8 @@ class ModelSettings:
                 rows[name]={'label':LABELS[name],'current':route.name,'last':dict(route.last),
                     'profile':self.profiles.get(name,{'choices':[], 'effort':effort}),
                     'inherited':name not in self.profiles or self.profiles[name]==self.global_profile,
-                    'effective_effort':getattr(route.chain[0], 'effort', effort)}
+                    'effective_effort':getattr(route.chain[0], 'effort', effort),
+                    'effective_timeout_s':getattr(route.chain[0], 'timeout', None)}
             services={k:{field:v for field,v in s.items() if field!='api_key'}|{'has_key':bool(s.get('api_key')),'models':MODELS.get(k,[]),'efforts':{m:effort_options(k,m) for m in MODELS.get(k,[])}} for k,s in self.services.items()}
             return {'rows':rows,'services':services,'global_profile':self.global_profile, 'jev_mode':self.jev_mode,
                     'decision': self.decision.public()}
@@ -213,15 +217,16 @@ class ModelSettings:
             # not turn it into a slow reasoning call on every utterance.
             if purpose=='voice_jev' and not profile.get('effort_explicit', False):
                 selected=('low' if model=='gemini-3.8-flash' else 'minimal') if service['protocol']=='gemini' and model.startswith('gemini-3') else 'off'
-            # Interactive routes: hard-cap HTTP wait so one slow call cannot push p95 past ~8s.
-            # Background write/introspection keep the longer ceiling.
-            # Slow fallback models (flash-lite / qwen) in non-first position get a longer
-            # degraded budget so timeout/429 on preferred models still yield an answer.
-            hot = purpose in {None, 'cognition', 'voice_jev', 'tool_plan', 'tool_wrap', 'vision'}
+            # Keep JEV's short wait independent of cognition's reasoning/JSON wait.
+            # Existing slow fallback budgets still apply; background planning and
+            # writes also need time to finish before their result can be read.
+            hot = purpose in {None, 'cognition', 'voice_jev', 'tool_wrap', 'vision'}
             if not hot:
                 timeout = 45.0
             elif index > 0 and model in SLOW_FALLBACK_MODELS:
                 timeout = DEGRADED_TIMEOUT_S
+            elif purpose == 'cognition':
+                timeout = COGNITION_TIMEOUT_S
             else:
                 timeout = ProviderModel.DEFAULT_TIMEOUT_S
             chain.append(ProviderModel(service, model, selected, timeout=timeout, route=purpose or ''))

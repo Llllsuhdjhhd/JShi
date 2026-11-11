@@ -17,6 +17,7 @@ from .intake import IntakeRecord
 @dataclass(frozen=True)
 class PlanFailure:
     message: str
+    waiting_for: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

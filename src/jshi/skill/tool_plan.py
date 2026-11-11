@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import json
+from datetime import datetime, timezone
 from dataclasses import replace
 from typing import Any, Callable, Mapping, Sequence, Union
 
@@ -85,6 +87,7 @@ TOOL_PLAN_SCHEMA: Mapping[str, Any] = {
         "expected_result": {"type": "string"},
         "ask": {"enum": ["execute", "propose_only", "create_tool"]},
         "error": {"type": "string"},
+        "waiting_for": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 200}},
         "create_tool": {
             "type": "object",
             "properties": {
@@ -178,10 +181,13 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
 只输出一个 JSON 对象，不要任何解释、注释或 Markdown。
 
 【输入】
-- 本轮任务 JSON：need、verbal、object_id、field_ref、scene、catalog、engine_tools 或 discovery、budget，以及 in_flight。
+- 本轮任务 JSON：need、verbal、scene、catalog、engine_tools 或 discovery、budget，以及 in_flight；均已按当前事项所属人物筛选，不带内部人物或现场长ID。
 - tool_materials（若有）：已取得的工具结果与事项关系。先看已有材料，只策划缺少或明确要求更新的部分；失败、过期、不完整的结果不能当成已经满足需求。
+- work_terms（若有）：原事项需求、补全后的需求、待补项和适用截止；now 是带时区的当前时间。不要把原请求的相对日期改成重试当天；过期不执行。补信息后保留已完成的步骤，只补剩余部分。
+- user_input（若有）是本次用户原话，verbal 是匠石已说的回应；不能把回应里的承诺当成已执行事实。原话含多项要求时逐项核对 need 的范围，遗漏或无法执行的部分明确报告，不只完成第一项就宣称全成。
+- 必需参数仍无法从 need、scene 或现有材料确定时，ok=false、waiting_for 列最多5个必要待补项，error 简述原因；这是等待补信息，不是永久失败，不编造参数。无缺项时 waiting_for 留空。持续接收未来对话不等于创建文件或一次写入；目录没有持续采集能力时明确报告能力缺口，不以空文件成功冒充记录已开始，也不生成永远空等的执行任务。
 - 只看本轮 need、现场和目录/命中；片场里旧的失败、不相干负面，不要拿来判定这次。
-- in_flight：该说话对象当前全部未终态记挂（按对象，不按本轮活动）。每项含 task_id / phase / tool_name / purpose / need / progress。phase 为 use（正在执行一次查询或动作）、create（正在造工具）或 propose（提案未执行）。tool_name 是命令名或正在造的工具名。purpose 是该工具的能力说明，只用来识别「在造哪一种工具」，不用来判断「本轮查询是否属于该能力域」。progress 是人类可读状态备注，不参与判定。
+- in_flight：该说话对象当前全部未终态记挂（按对象，不按本轮活动）。每项含 phase / tool_name / purpose / need / progress。phase 为 use（正在执行一次查询或动作）、create（正在造工具）或 propose（提案未执行）。tool_name 是命令名或正在造的工具名。purpose 是该工具的能力说明，只用来识别「在造哪一种工具」，不用来判断「本轮查询是否属于该能力域」。progress 是人类可读状态备注，不参与判定。
 - **优先检查 in_flight**。空列表不得以「已经在办」放弃；已终态不计入。按 phase 分别判定是否重复开工，不要用 purpose 覆盖本轮 need：
   - phase=use：只拦「同一查询还在跑」。比本轮 need 与该项 need（可辅以相同 tool_name）。地点、币种、对象等关键参数不同，不是同一查询，不产生约束，可以再 execute。
   - phase=create 或 propose：拦两件事。其一，不要再 create / propose 同一工具：本轮若是造工具，且 tool_name 相同，或 purpose 表明正在造的就是本轮也要造的那一种能力，则 ok=false。其二，本轮若是查询、且显然只能靠正在造的那一本才能做（目录里还没有替代），不要再造一本，也不要假装 execute；ok=false，说明工具还在造。天气查询对上正在造的汇率工具，不产生约束。
@@ -237,7 +243,8 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             return lookup
         if not bool(data.get("ok")):
             error = str(data.get("error") or "").strip() or "策划失败"
-            return PlanFailure(error)
+            from jshi.tool.validity import pending_information
+            return PlanFailure(error, pending_information(data.get('waiting_for')))
         plan_data = data.get("plan")
         if isinstance(plan_data, Mapping) and isinstance(
             plan_data.get("steps"), Sequence
@@ -382,6 +389,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
                 continue
             if (
                 isinstance(planned, PlanFailure)
+                and not planned.waiting_for
                 and not in_flight
                 and not forced_note
                 and _looks_like_in_flight_refusal(planned.message)
@@ -399,7 +407,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             return PlanFailure("我这边还没能从目录里定下该用哪个工具。")
         if isinstance(planned, PlanFailure):
             if (
-                not in_flight
+                not in_flight and not planned.waiting_for
                 and _looks_like_in_flight_refusal(planned.message)
             ):
                 return PlanFailure(
@@ -564,15 +572,18 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
         payload: dict[str, Any] = {
             "need": intake.need,
             "verbal": intake.verbal,
-            "object_id": intake.object_id,
-            "field_ref": dict(intake.field_ref),
             "scene": scene,
             "catalog": list(catalog),
             "budget": budget_to_dict(MAX_BUDGET),
-            "in_flight": [dict(item) for item in in_flight],
+            "in_flight": [{k:v for k,v in item.items() if k != 'task_id'} for item in in_flight],
         }
         if materials:
             payload["tool_materials"] = materials
+        if intake.meta.get('user_input'):
+            payload['user_input'] = intake.meta['user_input']
+        payload['now'] = datetime.now(timezone.utc).isoformat(timespec='minutes')
+        if intake.meta.get('work_terms'):
+            payload['work_terms'] = json.loads(intake.meta['work_terms'])
         if index.is_eager:
             payload["engine_tools"] = index.eager_tools()
         else:

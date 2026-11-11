@@ -26,7 +26,8 @@ def test_defaults_preserve_full_prompt_and_levels_remove_functions():
     assert len(texts[0]) > len(texts[1]) > len(texts[2])
     assert '【任务2 · 工具】' in texts[0]
     assert '不要为了让材料消失而标完成' in texts[0]
-    assert '其他仍须按实际情况分析：' not in texts[0]
+    assert '已有结果还会出现' in texts[0]
+    assert '只引用已有编号，不编造' in texts[0]
     for level in (1, 2, 3):
         schema = reply_schema_for('smith', prompt_level=level)
         assert schema['additionalProperties'] is False

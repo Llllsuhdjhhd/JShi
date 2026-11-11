@@ -6,7 +6,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from jshi.app.model_settings import ModelSettings, install_model_settings
+from jshi.app.model_settings import COGNITION_TIMEOUT_S, ModelSettings, install_model_settings
 from jshi.models.base import EchoModel, ModelResponse
 from jshi.models.routing import ProviderFailure, ProviderModel, RoutedModel
 
@@ -30,6 +30,8 @@ def test_hot_save_persists_without_exposing_secrets(tmp_path):
     next_process=process(tmp_path)
     restored=ModelSettings(tmp_path,next_process,None)
     assert restored.public()['rows']['cognition']['current']=='gemini-3.6-flash'
+    assert restored.public()['rows']['cognition']['effective_timeout_s'] == COGNITION_TIMEOUT_S
+    assert all(model.timeout == COGNITION_TIMEOUT_S for model in restored.routes['cognition'].chain)
     before=settings.path.read_bytes()
     data['profile']['choices'].reverse()
     with pytest.raises(ValueError,match='DeepSeek'): settings.save(data)
@@ -128,7 +130,7 @@ def test_hot_chain_gives_lite_degraded_timeout_when_not_first(tmp_path):
     settings.save({'name': 'cognition', 'profile': profile})
     chain = settings.routes['cognition'].chain
     assert chain[0].name == 'gemini-3-flash-preview'
-    assert chain[0].timeout == ProviderModel.DEFAULT_TIMEOUT_S
+    assert chain[0].timeout == COGNITION_TIMEOUT_S
     assert chain[1].name == 'gemini-3.1-flash-lite'
     from jshi.app.model_settings import DEGRADED_TIMEOUT_S
     assert chain[1].timeout == DEGRADED_TIMEOUT_S
@@ -158,13 +160,13 @@ def test_hot_chain_gives_qwen_degraded_timeout_after_lite_before_deepseek(tmp_pa
     assert [m.name for m in chain] == [
         'gemini-3-flash-preview', 'gemini-3.1-flash-lite', 'qwen3.5-flash', 'deepseek-v4-flash',
     ]
-    assert chain[0].timeout == ProviderModel.DEFAULT_TIMEOUT_S
+    assert chain[0].timeout == COGNITION_TIMEOUT_S
     assert 'qwen3.5-flash' in SLOW_FALLBACK_MODELS
     assert chain[1].timeout == DEGRADED_TIMEOUT_S
     assert chain[2].timeout == DEGRADED_TIMEOUT_S
     assert chain[2].service.get('thinking_style') == 'qwen'
-    # DeepSeek last keeps default hot timeout (paid last resort, not slow-fallback set).
-    assert chain[3].timeout == ProviderModel.DEFAULT_TIMEOUT_S
+    # DeepSeek cognition keeps the reasoning wait even as the last fallback.
+    assert chain[3].timeout == COGNITION_TIMEOUT_S
 
 
 def test_no_fallback_after_stream_has_started():
