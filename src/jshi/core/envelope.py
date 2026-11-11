@@ -61,6 +61,7 @@ class InputEnvelope:
     input_annotations: tuple = ()  # Entry facts for current inputs only; no review prompt.
     interaction_scene: str = ""  # Completed JEV scene, a fallible contextual reference.
     visual_snapshot_id: str = ""  # Optional observation version; independent of speech identity.
+    tool_event_ids: tuple[str, ...] = ()  # Internal references, never user utterances.
     entry_timing: dict = field(default_factory=dict)  # Observability only; never a model instruction.
 
     def __post_init__(self) -> None:

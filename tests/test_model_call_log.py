@@ -59,6 +59,20 @@ def test_transport_reports_new_then_reused_connection(pool):
     assert len(FakeConnection.opened) == 1
 
 
+def test_reused_socket_takes_the_next_routes_timeout(pool):
+    call()
+    observed = []
+    FakeConnection.opened[0].sock.settimeout = observed.append
+    response = http_pool.urlopen(http_pool.Request('https://api.deepseek.com/chat/completions', data=b'{}'), timeout=45)
+    response.read()
+    response.close()
+    assert observed == [45] and FakeConnection.opened[0].timeout == 45
+    response = http_pool.urlopen(http_pool.Request('https://api.deepseek.com/chat/completions', data=b'{}'), timeout=7)
+    response.read()
+    response.close()
+    assert observed == [45, 7] and FakeConnection.opened[0].timeout == 7
+
+
 def test_prewarm_opens_once_and_next_call_reuses_it(pool):
     assert http_pool.prewarm('https://api.deepseek.com/chat/completions')['status'] == 'connected'
     assert http_pool.prewarm('https://api.deepseek.com/chat/completions')['status'] == 'fresh_idle'

@@ -40,6 +40,13 @@ class VoiceDialogue:
 
     def import_history(self, subject, records):
         with self.lock:
+            records = tuple(records)
+            displays = {r.content.get('reply_id'): r.created_at.timestamp()*1000 for r in records
+                        if r.event_type == 'voice_reply_displayed' and r.content.get('reply_id')}
+            for row in self.state['replies']:
+                if row['subject'] == subject and row.get('reply_id') in displays and not row.get('displayed_at'):
+                    row['displayed_at'] = displays[row['reply_id']]
+                    self._save()
             loaded = self.state.setdefault('legacy_loaded', [])
             if subject in loaded:
                 return
@@ -74,7 +81,8 @@ class VoiceDialogue:
                 self.state['replies'].append({'subject':subject,'key':'legacy:'+reply_id,
                     'session':value.get('session_id','legacy'),'reply_id':reply_id,
                     'texts':list(texts),'played':completed,'state':value.get('state','generated'),
-                    'at':at,'played_at':{str(i):played_clocks.get(reply_id,{}).get(str(i),at) for i in completed}})
+                    'at':at,'displayed_at':displays.get(reply_id),
+                    'played_at':{str(i):played_clocks.get(reply_id,{}).get(str(i),at) for i in completed}})
             self.state['replies'] = self.state['replies'][-128:]
             loaded.append(subject)
             self._save()
@@ -94,8 +102,9 @@ class VoiceDialogue:
         with self.lock:
             if not any(r['subject'] == subject and r['key'] == key for r in self.state['replies']):
                 self.state['replies'].append({'subject': subject, 'key': key, 'session': session,
-                    'reply_id': '', 'texts': list(texts), 'played': list(range(len(texts))) if shown else [],
+                    'reply_id': '', 'texts': list(texts), 'played': [],
                     'state': 'shown' if shown else 'generated', 'at': time()*1000,
+                    'displayed_at': time()*1000 if shown else None,
                     'hide_until_played': bool(hide_until_played)})
                 self.state['replies'] = self.state['replies'][-128:]
                 self._save()
@@ -139,6 +148,14 @@ class VoiceDialogue:
                 row.setdefault('played_at', {})[str(segment)] = time()*1000
                 self._save()
 
+    def displayed(self, reply_id):
+        """A page receipt is usable dialogue evidence, never proof of hearing."""
+        with self.lock:
+            row = next((r for r in self.state['replies'] if r['reply_id'] == reply_id and reply_id), None)
+            if row and not row.get('displayed_at'):
+                row['displayed_at'] = time()*1000
+                self._save()
+
     def stop(self, session):
         with self.lock:
             for row in self.state['replies']:
@@ -159,10 +176,11 @@ class VoiceDialogue:
                 for i, text in enumerate(r['texts']):
                     at = r.get('played_at', {}).get(str(i), r['at'])
                     played = i in r['played'] and at <= cutoff
-                    if played or self.state['include_unplayed']:
+                    shown = r.get('displayed_at') is not None and r['displayed_at'] <= cutoff
+                    if played or shown or self.state['include_unplayed']:
                         rows.append({'who': '匠石', 'text': text, 'at': at if played else r['at'],
                             'basis': ('文字回复已发送，未确认阅读' if r['state'] == 'shown' else '已播') if played
-                                     else '已生成但未确认播出' + ('，已中断' if r['state'] == 'stopped' else ''),
+                                     else ('页面已显示，未确认阅读或播出' if shown else '已生成但未确认播出' + ('，已中断' if r['state'] == 'stopped' else '')),
                             **({'scope':'previous_session'} if session and r.get('session') != session else {})})
             rows.sort(key=lambda r: r['at'])
             selected, size = [], 0
@@ -191,7 +209,7 @@ class VoiceDialogue:
             if subject not in self._hidden:
                 self._hidden[subject] = tuple(sorted({segment for row in self.state['replies']
                     for i, segment in enumerate(row['texts']) if (subject is None or row['subject'] == subject)
-                    and i not in row['played'] and row.get('hide_until_played', True)
+                    and i not in row['played'] and not row.get('displayed_at') and row.get('hide_until_played', True)
                     and len(segment.strip()) >= 4}, key=len, reverse=True))
             hidden = self._hidden[subject]
         # Older pending-scene records carry explicit speech-plan lines. They are

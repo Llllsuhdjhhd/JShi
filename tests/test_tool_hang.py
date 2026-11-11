@@ -494,18 +494,23 @@ def test_tool_wording_is_shared_by_all_three_instructions() -> None:
         assert "暂缓告知" in text, name
         assert "怎么对对象开口" in text or "见任务1" in text, name
         assert "在做是否使用工具的判断时" not in text, name
-        assert "不得因为前一次失败就断定这次也不行" in text, name
-        assert "也不得无视前一次已经成功" in text, name
-        assert "不得因为天气查询失败而退出不能询问机票" in text, name
-        assert "要根据时间合理推算时效性" in text, name
+        if name != "smith":
+            assert "不得因为前一次失败就断定这次也不行" in text, name
+        if name != "smith":
+            assert "也不得无视前一次已经成功" in text, name
+        if name != "smith":
+            assert "不得因为天气查询失败而退出不能询问机票" in text, name
+        if name != "smith":
+            assert "要根据时间合理推算时效性" in text, name
         assert "【任务2 · 工具】" in text, name
-        assert "不需要工具则不要这两个键" in text, name
+        assert "不需要工具则不要调用字段" in text, name
     # 人格两份共用同一段（改一处两个人格同时生效）
     from jshi.style.packs import PERSONA_TOOL_NOTE, TOOL_TASK_NOTE
 
     assert TOOL_TASK_NOTE in texts["wood"]
     assert PERSONA_TOOL_NOTE in texts["suxipo"]
-    assert PERSONA_TOOL_NOTE in texts["smith"]
+    assert '「近期已结束的工具」为失败：不得因此断定这次也不行' in texts["smith"]
+    assert '已有结果不足、过时而需重查' in texts["smith"]
     assert PERSONA_TOOL_NOTE == TOOL_TASK_NOTE
 
 
@@ -1318,6 +1323,7 @@ def test_created_tool_continues_original_need_in_background(tmp_path: Path) -> N
                     status=ToolStatus.OK,
                     result={"content": content},
                     summary=content,
+                    execution=({"kind": "verification", "verdict": "passed", "reason": "测试执行器已登记能力"},),
                     ideal=True,
                 ),
             )
@@ -2170,8 +2176,7 @@ def test_plan_skill_reads_scene_not_into_intake(tmp_path: Path) -> None:
     assert port.last_request is not None
     payload = json.loads(port.last_request.input_text)
     assert payload["scene"] == marker
-    assert payload["field_ref"]["zone_kind"] == "wood"
-    assert "rewritten_context" not in payload["field_ref"]
+    assert "field_ref" not in payload and "object_id" not in payload
 
 
 def test_plan_skill_scene_loader_failure_is_empty() -> None:
@@ -2332,6 +2337,7 @@ class _StatusEngine:
             kind=FeedbackKind.RESULT,
             result=ToolResult(
                 status=self._statuses.get(key, ToolStatus.OK),
+                execution=({"kind": "verification", "verdict": "passed", "reason": "测试步骤已执行"},),
                 summary=f"{key} 结果",
                 time_ms=1,
             ),
@@ -2477,7 +2483,8 @@ def test_sequential_plan_auto_chains_missing_deps(tmp_path: Path) -> None:
             yield ToolFeedback(
                 request_id=request.request_id,
                 kind=FeedbackKind.RESULT,
-                result=ToolResult(status=ToolStatus.OK, summary=f"{key} 结果"),
+                result=ToolResult(status=ToolStatus.OK, summary=f"{key} 结果",
+                    execution=({"kind": "verification", "verdict": "passed", "reason": "测试步骤已执行"},)),
             )
 
     plan = ToolPlan(

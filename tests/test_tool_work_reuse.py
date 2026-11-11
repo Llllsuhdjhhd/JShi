@@ -54,13 +54,14 @@ def handle(service, ids, disposition="deferred", reply="", complete=False, unsai
     ], selected_ids=ids, reply=reply, unsaid=unsaid)
 
 
-def test_deferred_survives_topic_change_age_and_restart(tmp_path):
+def test_deferred_survives_restart_and_explicit_result_loading(tmp_path):
     service, _ = runtime(tmp_path)
     task_id = launch(service, ToolRequest(command="weather", params={"city": "x"}))
     handle(service, [task_id])
     later = utc_now() + timedelta(days=3)
     service2, engine2 = runtime(tmp_path)
-    entries = service2.list_tool_related_entries("s", "o", query="continue the plan", now=later)
+    assert service2.list_tool_related_entries("s", "o", query="continue the plan", now=later) == ()
+    entries = service2.list_tool_related_entries("s", "o", now=later, required_ids=(task_id,))
     assert [e["id"] for e in entries] == [task_id]
     assert entries[0]["handling"] == "deferred"
     assert not engine2.calls

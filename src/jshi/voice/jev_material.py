@@ -10,7 +10,8 @@ SUPPORT_BANDS = ('强不支持', '不支持', '区分不明显', '支持', '强�
 # Short replies use only current speech and general knowledge when the person is tentative.
 SHORT_REPLY_LEVELS = frozenset({'确定', '可能'})
 TASK_MATERIAL_SCOPE = ('以下仅为任务执行与采用状态，不含工具结果正文。'
-                       'result_available表示程序侧有结果，不表示本次已提供其内容；'
+                       'waiting_for为待补信息，expires_at为带时区的原任务适用截止；任务待补不等于发言未完，过期不续办。'
+                       'result_available表示程序侧有结果，不表示本次已提供其内容；completion_verified仅表示提供了产物核验依据，整项需求是否满足仍需主认知结合正文判断；'
                        '匠石已播的具体说法未与结果正文核对时，保留“已说、依据未核实”，不概括成任务结果已交付。')
 
 
@@ -201,14 +202,32 @@ def task_context(process, subject_id, speakers, *, code_of=None):
         result.append({'ref': f'Q{len(result)+1}', 'owner': code_of(owner) if code_of else '当前已绑定人物',
                        'purpose': hang.need[:200], 'state': state,
                        'updated_at': hang.updated_at.timestamp(),
-                       'result': {'ok': '成功', 'partial': '部分完成', 'failed': '失败',
+                       'result': {'ok': '执行结束', 'partial': '部分完成', 'failed': '失败',
                                   'aborted': '中止', 'rejected': '拒绝',
                                   'budget_exceeded': '预算不足'}.get(outcome, '尚无终态结果'),
                        'result_available': terminal is not None and outcome in {'ok', 'partial'},
+                       'completion_verified': any(r.get('kind') == 'verification' and r.get('verdict') == 'passed' for r in terminal.execution) if terminal else False,
                        'entered_main': hang.delivered_at is not None,
                        'delivery': delivery,
                        'closed': bool(work) and all(w.get('closed') for w in work)})
-    return result
+    intake_store = getattr(service, 'intake_store', None)
+    if intake_store is not None:
+        for owner in sorted(owners):
+            for intake in intake_store.list_for(subject_id, owner):
+                if intake.status not in {'failed', 'waiting', 'expired'}:
+                    continue
+                works = service.work_index.for_task(intake.intake_id)
+                if works and all(w.get('closed') for w in works):
+                    continue
+                result.append({'owner': code_of(owner) if code_of else '当前已绑定人物',
+                    'purpose': intake.need[:200], 'state': {'waiting':'待补信息，尚未执行', 'expired':'适用时段已过，不再续办'}.get(intake.status, '策划未完成，尚未执行'),
+                    'waiting_for': list(dict.fromkeys(q for w in works for q in w.get('waiting_for', ()))),
+                    'expires_at': next((w.get('expires_at') for w in works if w.get('expires_at')), ''),
+                    'updated_at': intake.updated_at.timestamp(), 'result': intake.plan_error[:160],
+                    'result_available': False, 'completion_verified': False,
+                    'entered_main': bool(intake.delivered_at), 'delivery': '按交付记录核对', 'closed': False})
+    result.sort(key=lambda r: r['updated_at'], reverse=True)
+    return [{**row, 'ref': f'Q{i}'} for i, row in enumerate(result[:6], 1)]
 
 
 def scene_task_context(process, subject_id, events, codes):

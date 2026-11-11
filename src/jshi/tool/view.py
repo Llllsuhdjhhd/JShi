@@ -279,6 +279,14 @@ def format_tool_now(
         lines.append("（无）")
     for hang in recent:
         _emit_now_hang(lines, hang, service=service, raw=raw)
+    pending = [r for r in intakes if r.status == 'waiting' or
+               r.status == 'expired' and (stamp-r.updated_at).total_seconds() <= ttl_s]
+    if pending:
+        lines.append("\n# 待补信息与时效")
+        for record in pending:
+            label = '待补信息' if record.status == 'waiting' else '已过期，不再执行'
+            lines.extend([f'- {label}  {record.intake_id[:8]}', f'  需求：{record.need}',
+                          f'  说明：{record.plan_error}'])
     return "\n".join(lines)
 
 

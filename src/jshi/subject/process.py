@@ -221,6 +221,7 @@ class AssembledCurrentState:
     input_review_text: str = ""
     object_codes: tuple[tuple[str, str], ...] = ()
     tool_codes: tuple[tuple[str, str], ...] = ()
+    work_codes: tuple[tuple[str, str], ...] = ()
     processing_modes: tuple[str, ...] = ("interaction",)
     input_items: tuple[Mapping[str, object], ...] = ()
     input_parts: tuple[Mapping[str, object], ...] = ()
@@ -554,6 +555,7 @@ class SubjectProcess:
         recall_prefetch=None,
         consume_gap: bool = False,
         clock: StepClock | None = None,
+        tool_event_ids: Sequence[str] = (),
     ) -> AssembledCurrentState:
         """单一路径组装（只读已有记录）：
         委托组装器收集各装载源，源内去重、生成快照与报告；
@@ -576,7 +578,7 @@ class SubjectProcess:
         tool_entries: tuple[Mapping[str, object], ...] = ()
         if speaker_oid and profile.includes("tool"):
             tool_entries = self.tool_service.list_tool_related_entries(
-                subject_id, speaker_oid, query=input_text
+                subject_id, speaker_oid, query=input_text, **({'required_ids': tool_event_ids} if tool_event_ids else {})
             )
         mark("③工具相关")
         ctx = AssemblyContext(
@@ -604,7 +606,10 @@ class SubjectProcess:
 
         self._turn_tool_ids = tuple(str(item["id"]) for item in tool_entries)
         tool_codes = tuple((f"T{i}", str(item["id"])) for i, item in enumerate(tool_entries, 1))
-        tool_related = format_tool_related(tool_entries, task_codes={oid:code for code,oid in tool_codes})
+        work_ids = tuple(dict.fromkeys(wid for item in tool_entries for wid in item.get('work_ids', ())))
+        work_codes = tuple((f'W{i}', wid) for i, wid in enumerate(work_ids, 1))
+        tool_related = format_tool_related(tool_entries, task_codes={oid:code for code,oid in tool_codes},
+                                          work_codes={wid:code for code,wid in work_codes})
         return AssembledCurrentState(
             input_text=input_text,
             speaker=working_set.speaker,
@@ -619,6 +624,7 @@ class SubjectProcess:
             # 主路径只呈现【工具相关】；裸 tool_input / 热状态标题不再分两路贴。
             tool_input=tool_related,
             tool_codes=tool_codes,
+            work_codes=work_codes,
             tool_hot_state="",
             prompt_level=profile.level,
             recall_memory=profile.recall_memory,
@@ -650,6 +656,37 @@ class SubjectProcess:
     # 外部活动主流程
     # ------------------------------------------------------------------
 
+    def experience_tool_results(self, subject_id: str, object_id: str, task_ids: Sequence[str],
+                                *, envelope: InputEnvelope | None = None, delivery_context: str = '', **kwargs):
+        """Internal trigger: the recipient is not a newly observed speaker."""
+        from jshi.core.envelope import InputPart, SpeakerEvidence
+        profile = self.profiles.get(object_id)
+        if profile is None:
+            raise ValueError('tool recipient no longer exists')
+        for task_id in task_ids:
+            record = self.tool_service.hang_store.get(task_id) or self.tool_service.intake_store.get(task_id)
+            if record is None or record.subject_id != subject_id or record.object_id != object_id:
+                raise ValueError('tool event owner mismatch')
+            if not self.tool_service.notice_available(task_id):
+                raise ValueError('tool event no longer available')
+        if not task_ids:
+            raise ValueError('tool event requires result references')
+        from jshi.tool.service import HOT_STATE_CAP
+        if len(task_ids) > HOT_STATE_CAP:
+            raise ValueError('too many tool event results')
+        if envelope is None:
+            envelope = InputEnvelope(session_id='tool-events', source='tool_event',
+                parts=(InputPart('text', text='工具事项有新的状态或结果。依据本轮工具材料决定交代结果、必要询问或暂缓；不是用户重新提出请求。'),),
+                speaker=SpeakerEvidence('tool-recipient', object_id, profile.label, 'recognized', 'tool_recipient'),
+                delivery_context=delivery_context)
+        if envelope.source != 'tool_event' or envelope.speaker.object_id != object_id:
+            raise ValueError('invalid internal tool envelope')
+        self.tool_service.work_index.attempt_notices(task_ids)
+        result = self.experience(subject_id, envelope.text, envelope=envelope,
+                                 _tool_event_ids=tuple(task_ids), **kwargs)
+        self.tool_service.work_index.acknowledge_notices(task_ids)
+        return result
+
     def experience(
         self,
         subject_id: str,
@@ -675,6 +712,7 @@ class SubjectProcess:
         visual_snapshot=None,
         preparation_context: str = '',
         light_finalize: bool = False,
+        _tool_event_ids: Sequence[str] = (),
     ) -> SubjectActivityResult:
         def phase(stage):
             from .cancellation import check
@@ -682,6 +720,9 @@ class SubjectProcess:
             if on_phase is not None:
                 on_phase(stage)
         phase('resolve')
+        internal_tool = bool(_tool_event_ids)
+        if internal_tool and (envelope is None or envelope.source != 'tool_event'):
+            raise ValueError('tool events require an internal envelope')
         self.reflection_executor.note_input()
         self._deferred_write = None
         self._code_restore = code_restore
@@ -772,13 +813,14 @@ class SubjectProcess:
         fact = HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.FACT,
-            event_type="idle_stimulus" if idle else "external_input",
+            event_type="tool_event" if internal_tool else "idle_stimulus" if idle else "external_input",
             content={
                 "text": recorded_text,
                 **({"envelope": envelope.to_dict()} if envelope else {}),
                 "stimulus": STIMULUS_IDLE if idle else STIMULUS_SPEECH,
                 "objects": dict(objects),
-                "source": "idle" if idle else speaker.label,
+                "source": "tool" if internal_tool else "idle" if idle else speaker.label,
+                **({'tool_task_ids': list(_tool_event_ids), 'owner_id': speaker.object_id} if internal_tool else {}),
                 "object_id": speaker.object_id,
                 "object_status": speaker.status,
                 "object_confidence": speaker.confidence,
@@ -790,10 +832,12 @@ class SubjectProcess:
         clock.sub("①输入事实")
         from jshi.core.prompt_profile import select_profile, PromptProfile
         profile = select_profile((u.input_id for u in envelope.current_utterances), envelope.jev_calls) if envelope is not None else PromptProfile()
+        if internal_tool:
+            profile = PromptProfile(level=1, recall_memory=False)
         activity_id = new_id()
         recall_request = self._recall_request(subject_id, text, speaker, envelope, profile, activity_id, fact.id)
         recall_prefetch = self._start_recall_prefetch(subject_id, speaker, profile, recall_request)
-        if envelope is not None:
+        if envelope is not None and not internal_tool:
             from jshi.recognition.acquaintance import acquaintance_store
             ids=[u.input_id for u in envelope.current_utterances if u.input_id]
             acquaintance_store(self).provenance(subject_id,fact.id,ids or (envelope.input_id,))
@@ -808,7 +852,7 @@ class SubjectProcess:
                 self.vision.store.error(subject_id, '记忆照片预算已满或媒体不可用，本轮未新增照片关联')
         clock.sub("①视觉关联")
         inbound = None
-        if not idle:
+        if not idle and not internal_tool:
             inbound = self.activity_ledger.append_external(
                 subject_id,
                 actor_object_id=speaker.actor_object_id,
@@ -820,7 +864,7 @@ class SubjectProcess:
         clock.sub("①活动账本")
 
         # 新对象落库（通过门禁后）：暂定档案，来源 = 输入事实 id
-        if self.profiles.get(speaker.object_id) is None and speaker.reason != "voice_pending" and not (envelope and envelope.speaker.status == "unknown"):
+        if not internal_tool and self.profiles.get(speaker.object_id) is None and speaker.reason != "voice_pending" and not (envelope and envelope.speaker.status == "unknown"):
             self.object_system.ensure_provisional(
                 object_id=speaker.object_id,
                 label=speaker.label,
@@ -870,7 +914,7 @@ class SubjectProcess:
         current = self.assemble_current_state(
             subject_id, text, view, speaker=speaker, stimulus=stimulus, prompt_profile=profile,
             recall_request=recall_request, recall_prefetch=recall_prefetch,
-            consume_gap=True, clock=clock,
+            consume_gap=True, clock=clock, tool_event_ids=_tool_event_ids,
         )
         clock.sub("③组装收尾")
         current = replace(current, preparation_context=preparation_context, light_finalize=light_finalize,
@@ -907,6 +951,9 @@ class SubjectProcess:
                     level="确定" if speaker.status == "confirmed" or (envelope and envelope.speaker.method == "user_selected") else "不确定",
                     evidence="文字输入由用户选择人物" if envelope and envelope.speaker.method == "user_selected" else "入口提供的对象归属",
                     direction="yes" if envelope and envelope.speaker.method == "user_selected" else "", parts=parts),)
+            if internal_tool:
+                items = (make_input(fact.id, '', '工具事件', text, source='tool',
+                    evidence='内部事项事实，不是用户发言；服务对象为' + speaker.label),)
             current = replace(current, input_items=items, input_parts=parts, media_source_ids=(fact.id,))
             if envelope and envelope.speaker.status == "unknown" and not incoming:
                 self.unknown_inputs.append(envelope.input_id, envelope.speaker.object_id,
@@ -937,7 +984,7 @@ class SubjectProcess:
                               interaction_scene=envelope.interaction_scene,
                               object_codes=tuple((object_codes or {}).items()))
             from jshi.core.prompt_profile import select_profile
-            profile = select_profile((u.input_id for u in envelope.current_utterances), envelope.jev_calls)
+            profile = PromptProfile(level=1, recall_memory=False) if internal_tool else select_profile((u.input_id for u in envelope.current_utterances), envelope.jev_calls)
             current = replace(current, prompt_level=profile.level, prompt_modules=profile.modules, recall_memory=profile.recall_memory,
                               main_image=profile.main_image, media_context=envelope.session_id,
                               media_source_ids=(fact.id,), force_image_review=bool(re.search(r'(?:重新|重|再)(?:看|检查|观察).{0,12}(?:图|照片|画面)|(?:图|照片|画面).{0,12}(?:重新|再)(?:看|检查|观察)', text)))
@@ -954,6 +1001,7 @@ class SubjectProcess:
                     "object_id": speaker.object_id,
                     "label": speaker.label,
                     "tool_codes": dict(current.tool_codes),
+                    "work_codes": dict(current.work_codes),
                     "value_count": len(current.subject_state.salient_values),
                     "commitment_count": len(current.subject_state.commitments),
                     "recalled_event_ids": [
@@ -986,7 +1034,7 @@ class SubjectProcess:
         activity = Activity(
             id=activity_id,
             subject_id=subject_id,
-            kind=ActivityKind.EXTERNAL,
+            kind=ActivityKind.INTERNAL if internal_tool else ActivityKind.EXTERNAL,
             trigger=fact.id,
         )
         self.repository.add_activity(activity)
@@ -1025,9 +1073,8 @@ class SubjectProcess:
             activity_id=activity.id,
             kind=CognitiveKind.PERCEPTION,
             content=(
-                f"闲时：{speaker.label}仍在场，无新原话"
-                if idle
-                else f"对方表达：{recorded_text}"
+                ("工具内部事件：" + recorded_text) if internal_tool else
+                (f"闲时：{speaker.label}仍在场，无新原话" if idle else f"对方表达：{recorded_text}")
             ),
             epistemic_status=EpistemicStatus.ACCEPTED,
             evidence_kind=EvidenceKind.REPORT,
@@ -1059,6 +1106,10 @@ class SubjectProcess:
             on_reply=deliver_verbal if on_verbal is not None else None,
         )
         tool_ids = dict(current.tool_codes)
+        if response.tool_intent is not None:
+            work_ids = dict(current.work_codes)
+            response = replace(response, tool_intent=replace(response.tool_intent,
+                work_id=work_ids.get(response.tool_intent.work_id, response.tool_intent.work_id)))
         from .cancellation import check
         check()
         response = replace(response,
@@ -1066,6 +1117,10 @@ class SubjectProcess:
             tool_handling=tuple({**item, "task_id": tool_ids.get(item.get("task_id"), item.get("task_id"))}
                                 for item in response.tool_handling))
         response = replace(response, speaker_judgments=(), next_jev_note='', object_assessment=None)
+        if internal_tool:
+            # Phase one is delivery only; existing plan scheduling owns execution.
+            # A failed notification must not create an autonomous retry loop.
+            response = replace(response, tool_intent=None, object_assessment=None, speaker_judgments=())
         self.pending_scene.append_updates(subject_id, activity.id, response.scene_updates,
             input_ids=tuple(u.input_id for u in envelope.current_utterances) if envelope else (fact.id,),
             restore=code_restore)
@@ -1276,8 +1331,11 @@ class SubjectProcess:
             handled_ids,
         )
         from jshi.recognition.acquaintance import acquaintance_store
-        acquaintance_store(self).provenance(subject_id,activity.id,
-            [item['input_id'] for item in current.input_items if item.get('input_id')])
+        if not internal_tool:
+            acquaintance_store(self).provenance(subject_id,activity.id,
+                [item['input_id'] for item in current.input_items if item.get('input_id')])
+        if hasattr(self.tool_service, 'work_index'):
+            self.tool_service.work_index.acknowledge_notices(handled_ids)
         self._intake_tool_if_requested(subject_id, activity, speaker, response, current.input_text)
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
         close_result = self.activity_close.close(
@@ -1671,7 +1729,8 @@ class SubjectProcess:
                 "【人物肖像·可修订】\n这是过往白描形成的描述，需以本轮信息为准。\n"
                 + "\n".join(portraits)
             )
-        if current.speaker and current.speaker.object_id and include_turn:
+        if (current.speaker and current.speaker.object_id and include_turn
+                and not any(item.get('source') == 'tool' for item in current.input_items)):
             from jshi.recognition.acquaintance import acquaintance_store
             acquaintance = acquaintance_store(self)
             person = current.speaker.object_id
@@ -2676,6 +2735,7 @@ class SubjectProcess:
             object_id=object_id,
             activity_id=activity.id,
             need=intent.need or "",
+            user_input=input_text,
             verbal=verbal_text(response.response_plan),
             field_ref={
                 "activity_id": activity.id,
@@ -2687,6 +2747,7 @@ class SubjectProcess:
                 input_text if any(word in input_text for word in ("重新查", "重查", "刷新", "更新数据")) else ""
             ),
             work_id=intent.work_id,
+            waiting_for=intent.waiting_for, expires_at=intent.expires_at,
             step_id=intent.step_id,
         )
 

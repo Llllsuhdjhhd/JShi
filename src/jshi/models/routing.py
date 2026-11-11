@@ -24,10 +24,18 @@ class ProviderFailure(RuntimeError):
         self.reason = reason
 
 
+class ProviderTimeout(ProviderFailure):
+    """A local socket timeout, not an HTTP 408 returned by the provider."""
+    def __init__(self, timeout, context, phase):
+        self.status, self.retryable = 408, True
+        self.reason = (f'读取模型回答正文超时（连续{timeout:g}秒未收到数据）' if phase == 'response_body'
+                       else f'连接或等待模型响应头超时（网络等待上限{timeout:g}秒）')
+        RuntimeError.__init__(self, f'{context}：{self.reason}')
+
+
 class ProviderModel:
-    # Hot-path default: cap a single HTTP wait so one slow upstream cannot
-    # drag cognition / JEV p95 past the interactive budget (~8s). Background
-    # routes (write_zone / introspection) pass a higher timeout explicitly.
+    # Short-route socket inactivity limit. Main cognition and background routes
+    # pass their own limits; this is not an end-to-end latency guarantee.
     DEFAULT_TIMEOUT_S = 7.0
 
     def __init__(self, service, model, effort='low', max_tokens=None, timeout=None, route=''):
@@ -51,16 +59,21 @@ class ProviderModel:
         return ProviderModel(self.service, self.name, self._lowest_effort(), self.max_tokens,
                              timeout=self.timeout, route=self.route)
 
-    def _log(self, started, response, *, purpose, stream, usage=None, error=None):
+    def _log(self, started, response, *, purpose, stream, usage=None, error=None, error_phase=None):
         from .call_log import record, usage_fields
         transport = getattr(response, 'transport', None) or {}
         record({'route': self.route, 'purpose': purpose, 'service': self.service.get('label', ''),
                 'model': self.name, 'effort': self.effort, 'stream': stream, 'status': 'error' if error else 'ok',
                 **({'error_type': error} if error else {}),
+                **({'error_phase': error_phase} if error_phase else {}),
+                'timeout_s': self.timeout,
                 'reused': transport.get('reused'), 'connect_ms': transport.get('connect_ms'),
                 'headers_ms': transport.get('headers_ms'), 'idle_s': transport.get('idle_s'),
                 'stale_retry': transport.get('stale_retry'),
                 'total_ms': round((monotonic() - started) * 1000, 1), **usage_fields(usage)})
+
+    def _timeout(self, phase):
+        return ProviderTimeout(self.timeout, self.service['label']+' · '+self.name, phase)
 
     def _payload(self, messages, stream=False, max_tokens=None, response_format=None):
         service = self.service
@@ -149,10 +162,10 @@ class ProviderModel:
             reason = exc.reason
             timed_out = isinstance(reason, TimeoutError) or 'timed out' in str(reason).lower()
             if timed_out or isinstance(exc, TimeoutError):
-                raise ProviderFailure(408, True, self.service['label']+' · '+self.name, f'请求超时（{self.timeout:g}s）') from None
+                raise self._timeout('connection_or_headers') from None
             raise
         except TimeoutError:
-            raise ProviderFailure(408, True, self.service['label']+' · '+self.name, f'请求超时（{self.timeout:g}s）') from None
+            raise self._timeout('connection_or_headers') from None
 
     def _text(self, result):
         if self.service['protocol']=='gemini':
@@ -165,7 +178,10 @@ class ProviderModel:
             with self._open(self._payload(messages,max_tokens=max_tokens, response_format=response_format)) as response:
                 result = json.load(response)
         except BaseException as exc:
-            self._log(started, response, purpose=purpose, stream=False, error=type(exc).__name__)
+            phase = 'response_body' if response is not None else 'connection_or_headers'
+            self._log(started, response, purpose=purpose, stream=False, error=type(exc).__name__, error_phase=phase)
+            if isinstance(exc, TimeoutError):
+                raise self._timeout(phase) from exc
             raise
         self._log(started, response, purpose=purpose, stream=False,
                   usage=result.get('usageMetadata') or result.get('usage'))
@@ -225,9 +241,13 @@ class ProviderModel:
                     if text: yield text
         except BaseException as exc:
             error = 'cancelled' if isinstance(exc, GeneratorExit) else type(exc).__name__
+            if isinstance(exc, TimeoutError):
+                raise self._timeout('response_body' if response is not None else 'connection_or_headers') from exc
             raise
         finally:
-            self._log(started, response, purpose=request.purpose, stream=True, usage=usage, error=error)
+            self._log(started, response, purpose=request.purpose, stream=True, usage=usage, error=error,
+                      error_phase=('response_body' if response is not None else 'connection_or_headers')
+                      if error and error != 'cancelled' else None)
 
 
 def _model_name(model):

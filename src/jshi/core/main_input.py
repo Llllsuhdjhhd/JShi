@@ -16,7 +16,7 @@ def render_inputs(items):
         source = {"text": "文字", "audio": "语音"}.get(item["source"], item["source"])
         number = str(item.get("number") or i).removeprefix("N")
         rows.append(f"{number}. {item['display']}：{item['text']}")
-        note = f"来源：{source}；人物：{item['identity_level']}"
+        note = "来源：工具内部事件；不是人物发言" if item['source'] == 'tool' else f"来源：{source}；人物：{item['identity_level']}"
         if item.get("identity_evidence"):
             note += "；依据：" + item["identity_evidence"]
         direction = {'yes': '入口初判对匠石说，须核对原话与接续',

@@ -253,8 +253,8 @@ class ToolUseIntent:
     refresh_reason: str = ""
     work_id: str = ""
     step_id: str = ""
-    work_id: str = ""
-    step_id: str = ""
+    waiting_for: tuple[str, ...] = ()
+    expires_at: str | None = None
 
 
 @dataclass(frozen=True, init=False)

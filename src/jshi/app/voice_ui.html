@@ -1320,6 +1320,22 @@ $('composer').onsubmit=async event=>{
  }catch(e){modelProgress(row,'处理失败',true);detailLine(extra,'失败原因：'+e.message);modelHistory(row,'失败原因：'+e.message);updateModelPanel(row);badge.textContent=shown?'回复已显示，后续处理未完成':'发送或处理失败';badge.title=e.message;badge.classList.add('failed');log('处理失败：'+e.message);if(!shown&&!$('typed').value)$('typed').value=text;$('text-status').textContent=(shown?'后续保存异常：':'发送失败，输入仍保留在对话区：')+e.message;}
  finally{clearTimeout(timer);textSending=false;$('send-text').disabled=false;$('typed').focus();}
 };
+// Completed tool work can arrive after the text request has ended.
+let toolNoticePolling=false;
+const shownToolNotices=new Set();
+setInterval(async()=>{
+ if(toolNoticePolling||textSending||document.hidden||$('typed').value.trim()||$('text-dock').hidden
+    ||(ws&&ws.readyState===WebSocket.OPEN))return;
+ const object_id=$('text-person').value;if(!object_id)return;
+ toolNoticePolling=true;
+ try{
+  const r=await fetch('/tool-results',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({object_id})});
+  if(!r.ok)return;const d=await r.json();
+  if(d.reply&&d.activity_id&&!shownToolNotices.has(d.activity_id)){
+   shownToolNotices.add(d.activity_id);log('匠石 → '+d.label+'：'+d.reply,'reply');
+  }
+ }catch{}finally{toolNoticePolling=false;}
+},1500);
 $('enroll-clear').onclick=()=>{for(const id of selectedInputs.keys()){const row=inputRows.get(id);if(row){row.p.classList.remove('selected');row.button.textContent='选择声音';}}selectedInputs.clear();selectionChanged();};
 $('enroll').onclick=()=>{
   if(!ws || ws.readyState!==WebSocket.OPEN){$('enroll-status').textContent='请在当前会话连接中登记声音。';return;}

@@ -36,6 +36,8 @@ from .hang import (
 from .intake import IntakeRecord, IntakeStore
 from .metrics import ToolMetricsStore
 from .work import WorkIndex
+from .verification import assessment_of, assessment_note, can_advance
+from .validity import deadline, is_expired, pending_information
 from .reuse import ReusePolicy
 from .plan import PlanFailure, RulePlanner, ToolPlan, ToolPlanner, normalize_plan
 from .port import ToolRunner
@@ -212,7 +214,7 @@ def dedupe_recent_tool_entries(
         if status == "已完成":
             if key not in best_ok:
                 best_ok[key] = item
-        elif status in {"失败", "部分完成"}:
+        elif status in {"失败", "部分完成", "已过期"}:
             if key not in best_fail:
                 best_fail[key] = item
     kept = list(best_ok.values()) + list(best_fail.values())
@@ -353,6 +355,7 @@ def format_tool_hot_state(
 def format_tool_related(
     entries: Sequence[Mapping[str, Any]], *, now: datetime | None = None,
     task_codes: Mapping[str, str] | None = None,
+    work_codes: Mapping[str, str] | None = None,
 ) -> str:
     """Tool-side rule brief; original results remain in task storage.
 
@@ -394,19 +397,25 @@ def format_tool_related(
             if isinstance(used, datetime):
                 add("使用时间", relative_time_label(used, now=now))
             add("状态", item.get("status"))
+            add("待补信息", '；'.join(item.get('waiting_for') or ()))
+            add("任务适用截止（带时区）", item.get('expires_at'))
+            if item.get('expired'):
+                add('时效', '已过期；保留事实供说明，不再续办原请求')
             add("新的信息", item.get("new_info"), 2000)
             add("最终的结果", item.get("final_result"), 2000)
+            add("结果核验", item.get("verification"), 1500)
             add("结束原因", item.get("end_reason"), 500)
             if item.get("work_open"):
                 lines.append("事项：尚未交付完毕，已有材料保留待用")
-            if item.get("work_ids"):
-                add("事项ID", ", ".join(item["work_ids"]))
+            if item.get('work_ids'):
+                add('事项ID', ', '.join((work_codes or {}).get(wid, wid) for wid in item['work_ids']))
             needs = [n for n in item.get("work_needs", ()) if n != item.get("need")]
             add("所属事项需求", "；".join(dict.fromkeys(needs)))
             add("尚未完成的步骤", ", ".join(item.get("pending_steps") or ()))
             add("计划进度", item.get("plan_progress"))
             add("结果处理", item.get("handling"))
-            add("复用来源任务", item.get("reused_from"))
+            if item.get("reused_from"):
+                add("复用来源任务", codes.get(str(item['reused_from']), '此前同一事项的任务'))
     return "\n".join(lines)
 
 # 解锁依赖的终态：只有真正做成。PARTIAL 是「部分工具未完成」，喂给依赖它的
@@ -591,6 +600,7 @@ class ToolService:
         self.work_index = WorkIndex(hang_store.path.parent / "tool_work.jsonl")
         self.reuse_policies = dict(reuse_policies or {})
         self._session_tasks: set[str] = set()
+        self._notice_claims: set[str] = set()
         policy_path = hang_store.path.parent / "tool_reuse.json"
         if policy_path.exists():
             try:
@@ -615,6 +625,7 @@ class ToolService:
         self.wrap_skill = wrap_skill
         self._lock = threading.Lock()
         self._dedupe_lock = threading.Lock()
+        self._intake_lock = threading.RLock()
         self._planner_threads: list[threading.Thread] = []
         self._wrap_slots = threading.Semaphore(max(1, wrap_concurrency))
         self._wrap_lock = threading.Lock()
@@ -641,13 +652,25 @@ class ToolService:
         self._plan_note: dict[str, str] = {}
         self.runner.on_feedback = self._on_engine_feedback
         if hasattr(self.planner, "material_loader") and self.planner.material_loader is None:
-            self.planner.material_loader = lambda intake: format_tool_related([
-                entry for entry in self.list_tool_related_entries(
-                    intake.subject_id, intake.object_id, query=intake.need)
-                if entry.get("final_result") and self.hang_store.get(str(entry["id"]))
-            ])
+            self.planner.material_loader = self._planning_material
 
-    def intake(
+    def _planning_material(self, intake):
+        entries = [e for e in self.list_tool_related_entries(intake.subject_id, intake.object_id, query=intake.need)
+                   if e.get('final_result') and e['id'] != intake.intake_id]
+        task_codes = {e['id']:f'T{i}' for i,e in enumerate(entries,1)}
+        work_codes = {wid:f'W{i}' for i,wid in enumerate(dict.fromkeys(w for e in entries for w in e.get('work_ids',())),1)}
+        current = self.intake_store.get(intake.intake_id)
+        if current and entries:
+            self.intake_store.update(intake.intake_id, meta={**current.meta,
+                'material_codes':json.dumps({'tasks':task_codes,'works':work_codes},ensure_ascii=False)})
+        return format_tool_related(entries, task_codes=task_codes, work_codes=work_codes)
+
+    def intake(self, **kwargs) -> IntakeRecord:
+        # Atomically reserve one continuation before its planner starts.
+        with self._intake_lock:
+            return self._intake(**kwargs)
+
+    def _intake(
         self,
         *,
         subject_id: str,
@@ -660,13 +683,17 @@ class ToolService:
         refresh_reason: str = "",
         work_id: str = "",
         step_id: str = "",
+        waiting_for: Sequence[str] = (),
+        expires_at: str | None = None,
+        user_input: str = '',
     ) -> IntakeRecord:
         # 新开前先清僵尸 open / 超时策划，避免 205 一直以为「还在办」。
         if (subject_id or "").strip() and (object_id or "").strip():
+            self.expire_work(subject_id, object_id)
             self.reap_stale(subject_id, object_id)
         need_key = (need or "").strip()
         with self._dedupe_lock:
-            if need_key:
+            if need_key and not work_id and not waiting_for and expires_at is None:
                 existing = self.hang_store.find_open_by_need(
                     subject_id, object_id, need_key
                 )
@@ -701,18 +728,64 @@ class ToolService:
                 origin=origin,
             )
         intake_meta = {}
+        if user_input:
+            intake_meta['user_input'] = user_input
         row = self.work_index.get(work_id)
-        if (row and not row["closed"] and row["subject_id"] == subject_id
-                and row["object_id"] == object_id):
+        if work_id and (row is None or row['subject_id'] != subject_id or row['object_id'] != object_id or row['closed']):
+            return self.intake_store.update(record.intake_id, status='failed', plan_error='原事项不存在、已结束或不属于本次人物；未执行')
+        if row:
+            if is_expired(row):
+                record = self.intake_store.update(record.intake_id, meta={'work_id':work_id})
+                self._intake_current(record)
+                return self.intake_store.get(record.intake_id)
+            active = next((self.hang_store.get(tid) for tid in row['tasks'].values()
+                           if self.hang_store.get(tid) and self.hang_store.get(tid).status == 'open'), None)
+            if active:
+                return self.intake_store.update(record.intake_id, status='launched',
+                    task_id=active.task_id, request_id=active.request_id,
+                    meta={'work_id':work_id, 'dedupe':'active_work'})
+            pending = next((r for r in self.intake_store.list_for(subject_id, object_id)
+                            if r.intake_id != record.intake_id and r.status == 'received'
+                            and r.meta.get('work_id') == work_id), None)
+            if pending:
+                return self.intake_store.update(record.intake_id, status='resolved',
+                    meta={'work_id':work_id, 'dedupe':'planning_work'})
             known_steps = {step["step_id"] for step in (row.get("plan") or {}).get("steps", ())}
             if not step_id or step_id in known_steps:
                 intake_meta.update(work_id=work_id, step_id=step_id)
+            else:
+                return self.intake_store.update(record.intake_id, status='failed', plan_error='续办步骤不属于原事项；未执行')
+        try:
+            deadline(expires_at)
+        except ValueError:
+            self._fail_intake(record.intake_id, '本次任务的适用时间尚未明确，未开始执行')
+            return self.intake_store.get(record.intake_id)
+        missing = pending_information(waiting_for)
+        if row or missing or expires_at is not None:
+            work_id = work_id or record.intake_id
+            self.work_index.create(work_id, subject_id, object_id, need)
+            self.work_index.set_terms(work_id, waiting_for=missing, expires_at=expires_at, need=need)
+            intake_meta['work_id'] = work_id
         if refresh_reason.strip():
             intake_meta["refresh_reason"] = refresh_reason.strip()
         if intake_meta:
             record = self.intake_store.update(
                 record.intake_id, meta=intake_meta
             ) or record
+        if work_id:
+            terms = self.work_index.get(work_id)
+            record = self.intake_store.update(record.intake_id, meta={**record.meta,
+                'work_terms': json.dumps({k:terms[k] for k in ('need','current_need','waiting_for','expires_at') if k in terms}, ensure_ascii=False)}) or record
+        if not self._intake_current(record):
+            return self.intake_store.get(record.intake_id)
+        if row:
+            for old in self.intake_store.list_for(subject_id, object_id):
+                if old.status == 'waiting' and old.meta.get('work_id') == work_id and old.intake_id != record.intake_id:
+                    self.intake_store.update(old.intake_id, status='resolved')
+                    self.work_index.acknowledge_notices((old.intake_id,))
+        if missing:
+            self._wait_intake(record, missing, notify=False)
+            return self.intake_store.get(record.intake_id)
         thread = threading.Thread(
             target=self._plan_and_launch,
             args=(record.intake_id,),
@@ -726,7 +799,9 @@ class ToolService:
 
     def _plan_and_launch(self, intake_id: str) -> None:
         record = self.intake_store.get(intake_id)
-        if record is None or record.status == "cancelled":
+        if record is None or record.status == "cancelled" or self._is_invalidated(record.meta):
+            return
+        if not self._intake_current(record):
             return
         tag = self._planner_tag()
         try:
@@ -736,17 +811,18 @@ class ToolService:
                 logger.error("tool planner failed: %s", exc)
             else:
                 logger.exception("tool planner failed")
-            self.intake_store.update(
-                intake_id,
-                status="failed",
-                plan_error="策划出错",
-                meta={"model_tag": tag} if tag else {},
-            )
+            reason = "策划模型响应超时，尚未开始执行" if isinstance(exc, TimeoutError) or "超时" in str(exc) else "策划未完成，尚未开始执行（" + type(exc).__name__ + "）"
+            self._fail_intake(intake_id, reason, tag)
             return
         current = self.intake_store.get(intake_id)
         if current is None or current.status == "cancelled":
             return
+        if not self._intake_current(current):
+            return
         if isinstance(planned, PlanFailure):
+            if planned.waiting_for:
+                self._wait_intake(current, planned.waiting_for)
+                return
             self._fail_intake(intake_id, planned.message, tag)
             return
         if isinstance(planned, ToolPlan):
@@ -757,6 +833,54 @@ class ToolService:
             self._launch_plan(current, normalized, plan_tag=tag)
         else:
             self._launch(current, planned, plan_tag=tag)
+
+    def _wait_intake(self, record, missing, *, notify=True):
+        work_id = record.meta.get('work_id') or record.intake_id
+        self.work_index.create(work_id, record.subject_id, record.object_id, record.need)
+        self.work_index.set_terms(work_id, waiting_for=missing, need=record.need)
+        self.work_index.bind(work_id, record.intake_id)
+        self.intake_store.update(record.intake_id, status='waiting',
+            plan_error='需要补充：' + '；'.join(missing), meta={**record.meta, 'work_id':work_id})
+        if notify:
+            self._publish_notice(record.intake_id)
+
+    def _intake_current(self, record, *, work_id=''):
+        """Recheck at actual dispatch, not only when the human first asked."""
+        work_id = work_id or record.meta.get('work_id') or record.intake_id
+        row = self.work_index.get(work_id)
+        latest = self.intake_store.get(record.intake_id) or record
+        if latest.status in {'cancelled', 'resolved'} or row and row.get('closed'):
+            return False
+        if not is_expired(row):
+            return True
+        if record.status != 'expired':
+            self.work_index.expire(work_id)
+            self.intake_store.update(record.intake_id, status='expired',
+                plan_error='任务的适用时段已过，本次未继续执行；如需新的时段请重新说明',
+                meta={**record.meta, 'work_id':work_id})
+            self.work_index.bind(work_id, record.intake_id)
+            self._publish_notice(record.intake_id)
+        return False
+
+    def expire_work(self, subject_id, object_id):
+        for row in self.work_index.for_object(subject_id, object_id):
+            if row['closed'] or row.get('expired') or not is_expired(row):
+                continue
+            self.work_index.expire(row['work_id'])
+            candidates = [r for r in self.intake_store.list_for(subject_id, object_id)
+                          if r.meta.get('work_id', r.meta.get('plan_id', r.intake_id)) == row['work_id']
+                          and r.status not in {'cancelled', 'resolved'}]
+            self._plan_status[row['work_id']] = PLAN_BLOCKED
+            for task_id in tuple(row['tasks'].values()):
+                hang = self.hang_store.get(task_id)
+                if hang and hang.status == 'open':
+                    self.cancel(task_id)
+            if candidates:
+                # Cancellation may update the paired intake; the expiry fact is
+                # distinct and reported once through the original work.
+                record = candidates[0]
+                record = self.intake_store.update(record.intake_id, status='received')
+                self._intake_current(record, work_id=row['work_id'])
 
     def _fail_intake(self, intake_id: str, message: str, tag: str = "") -> None:
         """策划（或计划归一化）失败：交接转 failed，失败句走可见路径，不建记挂。"""
@@ -774,8 +898,43 @@ class ToolService:
             intake_id,
             status="failed",
             plan_error=message,
-            meta={"model_tag": tag} if tag else {},
+            meta={**dict(self.intake_store.get(intake_id).meta), **({"model_tag": tag} if tag else {})},
         )
+
+        self._publish_notice(intake_id)
+
+    def _publish_notice(self, task_id: str) -> None:
+        record = self.hang_store.get(task_id) or self.intake_store.get(task_id)
+        if record is None or record.status == "cancelled":
+            return
+        works = self.work_index.for_task(task_id)
+        if not works:
+            work_id = record.meta.get('work_id') or task_id
+            self.work_index.create(work_id, record.subject_id, record.object_id, record.need)
+            self.work_index.bind(work_id, task_id)
+            works = self.work_index.for_task(task_id)
+        for row in works:
+            self.work_index.notice(row['work_id'], task_id, 'result_ready')
+
+    def claim_notices(self, subject_id: str, object_id: str) -> tuple[str, ...]:
+        self.expire_work(subject_id, object_id)
+        with self._lock:
+            ids = tuple(dict.fromkeys(row['task_id'] for row in self.work_index.pending_notices(subject_id, object_id)
+                                     if row['task_id'] not in self._notice_claims and not row.get('attempted')
+                                     and self.notice_available(row['task_id'])))[:HOT_STATE_CAP]
+            self._notice_claims.update(ids)
+            return ids
+
+    def notice_available(self, task_id: str) -> bool:
+        record = self.hang_store.get(task_id) or self.intake_store.get(task_id)
+        return bool(record is not None and record.status not in {'cancelled', 'resolved'}
+                    and not self._is_invalidated(record.meta))
+
+    def release_notices(self, task_ids: Sequence[str], *, handled: bool = False) -> None:
+        if handled:
+            self.work_index.acknowledge_notices(task_ids)
+        with self._lock:
+            self._notice_claims.difference_update(task_ids)
 
     def _planner_tag(self) -> str:
         skill = getattr(self.planner, "skill", None)
@@ -798,6 +957,7 @@ class ToolService:
         hang = self.hang_store.get(task_id)
         if (
             not result.ideal
+            or assessment_of(result)['verdict'] != 'passed'
             or hang is None
             or hang.plan_id
             or hang.meta.get("fulfill_after_create") != "1"
@@ -818,6 +978,8 @@ class ToolService:
         original = self.intake_store.get_by_task_id(task_id)
         if hang is None or original is None or hang.status == "cancelled":
             return
+        if not self._intake_current(original):
+            return
         from .catalog import engine_tools
 
         name = (hang.command or "").strip()
@@ -837,7 +999,7 @@ class ToolService:
             origin=original.origin,
         )
         followup = self.intake_store.update(
-            followup.intake_id, meta={"created_from": task_id, "work_id": original.intake_id,
+            followup.intake_id, meta={"created_from": task_id, "work_id": original.meta.get('work_id') or original.intake_id,
                                      "refresh_reason": original.meta.get("refresh_reason", "")}
         ) or followup
         if tool is None:
@@ -919,7 +1081,7 @@ class ToolService:
             hang = self.hang_store.get(task_id)
             if hang is None:
                 intake = self.intake_store.get(task_id)
-                if intake is None or intake.status != "failed":
+                if intake is None or intake.status not in {'failed', 'resolved', 'expired'}:
                     return False
                 continue
             if (hang.kind == "propose" or hang.status == "open"
@@ -974,6 +1136,7 @@ class ToolService:
             row = self.work_index.get(work_id)
             if row and self._work_execution_done(row) and all(
                 row["handling"].get(task_id, {}).get("disposition") in {"answered", "dismissed"}
+                or ((prior := self.intake_store.get(task_id)) is not None and prior.status == 'resolved')
                 for task_id in row["tasks"].values()
             ):
                 self.work_index.close(work_id, evidence)
@@ -988,6 +1151,10 @@ class ToolService:
         plan_ctx: Mapping[str, Any] | None = None,
     ) -> str | None:
         ctx = dict(plan_ctx or {})
+        parent = self.intake_store.get(self._plan_intake_ids.get(str(ctx.get('plan_id') or ''), ''))
+        work_id = str((parent.meta if parent else intake.meta).get('work_id') or ctx.get('plan_id') or intake.intake_id)
+        if not self._intake_current(intake, work_id=work_id):
+            return None
         if ctx.get("plan_id"):
             parent = self.intake_store.get(self._plan_intake_ids.get(str(ctx["plan_id"]), ""))
             if parent and parent.meta.get("refresh_reason"):
@@ -1007,7 +1174,7 @@ class ToolService:
         elif request.command:
             command = (request.command or "").strip()
         plan_id = str(ctx.get("plan_id") or "")
-        work_id = plan_id or str(intake.meta.get("work_id") or intake.intake_id)
+        # The plan is an execution recipe inside the existing person's work.
         step_id = str(ctx.get("step_id") or intake.meta.get("step_id") or "")
         self.work_index.create(work_id, intake.subject_id, intake.object_id, intake.need)
         with self._dedupe_lock:
@@ -1070,7 +1237,7 @@ class ToolService:
         if reused is not None:
             source = next(f for f in reversed(reused.feedback)
                           if f.kind is FeedbackKind.RESULT and f.result is not None)
-            result = replace(source.result, time_ms=0, cost=0, resource={}, execution=())
+            result = replace(source.result, time_ms=0, cost=0, resource={})
             feedback = ToolFeedback(request_id=hang.request_id, kind=FeedbackKind.RESULT,
                                     result=result, at=source.at,
                                     meta={"reused_from": reused.task_id})
@@ -1080,7 +1247,8 @@ class ToolService:
             self.hang_store.append_feedback(hang.task_id, (feedback,))
             self.hang_store.set_wrap(hang.task_id, visible=True, summary=reused.summary,
                                      terminal=True, wrap_meta={"reused_from": reused.task_id})
-            self._plan_on_result(hang.task_id, ToolStatus.OK)
+            self._plan_on_result(hang.task_id, result.status if can_advance(result) else ToolStatus.PARTIAL)
+            self._publish_notice(hang.task_id)
             return hang.task_id
         est_meta = request.meta.get("estimate") if isinstance(request.meta, Mapping) else {}
         if not isinstance(est_meta, Mapping):
@@ -1170,6 +1338,13 @@ class ToolService:
         )
         if bound.create is not None:
             self._create_tasks.add(hang.task_id)
+        if not self._intake_current(intake, work_id=work_id):
+            self.hang_store.cancel(hang.task_id)
+            return None
+        limit = deadline((self.work_index.get(work_id) or {}).get('expires_at'))
+        if limit:
+            bound = replace(bound, meta={**bound.meta,
+                'timeout_s': min(timeout_s, max(0.01, (limit - utc_now()).total_seconds()))})
         self.runner.start(bound, hang.task_id)
         return hang.task_id
 
@@ -1191,9 +1366,12 @@ class ToolService:
         self, intake: IntakeRecord, plan: ToolPlan, *, plan_tag: str = ""
     ) -> None:
         """启动一个多工具计划。依赖满足时逐步启动后续步骤。"""
+        if intake.meta.get('work_id'):
+            plan = replace(plan, plan_id=intake.meta['work_id'])
         self._plans[plan.plan_id] = plan
         self.work_index.create(plan.plan_id, intake.subject_id, intake.object_id,
                                plan.need or intake.need, _plan_to_dict(plan))
+        self.work_index.set_plan(plan.plan_id, _plan_to_dict(plan))
         self.intake_store.update(intake.intake_id, status="launched",
                                  meta={**dict(intake.meta), "plan_id": plan.plan_id})
         self._plan_intake_ids[plan.plan_id] = intake.intake_id
@@ -1255,6 +1433,9 @@ class ToolService:
         plan_tag: str = "",
     ) -> None:
         with self._plan_lock:
+            if not self._intake_current(intake, work_id=plan.plan_id):
+                self._plan_status[plan.plan_id] = PLAN_BLOCKED
+                return
             if self._plan_status.get(plan.plan_id) in PLAN_FROZEN:
                 return  # 计划已冻结 / 已取消：不再启动任何新步骤
             completed = self._plan_completed.get(plan.plan_id, set())
@@ -1346,6 +1527,14 @@ class ToolService:
             return False
         approved = replace(request, ask=AskMode.EXECUTE)
         intake = self.intake_store.get_by_task_id(item_id)
+        works = self.work_index.for_task(item_id)
+        if intake is None or any(not self._intake_current(intake, work_id=w['work_id']) for w in works):
+            self.hang_store.cancel(item_id)
+            return False
+        limits = [deadline(w.get('expires_at')) for w in works if w.get('expires_at')]
+        if limits:
+            approved = replace(approved, meta={**approved.meta, 'timeout_s': min(
+                float(approved.meta.get('timeout_s') or 60), max(0.01, (min(limits)-utc_now()).total_seconds()))})
         if intake is not None and intake.status == "proposed":
             self.intake_store.update(intake.intake_id, status="launched")
         self.runner.start(approved, item_id)
@@ -1438,11 +1627,13 @@ class ToolService:
         if hang is None or hang.status == "cancelled":
             return
         if item.kind is FeedbackKind.RESULT:
+            assessment = assessment_of(item.result) if item.result else {"verdict": "failed"}
+            self.hang_store.patch_meta(task_id, {**hang.meta, "assessment": json.dumps(assessment, ensure_ascii=False)})
             self._finish_create(task_id, item)
             self._record_tool_result(item, hang)
             self._plan_on_result(
                 task_id,
-                item.result.status if item.result is not None else ToolStatus.FAILED,
+                item.result.status if item.result is not None and can_advance(item.result) else ToolStatus.PARTIAL,
             )
             result = item.result
             self.hang_store.append_stage(
@@ -1493,6 +1684,8 @@ class ToolService:
                 summary=summary,
                 terminal=item.kind is FeedbackKind.RESULT,
             )
+            if item.kind is FeedbackKind.RESULT:
+                self._publish_notice(task_id)
             return
         with self._wrap_lock:
             self._wrap_pending.setdefault(task_id, []).append(item)
@@ -1634,6 +1827,7 @@ class ToolService:
                 wrap_meta={"source": "fallback"},
                 terminal=True,
             )
+            self._publish_notice(task_id)
             return
         summary = (result.summary or "").strip()
         # 终态包装若空摘要，用引擎 RESULT 正文兜底，避免收口后仍留着「还在查」的中途句。
@@ -1656,13 +1850,15 @@ class ToolService:
             terminal=terminal,
             summary_limit=summary_limit,
         )
+        if terminal:
+            self._publish_notice(task_id)
 
     def list_visible(
         self, subject_id: str, object_id: str
     ) -> tuple[VisibleToolItem, ...]:
         items: list[VisibleToolItem] = []
         for record in self.intake_store.list_for(subject_id, object_id):
-            if record.status != "failed":
+            if record.status not in {'failed', 'waiting', 'expired'}:
                 continue
             if record.delivered_at is not None:
                 continue  # 策划失败句也已交付进片场 → 不再走 tool_input
@@ -1943,6 +2139,7 @@ class ToolService:
         now: datetime | None = None,
         ttl_s: float = HOT_STATE_TTL_S,
         reap: bool = False,
+        required_ids: Sequence[str] = (),
     ) -> tuple[dict[str, Any], ...]:
         """组装【工具相关】条目（程序侧结构，再交给 format_tool_related）。
 
@@ -1978,13 +2175,17 @@ class ToolService:
                     }
                 )
                 continue
-            if record.status != "failed":
+            if record.status not in {'failed', 'waiting', 'expired'}:
                 continue
             age = (stamp - record.updated_at).total_seconds()
-            if age > ttl_s and record.delivered_at is not None:
+            if record.status != 'waiting' and age > ttl_s and record.delivered_at is not None and record.intake_id not in required_ids:
                 continue
             error = (record.plan_error or "策划失败").strip()
-            if self._is_dedupe_plan_error(error):
+            if record.status == 'waiting':
+                name, desc = '待补信息', '保留原事项，信息补齐后再执行'
+            elif record.status == 'expired':
+                name, desc = '适用时段已过', '原请求不再执行，保留已有事实供说明'
+            elif self._is_dedupe_plan_error(error):
                 name = "未新开"
                 desc = "与在办事项重复，未另开一本"
             elif "超时" in error:
@@ -1996,8 +2197,8 @@ class ToolService:
             entries.append(
                 {
                     "id": record.intake_id,
-                    "section": "recent",
-                    "status": "失败",
+                    "section": "in_use" if record.status == 'waiting' else "recent",
+                    "status": {'waiting':'待补信息', 'expired':'已过期'}.get(record.status, '失败'),
                     "need": record.need,
                     "tool_name": name,
                     "tool_description": desc,
@@ -2103,6 +2304,9 @@ class ToolService:
                 str(row["handling"].get(entry["id"], {}).get("disposition") or "待处理")
                 for row in works)
             entry["work_needs"] = [row["need"] for row in works if not row["closed"]]
+            entry['waiting_for'] = list(dict.fromkeys(q for row in works for q in row.get('waiting_for', ())))
+            entry['expires_at'] = ', '.join(dict.fromkeys(row['expires_at'] for row in works if row.get('expires_at')))
+            entry['expired'] = any(is_expired(row) for row in works)
             entry["pending_steps"] = [step["step_id"] for row in works if not row["closed"]
                 and (row.get("plan") or {}).get("mode") != "agent_loop"
                 for step in (row.get("plan") or {}).get("steps", ())
@@ -2128,9 +2332,17 @@ class ToolService:
                 if works and hang.status == "open" and hang.task_id not in self._session_tasks:
                     entry.update(section="recent", status="失败",
                                  final_result="上次进程中断，已有任务索引保留；本次未自动重放工具")
-        return select_tool_related_entries(
+        for entry in entries:
+            hang = self.hang_store.get(str(entry["id"]))
+            if hang:
+                terminal = next((f.result for f in reversed(hang.feedback) if f.result), None)
+                if terminal:
+                    entry["verification"] = assessment_note(terminal)
+        selected = select_tool_related_entries(
             dedupe_recent_tool_entries(entries), query=query, now=stamp, ttl_s=ttl_s
         )
+        required = [e for e in entries if e["id"] in required_ids]
+        return tuple(required + [e for e in selected if e["id"] not in required_ids])[:HOT_STATE_CAP]
 
     def invalidate(
         self, item_id: str, *, reason: str = ""

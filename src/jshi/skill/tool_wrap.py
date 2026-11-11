@@ -25,7 +25,8 @@ TOOL_WRAP_SCHEMA: Mapping[str, Any] = {
 _WRAP_STYLE = """【写法】
 summary 必须是功能向、描述性的阶段性事实：正在做什么、做到哪一步、结果是什么。
 读到这句话的人要用它判断「事办到哪了 / 答案是什么」，不是要看技术细节。
-禁止写入：token、耗时毫秒、费用数字、路径、文件名、命令行、JSON 键名、变量名、
+文件名、实际保存位置、结果日期及范围属于交付内容，按需保留。
+禁止写入：token、耗时毫秒、费用数字、内部安装路径、命令行、JSON 键名、变量名、
 堆栈、引擎内部阶段名、原始日志大段照抄。输入里出现这些也要丢掉，改写成白话。
 输入 text / result_text 往往很杂，只抽取对 need 有用的事实或进展；抽不出则 visible=false。"""
 
@@ -98,6 +99,7 @@ RESULT_PROMPT = """你是匠石的工具反馈包装器。你只负责把「工�
 - result_text
 - expected_result
 - ideal / ideal_note
+- verification：程序核验结论及实际产物；未核验不等于成功或失败
 - feedback_plan
 - metrics
 - plan_id
@@ -110,7 +112,7 @@ RESULT_PROMPT = """你是匠石的工具反馈包装器。你只负责把「工�
 
 【规则】
 1. 主语用「我」或「我这边」。
-2. 成功优先用“已经”；失败、超时、取消、部分完成用白话说明，不堆错误码。
+2. 先读取 verification：执行结束不等于目标完成；仅有文字声称成功不能写成已完成。产物通过核验时据实写出已做到的部分；未知、部分完成、失败、超时或取消说明依据与缺口。
 3. kind=use 写结果；kind=create 写工具是否创建成功、能做什么。
    结果是数据或事实时，**把内容本身写出来**（数值、日期、名称、结论）。
    不要写成「已查到 / 已获取 / 可用于回答」这类元陈述——读到这句话的人看不到原始数据，
@@ -226,6 +228,7 @@ class ToolWrapSkill(Skill[WrapResult]):
     ) -> dict[str, Any]:
         result = item.result
         assert result is not None
+        from jshi.tool.verification import assessment_note
         status = result.status.value
         if result.status is ToolStatus.ABORTED:
             status = "cancelled"
@@ -235,6 +238,7 @@ class ToolWrapSkill(Skill[WrapResult]):
             "command": hang.command,
             "status": status,
             "result_text": _result_text_for_wrap(result),
+            "verification": assessment_note(result),
             "ideal": bool(result.ideal),
             "ideal_note": (result.ideal_note or "").strip(),
             "feedback_plan": _feedback_plan_from_hang(hang),
