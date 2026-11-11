@@ -30,7 +30,7 @@ def preparation(**changes):
 
 
 def main_preparation(**changes):
-    return {k: v for k, v in preparation(**changes).items() if k not in {'route', 'reply', 'waiting_reply'}}
+    return {k: v for k, v in preparation(**changes).items() if k not in {'route', 'reply'}}
 
 
 class Model:
@@ -59,7 +59,7 @@ def run(mode, first=None, second=None, **kwargs):
         # Speech belongs to the first response; stage two supplies only needs.
         if isinstance(second, dict) and (second.get('route') == 'self_reply' or second.get('waiting_reply')):
             first = {**first, 'front': second}
-        answers = [first, {k: v for k, v in second.items() if k not in {'route', 'reply', 'waiting_reply'}}
+        answers = [first, {k: v for k, v in second.items() if k not in {'route', 'reply'}}
                    if isinstance(second, dict) else second]
     model = Model(answers)
     gate = VoiceJEV(model, mode=mode, fallback_models=[])
@@ -86,7 +86,7 @@ def test_same_decision_and_only_needed_calls(mode):
         assert model.requests[1].purpose == 'voice_jev_prepare'
         assert '人物证据' not in model.requests[1].input_text
         assert 'short_chat' not in model.requests[1].input_text
-        assert 'waiting' not in model.requests[1].input_text
+        assert 'waiting' in model.requests[1].input_text
 
 
 def test_split_second_stage_rejects_legacy_speech_fields():
@@ -271,7 +271,7 @@ def test_task_reference_and_clock_survive_shared_snapshot():
     source = {'now': 200000, 'task_context': [{'ref':'Q1','updated_at':190.,'purpose':'取消下载'}]}
     result = compact_jev_input(source)
     assert result['task_context'][0]['ref'] == 'Q1'
-    assert result['task_context'][0]['updated_at'] == -10000
+    assert result['task_context'][0]['updated_at'] == -10
     assert source['task_context'][0]['updated_at'] == 190.
 
 
@@ -700,3 +700,51 @@ def test_split_front_cannot_use_another_persons_cached_context():
     result,model=run('split',entry(front=preparation(route='self_reply',level=3,reply='不能提前说出')),
         delivery={'state':'completed','short_chat':{'allowed':True,'scope':'person','person_code':'P2','person':{'name':'其他人'}}})
     assert not result.model_error and result.route=='main' and not result.direct_reply
+
+
+@pytest.mark.parametrize('first_front', [None, 'omitted'])
+def test_split_preparation_can_acknowledge_without_direct_reply(first_front):
+    first = entry(**({'front': None} if first_front is None else {}))
+    model = Model([first, main_preparation(recall_memory=True, waiting_reply='嗯，我回想一下。')])
+    result = VoiceJEV(model, mode='split', fallback_models=[]).decide_batch(
+        'stone', [{'n': 1, 'who': 'P1', 'text': '你还记得我别的吗', 'source': 'web_text'}], [],
+        {'state': 'completed', 'waiting': {'allowed': True, 'levels': {'L2': {'expected_seconds': 4, 'max_chars': 16}}}})
+    assert not result.model_error and result.route == 'main'
+    assert result.waiting_reply == '嗯，我回想一下。' and not result.direct_reply
+    assert len(model.requests) == 2
+    assert '"waiting":{"allowed":true' in model.requests[1].input_text
+    assert 'short_chat' not in model.requests[1].input_text
+
+
+@pytest.mark.parametrize('allowed,state,control,seconds,phrase', [
+    (False, 'completed', 'keep', 4, '嗯……'),
+    (True, 'playing', 'keep', 4, '嗯……'),
+    (True, 'completed', 'keep', 1, '嗯……'),
+    (True, 'completed', 'keep', 4, ''),
+])
+def test_second_stage_ack_keeps_existing_permissions(allowed, state, control, seconds, phrase):
+    model = Model([entry(control=control), main_preparation(waiting_reply=phrase)])
+    result = VoiceJEV(model, mode='split', fallback_models=[]).decide_batch(
+        'stone', [{'n': 1, 'who': 'P1', 'text': '你还记得别的吗', 'source': 'web_text'}], [],
+        {'state': state, 'waiting': {'allowed': allowed, 'levels': {'L2': {'expected_seconds': seconds, 'max_chars': 16}}}})
+    assert result.route == 'main' and not result.model_error and not result.waiting_reply
+    assert len(model.requests) == 2
+
+
+def test_busy_main_preparation_is_preserved_without_speech_or_extra_call():
+    model = Model([entry(control='keep', front=preparation(recall_memory=True))])
+    result = VoiceJEV(model, mode='split', fallback_models=[]).decide_batch(
+        'stone', [{'n': 1, 'who': 'P1', 'text': '还记得别的吗', 'source': 'web_text'}], [],
+        {'state': 'playing', 'waiting': {'allowed': False}})
+    assert result.route == 'main' and not result.model_error and result.main_prompt_hint['recall_memory']
+    assert not result.direct_reply and not result.waiting_reply and len(model.requests) == 1
+
+
+@pytest.mark.parametrize('phrase,expected', [('嗯，我翻翻。', '嗯，我翻翻。'), ('嗯……', '嗯……'), ('我再仔细想一下', ''), ('……', '')])
+def test_ack_budget_counts_speech_without_discouraging_natural_pauses(phrase, expected):
+    model = Model([entry(), main_preparation(level=3, recall_memory=True, waiting_reply=phrase)])
+    result = VoiceJEV(model, mode='split', fallback_models=[]).decide_batch(
+        'stone', [{'n': 1, 'who': 'P1', 'text': '你还记得我别的吗', 'source': 'web_text'}], [],
+        {'state': 'completed', 'waiting': {'allowed': True, 'levels': {'L3': {'expected_seconds': 2.2, 'max_chars': 4}}}})
+    assert not result.model_error and result.waiting_reply == expected and result.route == 'main'
+    assert len(model.requests) == 2

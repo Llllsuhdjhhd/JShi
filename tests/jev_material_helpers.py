@@ -20,6 +20,7 @@ def read_material(text):
         elif title == '材料范围':
             result['now'] = parsed.pop('now')
             result['time_basis'] = parsed.pop('time_basis', None)
+            result['event_time_unit'] = parsed.pop('event_time_unit', None)
             result['window'] = parsed
         else:
             result[names.get(title, title)] = parsed

@@ -209,6 +209,8 @@ def build_system(request: ModelRequest) -> str:
     capability = ''
     if request.purpose == 'subject_activity' or request.purpose.startswith('voice_jev'):
         capability = '\n\n【当前部署的身份与能力】\n' + DEPLOYMENT_CAPABILITIES
+    if request.purpose == 'subject_activity':
+        capability += '\n\n' + RESULT_EVIDENCE_RULE
     # The minute-level time changes every turn; keeping it last lets the fixed rules hit the prefix cache.
     now_label = _now_label(request.now) if _is_cognition(request) else ''
     return (_build_system(request) + capability + '\n\n【文字规范】\n' + LANGUAGE_RULE
@@ -218,6 +220,14 @@ def build_system(request: ModelRequest) -> str:
 DEPLOYMENT_CAPABILITIES = (
     '匠石目前的载体是电脑，能通过电脑以及连接的外设进行听、说，自身不具备物理意义上的移动、操控等能力。'
     '在回应等活动时，需清晰地理解自身的行动边界。比如：不能和人下楼，不能喝水等。'
+)
+
+RESULT_EVIDENCE_RULE = (
+    '【结果依据与当前交往】\n'
+    '任务成功或结果可用只说明状态，不能代替结果正文。具体数值、日期及结论须有本次提供的对应来源；'
+    '自己的旧回答、承诺、未开口事项及片场摘要不是独立核实依据。没有结果正文时不凭常识补齐，不把旧结果当当前结果。'
+    '本轮未追问的旧任务不挤占当前交往；先回答本轮问题。确需交付时使用已有正文并核对对象与时间，'
+    '缺少依据则按本轮能力核查或如实保留缺口，不能虚构已查、已完成或承诺没有后续执行的操作。'
 )
 
 
@@ -245,11 +255,19 @@ def _build_system(request: ModelRequest) -> str:
 
 def build_user(request: ModelRequest) -> str:
     body = _build_user_body(request)
+    if request.purpose == 'subject_activity':
+        body += '\n\n' + result_material_note(bool((request.tool_input or '').strip()))
     prepared = getattr(request, 'preparation_context', '')
     if prepared:
         body += '\n\n【提前准备·未交付·可推翻】\n' + prepared
     note = getattr(request, "transport_context", "")
     return f"{note}\n\n{body}" if note else body
+
+
+def result_material_note(has_tool_material: bool) -> str:
+    status = ('本次已载入【工具相关】，逐项区分状态记录与实际结果正文。' if has_tool_material else
+              '本次没有载入【工具相关】正文；不表示工具没执行或没有结果。')
+    return '【本轮结果材料范围】\n' + status + '不能从任务摘要或自己的旧承诺补造结果；已说出不等于结果已核实。'
 
 
 def _build_user_body(request: ModelRequest) -> str:

@@ -5,6 +5,7 @@ from dataclasses import replace
 from copy import copy
 import json
 import re
+import unicodedata
 from time import monotonic
 
 from jshi.core import SubjectState
@@ -30,7 +31,7 @@ def split_instruction():
     from .jev_prompts import SPLIT_FRONT_INSTRUCTION
     opening = ENTRY_INSTRUCTION.replace(
         '不生成回复；需要回应的内容交下一阶段准备。',
-        '先独立完成入口结论；仅在下述front条件满足时同时给短答或主认知准备，其余交下一阶段。')
+        '先独立完成入口结论；在下述front条件满足时给直接回答或主认知准备及短答，其余交下一阶段。')
     return opening + '\n\n' + SPLIT_FRONT_INSTRUCTION
 
 
@@ -96,10 +97,15 @@ def preparation_schema():
 
 
 def main_preparation_schema():
-    # Split stage two cannot emit speech or choose the front-stage route.
+    # Stage two may acknowledge the wait, but cannot choose a direct answer.
     full = preparation_schema()['properties']
     return object_schema({key: full[key] for key in
-                          ('level', 'recall_memory', 'recall_query', 'main_image', 'reason')})
+                          ('level', 'recall_memory', 'recall_query', 'main_image', 'waiting_reply', 'reason')})
+
+
+def waiting_speech_chars(text):
+    # Punctuation expresses natural pauses; it is not additional spoken text.
+    return sum(not c.isspace() and not unicodedata.category(c).startswith('P') for c in text)
 
 
 def entry_schema(lines, refs):
@@ -293,8 +299,8 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             {'who': p, 'source': 'scene', 'names': [delivery['people'][p]]} for p in sorted(contextual)
             if p not in {c['who'] for c in r.get('candidates', [])}]]}
             if r.get('person_scope') != 'unaligned_cloud_span' else r for r in batch]
-    thin, payload, packed = gate._build_material(batch, context, delivery)
-    snapshot = build_snapshot(payload, batch, delivery)
+    thin, payload, packed, source_ids = gate._build_material(batch, context, delivery)
+    snapshot = build_snapshot(payload, batch, delivery, source_ids=source_ids)
     main_support = support_for_main(snapshot)
     refs = {r['evidence_ref'] for r in thin}
     refs.update(r.get('ref', r.get('evidence_ref')) for r in snapshot['events'])
@@ -590,7 +596,8 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
         if mode == 'split' and preparation is not None:
             if (control == 'stop' or entry['interaction'] != 'direct'
                     or entry['utterance_complete'] != 'complete' or overlap or pending
-                    or snapshot['state'].get('state') in {'thinking', 'playing', 'paused', 'queued'}):
+                    or preparation['route'] == 'self_reply' and
+                    snapshot['state'].get('state') in {'thinking', 'playing', 'paused', 'queued'}):
                 preparation = None
                 stages.append({'stage':'split_front','mode':mode,'status':'deferred',
                                'reason':'当前控制、完整度或忙碌状态需要继续准备'})
@@ -631,7 +638,7 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                                preparation_text(snapshot, entry, main_only=mode == 'split'),
                                main_preparation_schema() if mode == 'split' else preparation_schema())
             if mode == 'split':
-                preparation = {**preparation, 'route': 'main', 'reply': '', 'waiting_reply': ''}
+                preparation = {**preparation, 'route': 'main', 'reply': ''}
         if not isinstance(preparation, dict):
             raise ValueError('合并判断缺少回应准备')
         hint = {'level': preparation['level'], 'needs': [], 'recall_memory': preparation['recall_memory'],
@@ -671,11 +678,15 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                 and (control == 'redirect' or control == 'keep' and snapshot['state'].get('state') in {'completed', 'idle'})
                 and entry['interaction'] == 'direct' and not pending and not overlap
                 and budget.get('expected_seconds', 0) >= 1.5
-                and len(preparation['waiting_reply'].strip()) <= min(16, budget.get('max_chars', 0))):
+                and len(preparation['waiting_reply'].strip()) <= 16
+                and 0 < waiting_speech_chars(preparation['waiting_reply']) <= budget.get('max_chars', 0)):
             brief = preparation['waiting_reply'].strip()
         if accepted.silent_operation:
             route, direct, brief = 'main', '', ''
             hint['level'] = 1
+        if preparation.get('waiting_reply') and not brief:
+            stages.append({'stage': 'waiting_reply_permission', 'mode': mode, 'status': 'blocked',
+                           'reason': '短答不符合当前交往、播放许可或时长预算'})
         return replace(accepted, route=route, direct_reply=direct, waiting_reply=brief,
                        main_prompt_hint=hint, needs_main_review=route == 'main',
                        stage_records=tuple(stages), model_raw=raw, entry_support=main_support)

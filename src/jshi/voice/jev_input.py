@@ -56,7 +56,7 @@ def compact_jev_input(payload):
                 if value <= 0:
                     return None  # zero denotes an unavailable wall-clock timestamp
                 milliseconds = value * 1000 if key in _WALL_SECONDS else value
-                return round(milliseconds - anchor) if has_clock else round(value)
+                return round((milliseconds - anchor) / 1000, 1) if has_clock else round(value)
             if key in _DURATION_MS:
                 return round(value)
         return value
@@ -98,11 +98,13 @@ def compact_jev_input(payload):
         # Current text is already represented by lines. Keep media associations,
         # selected-speaker evidence and timing, but do not repeat the same text.
         envelope['parts'] = [p for p in envelope.get('parts', []) if p.get('kind') != 'text']
-    result['now'] = anchor if has_clock else now
+    result['now'] = 0 if has_clock else now
     if has_clock:
         target = result['input'] if isinstance(result.get('input'), dict) else result
+        target['event_time_unit'] = 'seconds'
         target['time_basis'] = (
-            '事件与环境时间均为相对now的整数毫秒：负数在此前，正数在此后；'
-            'null为时间未提供。start_ms/end_ms为音频内偏移，gap_ms为间隔。'
+            '事件与环境时间均为相对秒（最多一位小数）；now=0为本次判断时点，负数在此前，正数在此后；'
+            '例如at=-2.3表示约2.3秒前，不是分钟。null为时间未提供。'
+            'start_ms/end_ms仍为音频内偏移毫秒，gap_ms仍为间隔毫秒，与事件时间不同。'
         )
     return result

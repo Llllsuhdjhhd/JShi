@@ -59,15 +59,15 @@ def test_history_not_replayed_unless_explicitly_requested(tmp_path, monkeypatch)
     writer = JEVSceneWriter(model)
     writer.run('stone', store.snapshot(), '')
     assert 'history_reference' not in model.data
-    assert model.data['scene_at'] == -10000
-    assert model.data['input_output'][0]['at'] == -1000
+    assert model.data['scene_at'] == -10
+    assert model.data['input_output'][0]['at'] == -1
     assert 'long-old-id' not in model.request.input_text
     assert model.request.input_text == model.request.persona_user_text
     assert store.snapshot()['events'][0]['payload']['at'] == 109000
     writer.run('stone', store.snapshot(), '', history_reference=old)
     history = model.data['history_reference']
     assert history['scope'] == 'historical_only'
-    assert history['at'] == -10000
+    assert history['at'] == -10
     assert 'events' not in history
     assert history['scene'] == '旧活动'
     assert model.data['input_output'][0]['text'] == 'HELLO'

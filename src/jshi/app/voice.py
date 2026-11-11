@@ -1525,6 +1525,8 @@ class VoiceConversation:
                                    "names": c.get('names', [])} for c in evidence_rows[n-1]['candidates']],
                    "short_voice_hint": evidence_rows[n-1]['short_voice_hint']}
             source_record = self.input_records.get(u.input_id, {})
+            if evidence_rows[n-1].get('audio_delivery'):
+                row['audio_delivery'] = evidence_rows[n-1]['audio_delivery']
             if interaction in {'direct', 'uncertain', 'none'}:
                 source_record['entry_interaction'] = interaction
             if source_record.get('entry_interaction') in {'direct', 'uncertain', 'none'}:
@@ -1587,7 +1589,9 @@ class VoiceConversation:
                         model_snapshot = self.dialogue.clean(snapshot, subject=self.subject_id)
                         from jshi.core.person_names import known_names
                         model_snapshot['named_people'] = known_names(self.code_owner, self.process.profiles)
+                        from jshi.voice.jev_material import scene_task_context
                         result = self.person_reviewer.run(self.subject_id, model_snapshot, self.dialogue.filter_text(main_scene, subject=self.subject_id),
+                            task_lookup=lambda events: scene_task_context(self.process, self.subject_id, events, model_snapshot['codes']),
                             on_request=lambda req: self.process._record_step_input(req, self.person_reviewer.model,
                                 subject_id=self.subject_id, activity_id=review_id))
                         snapshot['material_window'] = model_snapshot.get('material_window', {})
@@ -2031,6 +2035,7 @@ class VoiceConversation:
 
     @input_stage('jev_people_material')
     def _jev_batch(self, utterances):
+        from jshi.voice.scene_material import audio_delivery_evidence
         utterances = tuple(utterances)
         batch = []
         ids = {r['object_id'] for u in utterances for r in (
@@ -2094,6 +2099,7 @@ class VoiceConversation:
                           "short_voice_hint": self.input_records.get(utterance.input_id, {}).get('short_voice_hint', {}),
                           "asr_previous": [s if len(s) <= 300 else s[:300]+'…（此前转写较长，此处截取）'
                                            for s in check.get('asr_previous', ())],
+                          "audio_delivery": audio_delivery_evidence(check),
                           "joint_evidence":joint,"voice_evidence": voice})
         return batch
 
@@ -2360,7 +2366,7 @@ class VoiceConversation:
         if self.utterance_material:
             delivery['utterance_context'] = self.utterance_organizer.material()
         delivery['conversation'] = self.dialogue.recent(self.subject_id, cutoff=cutoff,
-            exclude={u.input_id for u in utterances}, session=self.session_id)
+            exclude={u.input_id for u in utterances}, session=self.session_id, include_ids=True)
         delivery = self.dialogue.clean(delivery, subject=self.subject_id)
         delivery['answer_handling'] = self._answer_handling_context()
         from jshi.voice.wait_ack import model_key
@@ -3436,8 +3442,7 @@ class VoiceConversation:
                     and call.get('collection_complete') is not False
                     and not self.pending_voice and not envelope.overlap
                     and not self.output_disconnected
-                    and self.delivery.snapshot().get('state') not in {'playing', 'paused', 'queued'}
-                    and self.wait_ack_timing.claim_ack()):
+                    and self.delivery.snapshot().get('state') not in {'playing', 'paused', 'queued'}):
                 from jshi.voice.wait_ack import ack_context
                 envelope = replace(envelope, delivery_context='\n'.join(filter(None,
                     (envelope.delivery_context, ack_context(brief)))))
@@ -3448,7 +3453,8 @@ class VoiceConversation:
                     if (emitted or self.closed or epoch != self.epoch or not self.input_idle.is_set() or self.preparation.fragments
                             or not self.feedback.claim('reconsider_ack' if preparation_route == 'restart' else 'waiting_ack',
                                 feedback_revision, busy=self.delivery.snapshot().get('state') in {'playing','paused','queued'},
-                                speaking=self.speech_active(), overlap=envelope.overlap, enabled=True)):
+                                speaking=self.speech_active(), overlap=envelope.overlap, enabled=True)
+                            or not self.wait_ack_timing.claim_ack()):
                         return
                     await self._start_plan((ResponseItem('verbal', brief, (envelope.speaker.object_id,)),),
                                            envelope.speaker.object_id, epoch, ack_key)
@@ -3545,7 +3551,7 @@ class VoiceConversation:
     async def _direct_reply(self, text, object_id, epoch, envelope, current, call):
         if ('shared_scene_revision' in call and
                 tuple(call['shared_scene_revision']) != self._shared_scene_revision()):
-            self.record('jev_reply_withheld', {'reason': '主认知认识更新已到达，旧短答不再交付'})
+            self.record('jev_reply_withheld', {'reason': '主认知认识更新已到达，旧直接回答不再交付'})
             return
         from jshi.core.contracts import utc_now
         from jshi.effectiveness.timings import append_timing
@@ -3669,7 +3675,7 @@ class VoiceConversation:
             call = next(iter(metrics.get('jev_calls', ())), {})
             if ('shared_scene_revision' in call and
                     tuple(call['shared_scene_revision']) != self._shared_scene_revision()):
-                self.record('jev_reply_withheld', {'reason': '排队期间认识已更新，旧短答不再交付'})
+                self.record('jev_reply_withheld', {'reason': '排队期间认识已更新，旧直接回答不再交付'})
                 return
         if self.closed or epoch != self.epoch or turn_key in self.retired_turns:
             self.record('voice_answer_discarded', {'turn_key': turn_key,
@@ -4064,7 +4070,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         result = await asyncio.to_thread(judge.decide_envelope, subject_id, envelope,
             {'_decision_entry': entry_bridge(decision_service(process)),
              'state':'completed', 'jev_scene':scene, 'unwritten':unwritten, 'now':time()*1000,
-             'conversation':dialogue.recent(subject_id, exclude={envelope.input_id}),
+             'conversation':dialogue.recent(subject_id, exclude={envelope.input_id}, include_ids=True),
              'task_context':tasks, 'selected_person_code':selected_code or 'P1',
              'named_people': known_names(codes, process.profiles),
              'people':{p:labels.get(oid,p) for p,oid in codes.items()}, 'jev_material_scope':{k:material[k] for k in ('version','generation','archived_unread_count')},
@@ -4146,7 +4152,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 main_scene = main_reference.get('committed_scene', '')
                 from jshi.core.person_names import known_names
                 snapshot['named_people'] = known_names(snapshot['codes'], process.profiles)
+                from jshi.voice.jev_material import scene_task_context
                 scene, _ = await asyncio.to_thread(writer.run, subject_id, snapshot, main_scene,
+                    task_lookup=lambda events: scene_task_context(process, subject_id, events, snapshot['codes']),
                     on_request=lambda request: process._record_step_input(request, model,
                         subject_id=subject_id, activity_id=prompt_activity_id))
                 text_jev_store.sync_shared_events(process.pending_scene.shared_events(subject_id,

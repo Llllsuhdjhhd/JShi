@@ -20,17 +20,27 @@ def test_disfluent_shopping_expression_keeps_all_three_parts():
     assert organizer.material()[0]['state'] == 'unknown'
 
 
-def test_long_unfinished_speech_gets_checkpoint_without_waiting_for_end():
+def test_long_speech_recovers_once_at_pause_not_at_elapsed_checkpoint():
     async def run():
         audio = SessionAudio();audio.append(b'\0\0'*128000)
         got = asyncio.Event()
+        calls = []
         async def recognize(pcm,start):
+            calls.append(start)
             return (Transcript('这个问题我还没说完','A',0,8000,True),)
         async def deliver(rows,**kw):got.set()
         recovery=RecoveryIntake(audio,recognize,deliver,lambda *a:None)
         try:
             await recovery.offer([SpeechSegment([], 'A',0,8000,speaker_cluster_id='A')],0,8000)
+            await asyncio.sleep(0)
+            assert not calls and not got.is_set()
+            # Elapsed time alone must not turn an unfinished utterance into a
+            # second ASR input. The existing pause boundary releases recovery.
+            await recovery.offer([SpeechSegment([], 'A',0,8000,speaker_cluster_id='A')],0,8300)
             await asyncio.wait_for(got.wait(),1)
+            await recovery.offer([SpeechSegment([], 'A',0,8000,speaker_cluster_id='A')],0,8400)
+            await asyncio.sleep(0)
+            assert calls == [0]
         finally:await recovery.close()
     asyncio.run(run())
 

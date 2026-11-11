@@ -2,6 +2,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import math
 import re
 
 
@@ -9,9 +10,24 @@ def encoded_size(value):
     return len(json.dumps(value, ensure_ascii=False, separators=(',', ':')))
 
 
+def audio_delivery_evidence(record):
+    """Only measured packet/ASR clocks establish delayed delivery, never sample time.
+
+    The interval ends at recognition arrival, not at the current model call. A
+    later read of this material must not turn processing time into speech age.
+    """
+    timing = record.get('asr_timing') or {}
+    end, arrival = timing.get('_audio_end_received_mono'), timing.get('_asr_return_mono')
+    if not all(type(v) in (int, float) and math.isfinite(v) for v in (end, arrival)):
+        return {}
+    if arrival - end < 1:
+        return {}  # Includes inconsistent clocks; missing evidence is not a zero delay.
+    return {'recognition_delay_seconds': round(arrival - end)}
+
+
 def dialogue_row(payload):
     keys = ('ref', 'p', 'text', 'at', 'basis', 'status', 'track', 'entry_status', 'entry_interaction', 'targets',
-            'scope', 'corrected_events', 'environment', 'kind', 'source')
+            'scope', 'corrected_events', 'environment', 'kind', 'source', 'audio_delivery')
     row = {k: deepcopy(payload[k]) for k in keys if k in payload}
     judgment = payload.get('judgment') or {}
     if judgment:

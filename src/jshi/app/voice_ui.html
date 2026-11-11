@@ -131,7 +131,7 @@
   #log .training-label button{margin:0;padding:4px 8px;font-size:11px;background:#fff;color:#536d91;border:1px solid #dce5f1}
   #log .training-label button.saved{color:#398366;background:#f2faf5;border-color:#cce7d6;opacity:1}
   #log .training-status{font-size:11px;color:#9a6759}
-  #log .personal-mlp{font-size:12px;color:#506c91;overflow-wrap:anywhere}
+  #log .personal-mlp,#log .voiceprint-scores{font-size:12px;color:#506c91;overflow-wrap:anywhere}
   #log .identity-conflict{font-size:12px;color:#c53030;font-weight:600;overflow-wrap:anywhere}
   #log .input-person{cursor:pointer;text-decoration:underline dotted;text-underline-offset:4px}
   #log .input-person:focus-visible{outline:2px solid #8bb7f3;outline-offset:3px}
@@ -453,6 +453,7 @@ function voiceRanking(element,identityNote,candidates){
 }
 function refreshTrainingLabel(row){
   const t=row.training;if(!t)return;
+  refreshVoiceprintScores(row);
   const previous=t.pick.value;
   t.pick.replaceChildren(new Option('选择人物',''));
   t.pick.add(new Option('其他（电视／电子设备，仅反例）','__negative_other__'));
@@ -510,6 +511,13 @@ function personalPredictionText(result){
   const states={pending:'计算中',queued:'排队计算中',not_configured:'未启用',skipped_manual:'人工标注，未调用',skipped_overlap:'重叠声音，未调用',skipped_identified:'本句已有归属，未调用',no_audio:'缺少音频',busy:'忙碌，本句未调用',disabled:'已暂停',no_ready_models:'暂无适用模型',timeout:'本次计算超时',error:'本次计算失败',not_called:'未提供结果'};
   return 'MLP：'+(states[result?.status]||'本次无有效输出')+(result?.status==='error'&&result.detail?'（'+result.detail+'）':'');
 }
+function refreshVoiceprintScores(row){
+  if(!row?.voiceprintScores)return;
+  const hits=(row.voiceprintCandidates||[]).slice(0,3);
+  const repeated=hits.some(r=>r.source==='repeated_short_audio');
+  row.voiceprintScores.textContent=hits.length?'声纹相似度（前3'+(repeated?'，短句拼接参考':'')+'）：'+hits.map(r=>(r.label||speakerLabels.get(r.object_id)||'名称未提供')+' '+r.score.toFixed(3)).join(' · '):'声纹相似度：暂无有效分数';
+  row.voiceprintScores.title='声纹相似度，不是身份概率；最终人物归属见句首。\n'+(row.ranking?.textContent||'');
+}
 function trainingLabel(row,inputId,candidates,prediction,comparison){
   const box=document.createElement('span'),label=document.createElement('span'),pick=document.createElement('select'),button=document.createElement('button'),undo=document.createElement('button'),train=document.createElement('button'),trainStatus=document.createElement('span'),status=document.createElement('span');
   box.className='training-label';label.textContent='训练声音';pick.ariaLabel='这条声音属于谁';pick.title='默认选择声纹排名最高的人，可手动更正；候选不代表身份已确认';
@@ -534,7 +542,8 @@ function trainingLabel(row,inputId,candidates,prediction,comparison){
   const mlp=document.createElement('span');mlp.className='personal-mlp';mlp.textContent=personalPredictionText(prediction);
   mlp.title='各个人模型独立的0～1分类分数，尚未校准为身份概率。'+(prediction?.ranking||[]).filter(r=>Number.isFinite(r.threshold)).map(r=>(r.label||'未命名人物')+'模型门槛 '+r.threshold.toFixed(3)).join('；');
   row.personalPrediction={element:mlp,result:prediction};
-  box.appendChild(label);box.appendChild(pick);box.appendChild(button);box.appendChild(undo);box.appendChild(train);box.appendChild(mlp);box.appendChild(status);box.appendChild(trainStatus);row.p.appendChild(box);
+  row.voiceprintScores=document.createElement('span');row.voiceprintScores.className='voiceprint-scores';
+  box.appendChild(label);box.appendChild(pick);box.appendChild(button);box.appendChild(undo);box.appendChild(train);box.appendChild(mlp);box.appendChild(row.voiceprintScores);box.appendChild(status);box.appendChild(trainStatus);row.p.appendChild(box);
   refreshIdentityConflict(row,comparison);
   if(row.overlap)status.textContent='重叠声音不能收录';
   refreshTrainingLabel(row);
@@ -1081,7 +1090,7 @@ function message(m) {
       row.jevNote.hidden=false;row.jevNote.textContent=(m.identity_display?'句首显示：'+displayedSpeaker(m.speaker,m.certainty,row.voiceprintCandidates,m.identity_display)+'\n'+m.identity_display.reason+'\n':'')+'原始声音判断：'+personLabel(m.voice_initial.label)+'\n'+verdict+'\n'+(m.certainty==='可能'?'JEV推测：'+personLabel(m.speaker.label)+'（尚未确认；JEV未提供数值置信度）\n':'')+'最终归属依据：'+(m.reason||'未提供');
       row.meta.title=row.time+'\n声纹初判：'+personLabel(m.voice_initial.label)+'\n'+verdict+'\n'+(m.reason || '');
     }
-    refreshIdentityDetails(row);
+    refreshVoiceprintScores(row);refreshIdentityDetails(row);
     if(m.input_id===latestInputId&&row?.training?.savedSource!=='manual') $('speaker').textContent='当前说话人：'+displayedSpeaker(m.speaker,m.certainty,row?.voiceprintCandidates||[],m.identity_display)+' · '+verdict;
   }
   else if(m.type==='identity') log('身份关联：'+m.label+'\n'+m.detail,'notice');
@@ -1149,7 +1158,7 @@ function message(m) {
       for(const owner of progressOwners(m))modelProgress(owner,m.failed?'处理失败':'已完成',true,m.at_ms);
   }
   else if(m.type==='jev') {const labels={ignore:'只记录现场',resume:'继续当前状态',stop:'停止',respond:'接话',clarify:'澄清'}; $('judge').textContent='JEV：'+(m.direct_reply?'我回答':(labels[m.action] || m.action))+' · '+m.reason;}
-  else if(m.type==='jev_reply') {if(m.route==='self_reply')modelProgress(latestModelInput,'已完成',true);$('judge').textContent=m.route==='waiting_ack'?'JEV：等待接话 · 主认知正在处理':'JEV：我回答 · 短时聊天，本轮未进入主流程和记忆写入';}
+  else if(m.type==='jev_reply') {if(m.route==='self_reply')modelProgress(latestModelInput,'已完成',true);$('judge').textContent=m.route==='waiting_ack'?'JEV短答 · 主认知正在处理':'JEV直接回答 · 本轮未进入主认知和记忆写入';}
   else if(m.type==='reply') {
     clearPlayback(); replyId=m.reply_id; paused=m.paused;audioDone=false;refreshStatus();
     const clockEntry={generated:m.generated_at_ms,nodes:[]};playbackClocks.set(replyId,clockEntry);
@@ -1302,7 +1311,7 @@ $('composer').onsubmit=async event=>{
   if(d.type==='waiting_ack'){log('匠石 → '+(d.label||actor)+'：'+d.text,'reply');phase='匠石正在处理';$('text-status').textContent=phase;return;}
   if(d.reply&&!shown){replyRow=log('匠石 → '+(d.label||actor)+'：'+d.reply,'reply');shown=true;}
   if(d.type==='reply'){phase=shown?'回复已显示，正在完成本轮处理':'正在完成本轮处理';badge.textContent='已接收';$('text-status').textContent=phase;}
-  if(d.type==='complete'){modelProgress(row,'已完成',true);if(d.timing&&timingSummary(d.timing)){modelHistory(row,'服务端耗时：'+timingSummary(d.timing));updateModelPanel(row);}detailLine(extra,(d.route==='self_reply'?'JEV直接回答，未进入主认知。':d.route==='control'?'入口判断结束，本轮未进入主认知。':d.jev_fallback?'入口判断失败后，已转交主认知处理。':'已进入主认知。')+(d.timing&&timingSummary(d.timing)?'\n'+timingSummary(d.timing):''));showActions(d.actions,replyRow);complete=true;badge.textContent=d.route==='self_reply'?'JEV 我回答':d.route==='control'?'未进入主认知':'已处理';phase=d.route==='self_reply'?'短时聊天，本轮未进入主流程和记忆写入。':(shown?'本轮已完成。':'本轮已完成，未开口（'+d.mode+'）。')+(d.scene_write==='background'?'记忆在后台整理，可继续发送。':'');}
+  if(d.type==='complete'){modelProgress(row,'已完成',true);if(d.timing&&timingSummary(d.timing)){modelHistory(row,'服务端耗时：'+timingSummary(d.timing));updateModelPanel(row);}detailLine(extra,(d.route==='self_reply'?'JEV直接回答，未进入主认知。':d.route==='control'?'入口判断结束，本轮未进入主认知。':d.jev_fallback?'入口判断失败后，已转交主认知处理。':'已进入主认知。')+(d.timing&&timingSummary(d.timing)?'\n'+timingSummary(d.timing):''));showActions(d.actions,replyRow);complete=true;badge.textContent=d.route==='self_reply'?'JEV直接回答':d.route==='control'?'未进入主认知':'已处理';phase=d.route==='self_reply'?'短时聊天，本轮未进入主流程和记忆写入。':(shown?'本轮已完成。':'本轮已完成，未开口（'+d.mode+'）。')+(d.scene_write==='background'?'记忆在后台整理，可继续发送。':'');}
  }
  try{const r=await textRequest;if(!r.ok)throw Error(await r.text());
   if((r.headers.get('Content-Type')||'').includes('application/x-ndjson')){const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const chunk=await reader.read();if(chunk.done)break;buffer+=decoder.decode(chunk.value,{stream:true});let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(line.trim())eventReceived(JSON.parse(line));}}buffer+=decoder.decode();if(buffer.trim())eventReceived(JSON.parse(buffer));if(!complete)throw Error('连接中断，未收到处理完成确认');}

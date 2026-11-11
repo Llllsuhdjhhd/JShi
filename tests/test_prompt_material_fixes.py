@@ -188,7 +188,7 @@ def test_interaction_origin_preserves_age_without_program_ids():
     from jshi.voice.jev_material import build_snapshot
     payload = {'input': {'lines': []}, 'now': 100000}
     origin = {'text': '你好', 'basis': '有效面对面招呼', 'at_ms': 97500, 'input_id': 'private-long-id'}
-    state = build_snapshot(payload, [], {'interaction_origin': origin})['state']
+    state = build_snapshot(payload, [], {'now': 100000, 'interaction_origin': origin})['state']
     assert state['interaction_origin'] == {'text': '你好', 'basis': '有效面对面招呼', 'age_seconds': 2}
     assert origin['input_id'] == 'private-long-id'
 

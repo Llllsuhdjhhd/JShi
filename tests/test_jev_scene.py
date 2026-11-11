@@ -94,7 +94,8 @@ def test_recent_window_defers_unread_backlog_and_consumes_only_read_prefix(tmp_p
 
 
 
-def test_scene_writer_marks_omissions_and_never_silently_truncates_large_event(tmp_path):
+def test_scene_writer_marks_omissions_and_never_silently_truncates_large_event(tmp_path, monkeypatch):
+    monkeypatch.setattr('jshi.voice.jev_scene.time', lambda: 10)
     class Model:
         def generate(self, request):
             self.data = read_material(request.input_text)
@@ -106,7 +107,8 @@ def test_scene_writer_marks_omissions_and_never_silently_truncates_large_event(t
     model = Model()
     scene, _ = JEVSceneWriter(model).run('stone', snap, 'B1[2分钟前]  旧参考' + '字' * 4000 + '\nB2[1分钟前]  最新完整参考')
     assert model.data['window']['omitted_events'] == 1
-    assert model.data['input_output'] == [{'ref':'E2', 'text': '等一下，先别继续', 'at': round(2-model.data['now'])}]
+    assert model.data['now'] == 0
+    assert model.data['input_output'] == [{'ref':'E2', 'text': '等一下，先别继续', 'at': -10.0}]
     assert model.data['main_scene'] == '[1分钟前]  最新完整参考'
     assert store.commit(snap, scene)
     archive = json.loads(store.path.with_suffix('.archive.jsonl').read_text(encoding='utf-8'))

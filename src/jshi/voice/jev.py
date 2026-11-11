@@ -382,7 +382,7 @@ class VoiceJEV:
             return BatchDecision(action, reason, self._items_for(batch, 'no', '入口判断失败'),
                                  model_error=owner._unavailable_error + '；60秒冷却期间不重复请求')
         from .jev_prompts import LEGACY_ENTRY_INSTRUCTION as ENTRY_INSTRUCTION
-        thin_batch, payload, packed = self._build_material(batch, context, delivery)
+        thin_batch, payload, packed, _source_ids = self._build_material(batch, context, delivery)
         schema = {"type": "object", "properties": {
             "items": {"type": "array", "items": {"type": "object", "properties": {
                 "i": {"type": "integer", "enum": [row['n'] for row in batch]}, "person": {"type": "string", "enum": sorted({"unknown", *[
@@ -585,6 +585,8 @@ class VoiceJEV:
                 thin['person_scope'] = row['person_scope']
             if row.get('asr_previous'):
                 thin['asr_previous'] = row['asr_previous']
+            if row.get('audio_delivery'):
+                thin['audio_delivery'] = row['audio_delivery']
             if self._selected_text(row):
                 thin['binding'] = {'person': thin['p'], 'certainty': 'confirmed', 'to_jiangshi': 'yes'}
             thin_batch.append(thin)
@@ -594,8 +596,19 @@ class VoiceJEV:
                    "scene": delivery.get("jev_scene", ""), "now": delivery.get("now")}
         for line in thin_batch:
             line['evidence_ref'] = 'I' + str(line['i'])
+        # Scene and dialogue are mirrors of one recorded input. Match before
+        # stripping IDs, without guessing identity from equal words or clocks.
+        seen_inputs = {(row['input_id'], row.get('text')) for row in context
+                       if isinstance(row.get('input_id'), str) and row['input_id']}
+        conversation = [row for row in delivery.get('conversation', [])
+                        if not (isinstance(row.get('input_id'), str) and row['input_id']
+                                and (row['input_id'], row.get('text')) in seen_inputs)]
         payload['conversation'] = [{**row, 'evidence_ref': f'C{i}'}
-            for i, row in enumerate(delivery.get('conversation', []), 1)]
+            for i, row in enumerate(conversation, 1)]
+        source_ids = {(view, i): row['input_id']
+                      for view, rows in (('unwritten', context), ('conversation', conversation))
+                      for i, row in enumerate(rows)
+                      if isinstance(row.get('input_id'), str) and row['input_id']}
         if delivery.get('utterance_context'):
             payload['utterance_context'] = delivery['utterance_context']
         payload['playback'] = {k: delivery[k] for k in ('state', 'spoken', 'pending') if k in delivery}
@@ -611,7 +624,7 @@ class VoiceJEV:
         if delivery.get("task_context"):
             payload["task_context"] = delivery["task_context"]
         payload = compact_jev_input(payload)
-        return thin_batch, payload, packed
+        return thin_batch, payload, packed, source_ids
 
     @staticmethod
     def _unavailable_hold(delivery: dict | None, *, batch_reason: str = '') -> tuple[str, str]:

@@ -123,3 +123,22 @@ def test_waiting_ack_cooldown_does_not_disable_main(tmp_path, monkeypatch):
     assert not stats.claim_ack()
     clock[0]+=30
     assert stats.guidance('m',allowed=True)['allowed']
+
+
+@pytest.mark.parametrize('idle', [False])
+def test_skipped_ack_does_not_start_thirty_second_cooldown(process, idle):
+    async def scenario():
+        sent=[]
+        async def send(message): sent.append(message)
+        c=VoiceConversation(process,'stone',FakeCloud(),send)
+        try:
+            c.input_idle.clear()
+            e,_=envelope(process,'请回想一下')
+            e=replace(e,jev_calls=({'waiting_reply':'嗯……','input_ids':[], 'main_prompt_hint':{'level':2},'ms':0},))
+            await c._respond(e,c.epoch)
+            await asyncio.sleep(0)
+            assert c.wait_ack_timing.last_ack is None
+            assert not any(m.get('route')=='waiting_ack' for m in sent)
+        finally:
+            await c.close()
+    asyncio.run(scenario())

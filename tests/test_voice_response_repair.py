@@ -126,7 +126,7 @@ def test_late_punctuation_revision_never_requeues_completed_answer(process):
      '匠石，有人说我有点累，如果不让你安慰，只让你做一个动作，你会做啥？', False)])
 def test_revision_during_entry_keeps_equivalent_result_only(process, original, revised, stale):
     from jshi.voice.jev import VoiceJEV
-    from tests.test_jev_split_modes import Model, entry, preparation
+    from tests.test_jev_split_modes import Model, entry, main_preparation
     async def run():
         async def send(m): pass
         loop = asyncio.get_running_loop()
@@ -136,7 +136,7 @@ def test_revision_during_entry_keeps_equivalent_result_only(process, original, r
             return entry(control='keep', items=[{'i':1, 'person':'unknown',
                 'certainty':'unknown', 'why':'声音待定'}])
         c = VoiceConversation(process, 'stone', FakeCloud(), send,
-            jev=VoiceJEV(Model([revise, preparation()]), mode='split', fallback_models=[]))
+            jev=VoiceJEV(Model([revise, main_preparation()]), mode='split', fallback_models=[]))
         try:
             u = speech('a', original)
             c.input_records['a'] = {'transcript': Transcript(u.text, 'a', 72031, 74171, True)}
@@ -332,7 +332,7 @@ def test_handling_note_is_in_actual_main_request(process,action,reason):
     from jshi.models import ModelResponse, ResponsePlan
     from jshi.models.prompt import build_user
     from jshi.voice.jev import VoiceJEV
-    from tests.test_jev_split_modes import Model, entry, preparation
+    from tests.test_jev_split_modes import Model, entry, main_preparation
     from tests.test_voice import Model as MainModel
     class Quiet(MainModel):
         def generate(self, request):
@@ -344,7 +344,7 @@ def test_handling_note_is_in_actual_main_request(process,action,reason):
     async def run():
         async def send(m): pass
         c = VoiceConversation(process, 'stone', FakeCloud(), send,
-                              jev=VoiceJEV(Model([first, preparation()]), mode='split', fallback_models=[]))
+                              jev=VoiceJEV(Model([first, main_preparation()]), mode='split', fallback_models=[]))
         try:
             c._note_answer_handling(action, (), '上一条请求', reason)
             await c.accept(Transcript('匠石，解释一下', 'A', 0, 1000, True))

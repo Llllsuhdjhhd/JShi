@@ -146,10 +146,11 @@ class VoiceDialogue:
                     row['state'] = 'stopped'
             self._save()
 
-    def recent(self, subject, *, cutoff=None, exclude=(), session=None):
+    def recent(self, subject, *, cutoff=None, exclude=(), session=None, include_ids=False):
         cutoff = time()*1000 if cutoff is None else cutoff
         with self.lock:
-            rows = [{'who': list(r.get('person_links', {}).values())[-1]['who'] if r.get('person_links') else r['who'], 'text': r['text'], 'at': r['at'], 'basis': '收到的原话'}
+            rows = [{'who': list(r.get('person_links', {}).values())[-1]['who'] if r.get('person_links') else r['who'], 'text': r['text'], 'at': r['at'], 'basis': '收到的原话',
+                     **({'input_id': r['id']} if include_ids else {})}
                     for r in self.state['inputs'] if r['subject'] == subject and r['id'] not in exclude
                     and 0 <= cutoff-r['at'] <= 300000]
             for r in self.state['replies']:
@@ -166,7 +167,8 @@ class VoiceDialogue:
             rows.sort(key=lambda r: r['at'])
             selected, size = [], 0
             for row in reversed(rows[-24:]):
-                cost = len(json.dumps(row, ensure_ascii=False))
+                # Host-only IDs must not reduce the established text window.
+                cost = len(json.dumps({k:v for k,v in row.items() if k != 'input_id'}, ensure_ascii=False))
                 if size+cost > 4000:
                     break
                 selected.append(row); size += cost

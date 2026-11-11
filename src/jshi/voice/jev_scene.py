@@ -441,17 +441,18 @@ class JEVSceneWriter:
         self.model = model
         self._unavailable_until = 0.0
 
-    def run(self, subject_id, snapshot, main_scene, *, on_request=None, history_reference=None):
+    def run(self, subject_id, snapshot, main_scene, *, on_request=None, history_reference=None, task_lookup=None):
         if monotonic() < self._unavailable_until:
             from .jev_errors import JEVCooldownError
             raise JEVCooldownError('JEV片场接口计费或认证失败；60秒冷却期间保留待办')
         # Internal long IDs and progress belong to the store, never to the prompt.
         events, reference = recent_material(snapshot, main_scene)
+        tasks = task_lookup(events) if task_lookup is not None else []
         now_ms = time()*1000
         revisions = snapshot.get('revisions', [])
         payload = {"now": now_ms, "scene": snapshot["scene"],
             'scene_at': revisions[-1]['at'] if revisions else None,
-            "input_output": events, "main_scene": reference,
+            "input_output": events, "main_scene": reference, "task_context": tasks,
             "identity_evidence": snapshot.get('identity_evidence', []),
             "recent_context": snapshot.get('recent_context', []),
             "window": {"limit": RECENT_MATERIAL_CHARS, "omitted_events": len(snapshot["material_window"]["archived_input_ids"]),
@@ -477,14 +478,17 @@ class JEVSceneWriter:
         referenced = set(re.findall(r'(?<![A-Za-z0-9])P\d+(?![A-Za-z0-9])', json.dumps(payload, ensure_ascii=False)))
         payload['people'] = {code: name for code, name in people.items() if code in referenced}
         from .jev_input import compact_jev_input
-        from .jev_material import blocks
+        from .jev_material import blocks, TASK_MATERIAL_SCOPE
         material = compact_jev_input(payload)
         user = blocks([('上一版当前现场', {'scene': material['scene'], 'scene_at': material['scene_at']} if material['scene'] else None),
             ('本批新事件', material['input_output']), ('前序依据', material['recent_context']),
             ('人物依据', material['identity_evidence']), ('主认知参考', material['main_scene']),
+            ('任务材料范围', TASK_MATERIAL_SCOPE if material['task_context'] else None),
+            ('相关任务', material['task_context']),
             ('人物映射', material['people']), ('历史候选', material.get('history_candidates')),
             ('历史参考', material.get('history_reference')),
-            ('材料范围', {'now': material['now'], 'time_basis': material.get('time_basis'), **material['window']})])
+            ('材料范围', {'now': material['now'], 'event_time_unit': material.get('event_time_unit'),
+                        'time_basis': material.get('time_basis'), **material['window']})])
         from jshi.core.person_names import PersonNames
         names = PersonNames(snapshot.get('named_people', {}))
         user = names.material(user)

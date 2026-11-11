@@ -2100,6 +2100,9 @@ class SubjectProcess:
             extra_context += ({'kind': 'jev_scene', 'content': current.interaction_scene},)
         from jshi.core.person_names import known_names
         person_names = known_names({code: oid for oid, code in current.object_codes}, self.profiles)
+        from jshi.core.scene_updates import shared_update_context
+        scene_corrections = shared_update_context(
+            self.pending_scene.shared_events(current.subject_state.subject_id), now.timestamp() * 1000)
         request = ModelRequest(
             person_name_codes=tuple((name, code) for code, name in person_names.items()),
             purpose="subject_activity",
@@ -2119,7 +2122,7 @@ class SubjectProcess:
             persona_schema=persona_schema,
             persona_user_text=persona_user_text,
             tool_input=current.tool_input,
-            transport_context=current.transport_context,
+            transport_context='\n\n'.join(filter(None, (scene_corrections, current.transport_context))),
             tool_hot_state=current.tool_hot_state,
             input_review_text=current.input_review_text,
             processing_modes=current.processing_modes,

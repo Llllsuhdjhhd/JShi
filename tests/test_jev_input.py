@@ -35,10 +35,11 @@ def test_compaction_preserves_evidence_and_reference_relationships():
     envelope = compact['input']['envelope']
     assert line['p'] == 'P1' and line['i'] == 1
     assert line['track'] == compact['input']['unwritten'][0]['track'] == envelope['speaker']['track_id'] == 'T1'
-    assert line['at'] == -150
-    assert compact['input']['unwritten'][0]['at'] == -2000
-    assert envelope['environment']['captured'] == -400
-    assert envelope['environment']['described_at'] == -12000
+    assert compact['now'] == 0 and '相对秒' in compact['input']['time_basis']
+    assert line['at'] == -0.1
+    assert compact['input']['unwritten'][0]['at'] == -2
+    assert envelope['environment']['captured'] == -0.4
+    assert envelope['environment']['described_at'] == -12
     assert envelope['environment']['completed'] is None
     assert envelope['start_ms'] == 1201 and envelope['end_ms'] == 2201
     assert envelope['parts'][0]['reference'] == envelope['environment']['frame'] == 'M1'
@@ -70,7 +71,7 @@ def test_compact_text_keeps_original_multimodal_transport_and_output_identity():
         {'n': 7, 'who': 'P1', 'source': 'web_text', 'text': '你好', 'at': 1000.25}], [],
         {'now': 1100.75, 'envelope': packed})
     data = json.loads(model.request.input_text)
-    assert data['input']['lines'][0]['at'] == -101
+    assert data['input']['lines'][0]['at'] == -0.1
     assert data['input']['envelope']['parts'][0]['reference'] == 'M1'
     assert model.request.input_parts[0] == packed['parts'][0]
     assert packed == original
@@ -81,3 +82,25 @@ def test_missing_clock_does_not_invent_relative_time():
     compact = compact_jev_input({'input': {'lines': [{'at': 1234.7}]}, 'now': None})
     assert compact['input']['lines'][0]['at'] == 1235
     assert 'time_basis' not in compact['input']
+
+
+def test_relative_seconds_keep_event_order_and_do_not_convert_audio_offsets():
+    from jshi.voice.jev_material import build_snapshot
+    now = 1791700000000
+    payload = {'now': now, 'input': {'lines': [], 'unwritten': [
+        {'ref': 'E1', 'text': '叫匠石', 'at': now-2256},
+        {'ref': 'E2', 'text': '你还在吗', 'at': now-1120,
+         'start_ms': 15482, 'end_ms': 15862, 'gap_ms': 200}],
+        'names': ['匠石']},
+        'environment': {'captured': (now-1500)/1000, 'described_at': (now-2000)/1000}}
+    compact = compact_jev_input(payload)
+    assert compact['input']['event_time_unit'] == 'seconds'
+    assert [row['at'] for row in compact['input']['unwritten']] == [-2.3, -1.1]
+    assert compact['input']['unwritten'][1]['start_ms'] == 15482
+    assert compact['input']['unwritten'][1]['end_ms'] == 15862
+    assert compact['input']['unwritten'][1]['gap_ms'] == 200
+    assert compact['environment']['captured'] == -1.5
+    snapshot = build_snapshot(compact, [], {'now': now,
+        'interaction_origin': {'text': '叫匠石', 'at_ms': now-4200}})
+    assert snapshot['state']['interaction_origin']['age_seconds'] == 4
+    assert payload['input']['unwritten'][0]['at'] == now-2256
