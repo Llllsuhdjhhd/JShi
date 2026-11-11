@@ -1266,6 +1266,16 @@ for(const id of ['debug-part','debug-purpose']) $(id).onchange=()=>requestDebug(
 $('debug-extra').onchange=()=>{if($('debug-extra').value)requestDebug($('debug-extra').value);};
 $('debug-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('debug-content').textContent);$('debug-title').textContent='已复制当前内容';}catch(e){$('debug-title').textContent='复制失败：'+e.message;}};
 let textSending=false,pendingTyped=null;
+let initiativePolling=false;
+setInterval(async()=>{
+ if(initiativePolling||textSending||document.hidden||ready||$('typed').value.trim()||!$('text-person').value)return;
+ const owner=$('text-person').value;initiativePolling=true;
+ try{
+  const response=await fetch('/initiative-results',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({object_id:owner})});
+  if(response.ok){const data=await response.json();if(data.reply&&owner===$('text-person').value)log('匠石：'+data.reply,'reply',Date.now());}
+ }catch{}finally{initiativePolling=false;}
+},1000);
+
 async function refreshTextPeople(){
  const previous=$('text-person').value;
  try{const r=await fetch('/text-people',{cache:'no-store'});if(!r.ok)throw Error(await r.text());const d=await r.json();

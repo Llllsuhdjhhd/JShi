@@ -50,7 +50,11 @@ def _urlopen_chat(http_request: Request, timeout: float = 60):
                 attempt + 2,
                 _CHAT_ATTEMPTS,
             )
-            time.sleep(delay)
+            from jshi.subject.cancellation import check
+            until = time.monotonic() + delay
+            while time.monotonic() < until:
+                check()
+                time.sleep(min(.025, max(0, until - time.monotonic())))
     raise RuntimeError("unreachable")
 
 from jshi.core import SubjectState
@@ -93,6 +97,8 @@ class ModelRequest:
     persona_user_text: str = ""
     # 本轮刺激：speech（对方原话）/ idle（闲时，无新原话）。
     stimulus: str = "speech"
+    cognition_mode: str = "conversation"
+    wake_context: str = ""
     # 200 交出的人话，03 原样装入；空则本路不出现。
     tool_input: str = ""
     # Transport/actual playback facts, separate from the person's words.

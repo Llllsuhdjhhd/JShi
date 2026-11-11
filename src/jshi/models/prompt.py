@@ -200,7 +200,7 @@ def format_turn_input(label: str, text: str, *, stimulus: str = STIMULUS_SPEECH)
     """【本轮】/【此时的输入】正文。闲时直写时间流过，不写成「名字：原话」。"""
     name = (label or "").strip() or "对方"
     if stimulus == STIMULUS_IDLE:
-        return f"和上次{name}说话又过了3分钟"
+        return "定时自主审视，没有对方新发言；实际间隔以本轮唤起材料为准。"
     return f"{name}：{text}"
 
 
@@ -255,6 +255,8 @@ def _build_system(request: ModelRequest) -> str:
 
 def build_user(request: ModelRequest) -> str:
     body = _build_user_body(request)
+    if request.wake_context:
+        body = "【本轮唤起·不是人物原话】\n" + request.wake_context + "\n\n" + body
     if request.purpose == 'subject_activity':
         body += '\n\n' + result_material_note(bool((request.tool_input or '').strip()))
     prepared = getattr(request, 'preparation_context', '')
@@ -278,7 +280,7 @@ def _build_user_body(request: ModelRequest) -> str:
         return request.input_text
     speaker = request.speaker
     label = speaker.label.strip() if speaker and speaker.label.strip() else "对方"
-    parts: list[str] = [f"【说话人】{label}"]
+    parts: list[str] = ([] if request.cognition_mode == "initiative" else [f"【说话人】{label}"])
     if speaker is not None and speaker.reason == "voice_scene":
         parts.append("这是现场观察，没有唯一说话人；按语音现场各段证据理解，不要求先确定一个对象，不把现场拟人。")
     elif speaker is not None and speaker.reason == "voice_unknown":

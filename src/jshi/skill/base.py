@@ -149,6 +149,9 @@ class Skill(ABC, Generic[T]):
                 if request is not None
                 else self.instruction
             )
+        if request is not None and request.purpose == "subject_activity" and request.cognition_mode == "initiative":
+            from jshi.subject.initiative import instruction as initiative_instruction
+            instruction = initiative_instruction(request)
         schema = self.schema
         if request is not None:
             persona_schema = getattr(request, "persona_schema", None)

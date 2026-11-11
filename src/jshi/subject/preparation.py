@@ -67,6 +67,9 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
 
 
+from .cognition_runtime import serialized
+
+@serialized
 def prepare(process, subject_id, object_id, rows, scene_version, allowed):
     from jshi.subject.cancellation import check, generation_scope, invoke
     with generation_scope(allowed):

@@ -143,7 +143,7 @@ def prewarm(url: str, timeout: float = 5, count: int = 1) -> dict:
     return {'status': 'connected', 'connect_ms': connect_ms[0] if len(connect_ms) == 1 else connect_ms}
 
 
-def urlopen(request: Request, timeout: float = 60):
+def _urlopen_local(request: Request, timeout: float = 60):
     """Drop-in for ``urllib.request.urlopen`` that reuses HTTPS connections."""
     if not isinstance(request, Request):
         return _plain_urlopen(request, timeout=timeout)
@@ -187,3 +187,12 @@ def urlopen(request: Request, timeout: float = 60):
             raise HTTPError(request.full_url, response.status, response.reason, response.headers, wrapped)
         return wrapped
     raise RuntimeError('unreachable')
+
+
+def urlopen(request: Request, timeout: float = 60):
+    from jshi.subject.cancellation import scoped, check
+    check()
+    if scoped():
+        from .cancellable_http import open_cancellable
+        return open_cancellable(request, timeout)
+    return _urlopen_local(request, timeout)

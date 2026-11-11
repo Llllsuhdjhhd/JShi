@@ -50,7 +50,8 @@ def test_format_turn_input_idle_is_not_speaker_colon():
     speech = format_turn_input("路光", "你好")
     idle = format_turn_input("路光", "", stimulus=STIMULUS_IDLE)
     assert speech == "路光：你好"
-    assert idle == "和上次路光说话又过了3分钟"
+    assert "没有对方新发言" in idle
+    assert "3分钟" not in idle
     assert "路光：" not in idle
 
 
@@ -102,7 +103,7 @@ def test_idle_experience_does_not_append_external(tmp_path):
 
     text = build_user(user)
     assert "user：" not in text
-    assert "和上次user说话又过了3分钟" in text
+    assert "没有对方新发言" in text
     assert result.current_state.stimulus == STIMULUS_IDLE
     assert result.current_state.input_text == ""
 

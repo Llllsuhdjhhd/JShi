@@ -248,15 +248,22 @@ def test_jev_weather_question_reaches_following_main_context_after_playback(proc
 
 @pytest.mark.parametrize('control',['stop','redirect','keep'])
 def test_control_while_thinking_does_not_wait_for_old_model_or_revive_it(process,control):
-    entered,release=Event(),Event()
+    entered,release,exited=Event(),Event(),Event()
     class BlockingMain(Model):
         def generate(self,request):
             self.requests.append(request)
             if len(self.requests)==1:
                 entered.set()
-                assert release.wait(8)
+                from jshi.subject.cancellation import check
+                try:
+                    while not release.wait(.025):
+                        check()
+                finally:
+                    exited.set()
                 text='这是一份不该复活的旧回答。'
-            else:text='这是新问题的回答。'
+            else:
+                assert exited.is_set(), 'new cognition started before old execution exited'
+                text='这是新问题的回答。'
             return ModelResponse(text=text,model='main',response_plan=ResponsePlan('respond',items=(ResponseItem('verbal',text,('lux-id',)),)))
     process.cognition=BlockingMain()
     model=ScriptedControl('redirect',control)
@@ -273,6 +280,7 @@ def test_control_while_thinking_does_not_wait_for_old_model_or_revive_it(process
             if control!='keep':
                 await asyncio.wait_for(c.turn_queue.join(),2)
                 assert not release.is_set()
+                assert exited.is_set()
                 assert any(m['type']=='stop' for m in sent)
                 assert not any('旧回答' in m.get('text','') for m in sent if m['type']=='reply')
                 if control=='redirect':assert any('新问题' in m.get('text','') for m in sent if m['type']=='reply')

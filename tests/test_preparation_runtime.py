@@ -28,14 +28,14 @@ def test_main_cognition_material_does_not_reuse_preparation_memory_codes():
     assert set(spoken) == {'prefix', 'preparation'}
 
 
-def test_provisional_analysis_has_no_business_commit_and_no_long_ids():
+def test_provisional_analysis_has_no_business_commit_and_no_long_ids(tmp_path):
     seen=[]
     class Model:
         name='fixture'
         def generate(self,request):
             seen.append(request)
             return ModelResponse(text=json.dumps({'goal':'介绍经历','assumptions':[],'gaps':['长度未定'],'candidate':'候选介绍'}),model='fixture')
-    process=SimpleNamespace(memory=object(),cognition=Model(),_record_step_input=lambda *a,**k:None)
+    process=SimpleNamespace(repository=SimpleNamespace(path=tmp_path/"subject.db"),memory=object(),cognition=Model(),_record_step_input=lambda *a,**k:None)
     result=prepare(process,'subject','', (row(),),2,lambda:True)
     assert result.content['candidate']=='候选介绍'
     assert 'person' not in seen[0].input_text and 'subject' not in seen[0].input_text
@@ -141,13 +141,13 @@ def test_light_schema_accepts_formal_response_and_rejects_empty_json():
     with pytest.raises(ValueError):validate({},schema)
 
 
-def test_slow_read_does_not_hold_preparation_executor_after_cancellation():
+def test_slow_read_does_not_hold_preparation_executor_after_cancellation(tmp_path):
     from threading import Event, Thread
     from jshi.subject.cancellation import TurnCancelled
     allowed,started,release,finished=Event(),Event(),Event(),Event()
     allowed.set();outcomes=[]
     def slow_read(*args):started.set();release.wait(2);return (),{}
-    process=SimpleNamespace(memory=SimpleNamespace(prepare_recall=slow_read))
+    process=SimpleNamespace(repository=SimpleNamespace(path=tmp_path/"subject.db"),memory=SimpleNamespace(prepare_recall=slow_read))
     def run():
         try:prepare(process,'s','p',(row(),),0,allowed.is_set)
         except TurnCancelled:outcomes.append('cancelled')

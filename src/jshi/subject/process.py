@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from .cognition_runtime import serialized
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -216,6 +217,8 @@ class AssembledCurrentState:
     tool_input: str = ""
     tool_hot_state: str = ""
     stimulus: str = STIMULUS_SPEECH
+    cognition_mode: str = "conversation"
+    wake_context: str = ""
     transport_context: str = ""
     audio_delivery: bool = False
     input_review_text: str = ""
@@ -650,6 +653,7 @@ class SubjectProcess:
     # 外部活动主流程
     # ------------------------------------------------------------------
 
+    @serialized
     def experience(
         self,
         subject_id: str,
@@ -675,6 +679,8 @@ class SubjectProcess:
         visual_snapshot=None,
         preparation_context: str = '',
         light_finalize: bool = False,
+        cognition_mode: str = "conversation",
+        wake_context: str = "",
     ) -> SubjectActivityResult:
         def phase(stage):
             from .cancellation import check
@@ -702,6 +708,14 @@ class SubjectProcess:
         self.last_boot = "否"
         self.last_memory_control = None
         self._turn_tool_ids = ()
+        cognition_mode = envelope.cognition_mode if envelope else cognition_mode
+        wake_context = envelope.wake_context if envelope else wake_context
+        if stimulus == STIMULUS_IDLE:
+            cognition_mode = "initiative"
+        if cognition_mode not in {"conversation", "initiative"}:
+            raise ValueError("invalid cognition mode")
+        if envelope and envelope.source == "initiative":
+            stimulus = STIMULUS_IDLE
         idle = stimulus == STIMULUS_IDLE
         if idle:
             text = ""
@@ -772,7 +786,7 @@ class SubjectProcess:
         fact = HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.FACT,
-            event_type="idle_stimulus" if idle else "external_input",
+            event_type="initiative_stimulus" if envelope and envelope.source == "initiative" else "idle_stimulus" if idle else "external_input",
             content={
                 "text": recorded_text,
                 **({"envelope": envelope.to_dict()} if envelope else {}),
@@ -873,7 +887,7 @@ class SubjectProcess:
             consume_gap=True, clock=clock,
         )
         clock.sub("③组装收尾")
-        current = replace(current, preparation_context=preparation_context, light_finalize=light_finalize,
+        current = replace(current, cognition_mode=cognition_mode, wake_context=wake_context, preparation_context=preparation_context, light_finalize=light_finalize,
                           on_reconsider=(lambda: on_phase('reconsider')) if on_phase else None)
         # A just-recorded input can be returned by the memory source. It is
         # already in input_items, so don't present it as an additional memory.
@@ -911,6 +925,8 @@ class SubjectProcess:
             if envelope and envelope.speaker.status == "unknown" and not incoming:
                 self.unknown_inputs.append(envelope.input_id, envelope.speaker.object_id,
                     text, envelope.session_id, envelope.start_ms, envelope.end_ms)
+        if envelope and envelope.source == "initiative":
+            current = replace(current, input_items=(), input_text="", speaker=None)
         modes = tuple(dict.fromkeys(str(mode).strip() for mode in processing_modes if str(mode).strip()))
         current = replace(current, processing_modes=modes or ("interaction",))
         if observed_environment and self.vision:
@@ -2129,6 +2145,8 @@ class SubjectProcess:
             input_items=current.input_items,
             input_parts=current.input_parts,
             stimulus=current.stimulus,
+            cognition_mode=current.cognition_mode,
+            wake_context=current.wake_context,
             context=self._model_context(
                 current.subject_state.subject_id,
                 working_recalled,
@@ -2564,6 +2582,8 @@ class SubjectProcess:
             persona_schema=persona_schema,
             persona_user_text=persona_user_text,
             stimulus=current.stimulus,
+            cognition_mode=current.cognition_mode,
+            wake_context=current.wake_context,
             context=context,
         )
         if getattr(self, 'voice_dialogue', None) is not None:

@@ -60,6 +60,9 @@ class InputEnvelope:
     review_candidates: tuple = ()
     input_annotations: tuple = ()  # Entry facts for current inputs only; no review prompt.
     interaction_scene: str = ""  # Completed JEV scene, a fallible contextual reference.
+    cognition_mode: str = "conversation"
+    wake_context: str = ""
+    internal_task_ids: tuple[str, ...] = ()
     visual_snapshot_id: str = ""  # Optional observation version; independent of speech identity.
     entry_timing: dict = field(default_factory=dict)  # Observability only; never a model instruction.
 

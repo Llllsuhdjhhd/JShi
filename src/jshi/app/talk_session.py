@@ -75,7 +75,7 @@ class IdleTrial:
             f"say hello · 主动思考：{int(self.seconds)} 秒无输入将启动一轮认知，"
             f"最多 {self.max_rounds} 轮后关闭。"
             "是否开口由认知决定，不强制打招呼。"
-            "未切换说话人即默认当前对象在场。可用 /style 阿丘。"
+            "上次对象不代表当前仍在场；是否交往由现场依据决定。"
         )
 
 # (命令, 参数, 说明)。全屏壳用同一份列表做箭头选择。
@@ -671,6 +671,7 @@ class TalkSession:
                     carriers=self.carriers,
                     on_reply=_early,
                     stimulus=stimulus,
+                    wake_context=(f"定时审视；距上次会话活动约{int(time.monotonic()-self.idle_trial.last)}秒。当前在场情况未由计时器确认。" if stimulus == STIMULUS_IDLE else ""),
                     defer_write=getattr(self.process, "write_zone", None) is not None,
                 )
                 if getattr(self.process, "write_zone", None) is not None:

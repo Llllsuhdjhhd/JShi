@@ -5,7 +5,7 @@ from queue import Queue, Empty
 from threading import BoundedSemaphore, Thread
 
 
-class TurnCancelled(Exception):
+class TurnCancelled(BaseException):
     pass
 
 
@@ -21,7 +21,8 @@ def check():
 
 @contextmanager
 def generation_scope(allowed):
-    token = _allowed.set(allowed)
+    parent = _allowed.get()
+    token = _allowed.set(lambda: allowed() and (parent is None or parent()))
     try:
         check()
         yield
@@ -30,8 +31,15 @@ def generation_scope(allowed):
 
 
 def invoke(model, request, *, on_reply=None):
-    if _allowed.get() is None:
-        return model.generate_stream(request, on_reply=on_reply) if on_reply is not None and hasattr(model, 'generate_stream') else model.generate(request)
+    if request is not None or _allowed.get() is None:
+        check()
+        def guarded(value):
+            check()
+            if on_reply is not None:
+                on_reply(value)
+        result = model.generate_stream(request, on_reply=guarded) if on_reply is not None and hasattr(model, 'generate_stream') else model.generate(request)
+        check()
+        return result
     check()
     if not _capacity.acquire(blocking=False):
         raise RuntimeError('此前模型请求仍在结束，本次未新增请求，请稍后重试')
@@ -60,3 +68,7 @@ def invoke(model, request, *, on_reply=None):
         if not success:
             raise value
         return value
+
+
+def scoped():
+    return _allowed.get() is not None
