@@ -159,11 +159,12 @@ def test_actual_cognition_request_uses_jev_gate_and_failure_does_not_commit(stor
     process._write_lock = RLock()
     process._reconcile_pending_scene = lambda *a: None
     process.active_zone = SimpleNamespace(load=lambda *a: None)
-    process.pending_scene = SimpleNamespace(render=lambda *a: '')
+    process.pending_scene = SimpleNamespace(render=lambda *a: '', shared_events=lambda *a: ())
     process._governing_rules = lambda *a: ()
     process._model_context = lambda *a: ()
     process._record_step_input = lambda *a,**k: None
     process.style_packs = {}
+    process.profiles = None
     process.cognition = Cognition()
     current = AssembledCurrentState(input_text='看看',subject_state=SubjectState('stone','匠石','测试'),
                 personal_items=(),context_view=None,active_segment_ids=(),recalled=(),

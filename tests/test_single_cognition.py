@@ -94,6 +94,37 @@ def test_pending_sampling_does_not_reset_timer_or_lose_late_events():
     assert tool_mode(False) == 'initiative'
 
 
+def test_quiet_timer_backs_off_but_new_evidence_does_not_wait_for_backoff():
+    now = [0.]
+    q = WakeQueue(clock=lambda: now[0], seconds=180)
+    for expected in (180, 360, 720, 1440, 1800):
+        now[0] += q.interval
+        batch = q.claim()
+        assert [x.source for x in batch] == ['timer']
+        q.finish(batch, success=True, quiet=True)
+        assert q.interval == expected
+    now[0] += 31
+    q.offer('perception', 'new', 'new observation')
+    batch = q.claim()
+    assert [x.source for x in batch] == ['perception']
+    assert q.interval == 180
+    q.finish(batch, success=True, quiet=True)
+    assert q.quiet_rounds == 0
+
+
+def test_new_interaction_retires_interrupted_timer_but_keeps_new_observation():
+    now = [180.]
+    q = WakeQueue(clock=lambda: now[0], seconds=180)
+    now[0] += 181
+    batch = q.claim()
+    q.note_activity()  # Human interrupted the review.
+    q.offer('perception', 'late', 'observation during the interrupted review')
+    q.finish(batch, success=False)
+    now[0] += 30
+    assert [x.key for x in q.claim()] == ['late']
+    assert q.claim() == ()
+
+
 def test_initiative_is_internal_and_keeps_no_fictional_speaker(tmp_path):
     from tests.test_idle_stimulus import _process
     from jshi.core.envelope import InputEnvelope, SpeakerEvidence
@@ -110,6 +141,29 @@ def test_initiative_is_internal_and_keeps_no_fictional_speaker(tmp_path):
 
 
 from tests.test_voice import process
+
+
+def test_cancelled_real_tool_review_closes_activity_and_retries_notice(process, monkeypatch):
+    import pytest
+    from jshi.subject.domain import ActivityStatus
+    from tests.test_tool_notifications import failed_task
+    task = failed_task(process)
+    original = process.cognition.generate
+    def interrupt(request):
+        raise TurnCancelled('new input')
+    monkeypatch.setattr(process.cognition, 'generate', interrupt)
+    with pytest.raises(TurnCancelled):
+        process.experience_tool_results('stone', 'lux-id', (task,))
+    activities = process.repository.list_activities('stone')
+    assert activities[-1].status == ActivityStatus.ABANDONED
+    assert not process.repository.list_activities('stone', ActivityStatus.OPEN)
+    assert any(h.event_type == 'activity_interrupted' for h in process.repository.list_history('stone'))
+    assert process.tool_service.claim_notices('stone', 'lux-id') == (task,)
+    process.tool_service.release_notices((task,))
+    monkeypatch.setattr(process.cognition, 'generate', original)
+    result = process.experience_tool_results('stone', 'lux-id', (task,))
+    assert result.activity.status == ActivityStatus.COMPLETED
+    assert process.tool_service.claim_notices('stone', 'lux-id') == ()
 
 def test_web_timer_uses_real_main_and_is_not_a_new_user_message(process, monkeypatch):
     import asyncio
@@ -132,6 +186,34 @@ def test_web_timer_uses_real_main_and_is_not_a_new_user_message(process, monkeyp
             count=len(process.cognition.requests)
             await client.post('/initiative-results',json={'object_id':'lux-id'},headers=headers)
             assert len(process.cognition.requests)==count
+    asyncio.run(run())
+
+
+def test_web_tool_result_resets_overdue_timer(process, monkeypatch):
+    import asyncio
+    from aiohttp.test_utils import TestClient, TestServer
+    from jshi.app.voice import create_app
+    from jshi.voice.config import VoiceConfig
+    from tests.test_tool_notifications import failed_task
+    now = [0.]
+    original = WakeQueue.__init__
+    def init(self, **kwargs):
+        original(self, clock=lambda: now[0], seconds=10)
+    monkeypatch.setattr(WakeQueue, '__init__', init)
+    failed_task(process)
+    async def run():
+        async with TestClient(TestServer(create_app(process, 'stone', VoiceConfig('')))) as client:
+            now[0] = 100
+            headers = {'Origin': str(client.make_url('/')).rstrip('/')}
+            response = await client.post('/initiative-results', json={'object_id': 'lux-id'}, headers=headers)
+            assert (await response.json())['reply']
+            count = len(process.cognition.requests)
+            response = await client.post('/initiative-results', json={'object_id': 'lux-id'}, headers=headers)
+            assert (await response.json())['reply'] == ''
+            assert len(process.cognition.requests) == count
+            now[0] += 11
+            response = await client.post('/initiative-results', json={'object_id': 'lux-id'}, headers=headers)
+            assert (await response.json())['reply']
     asyncio.run(run())
 
 

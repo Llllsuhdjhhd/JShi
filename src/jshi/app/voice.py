@@ -1548,6 +1548,7 @@ class VoiceConversation:
                 row['entry_interaction'] = source_record['entry_interaction']
                 if source_record['entry_interaction'] == 'direct':
                     self.human_interaction[u.speaker.object_id] = monotonic()
+                    self.wakeups.note_activity()
             initial = self.source_speakers.get(u.input_id, u.speaker)
             row["voice_initial"] = {"p": self.assign_code(initial.object_id, initial.label) if initial.method not in {"unassigned_audio", "visual_scene"} else "unknown",
                 "basis": initial.method, "similarity": initial.confidence}
@@ -1984,7 +1985,7 @@ class VoiceConversation:
             self.wake_batches[envelope.input_id] = (batch, ids, envelope.speaker.object_id)
             self.turn_queue.put_nowait((envelope, self.epoch))
 
-    def _finish_wakeup(self, input_id, success):
+    def _finish_wakeup(self, input_id, success, *, quiet=False):
         value = self.wake_batches.pop(input_id, None)
         if value is None:
             return
@@ -1992,8 +1993,10 @@ class VoiceConversation:
         if ids:
             self.process.tool_service.release_notices(ids)
             self.tool_wake_retry[owner] = monotonic() + 30
+            if success:
+                self.wakeups.note_activity()
         if batch:
-            self.wakeups.finish(batch, success=success)
+            self.wakeups.finish(batch, success=success, quiet=quiet)
 
     def enqueue_turn(self, envelope) -> None:
         if self.closed:
@@ -3171,6 +3174,7 @@ class VoiceConversation:
                 # Publish only after entry judgment/rule completion. Background
                 # snapshots must never race ahead of this batch's first JEV.
                 control = jev_calls[-1].get('control') if jev_calls else ''
+                await asyncio.to_thread(self.process.tool_service.observe_utterances, self.subject_id, current)
                 if control in {'stop', 'redirect'} and not record.get('control_applied'):
                     await self.stop('semantic_' + control)
                     input_epoch = self.epoch
@@ -3281,6 +3285,7 @@ class VoiceConversation:
                 for event in internal[1:]:
                     self._finish_wakeup(event.input_id, False)
             wake_success = False
+            wake_quiet = False
             self.turn_busy = True
             current = ()
             try:
@@ -3290,6 +3295,8 @@ class VoiceConversation:
                     self.active_turn = {"state": "thinking", "input": "自主审视或内部事项", "pending_text": "尚未生成回应"}
                     plan = await self._respond(envelope, epoch)
                     wake_success = plan is not None
+                    wake_quiet = bool(plan is not None and not plan.verbal_text() and not plan.has_embodied()
+                        and not getattr(self.process.last_model_response, 'tool_intent', None))
                     continue
                 if envelope.source == 'visual_environment' and not self.input_idle.is_set():
                     self.defer_environment(envelope)
@@ -3307,6 +3314,7 @@ class VoiceConversation:
                             continue
                         epoch = self.epoch
                     current = tuple(self._apply_attribution(list(current), items, persist=not bool(record.get('direct_reply'))))
+                    await asyncio.to_thread(self.process.tool_service.observe_utterances, self.subject_id, current)
                     await self._publish_attribution(current, items, record)
                     envelope = replace(envelope, jev_calls=(*envelope.jev_calls, record),
                         visual_snapshot_id=record.get('visual_snapshot_id', ''),
@@ -3426,7 +3434,7 @@ class VoiceConversation:
             except Exception as exc:
                 await self.emit("notice", text=f"主流程调用失败：{exc}")
             finally:
-                self._finish_wakeup(envelope.input_id, wake_success)
+                self._finish_wakeup(envelope.input_id, wake_success, quiet=wake_quiet)
                 self.turn_busy = False
                 self.active_turn = None
                 self.entry_scheduler.schedule.set_task('cognition', 'done')
@@ -3568,7 +3576,7 @@ class VoiceConversation:
             self.answer_status[turn_key] = 'ready'
             from jshi.voice.delivery import sentences
             self.dialogue.plan(self.subject_id, self.session_id + ':' + str(turn_key), self.session_id,
-                [segment for item in items for segment in sentences(item.text)])
+                [segment for item in items for segment in sentences(item.text)], owner=envelope.speaker.object_id)
             loop.call_soon_threadsafe(lambda: asyncio.create_task(self._start_plan(items, envelope.speaker.object_id, epoch, turn_key)))
 
         if len(envelope.jev_calls) == 1:
@@ -3845,7 +3853,7 @@ class VoiceConversation:
         hide = self.voice_timings.get(turn_key, (None, {}))[1].get('route') != 'waiting_ack'
         self.dialogue.plan(self.subject_id, key, self.session_id,
                            [segment for item in items for segment in sentences(item.text)],
-                           hide_until_played=hide)
+                           hide_until_played=hide, owner=object_id)
         if self.delivery.snapshot().get("state") in {"queued", "playing", "paused"}:
             self.record('voice_answer_deferred', {'reason': 'player_busy', 'turn_key': turn_key,
                 'input_ids': self.reply_input_ids.get(turn_key, []),
@@ -4264,7 +4272,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         from jshi.recognition.acquaintance import acquaintance_store
         acquaintances=acquaintance_store(process)
         acquaintances.observe_text(subject_id,envelope.speaker.object_id,envelope.input_id,envelope.text,session=envelope.session_id)
-        dialogue.input(subject_id, envelope.input_id, envelope.text, envelope.speaker.label)
+        dialogue.input(subject_id, envelope.input_id, envelope.text, envelope.speaker.label,
+                       actor_id=envelope.speaker.object_id)
         judgment = result.items[0] if result.items else None
         scene_store.append(envelope.input_id, {'text':envelope.text, 'at':time()*1000,
             'p': selected_code or 'unknown', 'source':envelope.source, 'basis':'统一输入信封',
@@ -4329,6 +4338,10 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             text_jev_task = asyncio.create_task(flush_text_jev())
 
     def record_text_jev_delivery(result, incoming):
+        text = result.response_plan.verbal_text()
+        if text.strip():
+            dialogue.plan(subject_id, 'text:'+incoming.input_id, 'web-text', [text],
+                          shown=True, owner=incoming.speaker.object_id)
         from jshi.recognition.acquaintance import acquaintance_store
         acquaintance_store(process).reply_delivered(subject_id,incoming.speaker.object_id,
             'text-question:'+incoming.input_id,result.response_plan.verbal_text(),medium='text')
@@ -4643,6 +4656,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         registry_busy = initiative_processing = True
         initiative_cancelled = False
         success = False
+        quiet = False
         try:
             def run():
                 from jshi.subject.cancellation import generation_scope, check
@@ -4653,10 +4667,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     return process.experience(subject_id, '', envelope=envelope, defer_write=True)
             result = await asyncio.to_thread(run)
             success = True
+            quiet = (not result.response_plan.verbal_text() and not result.response_plan.has_embodied()
+                     and not getattr(process.last_model_response, 'tool_intent', None))
             schedule_text_scene()
             reply = result.response_plan.verbal_text()
             if reply:
-                dialogue.plan(subject_id, result.activity.id, 'web-text', [reply], shown=True, hide_until_played=False)
+                dialogue.plan(subject_id, result.activity.id, 'web-text', [reply], shown=True, hide_until_played=False, owner=owner)
             return web.json_response({'reply': reply, 'label': person.label, 'activity_id': result.activity.id})
         except TurnCancelled:
             return web.json_response({'reply': ''})
@@ -4667,8 +4683,10 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             if ids:
                 service.release_notices(ids)
                 text_tool_retry[owner] = monotonic() + 30
+                if success:
+                    text_wakes.note_activity()
             if batch:
-                text_wakes.finish(batch, success=success)
+                text_wakes.finish(batch, success=success, quiet=quiet)
             registry_busy = initiative_processing = False
 
     async def text_input(request):
@@ -4704,6 +4722,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             raise web.HTTPConflict(text='正在处理其他会话，请稍后再发送')
         registry_busy = True
         text_interactions[profile.object_id] = monotonic()
+        text_wakes.note_activity()
         try:
             evidence = SpeakerEvidence('typed:'+profile.object_id, profile.object_id, profile.label,
                                        'recognized', 'user_selected', 1.0)
@@ -4724,6 +4743,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 parts=(InputPart('text', text),), speaker=evidence,
                 entry_timing={'received_mono':received_mono, 'received_at_ms':received_at_ms,
                               'source':'web_text'})
+            await asyncio.to_thread(process.tool_service.observe_envelope, subject_id, envelope)
             streaming = 'application/x-ndjson' in request.headers.get('Accept', '')
             events = asyncio.Queue()
             loop = asyncio.get_running_loop()
@@ -4788,7 +4808,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         from types import SimpleNamespace
                         from jshi.subject.process import ActivityTiming
                         plan = ResponsePlan('respond', items=(ResponseItem('verbal', direct, (profile.object_id,)),))
-                        dialogue.plan(subject_id, 'text:'+envelope.input_id, 'web-text', [direct], shown=True)
+                        dialogue.plan(subject_id, 'text:'+envelope.input_id, 'web-text', [direct], shown=True, owner=profile.object_id)
                         process.repository.add_history(HistoryRecord(subject_id=subject_id, kind=HistoryKind.FACT,
                             event_type='jev_direct_reply', content={'input':text, 'reply':direct, 'delivery':'text_sent'}, source_ids=()))
                         plan_ready(plan) if streaming else None

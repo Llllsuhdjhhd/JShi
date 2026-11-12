@@ -16,6 +16,7 @@ class VoiceDialogue:
         self.path = Path(path)
         self.lock = RLock()
         self._hidden = {}
+        self.on_reply = None
         self.state = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {
             'include_unplayed': False, 'inputs': [], 'replies': []}
 
@@ -96,7 +97,7 @@ class VoiceDialogue:
                 self.state['inputs'] = rows[-256:]
                 self._save()
 
-    def plan(self, subject, key, session, texts, *, shown=False, hide_until_played=True):
+    def plan(self, subject, key, session, texts, *, shown=False, hide_until_played=True, owner=''):
         """Register a reply. Waiting-ack text is already committed by the host, so keep it
         visible to the model without waiting for player receipts."""
         with self.lock:
@@ -105,9 +106,36 @@ class VoiceDialogue:
                     'reply_id': '', 'texts': list(texts), 'played': [],
                     'state': 'shown' if shown else 'generated', 'at': time()*1000,
                     'displayed_at': time()*1000 if shown else None,
-                    'hide_until_played': bool(hide_until_played)})
+                    'hide_until_played': bool(hide_until_played), 'owner': owner})
                 self.state['replies'] = self.state['replies'][-128:]
                 self._save()
+            row = next(r for r in self.state['replies'] if r['subject'] == subject and r['key'] == key)
+            if owner and not row.get('owner'):
+                row['owner'] = owner
+                self._save()
+            self._record_reply(row)
+
+    @staticmethod
+    def recording_rows(row):
+        """Only actual delivery evidence; generated/queued text is not conversation."""
+        for i, text in enumerate(row['texts']):
+            played = i in row['played']
+            if not played and not row.get('displayed_at'):
+                continue
+            yield {'subject': row['subject'], 'owner': row.get('owner', ''),
+                'event_id': 'reply:' + row['key'] + ':' + str(i), 'text': text,
+                'input_id': row['key'][5:] if row['key'].startswith('text:') else '',
+                'stamp': row.get('played_at', {}).get(str(i), row['at']) if played else row['displayed_at'],
+                'basis': '语音已播' if played else ('文字已发送，未确认阅读' if row['state'] == 'shown' else '页面已显示，未确认播出')}
+
+    def _record_reply(self, row):
+        if callable(self.on_reply):
+            for event in self.recording_rows(row):
+                self.on_reply(event)
+
+    def recording_snapshot(self):
+        with self.lock:
+            return tuple(e for r in self.state['replies'] for e in self.recording_rows(r))
 
     def link_inputs(self, subject, ids, target, label, *, link_id, active=True):
         """A reversible projection; preserve the original label and actor."""
@@ -147,6 +175,7 @@ class VoiceDialogue:
                 row['played'].append(segment)
                 row.setdefault('played_at', {})[str(segment)] = time()*1000
                 self._save()
+                self._record_reply(row)
 
     def displayed(self, reply_id):
         """A page receipt is usable dialogue evidence, never proof of hearing."""
@@ -155,6 +184,7 @@ class VoiceDialogue:
             if row and not row.get('displayed_at'):
                 row['displayed_at'] = time()*1000
                 self._save()
+                self._record_reply(row)
 
     def stop(self, session):
         with self.lock:
@@ -257,6 +287,10 @@ def dialogue_state(process):
     if state is None:
         state = VoiceDialogue(process.repository.path.parent/'voice_dialogue.json')
         process.voice_dialogue = state
+    service = getattr(process, 'tool_service', None)
+    if service is not None and hasattr(service, 'observe_reply'):
+        state.on_reply = service.observe_reply
+        service.recording_source = state.recording_snapshot
     return state
 
 

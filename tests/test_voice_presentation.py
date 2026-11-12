@@ -50,8 +50,9 @@ def test_visual_backlog_retains_only_latest_and_does_not_merge_into_speech(proce
             assert c.pending_environment.text=='最新画面'
             assert c.turn_queue.empty()
             c.input_idle.set()
-            await asyncio.sleep(.12)
-            visual,_=c.turn_queue.get_nowait();c.turn_queue.task_done()
-            assert visual.text=='最新画面'
+            visual,_=await asyncio.wait_for(c.turn_queue.get(), timeout=2);c.turn_queue.task_done()
+            assert visual.source == 'initiative'
+            assert c.pending_environment is None
+            assert not visual.text  # Perception wakes cognition without inventing human speech.
         finally: await c.close()
     asyncio.run(run())

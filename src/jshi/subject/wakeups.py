@@ -17,28 +17,46 @@ class WakeQueue:
         self.last_review = clock()
         self.next_allowed = self.last_review
         self.pending = {}
+        self.quiet_rounds = 0
+
+    @property
+    def interval(self):
+        return min(self.seconds * 2 ** max(0, self.quiet_rounds - 1), max(self.seconds, 1800.))
+
+    def note_activity(self):
+        """A human interaction or reviewed result makes an old timer obsolete."""
+        self.last_review = self.clock()
+        self.quiet_rounds = 0
+        self.next_allowed = self.last_review + min(30., self.seconds)
+        self.pending.pop('timer', None)
 
     def offer(self, source, key, description):
         # Evidence itself stays in shared scene; this is only a wakeup marker.
         self.pending[source] = WakeSignal(source, key, description)
+        if source != 'timer':
+            self.quiet_rounds = 0
 
     def claim(self):
         now = self.clock()
         if not self.enabled or now < self.next_allowed:
             return ()
-        if now - self.last_review >= self.seconds:
-            self.offer("timer", "timer", f"距上次自主审视约{int(now-self.last_review)}秒；没有新增人物发言。")
+        if now - self.last_review >= self.interval:
+            self.offer("timer", "timer", f"距上次交谈或审视约{int(now-self.last_review)}秒；本轮没有新增人物发言。")
         batch = tuple(self.pending.values())
         self.pending.clear()
         return batch
 
-    def finish(self, batch, *, success):
+    def finish(self, batch, *, success, quiet=False):
         now = self.clock()
         self.next_allowed = now + min(30., self.seconds)
         if success:
             self.last_review = now
+            unchanged = all(x.source == 'timer' for x in batch) and not self.pending
+            self.quiet_rounds = min(self.quiet_rounds + 1, 16) if quiet and unchanged else 0
         else:
             for signal in batch:
+                if signal.source == 'timer' and now - self.last_review < self.interval:
+                    continue  # A newer human turn/result has already reset this timer.
                 self.pending.setdefault(signal.source, signal)
 
 

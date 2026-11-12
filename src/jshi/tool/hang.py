@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import json
 import logging
 import os
@@ -372,6 +375,7 @@ class HangStore:
         self.path = Path(path)
         self._lock = threading.Lock()
         self._records: dict[str, HangRecord] = {}
+        self._read_snapshot = ContextVar(f"hang_snapshot_{id(self)}", default=None)
         self._max_bytes = max(1, int(max_bytes))
         self._max_responses = max(1, int(max_responses))
         self._lines = 0
@@ -456,9 +460,36 @@ class HangStore:
         self._bytes = total
 
     def get(self, task_id: str) -> HangRecord | None:
+        snapshot = self._read_snapshot.get()
+        if snapshot is not None and task_id in snapshot[1]:
+            return snapshot[1][task_id]
         with self._lock:
             record=self._records.get(task_id)
+            if snapshot is not None and record and record.subject_id == snapshot[0]:
+                return None  # Added after this read began; visible on the next read.
             return replace(record,object_id=self._linked_owner(record)) if record else None
+
+    @contextmanager
+    def read_snapshot(self, subject_id: str):
+        """One task/identity view per brief, also used by work-owner lookups.
+
+        Scoped to the current context, never shared with writers or retained
+        across turns. Identity corrections and new feedback appear next read.
+        """
+        existing = self._read_snapshot.get()
+        if existing is not None and existing[0] == subject_id:
+            yield
+            return
+        links = getattr(self, 'person_links', None)
+        project = links.projector(subject_id) if hasattr(links, 'projector') else None
+        with self._lock:
+            records = tuple(r for r in self._records.values() if r.subject_id == subject_id)
+        snapshot = {r.task_id: replace(r, object_id=self._linked_owner(r, project)) for r in records}
+        token = self._read_snapshot.set((subject_id, snapshot))
+        try:
+            yield
+        finally:
+            self._read_snapshot.reset(token)
 
     def create(
         self,
@@ -660,6 +691,10 @@ class HangStore:
         return links.project(record.subject_id,record.object_id,refs)
 
     def list_for(self, subject_id: str, object_id: str) -> tuple[HangRecord, ...]:
+        snapshot = self._read_snapshot.get()
+        if snapshot is not None and snapshot[0] == subject_id:
+            return tuple(sorted((r for r in snapshot[1].values() if r.object_id == object_id),
+                                key=lambda r: r.updated_at, reverse=True))
         links=getattr(self,'person_links',None)
         project=links.projector(subject_id) if hasattr(links,'projector') else None
         with self._lock:

@@ -1,13 +1,22 @@
 """One execution owner per repository and subject, including preparation."""
 from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
 from threading import Event, Lock
 import hashlib
 import os
+import logging
 
 _registry = {}
 _registry_lock = Lock()
+_cancel_cleanup = ContextVar('cognition_cancel_cleanup', default=None)
+
+
+def on_cancel(callback):
+    callbacks = _cancel_cleanup.get()
+    if callbacks is not None:
+        callbacks.append(callback)
 
 class CognitionRuntime:
     def __init__(self, path):
@@ -83,5 +92,18 @@ def serialized(fn):
     @wraps(fn)
     def wrapped(process, subject_id, *args, **kwargs):
         with runtime_for(process, subject_id).occupy():
-            return fn(process, subject_id, *args, **kwargs)
+            from .cancellation import TurnCancelled
+            callbacks = []
+            token = _cancel_cleanup.set(callbacks)
+            try:
+                return fn(process, subject_id, *args, **kwargs)
+            except TurnCancelled:
+                for callback in reversed(callbacks):
+                    try:
+                        callback()
+                    except Exception:
+                        logging.getLogger(__name__).exception('Cancellation cleanup failed')
+                raise
+            finally:
+                _cancel_cleanup.reset(token)
     return wrapped

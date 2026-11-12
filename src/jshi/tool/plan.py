@@ -35,6 +35,7 @@ class ToolPlan:
     need: str
     mode: str = "sequential"  # sequential | parallel | mixed
     steps: tuple[ToolStep, ...] = ()
+    requirements: tuple[str, ...] = ()
 
 
 PlanResult = Union[ToolRequest, ToolPlan, PlanFailure]
@@ -88,6 +89,7 @@ def normalize_plan(plan: ToolPlan) -> Union[ToolPlan, PlanFailure]:
         need=plan.need,
         mode=plan.mode,
         steps=tuple(normalized),
+        requirements=plan.requirements,
     )
 
 

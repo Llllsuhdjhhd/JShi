@@ -685,8 +685,13 @@ class SubjectProcess:
         if envelope.source != 'tool_event' or envelope.speaker.object_id != object_id:
             raise ValueError('invalid internal tool envelope')
         self.tool_service.work_index.attempt_notices(task_ids)
-        result = self.experience(subject_id, envelope.text, envelope=envelope,
-                                 _tool_event_ids=tuple(task_ids), **kwargs)
+        from .cancellation import TurnCancelled
+        try:
+            result = self.experience(subject_id, envelope.text, envelope=envelope,
+                                     _tool_event_ids=tuple(task_ids), **kwargs)
+        except TurnCancelled:
+            self.tool_service.work_index.retry_interrupted_notices(task_ids)
+            raise
         self.tool_service.work_index.acknowledge_notices(task_ids)
         return result
 
@@ -843,6 +848,12 @@ class SubjectProcess:
             },
         )
         self.repository.add_history(fact)
+        if fact.event_type == 'external_input':
+            if envelope is not None:
+                self.tool_service.observe_envelope(subject_id, envelope)
+            else:
+                self.tool_service.recorder.observe(subject_id, speaker.object_id, fact.id,
+                                                   recorded_text, speaker.label)
         clock.sub("①输入事实")
         from jshi.core.prompt_profile import select_profile, PromptProfile
         profile = select_profile((u.input_id for u in envelope.current_utterances), envelope.jev_calls) if envelope is not None else PromptProfile()
@@ -1054,6 +1065,8 @@ class SubjectProcess:
             trigger=fact.id,
         )
         self.repository.add_activity(activity)
+        from .cognition_runtime import on_cancel
+        on_cancel(lambda: self._mark_activity_interrupted(activity.id))
         self.repository.add_history(
             HistoryRecord(
                 subject_id=subject_id,
@@ -1352,7 +1365,8 @@ class SubjectProcess:
                 [item['input_id'] for item in current.input_items if item.get('input_id')])
         if hasattr(self.tool_service, 'work_index'):
             self.tool_service.work_index.acknowledge_notices(handled_ids)
-        self._intake_tool_if_requested(subject_id, activity, speaker, response, current.input_text)
+        self._intake_tool_if_requested(subject_id, activity, speaker, response,
+                                       current.input_text, envelope=envelope)
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
         close_result = self.activity_close.close(
             subject_id,
@@ -2725,6 +2739,18 @@ class SubjectProcess:
 
         planner.scene_loader = bind_scene_loader(self.active_zone, self.zone_store)
 
+    def _mark_activity_interrupted(self, activity_id):
+        from .domain import ActivityStatus
+        activity = self.repository.get_activity(activity_id)
+        if activity.status != ActivityStatus.OPEN:
+            return
+        self.repository.update_activity(activity_id, status=ActivityStatus.ABANDONED,
+                                        reason='turn_interrupted')
+        self.repository.add_history(HistoryRecord(subject_id=activity.subject_id,
+            kind=HistoryKind.SUBJECT, event_type='activity_interrupted',
+            content={'activity_id': activity_id, 'reason': 'turn_interrupted',
+                     'to': 'abandoned', 'tool_work_cancelled': False}, source_ids=(activity_id,)))
+
     def _intake_tool_if_requested(
         self,
         subject_id: str,
@@ -2732,6 +2758,8 @@ class SubjectProcess:
         speaker: SpeakerCandidate | None,
         response: ModelResponse,
         input_text: str = "",
+        *,
+        envelope: InputEnvelope | None = None,
     ) -> None:
         """有工具指示则交接给 200；不等策划、不等执行。"""
         intent = getattr(response, "tool_intent", None)
@@ -2740,6 +2768,14 @@ class SubjectProcess:
         object_id = (speaker.object_id if speaker is not None else "") or ""
         if not object_id:
             return
+        if envelope is not None:
+            if envelope.source in {"tool", "tool_event", "initiative"}:
+                input_text = ""
+            elif envelope.current_utterances:
+                # Planner authorization comes from this owner's actual words,
+                # never entry-model annotations or another person's speech.
+                input_text = "\n".join(u.text for u in envelope.current_utterances
+                                       if u.speaker.object_id == object_id)
         pack_id = self.style_packs.get(subject_id)
         registry = getattr(self.style_packs, "registry", None)
         persona = is_persona(pack_id, registry=registry)

@@ -71,6 +71,7 @@ class ToolModule:
 
     def __init__(self, engine: ToolEngine) -> None:
         self.engine = engine
+        self.local_execute = None
 
     @property
     def engine_name(self) -> str:
@@ -99,6 +100,10 @@ class ToolModule:
         )
 
     def iter_feedback(self, request: ToolRequest, cancel=None):
+        from .recording import COMMAND
+        if request.command == COMMAND and self.local_execute is not None:
+            yield from self.local_execute(request, cancel=cancel)
+            return
         engine = self.engine
         iterator = getattr(engine, "iter_execute", None)
         if callable(iterator):

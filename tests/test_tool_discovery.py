@@ -520,7 +520,7 @@ def test_plan_loop_exceeds_lookup_rounds() -> None:
 
 def test_instruction_says_not_to_use_old_scene_failures() -> None:
     text = ToolPlanSkill.instruction
-    assert "片场里旧的失败" in text
+    assert "无关的旧失败不用于否定本次能力" in text
     assert "lookup.search" in text
     assert "engine_tools" in text
 

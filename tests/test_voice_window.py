@@ -140,8 +140,8 @@ def test_single_request_reuses_context_and_compacts_ids_without_mutating_source(
     assert VoiceJEV(Model(), mode='legacy').decide('stone','我补充一下',speaker,delivery).action=='respond'
     payload=json.loads(requests[0].input_text)
     assert payload['speaker']['track_id']=='T1' and 'object_id' not in payload['speaker']
-    assert payload['delivery']['scene'][0]['at']==-1000
-    assert payload['delivery']['person_portraits'][0]['cached_at']==-1000
+    assert payload['delivery']['scene'][0]['at']==-1.0
+    assert payload['delivery']['person_portraits'][0]['cached_at']==-1.0
     assert 'envelope' not in payload['delivery'] and 'time_basis' in payload
     assert 'jev_scene' not in payload['delivery']
     assert payload['delivery']['collection']['expression_complete'] is False

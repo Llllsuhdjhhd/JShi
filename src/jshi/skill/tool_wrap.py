@@ -161,6 +161,11 @@ class ToolWrapSkill(Skill[WrapResult]):
         request: ModelRequest = tool_skill_request(hang.subject_id, payload)
         return self._run_with_instruction(request, prompt)
 
+    def review_execution(self, request, observations, assessment, assistant='', context=None):
+        from jshi.tool.supervision import review_execution
+        return review_execution(self._model, request, observations, assessment,
+                                assistant=assistant, context=context)
+
     def _prompt_and_payload(
         self, hang: HangRecord, batch: Sequence[ToolFeedback]
     ) -> tuple[str, dict[str, Any]]:

@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import threading
+from time import monotonic
 from urllib.error import URLError
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ from .contract import (
     ToolFeedback,
     ToolOrigin,
     ToolRequest,
+    ToolResult,
     ToolStatus,
     utc_now,
 )
@@ -397,12 +399,14 @@ def format_tool_related(
             if isinstance(used, datetime):
                 add("使用时间", relative_time_label(used, now=now))
             add("状态", item.get("status"))
+            add("当前文件核验", item.get("artifact_update"), 500)
             add("待补信息", '；'.join(item.get('waiting_for') or ()))
             add("任务适用截止（带时区）", item.get('expires_at'))
             if item.get('expired'):
                 add('时效', '已过期；保留事实供说明，不再续办原请求')
             add("新的信息", item.get("new_info"), 2000)
-            add("最终的结果", item.get("final_result"), 2000)
+            add("历史检查（不能代表当前状态）" if item.get('artifact_update') else "最终的结果",
+                item.get("final_result"), 2000)
             add("结果核验", item.get("verification"), 1500)
             add("结束原因", item.get("end_reason"), 500)
             if item.get("work_open"):
@@ -552,9 +556,11 @@ def _plan_to_dict(plan: ToolPlan) -> dict[str, Any]:
         "plan_id": plan.plan_id,
         "need": plan.need,
         "mode": plan.mode,
+        "requirements": list(plan.requirements),
         "steps": [
             {
                 "step_id": step.step_id,
+                "need": step.request.need,
                 "command": step.request.command,
                 "params": dict(step.request.params),
                 "expected_result": step.request.expected_result,
@@ -601,6 +607,7 @@ class ToolService:
         self.reuse_policies = dict(reuse_policies or {})
         self._session_tasks: set[str] = set()
         self._notice_claims: set[str] = set()
+        self._recording_checks: dict[str, float] = {}
         policy_path = hang_store.path.parent / "tool_reuse.json"
         if policy_path.exists():
             try:
@@ -651,8 +658,141 @@ class ToolService:
         self._plan_status: dict[str, str] = {}
         self._plan_note: dict[str, str] = {}
         self.runner.on_feedback = self._on_engine_feedback
+        from .recording import DialogueRecorder, TOOL
+        self.recorder = DialogueRecorder(hang_store.path.parent / 'dialogue-recordings.sqlite3',
+                                        on_change=self._recording_changed)
+        self.recording_source = None
+        self.runner.module.local_execute = self._recording_execute
+        if hasattr(self.planner, 'extra_tools'):
+            self.planner.extra_tools = (TOOL,)
+        engine = getattr(self.runner.module, 'engine', None)
+        if hasattr(engine, 'reviewer') and callable(getattr(self.wrap_skill, 'review_execution', None)):
+            engine.reviewer = self._review_execution
         if hasattr(self.planner, "material_loader") and self.planner.material_loader is None:
             self.planner.material_loader = self._planning_material
+
+    def observe_utterances(self, subject_id, utterances):
+        """Feed confirmed current speech even when JEV does not invoke cognition."""
+        for utterance in utterances:
+            speaker = utterance.speaker
+            if speaker.method == 'visual_scene' or not utterance.input_id:
+                continue
+            known = speaker.status in {'recognized', 'introduced'} and bool(speaker.object_id)
+            owner = speaker.object_id if known else 'unassigned:' + utterance.input_id
+            stamp = ''
+            if utterance.recorded_start_at_ms is not None:
+                stamp = datetime.fromtimestamp(utterance.recorded_start_at_ms / 1000, timezone.utc).isoformat(timespec='seconds')
+            self.recorder.observe(subject_id, owner, utterance.input_id,
+                                  utterance.text, speaker.label if known else '身份未确认的说话人', stamp)
+
+    def observe_envelope(self, subject_id, envelope):
+        if not envelope.final or envelope.source not in {'voice', 'microphone', 'web_text'}:
+            return
+        if envelope.current_utterances:
+            self.observe_utterances(subject_id, envelope.current_utterances)
+        elif envelope.speaker.status in {'recognized', 'introduced'}:
+            self.recorder.observe(subject_id, envelope.speaker.object_id, envelope.input_id,
+                                  envelope.text, envelope.speaker.label)
+
+    def _recording_execute(self, request, cancel=None):
+        if cancel is not None and cancel.is_set():
+            yield ToolFeedback(request_id=request.request_id, kind=FeedbackKind.RESULT,
+                               result=ToolResult(status=ToolStatus.ABORTED, error='记录操作已取消'))
+            return
+        try:
+            work_id = request.meta['work_id']
+            params = dict(request.params)
+            goal = (self.work_index.get(work_id) or {}).get('recording_goal', {})
+            saved = goal.get('params', {})
+            if goal.get('continuous') and params.get('action') == 'export':
+                if saved.get('path') and params.get('path') and Path(saved['path']).resolve() != Path(params['path']).resolve():
+                    raise ValueError('补录目标与持续委托文件不同，需要先明确记录范围')
+                # A one-off backfill must not silently end a known continuous goal.
+                params = {**saved, **params, 'action': 'start', 'history': params.get('history', 'available')}
+            if params.get('action') == 'start':
+                self.work_index.set_recording_goal(work_id, continuous=True, params=params)
+            elif params.get('action') == 'stop':
+                self.work_index.set_recording_goal(work_id, continuous=False)
+            if callable(self.recording_source):
+                for event in self.recording_source():
+                    self.observe_reply(event)
+            row = self.recorder.command(request.subject_id, request.meta['object_id'],
+                work_id, params,
+                start_seq=int(request.meta.get('recording_start_seq') or 0) or None)
+            if params.get('action') == 'start':
+                self.work_index.set_recording_goal(work_id, continuous=True,
+                    params={**params, 'path': row['path'], 'scope': row['scope'],
+                            'include_replies': bool(row['include_replies'])})
+            feedback = self._recording_feedback(request.request_id, row)
+        except (OSError, ValueError, KeyError) as exc:
+            summary = '记录操作未完成：' + str(exc)
+            feedback = ToolFeedback(request_id=request.request_id, kind=FeedbackKind.RESULT,
+                result=ToolResult(status=ToolStatus.FAILED, summary=summary, error=summary),
+                meta={'local_summary': summary})
+        yield feedback
+
+    def observe_reply(self, event):
+        owner = event.get('owner') or self.recorder.owner_for(event['subject'], event.get('input_id', ''))
+        if not owner:
+            return  # Unknown recipient is not assigned to the most recent speaker.
+        stamp = datetime.fromtimestamp(event['stamp'] / 1000, timezone.utc).isoformat(timespec='seconds')
+        self.recorder.observe(event['subject'], owner, event['event_id'], event['text'], '匠石', stamp,
+                              role='assistant', basis=event['basis'], control=False)
+
+    def _recording_feedback(self, request_id, row):
+        from .verification import check_file
+        fact = check_file(row['path'], base=Path.cwd(), sha256=row['sha256'])
+        passed = row['state'] != 'blocked' and fact['passed'] and not row.get('input_gap')
+        summary = self.recorder.summary(row)
+        if not fact['passed']:
+            summary = '当前文件核验未通过：' + fact.get('reason', '') + '；' + summary
+        return ToolFeedback(request_id=request_id, kind=FeedbackKind.RESULT,
+            result=ToolResult(status=ToolStatus.OK if passed else ToolStatus.PARTIAL,
+                summary=summary, result={'recording': row}, ideal=passed,
+                execution=({'kind': 'verification', 'verdict': 'passed' if passed else 'failed',
+                            'facts': [fact], 'reason': '已核对本次记录进度；启动不代表持续事项结束'},)),
+            meta={'local_summary': summary})
+
+    def _recording_changed(self, row):
+        # Only state transitions create notices, never every recorded sentence.
+        from .recording import COMMAND
+        work = self.work_index.get(row['work_id'])
+        if not work or work.get('closed'):
+            return
+        hang = self.hang_store.create(subject_id=row['subject'], object_id=row['owner'],
+            need=work['need'], command=COMMAND, params={'path': row['path'], 'action': 'status'})
+        for work_id in row['work_ids']:
+            if self.work_index.get(work_id):
+                if row.get('stop_seq') is not None:
+                    self.work_index.set_recording_goal(work_id, continuous=False)
+                self.work_index.bind(work_id, hang.task_id)
+        self._session_tasks.add(hang.task_id)
+        feedback = self._recording_feedback(hang.request_id, row)
+        self.hang_store.append_feedback(hang.task_id, (feedback,))
+        self._on_engine_feedback(hang.task_id, feedback)
+
+    def _review_execution(self, request, observations, assessment, assistant, *, phase='final'):
+        from .supervision import Review
+        wid = request.meta.get('work_id', '')
+        row = self.work_index.get(wid) or {}
+        if row.get('closed') or row.get('expired'):
+            return Review('blocked', '事项已停止，不继续执行。')
+        revision = row.get('revision', 0)
+        result = self.wrap_skill.review_execution(request, observations, assessment, assistant,
+            {'phase': phase, 'goal': row.get('need') or request.meta.get('overall_need') or request.need,
+             'original_request': row.get('original_request') or request.meta.get('user_input', ''),
+             'amendments': [e['text'] for e in row.get('amendments', ())]})
+        current = self.work_index.get(wid) or {}
+        if current.get('closed') or current.get('expired'):
+            return Review('blocked', '事项已停止，旧审查结果不再推进任务。')
+        if current.get('revision', 0) != revision:
+            result = Review('correct', '审查期间收到补充要求，按新要求继续核对。',
+                            '\n'.join(e['text'] for e in current.get('amendments', ())))
+        if row:
+            self.work_index.review(wid, request.request_id, {**result.as_dict(), 'phase': phase})
+            if result.waiting_for:
+                self.work_index.clarify(wid, result.waiting_for, request.request_id)
+        return result
 
     def _planning_material(self, intake):
         entries = [e for e in self.list_tool_related_entries(intake.subject_id, intake.object_id, query=intake.need)
@@ -717,6 +857,12 @@ class ToolService:
                             "dedupe_task_id": existing.task_id,
                         },
                     )
+                    if user_input.strip():
+                        for work in self.work_index.for_task(existing.task_id):
+                            self.work_index.amend(work['work_id'], user_input, record.intake_id)
+                        steer = getattr(self.runner.module.engine, 'steer', None)
+                        if callable(steer):
+                            steer(existing.request_id, '原委托人的补充要求：' + user_input)
                     return self.intake_store.get(record.intake_id) or record
             record = self.intake_store.create(
                 subject_id=subject_id,
@@ -727,7 +873,8 @@ class ToolService:
                 field_ref=field_ref,
                 origin=origin,
             )
-        intake_meta = {}
+        intake_meta = {'recording_start_seq': str(max(1, self.recorder.latest(subject_id, object_id)))}
+        intake_meta['recent_user_utterances'] = json.dumps(self.recorder.recent_inputs(subject_id, object_id), ensure_ascii=False)
         if user_input:
             intake_meta['user_input'] = user_input
         row = self.work_index.get(work_id)
@@ -738,18 +885,28 @@ class ToolService:
                 record = self.intake_store.update(record.intake_id, meta={'work_id':work_id})
                 self._intake_current(record)
                 return self.intake_store.get(record.intake_id)
+            if (user_input or need).strip():
+                self.work_index.amend(work_id, user_input or need, record.intake_id)
             active = next((self.hang_store.get(tid) for tid in row['tasks'].values()
                            if self.hang_store.get(tid) and self.hang_store.get(tid).status == 'open'), None)
             if active:
+                amendment = user_input or need
+                if amendment.strip():
+                    self.work_index.amend(work_id, amendment, record.intake_id)
+                    steer = getattr(self.runner.module.engine, 'steer', None)
+                    sent = bool(callable(steer) and steer(active.request_id,
+                        '原委托人的补充要求（原目标仍保留）：' + amendment))
+                    intake_meta['guidance_delivery'] = 'sent' if sent else 'pending_review'
                 return self.intake_store.update(record.intake_id, status='launched',
                     task_id=active.task_id, request_id=active.request_id,
-                    meta={'work_id':work_id, 'dedupe':'active_work'})
+                    meta={**intake_meta, 'work_id':work_id, 'dedupe':'active_work'})
             pending = next((r for r in self.intake_store.list_for(subject_id, object_id)
                             if r.intake_id != record.intake_id and r.status == 'received'
                             and r.meta.get('work_id') == work_id), None)
             if pending:
+                self.work_index.amend(work_id, user_input or need, record.intake_id)
                 return self.intake_store.update(record.intake_id, status='resolved',
-                    meta={'work_id':work_id, 'dedupe':'planning_work'})
+                    meta={**intake_meta, 'work_id':work_id, 'dedupe':'planning_work'})
             known_steps = {step["step_id"] for step in (row.get("plan") or {}).get("steps", ())}
             if not step_id or step_id in known_steps:
                 intake_meta.update(work_id=work_id, step_id=step_id)
@@ -775,7 +932,8 @@ class ToolService:
         if work_id:
             terms = self.work_index.get(work_id)
             record = self.intake_store.update(record.intake_id, meta={**record.meta,
-                'work_terms': json.dumps({k:terms[k] for k in ('need','current_need','waiting_for','expires_at') if k in terms}, ensure_ascii=False)}) or record
+                'work_terms': json.dumps({k:terms[k] for k in ('need','current_need','waiting_for','expires_at',
+                    'original_request','requirements','amendments','clarifications','recording_goal') if k in terms}, ensure_ascii=False)}) or record
         if not self._intake_current(record):
             return self.intake_store.get(record.intake_id)
         if row:
@@ -805,7 +963,20 @@ class ToolService:
             return
         tag = self._planner_tag()
         try:
-            planned = self.planner.plan(record)
+            for attempt in range(2):
+                wid = record.meta.get('work_id') or record.intake_id
+                terms = self.work_index.get(wid) or {}
+                revision = terms.get('revision', 0)
+                if terms:
+                    record = replace(record, meta={**record.meta, 'work_terms': json.dumps({
+                        k: terms[k] for k in ('need', 'current_need', 'waiting_for', 'expires_at',
+                            'original_request', 'requirements', 'amendments', 'clarifications', 'recording_goal') if k in terms}, ensure_ascii=False)})
+                planned = self.planner.plan(record)
+                if (self.work_index.get(wid) or {}).get('revision', 0) == revision:
+                    break
+            else:
+                self._fail_intake(intake_id, '策划期间要求仍在变化，已保留全部补充，未按旧计划执行。', tag)
+                return
         except Exception as exc:
             if isinstance(exc, URLError):
                 logger.error("tool planner failed: %s", exc)
@@ -837,6 +1008,8 @@ class ToolService:
     def _wait_intake(self, record, missing, *, notify=True):
         work_id = record.meta.get('work_id') or record.intake_id
         self.work_index.create(work_id, record.subject_id, record.object_id, record.need)
+        self.work_index.define_goal(work_id, original=record.meta.get('user_input') or record.need)
+        self.work_index.clarify(work_id, missing, record.intake_id)
         self.work_index.set_terms(work_id, waiting_for=missing, need=record.need)
         self.work_index.bind(work_id, record.intake_id)
         self.intake_store.update(record.intake_id, status='waiting',
@@ -867,6 +1040,9 @@ class ToolService:
             if row['closed'] or row.get('expired') or not is_expired(row):
                 continue
             self.work_index.expire(row['work_id'])
+            for job in self.recorder.for_work(row['work_id']):
+                if job['state'] != 'stopped':
+                    self.recorder.command(subject_id, object_id, row['work_id'], {'action': 'stop', 'path': job['path']})
             candidates = [r for r in self.intake_store.list_for(subject_id, object_id)
                           if r.meta.get('work_id', r.meta.get('plan_id', r.intake_id)) == row['work_id']
                           and r.status not in {'cancelled', 'resolved'}]
@@ -918,12 +1094,22 @@ class ToolService:
 
     def claim_notices(self, subject_id: str, object_id: str) -> tuple[str, ...]:
         self.expire_work(subject_id, object_id)
+        self.check_recordings(subject_id)
         with self._lock:
             ids = tuple(dict.fromkeys(row['task_id'] for row in self.work_index.pending_notices(subject_id, object_id)
                                      if row['task_id'] not in self._notice_claims and not row.get('attempted')
                                      and self.notice_available(row['task_id'])))[:HOT_STATE_CAP]
             self._notice_claims.update(ids)
             return ids
+
+    def check_recordings(self, subject_id, *, force=False):
+        # The existing notification poll supervises files without another model or worker.
+        now = monotonic()
+        with self._lock:
+            if not force and now < self._recording_checks.get(subject_id, 0):
+                return ()
+            self._recording_checks[subject_id] = now + 30
+        return self.recorder.verify_running(subject_id)
 
     def notice_available(self, task_id: str) -> bool:
         record = self.hang_store.get(task_id) or self.intake_store.get(task_id)
@@ -1068,6 +1254,12 @@ class ToolService:
         return None
 
     def _work_execution_done(self, row: Mapping[str, Any]) -> bool:
+        if row.get('recording_goal', {}).get('continuous'):
+            return False
+        if row.get('waiting_for') or row.get('supervision_status') in {'correct', 'blocked'}:
+            return False
+        if any(job['state'] != 'stopped' for job in self.recorder.for_work(row['work_id'])):
+            return False
         plan = row.get("plan") or {}
         tasks = row["tasks"]
         if plan.get("mode") == "agent_loop":
@@ -1177,6 +1369,9 @@ class ToolService:
         # The plan is an execution recipe inside the existing person's work.
         step_id = str(ctx.get("step_id") or intake.meta.get("step_id") or "")
         self.work_index.create(work_id, intake.subject_id, intake.object_id, intake.need)
+        source = parent or intake
+        self.work_index.define_goal(work_id, original=source.meta.get('user_input', ''),
+                                    requirements=request.meta.get('goal_requirements') or request.meta.get('requirements', ()))
         with self._dedupe_lock:
             if command:
                 existing = self.hang_store.find_open_by_command(
@@ -1264,6 +1459,11 @@ class ToolService:
                 **dict(request.meta),
                 "timeout_s": timeout_s,
                 "estimate": dict(est_meta),
+                "work_id": work_id,
+                "object_id": intake.object_id,
+                "user_input": (self.work_index.get(work_id) or {}).get('original_request') or source.meta.get('user_input', ''),
+                "recording_start_seq": source.meta.get('recording_start_seq', ''),
+                "amendments": [e['text'] for e in (self.work_index.get(work_id) or {}).get('amendments', ())],
             },
         )
         estimate = ToolFeedback(
@@ -1409,7 +1609,8 @@ class ToolService:
             template="generic",
             command="",
             ask=AskMode.EXECUTE,
-            meta={"agent_plan": _plan_to_dict(plan)},
+            meta={"agent_plan": _plan_to_dict(plan),
+                  "requirements": plan.requirements or (plan.need,)},
         )
         task_id = self._launch(
             record,
@@ -1673,7 +1874,16 @@ class ToolService:
                     },
                 ),
             )
-        if self.wrap_skill is None:
+        if item.meta.get('supervision') or item.meta.get('local_summary'):
+            self.hang_store.set_wrap(task_id, visible=True,
+                summary=str(item.meta.get('local_summary') or item.meta['supervision']['summary']),
+                wrap_meta={'source': 'local' if item.meta.get('local_summary') else 'supervision'},
+                terminal=item.kind is FeedbackKind.RESULT)
+            if item.kind is FeedbackKind.RESULT:
+                self._publish_notice(task_id)
+            return
+        if self.wrap_skill is None or (item.kind is FeedbackKind.PROGRESS
+                                      and callable(getattr(self.runner.module.engine, 'reviewer', None))):
             wrapped = rule_wrap_from_item(item)
             if wrapped is None:
                 return
@@ -1723,6 +1933,8 @@ class ToolService:
         if not command:
             return
         self.metrics.record(command, item.result)
+        if command.startswith('runtime:'):
+            return
         self._refresh_tool_meta(command)
 
     def _refresh_tool_meta(self, command: str) -> None:
@@ -2141,17 +2353,34 @@ class ToolService:
         reap: bool = False,
         required_ids: Sequence[str] = (),
     ) -> tuple[dict[str, Any], ...]:
+        """组装工具材料；同次读取复用任务及归属快照，不阻塞后台反馈。
+
+        默认只读；reap=True 时在建立快照前清理过期执行。
+        """
+        if reap:
+            self.reap_stale(subject_id, object_id, now=now)
+        with self.hang_store.read_snapshot(subject_id):
+            return self._list_tool_related_entries(subject_id, object_id, query=query,
+                now=now, ttl_s=ttl_s, required_ids=required_ids)
+
+    def _list_tool_related_entries(
+        self,
+        subject_id: str,
+        object_id: str,
+        *,
+        query: str = "",
+        now: datetime | None = None,
+        ttl_s: float = HOT_STATE_TTL_S,
+        required_ids: Sequence[str] = (),
+    ) -> tuple[dict[str, Any], ...]:
         """组装【工具相关】条目（程序侧结构，再交给 format_tool_related）。
 
         含：策划中（intake received、205 在跑）、使用中记挂、近时终态、
         近时取消、策划失败。已被 ``invalidate`` 的不出现。
         相同需求和参数的重复执行归并；未消化结果保留到 05 标明已消化。
         旧结果只在当前问题再次相关时装入，账本本身不丢。
-        默认只读；``reap=True`` 时先 ``reap_stale``（主流程在组装前单独调用）。
         """
         stamp = now or utc_now()
-        if reap:
-            self.reap_stale(subject_id, object_id, now=stamp)
         entries: list[dict[str, Any]] = []
 
         for record in self.intake_store.list_for(subject_id, object_id):
@@ -2289,6 +2518,7 @@ class ToolService:
                     "updated_at": hang.updated_at,
                     "delivered_at": hang.delivered_at,
                     "params": hang.params,
+                    "observed_at": next((f.at for f in reversed(hang.feedback) if f.kind is FeedbackKind.RESULT), used_at),
                     "final_result": (hang.summary or "").strip(),
                     "end_reason": next((f.result.error or f.result.ideal_note
                         for f in reversed(hang.feedback)
@@ -2296,9 +2526,16 @@ class ToolService:
                 }
             )
 
+        recordings = self.recorder.list_for(subject_id, object_id)
         for entry in entries:
             works = self.work_index.for_task(str(entry["id"]))
             entry["work_ids"] = [row["work_id"] for row in works]
+            jobs = [r for r in recordings if set(r['work_ids']) & set(entry['work_ids'])]
+            if jobs and entry.get('tool_name') == 'runtime:dialogue-recording':
+                entry['final_result'] = '\n'.join(self.recorder.summary(r) for r in jobs)
+                if any(r['state'] != 'stopped' for r in jobs):
+                    entry.update(section='in_use', status='记录受阻' if any(r['state']=='blocked' for r in jobs) else '持续记录中')
+                    entry['new_info'] = entry['final_result']
             entry["work_open"] = any(not row["closed"] for row in works)
             entry["handling"] = ", ".join(
                 str(row["handling"].get(entry["id"], {}).get("disposition") or "待处理")
@@ -2338,11 +2575,41 @@ class ToolService:
                 terminal = next((f.result for f in reversed(hang.feedback) if f.result), None)
                 if terminal:
                     entry["verification"] = assessment_note(terminal)
+        self._annotate_recording_updates(subject_id, entries)
         selected = select_tool_related_entries(
             dedupe_recent_tool_entries(entries), query=query, now=stamp, ttl_s=ttl_s
         )
         required = [e for e in entries if e["id"] in required_ids]
         return tuple(required + [e for e in selected if e["id"] not in required_ids])[:HOT_STATE_CAP]
+
+    def _annotate_recording_updates(self, subject_id, entries):
+        """An earlier file inspection cannot describe a later verified recording."""
+        from .verification import check_file
+        for receipt in self.recorder.file_receipts(subject_id):
+            path = receipt['path']
+            key = path.replace('/', '\\').casefold()
+            older = [e for e in entries if e.get('tool_name') != 'runtime:dialogue-recording'
+                     and key in str(e.get('need', '')).replace('/', '\\').casefold()]
+            if not older:
+                continue
+            fact = check_file(path, base=Path.cwd(), sha256=receipt['sha256'])
+            if not fact['passed']:
+                for entry in older:
+                    entry['artifact_update'] = ('当前文件回读与最近记录回执不一致或无法读取；'
+                        '此前检查不能证明当前内容，需重新核验。')
+                continue
+            try:
+                modified = datetime.fromtimestamp(Path(path).stat().st_mtime, timezone.utc)
+            except OSError:
+                continue
+            for entry in older:
+                checked = entry.get('observed_at') or entry.get('used_at')
+                if not isinstance(checked, datetime) or checked >= modified:
+                    continue
+                entry['artifact_update'] = (f"该检查之后文件已更新，当前实际回读与记录器回执一致，共{receipt['bytes']}字节。"
+                    '此前“未写入”等结论只对应旧文件，不能据此描述当前状态。'
+                    + {'stopped': '当前未持续记录。', 'running': '记录任务仍在运行。',
+                       'blocked': '当前记录受阻。'}[receipt['state']])
 
     def invalidate(
         self, item_id: str, *, reason: str = ""
@@ -2469,6 +2736,11 @@ class ToolService:
         self._proposed_requests.pop(item_id, None)
         hang = self.hang_store.get(item_id)
         if hang is not None:
+            for work in self.work_index.for_task(item_id):
+                for job in self.recorder.for_work(work['work_id']):
+                    if job['state'] != 'stopped':
+                        self.recorder.command(job['subject'], job['owner'], job['work_id'],
+                                              {'action': 'stop', 'path': job['path']})
             self._proposed_requests.pop(hang.task_id, None)
             self._create_tasks.discard(hang.task_id)
             self.hang_store.append_stage(

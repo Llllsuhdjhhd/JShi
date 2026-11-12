@@ -74,9 +74,15 @@ def can_advance(result) -> bool:
     Observed query output is not independent verification of the whole goal.
     Missing/mismatched artifacts always block advancement.
     """
+    if any(row.get('kind') == 'supervision' and row.get('decision') != 'accept'
+           for row in result.execution):
+        return False
     value = assessment_of(result)
+    accepted = any(row.get('kind') == 'supervision' and row.get('decision') == 'accept'
+                   for row in result.execution)
     return value.get('verdict') == 'passed' or (
-        value.get('verdict') == 'unknown' and value.get('execution_observed') is True
+        value.get('verdict') == 'unknown' and (value.get('execution_observed') is True
+                                             or accepted and value.get('completed_calls', 0) > 0)
         and not value.get('call_errors'))
 
 
@@ -91,6 +97,11 @@ def assessment_note(result) -> str:
     value = assessment_of(result)
     names = {"passed": "产物核验通过", "partial": "产物部分核验通过", "failed": "产物核验未通过", "unknown": "目标完成尚未核验"}
     lines = [names.get(value.get("verdict"), names["unknown"]), str(value.get("reason") or "")]
+    review = next((r for r in reversed(result.execution) if r.get('kind') == 'supervision'), None)
+    if review:
+        if review.get('decision') == 'accept' and value.get('verdict') == 'unknown':
+            lines[0] = '实际执行输出已结合目标审查；本次无独立文件产物核验'
+        lines.append('目标审查：' + str(review.get('summary', '')))
     for fact in value.get("facts", ()):
         lines.append(f"文件：{fact.get('path', '')}；" + ("已回读核对" if fact.get("passed") else str(fact.get("reason") or "未核验")))
     return "\n".join(filter(None, lines))

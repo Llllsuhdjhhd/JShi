@@ -34,7 +34,7 @@ from .contract import (
 
 logger = logging.getLogger(__name__)
 
-FILE_VERIFICATION_NOTE = "文件任务必须实际创建或写入并回读；仅口头声称完成不算结果。使用 shell 写文件时，最后由脚本输出 JSON，artifacts 列出实际绝对 path 与从实际文件计算的 sha256，供程序核验；不要编造校验值。"
+FILE_VERIFICATION_NOTE = "按本次步骤执行：创建或写入任务须实际落盘并回读；仅核验、查找、读取或打开文件时只读已有产物，不得创建、覆盖或修补，缺失或不一致如实报错。文件证据由脚本输出 JSON，artifacts 列出实际绝对 path 与从实际文件计算的 sha256，供程序核验；不要编造校验值。"
 
 
 def _result_payload(text: str) -> dict[str, Any]:
@@ -78,7 +78,7 @@ def _shell_output_is_exploration(text: str) -> bool:
         for ln in lines:
             if (
                 ln.endswith(":")
-                or re.fullmatch(r"[\w.\-]+", ln) is not None
+                or re.fullmatch(r"[\w.\-]+", ln, re.ASCII) is not None
                 or re.search(r"(?i)\.(ps1|sh|json|md|py)$", ln)
             ):
                 fileish += 1
@@ -201,8 +201,12 @@ class PiEngine:
         # auth、sessions，落在用户目录下会被沙箱拒（EPERM），也会污染本机配置。
         self.home_dir = Path(home_dir) if home_dir else Path(".tmp/pi")
         self.env_api_key_name = env_api_key_name
+        self._stop_state = threading.local()
         self._last_stop = ""
         self._spawn_error = ""
+        self.reviewer = None
+        self._control_lock = threading.RLock()
+        self._running: dict[str, subprocess.Popen] = {}
         # home_dir 不再默认相对 CWD：cli 传 None 时也落到仓库工作区内的绝对路径，
         # 避免换目录启动后写到工作区外撞沙箱。
         self.home_dir = (
@@ -334,6 +338,14 @@ class PiEngine:
         thread = threading.Thread(target=watch, name="pi-watchdog", daemon=True)
         thread.start()
         return stop, reason
+
+    @property
+    def _last_stop(self):
+        return getattr(self._stop_state, 'reason', '')
+
+    @_last_stop.setter
+    def _last_stop(self, value):
+        self._stop_state.reason = value
 
     def _iter_events(
         self,
@@ -518,6 +530,11 @@ class PiEngine:
         """
         prompt = self._build_prompt(request)
         proc = self._spawn()
+        with self._control_lock:
+            self._running[request.request_id] = proc
+        review = None
+        corrections = 0
+        progress_reviewed = False
         active_calls: set[str] = set()
         completed_calls: set[str] = set()
         call_args: dict[str, dict] = {}
@@ -541,14 +558,12 @@ class PiEngine:
             if float(raw_timeout) > 0:
                 timeout_s = float(raw_timeout)
         try:
-            self._send(
-                proc,
-                {"id": request.request_id, "type": "prompt", "message": prompt},
-            )
+            with self._control_lock:
+                self._send(proc, {"id": request.request_id, "type": "prompt", "message": prompt})
             for event in self._iter_events(
                 proc,
                 timeout_s=timeout_s,
-                stop_on_settled=True,
+                stop_on_settled=not callable(self.reviewer),
                 cancel=cancel,
             ):
                 usage = _merge_usage(usage, _usage_from_event(event))
@@ -558,6 +573,35 @@ class PiEngine:
                     text = self._assistant_text(event)
                     if text:
                         assistant_text = text
+                if event_type == 'agent_settled' and callable(self.reviewer):
+                    from .verification import assess_pi
+                    assessment = assess_pi(observed_calls, base=self._scratch_dir,
+                                           created=request.create is not None)
+                    review = self.reviewer(request, observed_calls, assessment, assistant_text)
+                    if cancel is not None and cancel.is_set():
+                        break
+                    if time.monotonic() - started >= timeout_s:
+                        self._last_stop = 'timeout'
+                        break
+                    yield ToolFeedback(request_id=request.request_id, kind=FeedbackKind.PROGRESS,
+                        progress=ToolProgress(stage='supervision', partial=review.summary),
+                        meta={'supervision': review.as_dict()})
+                    if review.decision == 'correct' and corrections < 2:
+                        corrections += 1
+                        with self._control_lock:
+                            self._send(proc, {'id': request.request_id + f':correct:{corrections}',
+                                'type': 'prompt', 'message': '执行监督反馈：' + review.instruction
+                                + '\n保留已确认成果，只修正指出的问题；完成后交回实际证据。\n' + FILE_VERIFICATION_NOTE})
+                        # The same Pi conversation retains earlier work. Only fresh evidence
+                        # may validate this attempt; old successful output cannot mask failure.
+                        observed_calls.clear()
+                        call_args.clear()
+                        active_calls.clear()
+                        completed_calls.clear()
+                        shell_ok_parts.clear()
+                        last_shell_ok = last_tool_ok = last_tool_error = assistant_text = ''
+                        continue
+                    break
                 if event_type == "tool_execution_start":
                     active_calls.add(_tool_call_key(event, len(active_calls)))
                     call_args[str(event.get("toolCallId") or "")] = dict(event["args"]) if isinstance(event.get("args"), Mapping) else {}
@@ -578,6 +622,29 @@ class PiEngine:
                             text = content.strip()
                             if text and text not in shell_ok_parts:
                                 shell_ok_parts.append(text)
+                    # One substantive intermediate checkpoint per session. Pi continues
+                    # asynchronously; steer applies at its next supported tool boundary.
+                    if (callable(self.reviewer) and not progress_reviewed
+                            and (tool_name == 'write' or observed_calls[-1]['substantive'])):
+                        from .verification import assess_pi
+                        progress_reviewed = True
+                        assessment = assess_pi(observed_calls, base=self._scratch_dir,
+                                               created=request.create is not None)
+                        checkpoint = self.reviewer(request, observed_calls, assessment, assistant_text, phase='progress')
+                        if cancel is not None and cancel.is_set():
+                            break
+                        if time.monotonic() - started >= timeout_s:
+                            self._last_stop = 'timeout'
+                            break
+                        if checkpoint.waiting_for:
+                            review = checkpoint
+                            break
+                        if checkpoint.decision == 'correct' and corrections < 2:
+                            corrections += 1
+                            self.steer(request.request_id, '执行过程监督纠正：' + checkpoint.instruction)
+                        yield ToolFeedback(request_id=request.request_id, kind=FeedbackKind.PROGRESS,
+                            progress=ToolProgress(stage='supervision', partial=checkpoint.summary),
+                            meta={'supervision': {**checkpoint.as_dict(), 'phase': 'progress'}})
                 converted = self._convert_event(
                     request,
                     event,
@@ -605,6 +672,8 @@ class PiEngine:
                 if converted is not None:
                     yield converted
         finally:
+            with self._control_lock:
+                self._running.pop(request.request_id, None)
             self._close(proc)
 
         stop_reason = self._last_stop
@@ -639,6 +708,22 @@ class PiEngine:
             return
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        if callable(self.reviewer) and review is None:
+            from .supervision import Review
+            from .verification import assess_pi
+            review = Review('blocked', '执行中断，未完成监督核验；保留已有成果。')
+            assessment = assess_pi(observed_calls, base=self._scratch_dir, created=request.create is not None)
+        if review is not None and review.decision != 'accept':
+            note = review.summary
+            if review.decision == 'correct':
+                note = '已达到本次自动纠正上限，仍有未完成项。' + note
+            yield ToolFeedback(request_id=request.request_id, kind=FeedbackKind.RESULT,
+                result=ToolResult(status=ToolStatus.PARTIAL, summary=note, ideal=False,
+                    result=_result_payload(_join_shell_result_parts(shell_ok_parts) or assistant_text),
+                    ideal_note=note, time_ms=elapsed_ms, cost=_usage_cost(usage),
+                    execution=(assessment, {'kind': 'supervision', **review.as_dict()})),
+                meta={'supervision': {**review.as_dict(), 'summary': note}})
+            return
         # 多段脚本输出一并保留（汇率 + 检索等），丢掉 ls / 读 SKILL 探路噪声。
         shell_joined = _join_shell_result_parts(shell_ok_parts)
         shell_fallback = (
@@ -682,14 +767,15 @@ class PiEngine:
                 result=ToolResult(
                     status=ToolStatus.OK,
                     result=_result_payload(full),
-                    summary=short,
-                    ideal=assessment["verdict"] == "passed",
+                    summary=review.summary if review is not None else short,
+                    ideal=assessment["verdict"] == "passed" or review is not None and review.decision == 'accept',
                     ideal_note=assessment["reason"],
-                    execution=(assessment,),
+                    execution=(assessment,) + (({'kind': 'supervision', **review.as_dict()},) if review is not None else ()),
                     cost=_usage_cost(usage),
                     time_ms=elapsed_ms,
                     resource=_usage_resource(usage),
                 ),
+                meta={'supervision': review.as_dict()} if review is not None else {},
             )
             return
         if active_calls and not active_calls.issubset(completed_calls):
@@ -721,7 +807,26 @@ class PiEngine:
             result=ToolResult(status=ToolStatus.FAILED, error="Pi 会话未产出工具结果"),
         )
 
+    def steer(self, request_id: str, message: str) -> bool:
+        """Append authorized guidance to the live Pi conversation, never a new task."""
+        with self._control_lock:
+            proc = self._running.get(request_id)
+            if proc is None or proc.poll() is not None:
+                return False
+            try:
+                self._send(proc, {'type': 'steer', 'message': message})
+                return True
+            except (OSError, ValueError):
+                return False
+
     def _build_prompt(self, request: ToolRequest) -> str:
+        contract = {'original_request': request.meta.get('user_input', ''),
+                    'goal': request.meta.get('overall_need') or request.need,
+                    'requirements': request.meta.get('requirements', ()),
+                    'amendments': request.meta.get('amendments', ())}
+        return self._build_task_prompt(request) + '\n委托及验收要求（遵守本步范围；委托人的新补充优先于旧计划，实质冲突不明确时暂停并说明需确认什么）：' + json.dumps(contract, ensure_ascii=False)
+
+    def _build_task_prompt(self, request: ToolRequest) -> str:
         if request.create is not None:
             return self._build_create_prompt(request)
         agent_plan = request.meta.get("agent_plan")
@@ -749,6 +854,8 @@ class PiEngine:
                 "",
                 "【目标】",
                 request.need or "（未指定）",
+                *(["总目标背景（不是本步执行指令）：" + str(request.meta["overall_need"])]
+                  if request.meta.get("overall_need") else []),
                 "",
                 "【工具】",
                 command,
@@ -798,6 +905,13 @@ class PiEngine:
         if request.params:
             params = json.dumps(dict(request.params), ensure_ascii=False, separators=(",", ":"))
             args = f"{args}；调用参数(JSON，以此为准)：{params}" if args else f"调用参数(JSON，以此为准)：{params}"
+        if request.expected_result:
+            args += "；本步期望结果：" + request.expected_result
+        if request.meta.get("step_scope"):
+            args += "；只执行本步骤，不代办前后步骤。"
+        overall = str(request.meta.get("overall_need") or "").strip()
+        if overall and overall != request.need:
+            args += "；总目标背景（不是本步执行指令）：" + overall
         line = f"/skill:{name}"
         if args:
             line += " " + args
@@ -816,8 +930,10 @@ class PiEngine:
             deps = step.get("depends_on") or []
             step_lines.append(
                 f"{index + 1}. {step.get('step_id') or 'step'}"
+                f" | 本步目标：{step.get('need') or step.get('expected_result') or '按参数执行指定工具'}"
                 f" | 工具：{step.get('command') or '（由你选用）'}"
                 f" | 参数：{json.dumps(dict(step.get('params') or {}), ensure_ascii=False)}"
+                f" | 本步验收：{step.get('expected_result') or '（未指定）'}"
                 f" | 依赖：{json.dumps(list(deps), ensure_ascii=False)}"
             )
         return "\n".join(

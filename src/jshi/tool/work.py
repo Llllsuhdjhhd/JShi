@@ -77,6 +77,56 @@ class WorkIndex:
             row['plan'] = dict(plan)
             self._save(row)
 
+    def define_goal(self, work_id, *, original='', requirements=()):
+        with self._lock:
+            row = deepcopy(self._records[work_id])
+            if original and not row.get('original_request'):
+                row['original_request'] = original
+            if requirements and not row.get('requirements'):
+                row['requirements'] = list(requirements)
+            row.setdefault('revision', 0)
+            if row != self._records[work_id]:
+                self._save(row)
+
+    def clarify(self, work_id, questions, source_id):
+        with self._lock:
+            row = deepcopy(self._records[work_id])
+            entries = row.setdefault('clarifications', [])
+            if not any(e['source_id'] == source_id for e in entries):
+                entries.append({'source_id': source_id, 'questions': list(questions)})
+                row['waiting_for'] = list(questions)
+                self._save(row)
+
+    def set_recording_goal(self, work_id, *, continuous, params=None):
+        """Keep the accepted recording lifetime separate from one execution result."""
+        with self._lock:
+            row = deepcopy(self._records[work_id])
+            goal = row.setdefault('recording_goal', {})
+            goal['continuous'] = bool(continuous)
+            if params is not None:
+                goal['params'] = dict(params)
+            if row != self._records[work_id]:
+                self._save(row)
+
+    def amend(self, work_id, text, source_id):
+        with self._lock:
+            row = deepcopy(self._records[work_id])
+            entries = row.setdefault('amendments', [])
+            if not any(e['source_id'] == source_id for e in entries):
+                entries.append({'source_id': source_id, 'text': text})
+                row['revision'] = row.get('revision', 0) + 1
+                self._save(row)
+            return row['revision']
+
+    def review(self, work_id, request_id, result):
+        with self._lock:
+            row = deepcopy(self._records[work_id])
+            reviews = row.setdefault('reviews', [])
+            reviews.append({'request_id': request_id, 'revision': row.get('revision', 0), **result})
+            row['reviews'] = reviews[-48:]
+            row['supervision_status'] = ('in_progress' if result.get('phase') == 'progress' else result['decision'])
+            self._save(row)
+
     def _project(self, row):
         value=deepcopy(row)
         owner=getattr(self,'person_owner',None)
@@ -162,3 +212,18 @@ class WorkIndex:
                          for row in (self._project(value),)
                          if row['subject_id'] == subject_id and (object_id is None or row['object_id'] == object_id)
                          for tid, notice in row.get('notices', {}).items() if not notice['handled'])
+
+    def retry_interrupted_notices(self, task_ids):
+        """One retry for host cancellation before cognition commits, not provider errors."""
+        wanted = set(task_ids)
+        with self._lock:
+            for value in tuple(self._records.values()):
+                row = deepcopy(value)
+                changed = False
+                for tid, notice in row.get('notices', {}).items():
+                    if (tid in wanted and not notice['handled'] and notice.get('attempted')
+                            and notice.get('interrupted_retries', 0) < 1):
+                        notice.update(attempted=False, interrupted_retries=1)
+                        changed = True
+                if changed:
+                    self._save(row)

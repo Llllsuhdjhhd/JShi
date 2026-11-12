@@ -833,6 +833,7 @@ def test_plan_ignores_model_template_and_uses_default(tmp_path: Path) -> None:
     planner = SkillPlanner(
         ToolPlanSkill(_JsonPort({"ok": True, "template": "not-a-template", "command": "echo"})),
         catalog=load_catalog(),
+        engine_tools=({'name': 'echo'},),
     )
     process, _repository, store, service = _runtime(
         tmp_path,
@@ -863,6 +864,7 @@ def test_plan_skill_ok_creates_hang(tmp_path: Path) -> None:
             )
         ),
         catalog=load_catalog(),
+        engine_tools=({'name': 'echo'},),
     )
     process, _repository, store, service = _runtime(
         tmp_path,

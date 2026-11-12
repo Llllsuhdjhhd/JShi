@@ -129,6 +129,7 @@ TOOL_PLAN_SCHEMA: Mapping[str, Any] = {
                         "type": "object",
                         "properties": {
                             "step_id": {"type": "string"},
+                            "need": {"type": "string"},
                             "command": {"type": "string"},
                             "params": {"type": "object"},
                             "expected_result": {"type": "string"},
@@ -170,6 +171,11 @@ TOOL_PLAN_SCHEMA: Mapping[str, Any] = {
     },
     "required": ["ok"],
 }
+TOOL_PLAN_SCHEMA["properties"]["requirements"] = {"type": "array", "maxItems": 16, "items": {"type": "string"}}
+from jshi.tool.recording import TOOL as RECORDING_TOOL, COMMAND as RECORDING_COMMAND
+TOOL_PLAN_SCHEMA['properties']['task_type'] = {'enum': ['general', 'dialogue_recording']}
+TOOL_PLAN_SCHEMA['properties']['dialogue_recording'] = RECORDING_TOOL['params']
+TOOL_PLAN_SCHEMA['required'].append('task_type')
 
 
 class ToolPlanSkill(Skill[PlanSkillOutput]):
@@ -181,19 +187,25 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
 只输出一个 JSON 对象，不要任何解释、注释或 Markdown。
 
 【输入】
-- 本轮任务 JSON：need、verbal、scene、catalog、engine_tools 或 discovery、budget，以及 in_flight；均已按当前事项所属人物筛选，不带内部人物或现场长ID。
+- 本轮任务 JSON：need、verbal、scene、catalog、engine_tools 或 discovery、budget、execution_capabilities，以及 in_flight；均已按当前事项所属人物筛选，不带内部人物或现场长ID。
 - tool_materials（若有）：已取得的工具结果与事项关系。先看已有材料，只策划缺少或明确要求更新的部分；失败、过期、不完整的结果不能当成已经满足需求。
 - work_terms（若有）：原事项需求、补全后的需求、待补项和适用截止；now 是带时区的当前时间。不要把原请求的相对日期改成重试当天；过期不执行。补信息后保留已完成的步骤，只补剩余部分。
 - user_input（若有）是本次用户原话，verbal 是匠石已说的回应；不能把回应里的承诺当成已执行事实。原话含多项要求时逐项核对 need 的范围，遗漏或无法执行的部分明确报告，不只完成第一项就宣称全成。
-- 必需参数仍无法从 need、scene 或现有材料确定时，ok=false、waiting_for 列最多5个必要待补项，error 简述原因；这是等待补信息，不是永久失败，不编造参数。无缺项时 waiting_for 留空。持续接收未来对话不等于创建文件或一次写入；目录没有持续采集能力时明确报告能力缺口，不以空文件成功冒充记录已开始，也不生成永远空等的执行任务。
-- 只看本轮 need、现场和目录/命中；片场里旧的失败、不相干负面，不要拿来判定这次。
+- recent_user_utterances是宿主保留的该人物近期原话，辅助还原连续委托；与need缩写冲突时不能漏掉原话中的持续要求。它不是完整聊天记录，不供执行器据此编造对话。
+- work_terms.recording_goal是此前已接受的持续记录目标，独立于单次执行是否成功；continuous=true时补录沿用原文件和持续范围，不能用export或文件结束标记将其结束。只有明确停止、取消或约定结束才收尾；工具回执中的running/blocked/stopped才是实际运行状态。
+- “补进去”不撤销原有持续记录要求。文件结束标记、旧工具输出、匠石回应或need里自行增加的“只办一次”都不能代替用户停止指令；收窄目标必须有用户原话或原约定结束条件依据。既往持续目标存在时用start并按history/since补录，不能仅export；现有证据无法判断范围时按澄清规则询问。
+- task_type必须区分general与dialogue_recording。凡目标是保存、补录或检查本系统的实际对话原文，选dialogue_recording，并在dialogue_recording填宿主操作参数；不要输出plan、create_tool或让Pi自己生成聊天正文。宿主有真实输入与回复交付源，Pi只有任务描述，两者不能互相替代。start持续记录直到停止，export只导出当前已保留原话，status只核验，stop结束，resume恢复受阻任务。默认记录双方include_replies=true；只要人的话才false。补录近期内容用history=available，指定时间用带时区的since；缺失历史如实报告。原委托包含“后续也记录”时必须保留start，不能缩成export；仅要求导出已有记录则export。范围不清按澄清规则询问。持续任务只有查到宿主任务running才算已启动；文件存在或Pi成功均不证明启动。
+- requirements逐项列出本次必须满足的可核验要求，最多16项；完整保留用户补充和持续执行、停止、交付要求。每项不能只是“执行成功”。依赖中间结果调整方法的任务优先agent_loop，交由Pi完成并接受监督纠偏。
+- 先核对完整目标、必须满足的要求和完成条件，再拆步骤。一次执行、等待外部信息与持续执行分别规划；持续任务必须有真实输入来源、后续触发、进度保存和停止机制。future_dialogue_input=true时，持续记录对话必须使用runtime:dialogue-recording；它由宿主接收未来输入并落盘，Pi本身不会持续接收对话。此命令放在单独工具请求或sequential步骤中，不能放入Pi的agent_loop；启动后保持事项开放直到停止收尾。默认只记录委托人，明确要求记录所有人时scope=all。future_dialogue_input=false时不可用一次写入冒充持续采集，应报告能力缺口。
+- 目标本身、执行范围、交付内容、验收标准或必需参数仍有影响执行的歧义时，先核对原话、work_terms中的既往问答和现场材料；仍无法确定则ok=false、waiting_for列最多5个具体问题、error简述为何影响执行。主认知会向原委托人询问，回答会带着同一事项的原始要求、历次补充和待补项回来；允许多轮澄清，直到足以执行再规划。工具侧不直接对用户说话，不擅自替用户确定目标，也不反复问已回答的问题。清楚且可执行时waiting_for留空，不为普通实施选择增加确认。能力不足应明确报告，不能转成无意义的询问。
+- 综合本轮need、用户原话、work_terms、现场和目录/命中；片场里无关的旧失败不用于否定本次能力。
 - in_flight：该说话对象当前全部未终态记挂（按对象，不按本轮活动）。每项含 phase / tool_name / purpose / need / progress。phase 为 use（正在执行一次查询或动作）、create（正在造工具）或 propose（提案未执行）。tool_name 是命令名或正在造的工具名。purpose 是该工具的能力说明，只用来识别「在造哪一种工具」，不用来判断「本轮查询是否属于该能力域」。progress 是人类可读状态备注，不参与判定。
 - **优先检查 in_flight**。空列表不得以「已经在办」放弃；已终态不计入。按 phase 分别判定是否重复开工，不要用 purpose 覆盖本轮 need：
   - phase=use：只拦「同一查询还在跑」。比本轮 need 与该项 need（可辅以相同 tool_name）。地点、币种、对象等关键参数不同，不是同一查询，不产生约束，可以再 execute。
   - phase=create 或 propose：拦两件事。其一，不要再 create / propose 同一工具：本轮若是造工具，且 tool_name 相同，或 purpose 表明正在造的就是本轮也要造的那一种能力，则 ok=false。其二，本轮若是查询、且显然只能靠正在造的那一本才能做（目录里还没有替代），不要再造一本，也不要假装 execute；ok=false，说明工具还在造。天气查询对上正在造的汇率工具，不产生约束。
   - 命中时 error 写「我这边已经在办…」或「我这边还在造这个工具…」，不再 execute，也不再为此重复 create。
 - discovery 模式后续轮次会提供 lookups（lookup.search/describe 的命中结果），必须读取 lookups。
-- 判定范围：仅依据本轮 need、in_flight、scene、catalog / lookups；片场中旧失败记录、无关负面信息，不纳入本次判定。
+- 判定范围：本轮need、user_input、recent_user_utterances、work_terms、in_flight、scene及catalog / lookups；旧结果的时效按当前核验材料理解，不沿用已经过时的“未写入”等结论。
 - scene 仅用于把缺失的对象、地点、产物补充进 params；不修改需求本身，不生成对外话术。
 
 【三种结局，三选一】
@@ -206,6 +218,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
    - need 本身模糊，缺少关键信息；
    - 风险明显不可接受；
    - 预算明确不足；
+    - execution_capabilities 明确不支持完成目标所需的执行方式，不能靠创建单次工具补足；
    - in_flight 按上面规则构成重复开工，或查询所依赖的工具仍在造。
    ok=false 时，error 以「我 / 我这边」开头写一句原因；不发起任何动作。目录缺少工具本身不等于放弃，除非同时需求不清。
    budget 当前为无限占位，暂不会因预算不足放弃；预算规则保留，接入真实预算后自动生效。
@@ -218,6 +231,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
   - mixed：部分步骤并行、部分步骤有先后。
   - agent_loop：后面步骤依赖前面结果，或需要 Pi 根据中间结果动态决定下一步。
 - 每个 step 必须有唯一 step_id；depends_on 只能引用本 plan 里已有的 step_id。
+- 每步 need 只描述这一步做什么，expected_result 写这一步的验收条件；总目标仅作背景。核验步骤只读已有产物，不重新创建、覆盖或修补；发现缺失或不一致交回失败证据，由后续明确的修复步骤处理。
 - 相互独立的步骤不要互相写 depends_on，程序会同时启动所有就绪步骤。
 - 每个 step 仍遵守 command / params / expected_result / create_tool 的规则。
 - agent_loop 只给总目标和候选步骤，不替 Pi 固定每一步的内部判断。
@@ -245,6 +259,15 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             error = str(data.get("error") or "").strip() or "策划失败"
             from jshi.tool.validity import pending_information
             return PlanFailure(error, pending_information(data.get('waiting_for')))
+        recording = data.get('dialogue_recording')
+        if data.get('task_type') == 'dialogue_recording' or isinstance(recording, Mapping):
+            if not isinstance(recording, Mapping) or not recording.get('action'):
+                return PlanFailure('我这边还没有确定记录操作，未执行。')
+            if data.get('plan') or data.get('create_tool'):
+                return PlanFailure('我这边的记录计划混入了其他执行方式，未执行。')
+            return ToolRequest(template=DEFAULT_TEMPLATE, command=RECORDING_COMMAND,
+                params=dict(recording), ask=AskMode.EXECUTE,
+                meta={'requirements': tuple(str(x) for x in data.get('requirements', ()))[:16]})
         plan_data = data.get("plan")
         if isinstance(plan_data, Mapping) and isinstance(
             plan_data.get("steps"), Sequence
@@ -262,6 +285,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
                 need="",
                 mode=mode,
                 steps=steps,
+                requirements=tuple(str(x).strip() for x in data.get('requirements', ()) if str(x).strip())[:16],
             )
         params = data.get("params") if isinstance(data.get("params"), Mapping) else {}
         raw_est = data.get("estimate") if isinstance(data.get("estimate"), Mapping) else {}
@@ -279,6 +303,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             expected_result=str(data.get("expected_result") or ""),
             ask=ask,
             meta={
+                "requirements": tuple(str(x).strip() for x in data.get('requirements', ()) if str(x).strip())[:16],
                 "estimate": {
                     "time_est_ms": raw_est.get("time_est_ms"),
                     "cost_est": raw_est.get("cost_est"),
@@ -343,6 +368,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             step_id=str(step.get("step_id") or "").strip() or new_id(),
             request=ToolRequest(
                 template=DEFAULT_TEMPLATE,
+                need=str(step.get("need") or "").strip(),
                 command=str(step.get("command") or "").strip(),
                 create=cls._parse_create(step, ask),
                 params=dict(params),
@@ -357,7 +383,16 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
         del raw_text
         return PlanFailure("我这边没能定下该怎么办。")
 
-    def plan_intake(
+    def plan_intake(self, intake, catalog, engine_tools=(), scene='', in_flight=(), materials=''):
+        result = self._plan_intake_once(intake, catalog, engine_tools, scene, in_flight, materials)
+        repairable = ('没有指定工具', '没能定下该用哪个工具', '步骤缺少编号', '步骤编号重复',
+                      '步骤依赖不存在', '互相依赖', '记录计划混入', '没有确定记录操作')
+        if isinstance(result, PlanFailure) and not result.waiting_for and any(t in result.message for t in repairable):
+            intake = replace(intake, meta={**intake.meta, 'planning_error': result.message})
+            return self._plan_intake_once(intake, catalog, engine_tools, scene, in_flight, materials)
+        return result
+
+    def _plan_intake_once(
         self,
         intake: IntakeRecord,
         catalog: Sequence[Mapping[str, Any]],
@@ -435,6 +470,8 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
         else:
             if not command:
                 return PlanFailure("我这边没能定下该用哪个工具。")
+            if command == RECORDING_COMMAND and command not in engine_names:
+                return PlanFailure('我这边没有接入真实对话记录源，未执行记录。')
             if engine_names and command not in engine_names:
                 return PlanFailure("我这边没能定下该用哪个工具，引擎目录里没有这一条。")
         origin = ToolOrigin.EXTERNAL_05
@@ -445,7 +482,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             except ValueError:
                 origin = ToolOrigin.EXTERNAL_05
         estimate = dict(
-            planned.meta.get("estimate")
+            planned.meta.get("estimate") or {}
             if isinstance(planned.meta, Mapping)
             else {}
         )
@@ -464,6 +501,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             ask=planned.ask,
             budget=MAX_BUDGET,
             meta={
+                "requirements": planned.meta.get('requirements') or (planned.expected_result or intake.need,),
                 "estimate": dict(estimate or {}),
                 "feedback_plan": dict(
                     create_spec.feedback_plan
@@ -481,6 +519,8 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
         index: ToolIndex,
     ) -> PlanResult:
         step_ids = {step.step_id for step in plan.steps}
+        if plan.mode == 'agent_loop' and any((step.request.command or '').startswith('runtime:') for step in plan.steps):
+            return PlanFailure('持续记录由宿主执行，请使用独立请求或顺序计划，不能放入Pi会话。')
         if len(step_ids) != len(plan.steps):
             return PlanFailure("我这边没能定下计划，步骤编号重复。")
         origin = ToolOrigin.EXTERNAL_05
@@ -532,10 +572,14 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
                 subject_id=intake.subject_id,
                 activity_id=intake.activity_id,
                 origin=origin,
-                need=intake.need,
+                need=request.need or request.expected_result or "按本步参数执行指定工具，返回实际结果。",
                 template=DEFAULT_TEMPLATE,
                 budget=MAX_BUDGET,
                 meta={
+                    "overall_need": intake.need,
+                    "step_scope": True,
+                    "requirements": (request.expected_result or request.need or intake.need,),
+                    "goal_requirements": plan.requirements,
                     "estimate": estimate,
                     "feedback_plan": dict(
                         create_spec.feedback_plan
@@ -557,6 +601,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             need=intake.need,
             mode=plan.mode,
             steps=tuple(final_steps),
+            requirements=plan.requirements,
         )
 
     def _task_payload(
@@ -576,11 +621,19 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
             "catalog": list(catalog),
             "budget": budget_to_dict(MAX_BUDGET),
             "in_flight": [{k:v for k,v in item.items() if k != 'task_id'} for item in in_flight],
+            "execution_capabilities": {"future_dialogue_input": 'runtime:dialogue-recording' in index.names},
         }
         if materials:
             payload["tool_materials"] = materials
         if intake.meta.get('user_input'):
             payload['user_input'] = intake.meta['user_input']
+        if intake.meta.get('recent_user_utterances'):
+            payload['recent_user_utterances'] = json.loads(intake.meta['recent_user_utterances'])
+        if intake.meta.get('planning_error'):
+            payload['planning_error'] = '上次计划未执行，结构校验未通过：' + intake.meta['planning_error'] + '。修正执行定义后重新输出，不能改写用户目标。'
+        # Runtime capabilities are always visible, even when the Pi catalog is large.
+        if RECORDING_COMMAND in index.names:
+            payload['runtime_tools'] = [RECORDING_TOOL]
         payload['now'] = datetime.now(timezone.utc).isoformat(timespec='minutes')
         if intake.meta.get('work_terms'):
             payload['work_terms'] = json.loads(intake.meta['work_terms'])
@@ -615,6 +668,7 @@ class SkillPlanner:
         self.scene_loader = scene_loader
         self.hang_store = hang_store
         self.material_loader = material_loader
+        self.extra_tools = ()
 
     def invalidate_tools(self) -> None:
         """造出新工具之后调用：下一次策划重新读引擎目录。
@@ -705,10 +759,12 @@ class SkillPlanner:
         return tuple(items)
 
     def plan(self, intake: IntakeRecord) -> PlanResult:
-        tools = self._resolve_tools()
+        tools = (*self._resolve_tools(), *self.extra_tools)
         engine_error = self._engine_error()
-        if engine_error:
+        if engine_error and not self.extra_tools:
             return PlanFailure("我这边现在连不上工具引擎，暂时没法判断或执行。")
+        if engine_error:
+            tools = self.extra_tools
         scene = self._load_scene(intake)
         materials = ""
         if self.material_loader is not None:
@@ -719,4 +775,9 @@ class SkillPlanner:
         kwargs = {"scene": scene, "in_flight": self._in_flight(intake)}
         if materials:
             kwargs["materials"] = materials
-        return self.skill.plan_intake(intake, self.catalog, tools, **kwargs)
+        result = self.skill.plan_intake(intake, self.catalog, tools, **kwargs)
+        if engine_error:
+            requests = [s.request for s in result.steps] if isinstance(result, ToolPlan) else [result] if isinstance(result, ToolRequest) else []
+            if any(r.create is not None or not (r.command or '').startswith('runtime:') for r in requests):
+                return PlanFailure('Pi暂不可用，当前只能执行已提供的宿主记录操作。')
+        return result

@@ -83,6 +83,34 @@ def test_internal_result_rejects_wrong_recipient(process):
         process.experience_tool_results('stone', 'lux-id', (task,))
 
 
+def test_planner_receives_owner_words_without_jev_notes_or_other_speakers(process, monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from jshi.core.envelope import InputEnvelope, InputPart, SceneUtterance, SpeakerEvidence
+    from jshi.models.base import ResponsePlan
+
+    owner = SpeakerEvidence('A', 'lux-id', 'lux', 'recognized')
+    other = SpeakerEvidence('B', 'other-id', 'other', 'recognized')
+    decorated = 'P1：补进去吧\nP2：停止记录\nJEV 初判：只办这一次。'
+    envelope = InputEnvelope('test', 'voice', (InputPart('text', decorated),), owner,
+        current_utterances=(SceneUtterance('补进去吧', owner, 0, 100),
+                            SceneUtterance('停止记录', other, 100, 200)))
+    intent = SimpleNamespace(need='补录并继续记录', refresh_reason='', work_id='',
+                             waiting_for=(), expires_at='', step_id='')
+    response = SimpleNamespace(tool_intent=intent, response_plan=ResponsePlan('wait'))
+    calls = []
+    monkeypatch.setattr(process.tool_service, 'intake', lambda **kw: calls.append(kw))
+    activity = SimpleNamespace(id='activity')
+    process._intake_tool_if_requested('stone', activity, owner, response,
+                                     decorated, envelope=envelope)
+    assert calls[-1]['user_input'] == '补进去吧'
+    assert calls[-1]['need'] == '补录并继续记录'
+    for source in ('tool', 'tool_event', 'initiative'):
+        process._intake_tool_if_requested('stone', activity, owner, response,
+                                         decorated, envelope=replace(envelope, source=source))
+        assert calls[-1]['user_input'] == ''
+
+
 @pytest.mark.parametrize('active', [False, True])
 def test_text_page_receives_result_without_user_asking_again(process, active):
     import asyncio
@@ -158,6 +186,30 @@ def test_text_interrupts_tool_notice_before_starting_new_cognition(process):
                 release.set()
                 await asyncio.gather(notice, return_exceptions=True)
     asyncio.run(run())
+
+
+def test_interrupted_notice_gets_one_retry_but_provider_failure_does_not(process):
+    from jshi.subject.cancellation import TurnCancelled
+    task = failed_task(process)
+    service = process.tool_service
+    def interrupted(*args, **kwargs):
+        raise TurnCancelled('connection closed before reply committed')
+    process.experience = interrupted
+    for retry in range(2):
+        assert service.claim_notices('stone', 'lux-id') == (task,)
+        with pytest.raises(TurnCancelled):
+            process.experience_tool_results('stone', 'lux-id', (task,))
+        service.release_notices((task,))
+    assert service.claim_notices('stone', 'lux-id') == ()
+    other = failed_task(process)
+    def unavailable(*args, **kwargs):
+        raise RuntimeError('model provider unavailable')
+    process.experience = unavailable
+    assert service.claim_notices('stone', 'lux-id') == (other,)
+    with pytest.raises(RuntimeError):
+        process.experience_tool_results('stone', 'lux-id', (other,))
+    service.release_notices((other,))
+    assert service.claim_notices('stone', 'lux-id') == ()
 
 
 def test_unknown_completion_does_not_unlock_dependent_step(tmp_path):
