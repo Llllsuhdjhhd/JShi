@@ -2001,16 +2001,17 @@ class VoiceConversation:
                     continue
                 if self.turn_busy or self.active_turn or not self.input_idle.is_set() or not self.turn_queue.empty() or not self.queue.empty():
                     continue
-                if self.conversation_active():
+                if self.entry_scheduler.schedule.blocks_start():
                     continue
-                batch = self.wakeups.claim()
+                batch = self.wakeups.claim(allow_timer=not self.conversation_active())
                 if not batch:
                     continue
                 envelope = InputEnvelope(session_id=self.session_id, source='initiative',
                     parts=(), voice_delivery=True, delivery_context=self.dialogue.note(self.subject_id),
                     speaker=SpeakerEvidence('initiative', object_id='scene:'+self.subject_id,
                         label='现场', status='unknown', method='voice_scene'), cognition_mode='initiative',
-                    wake_context='\n'.join(x.description for x in batch))
+                    wake_context=('交谈间隙收到新的现场事件，结合当前交谈判断是否值得接话；没有人提出新请求。\n'
+                                  if self.conversation_active() else '') + '\n'.join(x.description for x in batch))
             self.wake_batches[envelope.input_id] = (batch, ids, envelope.speaker.object_id)
             self.turn_queue.put_nowait((envelope, self.epoch))
 
@@ -2070,7 +2071,6 @@ class VoiceConversation:
     def defer_environment(self, envelope):
         for observation in envelope.current_utterances:
             self.process.note_entry_background(self.subject_id, observation)
-        self.wakeups.offer("perception", envelope.input_id, "现场有新的视觉观察；按共享片场与有效图片时间理解，不代表有人向匠石说话。")
         self.pending_environment = envelope
         if self.environment_task is None or self.environment_task.done():
             self.environment_task = asyncio.create_task(self._environment_turns())
@@ -2085,7 +2085,8 @@ class VoiceConversation:
                     or monotonic()-self.last_input_at < self.environment_idle_s):
                 continue
             envelope, self.pending_environment = self.pending_environment, None
-            self.wakeups.offer("perception", envelope.input_id, "有效视觉观察已更新，结合当前现场自主审视。")
+            self.wakeups.offer("perception", envelope.input_id, "有效视觉观察已更新，结合当前现场自主审视。",
+                               fingerprint=('visual', ' '.join(envelope.text.split())))
 
     def voice_evidence(self, utterance, candidates):
         evidence = self._voice_evidence(utterance, candidates)
@@ -4254,7 +4255,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             active_conversation.enqueue_turn(envelope)
         else:
             process.note_entry_background(subject_id, observation)
-            text_wakes.offer('perception', envelope.input_id, '有效视觉观察已进入共享现场；这是观察，不是人物发言。')
+            text_wakes.offer('perception', envelope.input_id, '有效视觉观察已进入共享现场；这是观察，不是人物发言。',
+                             fingerprint=('visual', ' '.join(envelope.text.split())))
 
     async def judge_standalone(envelope, *, waiting_allowed=False):
         from jshi.voice.jev_scene import JEVSceneStore
@@ -4707,7 +4709,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         claim = getattr(service, 'claim_notices', None)
         tool_entry = getattr(process, 'experience_tool_results', None)
         ids = claim(subject_id, owner) if callable(claim) and callable(tool_entry) and monotonic() >= text_tool_retry.get(owner,0) else ()
-        batch = () if ids or active or request.path == '/tool-results' else text_wakes.claim()
+        batch = () if ids or request.path == '/tool-results' else text_wakes.claim(allow_timer=not active)
         if not ids and not batch:
             return web.json_response({'reply': ''})
         mode = tool_mode(active) if ids else 'initiative'
@@ -4718,7 +4720,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 status='recognized' if ids else 'unknown', method='tool_recipient' if ids else 'voice_scene'),
             cognition_mode=mode, tool_event_ids=tuple(ids),
             delivery_context=dialogue.note(subject_id), wake_context=
-            ('沿当前交谈交代结果。' if active else '当前页面可交付文字；人物选择不证明仍在场，结合现场决定是否发起。')
+            ('沿当前交谈交代结果。' if active and ids else
+             '交谈间隙收到新的现场事件，结合当前交谈判断是否值得接话；没有人提出新请求。' if active else
+             '当前页面可交付文字；人物选择不证明仍在场，结合现场决定是否发起。')
             + '\n' + '\n'.join(x.description for x in batch))
         registry_busy = initiative_processing = True
         initiative_cancelled = False

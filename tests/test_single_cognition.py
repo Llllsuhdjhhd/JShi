@@ -85,7 +85,7 @@ def test_pending_sampling_does_not_reset_timer_or_lose_late_events():
         now[0] += 1
         q.offer('perception',str(i),'new observation')
     batch = q.claim()
-    assert {x.source for x in batch} == {'timer','perception'}
+    assert {x.source for x in batch} == {'perception'}
     q.offer('perception','late','late observation')
     q.finish(batch,success=True)
     now[0] += 10
@@ -289,3 +289,125 @@ def test_tool_notification_adapter_chooses_conversation_or_initiative(process):
             assert (await client.post('/initiative-results',json={'object_id':'lux-id'},headers=headers)).status==200
             assert modes==['initiative','conversation']
     asyncio.run(run())
+
+
+def test_conversation_claims_events_but_not_timer_and_deduplicates_observations():
+    now=[0.]
+    q=WakeQueue(clock=lambda:now[0],seconds=180)
+    now[0]=181
+    assert q.claim(allow_timer=False)==()
+    q.offer('perception','image-a','fresh observation',fingerprint=('visual','visible frown'))
+    batch=q.claim(allow_timer=False)
+    assert [x.key for x in batch]==['image-a']
+    q.finish(batch,success=True,quiet=True)
+    now[0]+=31
+    q.offer('perception','image-b','same observation',fingerprint=('visual','visible frown'))
+    assert q.claim(allow_timer=False)==()
+    q.offer('perception','image-c','changed observation',fingerprint=('visual','turns toward companion'))
+    batch=q.claim(allow_timer=False)
+    assert [x.key for x in batch]==['image-c']
+    q.offer('perception','image-d','newer',fingerprint=('visual','looks away'))
+    q.finish(batch,success=False)
+    now[0]+=31
+    assert [x.key for x in q.claim(allow_timer=False)]==['image-d']
+
+
+def test_active_voice_conversation_reviews_environment_without_forcing_speech(process):
+    import asyncio
+    from jshi.app.voice import VoiceConversation
+    from tests.test_voice import FakeCloud
+    from jshi.models import ModelResponse, ResponsePlan
+    class Quiet:
+        name='quiet-environment'
+        def __init__(self):self.requests=[]
+        def generate(self,request):
+            self.requests.append(request)
+            return ModelResponse(model=self.name,text='',response_plan=ResponsePlan(mode='wait',reason='对方正在思考'))
+    process.cognition=Quiet()
+    async def run():
+        sent=[]
+        async def send(item):sent.append(item)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,scene_idle_s=60)
+        c.conversation_active=lambda *args:True
+        try:
+            c.wakeups.last_review-=200
+            await asyncio.sleep(.6)
+            assert not process.cognition.requests
+            c.input_idle.clear()
+            from jshi.core.envelope import InputEnvelope, InputPart, SceneUtterance, SpeakerEvidence
+            person=SpeakerEvidence('environment',label='环境观察',method='visual_scene')
+            observation=SceneUtterance('可见对方低头，表情不清楚。',person,0,0,input_id='event-1')
+            event=InputEnvelope('test','visual_environment',(InputPart('text',observation.text),),person,
+                                current_utterances=(observation,))
+            c.environment_idle_s=0
+            c.defer_environment(event)
+            await asyncio.sleep(.6)
+            assert not process.cognition.requests
+            c.input_idle.set()
+            for _ in range(100):
+                if process.cognition.requests:break
+                await asyncio.sleep(.03)
+            await asyncio.wait_for(c.turn_queue.join(),4)
+            assert len(process.cognition.requests)==1
+            request=process.cognition.requests[0]
+            assert request.cognition_mode=='initiative'
+            assert '有效视觉观察' in request.wake_context and '交谈间隙' in request.wake_context
+            from jshi.models.prompt import build_user
+            assert '低头' in build_user(request)
+            assert not any(m['type']=='reply' for m in sent)
+            assert not c.wake_batches
+        finally:await c.close()
+    asyncio.run(run())
+
+
+def test_web_environment_event_can_review_during_recent_conversation(process, monkeypatch):
+    import asyncio
+    from aiohttp.test_utils import TestClient, TestServer
+    from jshi.app.voice import create_app
+    from jshi.voice.config import VoiceConfig
+    from jshi.voice.jev import VoiceJEV
+    now=[0.]
+    queues=[]
+    original=WakeQueue.__init__
+    def init(self, **kwargs):
+        original(self,clock=lambda:now[0],seconds=180)
+        queues.append(self)
+    monkeypatch.setattr(WakeQueue,'__init__',init)
+    async def run():
+        async with TestClient(TestServer(create_app(process,'stone',VoiceConfig(''),jev=VoiceJEV(None)))) as client:
+            headers={'Origin':str(client.make_url('/')).rstrip('/')}
+            response=await client.post('/text-input',json={'object_id':'lux-id','text':'你好'},headers=headers)
+            assert response.status==200
+            await response.read()
+            count=len(process.cognition.requests)
+            queues[0].last_review=-1000
+            now[0]=31
+            response=await client.post('/initiative-results',json={'object_id':'lux-id'},headers=headers)
+            await response.read()
+            assert len(process.cognition.requests)==count
+            queues[0].offer('perception','new','可见对方转向桌旁；表情不可辨识。')
+            response=await client.post('/initiative-results',json={'object_id':'lux-id'},headers=headers)
+            assert response.status==200
+            await response.read()
+            assert len(process.cognition.requests)==count+1
+            request=process.cognition.requests[-1]
+            assert request.cognition_mode=='initiative' and '交谈间隙' in request.wake_context
+    asyncio.run(run())
+
+
+def test_human_activity_resets_timer_without_starving_new_event():
+    now=[0.]
+    q=WakeQueue(clock=lambda:now[0],seconds=180)
+    now[0]=10
+    q.note_activity()
+    q.offer('perception','first','new observation')
+    batch=q.claim(allow_timer=False)
+    assert len(batch)==1
+    q.finish(batch,success=True)
+    now[0]=11
+    q.note_activity()
+    q.offer('perception','second','newer observation')
+    assert q.claim(allow_timer=False)==()
+    now[0]=40
+    q.note_activity()
+    assert [x.key for x in q.claim(allow_timer=False)]==['second']

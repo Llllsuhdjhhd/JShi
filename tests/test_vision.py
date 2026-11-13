@@ -907,3 +907,18 @@ def test_mixed_inputs_preserve_text_and_media(process):
             assert c._jev_batch((v,))[0]['voice_evidence']['strength']=='unavailable'
         finally: await c.close()
     asyncio.run(run())
+
+
+def test_actual_visual_request_keeps_expression_evidence_separate_from_emotion(store):
+    seen=[]
+    def transport(payload):
+        seen.append(payload)
+        return {'choices':[{'message':{'content':'{"description":"画面左侧人物皱眉，面部细节部分遮挡。","change_degree":"unknown"}'}}]}
+    from jshi.vision.model import VisionModel
+    value=VisionModel(store.config,transport).observe(image())
+    content=seen[0]['messages'][0]['content']
+    assert '表情可见特征' in content[0]['text']
+    assert '不推断心理状态' in content[0]['text']
+    assert '脸部过小、遮挡或模糊' in content[0]['text']
+    assert [p['type'] for p in content]==['text','image_url']
+    assert value['change_degree']=='unknown'
