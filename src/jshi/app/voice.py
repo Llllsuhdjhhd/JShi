@@ -225,6 +225,11 @@ class VoiceConversation:
             or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}
         )) if executor else None
 
+        from .tool_preflight import EstimateBridge
+        service = getattr(process, 'tool_service', None)
+        self.estimate_bridge = (EstimateBridge(self, service)
+                                if callable(getattr(service, 'subscribe_estimates', None)) else None)
+
     async def emit(self, kind: str, **payload) -> None:
         if kind in {'pause', 'resume', 'stop', 'block_next', 'clear_block'}:
             self.permit_sequence += 1
@@ -1948,20 +1953,37 @@ class VoiceConversation:
             claim = getattr(service, 'claim_notices', None)
             tool_entry = getattr(self.process, 'experience_tool_results', None)
             ids, batch = (), ()
+            poll_invalid = False
             envelope = None
             # Tool branch owns the notice store. No second result database here.
             if callable(claim) and callable(tool_entry):
-                for utterance in reversed(self.scene):
+                checked_owners = set()
+                for utterance in reversed(tuple(self.scene)):
                     person = utterance.speaker
+                    if person.object_id in checked_owners:
+                        continue
                     if person.status not in {'recognized', 'introduced'}:
                         continue
+                    checked_owners.add(person.object_id)
                     if self.conversation_active() and not self.conversation_active(person.object_id):
                         continue
                     if monotonic() < self.tool_wake_retry.get(person.object_id, 0):
                         continue
                     if self.process.profiles.get(person.object_id) is None:
                         continue
-                    ids = claim(self.subject_id, person.object_id)
+                    epoch = self.epoch
+                    ids = await self._claim_tool_notices(service, person.object_id)
+                    if (self.closed or self.epoch != epoch or self.turn_busy or self.active_turn
+                            or not self.input_idle.is_set() or not self.turn_queue.empty()
+                            or not self.queue.empty() or self.judging or self.judge_pending
+                            or self.pending_voice or self.output_disconnected
+                            or runtime_for(self.process, self.subject_id).state != "idle"
+                            or self.delivery.snapshot().get('state') in {'playing', 'paused', 'queued'}
+                            or (self.conversation_active() and not self.conversation_active(person.object_id))):
+                        service.release_notices(ids)
+                        ids = ()
+                        poll_invalid = True
+                        break
                     if ids:
                         mode = tool_mode(self.conversation_active(person.object_id))
                         envelope = InputEnvelope(session_id=self.session_id, source='tool_event',
@@ -1971,7 +1993,13 @@ class VoiceConversation:
                             cognition_mode=mode, wake_context='沿当前交谈交代结果。' if mode == 'conversation' else
                             '内部事项变化；上次交谈对象不证明当前在场，结合现场决定告知或暂缓。')
                         break
+            if poll_invalid:
+                continue
             if envelope is None:
+                if self.closed:
+                    continue
+                if self.turn_busy or self.active_turn or not self.input_idle.is_set() or not self.turn_queue.empty() or not self.queue.empty():
+                    continue
                 if self.conversation_active():
                     continue
                 batch = self.wakeups.claim()
@@ -1984,6 +2012,18 @@ class VoiceConversation:
                     wake_context='\n'.join(x.description for x in batch))
             self.wake_batches[envelope.input_id] = (batch, ids, envelope.speaker.object_id)
             self.turn_queue.put_nowait((envelope, self.epoch))
+
+    async def _claim_tool_notices(self, service, owner):
+        # Shield the worker so cancellation cannot strand claimed notices.
+        pending = asyncio.create_task(asyncio.to_thread(service.claim_notices, self.subject_id, owner))
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            try:
+                ids = await pending
+                service.release_notices(ids)
+            finally:
+                raise
 
     def _finish_wakeup(self, input_id, success, *, quiet=False):
         value = self.wake_batches.pop(input_id, None)
@@ -4046,6 +4086,9 @@ class VoiceConversation:
         def progress(stage):
             if on_progress is not None:
                 on_progress(stage)
+        bridge = getattr(self, 'estimate_bridge', None)
+        if bridge is not None:
+            await bridge.close()
         progress('停止播放与入口')
         await self.stop("connection closed")
         self.closed = True
@@ -5258,6 +5301,11 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                                     stream.write(json.dumps(row)+'\n')
                             except OSError:
                                 logging.getLogger(__name__).exception('Audio clock could not be saved')
+                        elif kind == 'tool_estimate_approve':
+                            if conversation.estimate_bridge is not None:
+                                task = asyncio.create_task(conversation.estimate_bridge.approve(str(payload.get('task_id', ''))))
+                                conversation.background_tasks.add(task)
+                                task.add_done_callback(conversation.background_tasks.discard)
                         elif kind == 'transcript_displayed':
                             await conversation.transcript_displayed(str(payload.get('input_id', '')), payload.get('render_ms'))
                         elif kind == 'reply_displayed':

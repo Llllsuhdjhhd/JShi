@@ -416,3 +416,22 @@ assert.match(vm.runInContext('rankElement.textContent',ctx),/同一短句重复�
 vm.runInContext(`const typed=log('lux（文字）：哈喽匠石','input');typedDetails(typed,'lux');bindPipelineRow(typed,'typed-final',{});
 message({type:'identity_final',input_id:'typed-final',jev_status:'completed',certainty:'确定',reason:'文字选择',speaker:{object_id:'lux-id',label:'lux',method:'user_selected'},voice_initial:{label:'lux'}});`,ctx);
 console.log('Typed identity result preserves text row without accessing voice-only fields');
+
+vm.runInContext(`
+message({type:'timeline',input_id:'gap-a',start_ms:324612,end_ms:326272,text:'你好像很卡。',speaker:{object_id:'lux',label:'lux',track_id:'7'}});
+message({type:'timeline',input_id:'gap-b',start_ms:327931,end_ms:328311,text:'是这样吗？',speaker:{object_id:'lux',label:'lux',track_id:'7'}});
+message({type:'utterance_updates',updates:[{utterance_id:'gap',state:'paused',parts:[
+{input_id:'gap-a',text:'你好像很卡。',start_ms:324612,end_ms:326272},
+{input_id:'gap-b',text:'是这样吗？',start_ms:327931,end_ms:328311}]}]});
+`,ctx);
+assert.equal(vm.runInContext("inputRows.get('gap-a').body.textContent",ctx),'你好像很卡。');
+assert.equal(vm.runInContext("inputRows.get('gap-b').body.textContent",ctx),'是这样吗？');
+vm.runInContext(`message({type:'transcript_revision',input_ids:['gap-a','gap-b'],text:'修订内容'});`,ctx);
+assert.equal(vm.runInContext("inputRows.get('gap-a').p.children.includes(latestModelInput.modelUi.panel)",ctx),true);
+
+vm.runInContext(`message({type:'tool_estimate',task_id:'estimate-normal',text:'预计约3秒；费用未知',need_confirm:false});`,ctx);
+assert.match(vm.runInContext(`$('log').lastChild.textContent`,ctx),/预计约3秒/);
+vm.runInContext(`message({type:'tool_estimate',task_id:'estimate-confirm',text:'超过预算，尚未执行',need_confirm:true});`,ctx);
+assert.equal(vm.runInContext(`$('log').lastChild.lastChild.textContent`,ctx),'确认执行');
+vm.runInContext(`$('log').lastChild.lastChild.onclick();`,ctx);
+assert.equal(vm.runInContext(`$('log').lastChild.lastChild.disabled`,ctx),true);

@@ -358,6 +358,9 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                     and 'type' not in output.get('properties', {})):
                 data = {k:v for k,v in data.items() if k != 'type'}
                 record['normalization'] = 'transport_json_object_marker'
+            if isinstance(data, dict) and '_extra' in data and data['_extra'] is None and '_extra' not in output.get('properties', {}):
+                data = {k: v for k, v in data.items() if k != '_extra'}
+                record['normalization'] = ','.join(filter(None, (record.get('normalization'), 'empty_extra_marker')))
             if stage in {'voice_jev', 'voice_jev_entry', 'voice_jev_identity'}:
                 data, repaired = exact_identity_duplicates(data)
                 if repaired:

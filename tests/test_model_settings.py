@@ -369,3 +369,10 @@ def test_deepseek_native_effort_max_and_invalid_explicit_minimal(tmp_path):
     with pytest.raises(ValueError,match='不支持'):
         settings.save({'name':'cognition','profile':{'choices':choices,'effort':'minimal','effort_explicit':True}})
     assert settings.routes['cognition'].chain[0].effort=='max'
+
+
+def test_tool_review_uses_background_budget_without_changing_entry(tmp_path):
+    settings = ModelSettings(tmp_path, process(tmp_path), None)
+    profile = {'choices': [{'service': 'deepseek', 'model': 'deepseek-v4-flash'}]}
+    assert settings._chain(profile, services(), purpose='tool_wrap')[0].timeout == 45.0
+    assert settings._chain(profile, services(), purpose='voice_jev')[0].timeout == 7.0

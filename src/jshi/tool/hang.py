@@ -375,6 +375,7 @@ class HangStore:
         self.path = Path(path)
         self._lock = threading.Lock()
         self._records: dict[str, HangRecord] = {}
+        self._owner_projection = ContextVar(f"hang_owner_{id(self)}", default=None)
         self._read_snapshot = ContextVar(f"hang_snapshot_{id(self)}", default=None)
         self._max_bytes = max(1, int(max_bytes))
         self._max_responses = max(1, int(max_responses))
@@ -468,6 +469,17 @@ class HangStore:
             if snapshot is not None and record and record.subject_id == snapshot[0]:
                 return None  # Added after this read began; visible on the next read.
             return replace(record,object_id=self._linked_owner(record)) if record else None
+
+    @contextmanager
+    def owner_projection(self, subject_id):
+        """Reuse identity links while keeping task records live during mutations."""
+        links = getattr(self, 'person_links', None)
+        project = links.projector(subject_id) if hasattr(links, 'projector') else None
+        token = self._owner_projection.set((subject_id, project))
+        try:
+            yield
+        finally:
+            self._owner_projection.reset(token)
 
     @contextmanager
     def read_snapshot(self, subject_id: str):
@@ -687,6 +699,9 @@ class HangStore:
         links=getattr(self,'person_links',None)
         if links is None: return record.object_id
         refs=[str(v) for k,v in record.field_ref.items() if k in {'input_id','source_input_id','activity_id'} and v]
+        cached = self._owner_projection.get()
+        if project is None and cached is not None and cached[0] == record.subject_id:
+            project = cached[1]
         if project is not None: return project(record.object_id,refs)
         return links.project(record.subject_id,record.object_id,refs)
 

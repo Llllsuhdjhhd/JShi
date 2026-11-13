@@ -399,6 +399,10 @@ def format_tool_related(
             if isinstance(used, datetime):
                 add("使用时间", relative_time_label(used, now=now))
             add("状态", item.get("status"))
+            add("执行现状", item.get("execution_state"))
+            add("执行预算", item.get("budget_note"), 1000)
+            add("执行前预估（不是实际消耗）", item.get("preflight"), 1000)
+            add("待核验的实际输出（不代表完成）", item.get("execution_excerpt"), 1800)
             add("当前文件核验", item.get("artifact_update"), 500)
             add("待补信息", '；'.join(item.get('waiting_for') or ()))
             add("任务适用截止（带时区）", item.get('expires_at'))
@@ -410,7 +414,9 @@ def format_tool_related(
             add("结果核验", item.get("verification"), 1500)
             add("结束原因", item.get("end_reason"), 500)
             if item.get("work_open"):
-                lines.append("事项：尚未交付完毕，已有材料保留待用")
+                lines.append("事项：尚未交付完毕，已有材料保留待用；不表示执行仍在运行。")
+                if item.get('execution_state') == '本次执行已结束':
+                    lines.append('用户追问时先说明结束原因和未完成项；需要继续办理时沿原事项发出工具请求并说明refresh_reason，不得只承诺等结果。状态询问本身不授权扩大任务范围。')
             if item.get('work_ids'):
                 add('事项ID', ', '.join((work_codes or {}).get(wid, wid) for wid in item['work_ids']))
             needs = [n for n in item.get("work_needs", ()) if n != item.get("need")]
@@ -646,6 +652,7 @@ class ToolService:
         # propose_only 的待批准请求。只在当前进程内可批准；重启后为空，
         # 结果是“不执行”，而不是误执行。
         self._proposed_requests: dict[str, ToolRequest] = {}
+        self.estimate_listeners = set()
         # 多工具计划：仅当前进程内调度，重启后按未完成处理，不误执行。
         self._plans: dict[str, ToolPlan] = {}
         self._plan_lock = threading.RLock()
@@ -1024,6 +1031,10 @@ class ToolService:
         latest = self.intake_store.get(record.intake_id) or record
         if latest.status in {'cancelled', 'resolved'} or row and row.get('closed'):
             return False
+        if (row or {}).get('execution_budget', {}).get('stop_reason'):
+            if latest.status != 'failed':
+                self._fail_intake(record.intake_id, self.work_index.budget_note(row))
+            return False
         if not is_expired(row):
             return True
         if record.status != 'expired':
@@ -1078,6 +1089,10 @@ class ToolService:
         )
 
         self._publish_notice(intake_id)
+        for work in self.work_index.for_task(intake_id):
+            if not work.get('execution_budget', {}).get('stop_reason'):
+                self.work_index.record_attempt(work['work_id'], intake_id, success=False,
+                                               reason='策划未完成：' + message)
 
     def _publish_notice(self, task_id: str) -> None:
         record = self.hang_store.get(task_id) or self.intake_store.get(task_id)
@@ -1093,14 +1108,15 @@ class ToolService:
             self.work_index.notice(row['work_id'], task_id, 'result_ready')
 
     def claim_notices(self, subject_id: str, object_id: str) -> tuple[str, ...]:
-        self.expire_work(subject_id, object_id)
-        self.check_recordings(subject_id)
-        with self._lock:
-            ids = tuple(dict.fromkeys(row['task_id'] for row in self.work_index.pending_notices(subject_id, object_id)
-                                     if row['task_id'] not in self._notice_claims and not row.get('attempted')
-                                     and self.notice_available(row['task_id'])))[:HOT_STATE_CAP]
-            self._notice_claims.update(ids)
-            return ids
+        with self.hang_store.owner_projection(subject_id):
+            self.expire_work(subject_id, object_id)
+            self.check_recordings(subject_id)
+            with self._lock:
+                ids = tuple(dict.fromkeys(row['task_id'] for row in self.work_index.pending_notices(subject_id, object_id)
+                                         if row['task_id'] not in self._notice_claims and not row.get('attempted')
+                                         and self.notice_available(row['task_id'])))[:HOT_STATE_CAP]
+                self._notice_claims.update(ids)
+                return ids
 
     def check_recordings(self, subject_id, *, force=False):
         # The existing notification poll supervises files without another model or worker.
@@ -1509,6 +1525,12 @@ class ToolService:
                 },
             ),
         )
+        from .preflight import preview
+        preflight = preview(bound, est_meta)
+        self.hang_store.patch_meta(hang.task_id, {**hang.meta, 'preflight': json.dumps(preflight, ensure_ascii=False),
+            'preflight_state': 'waiting' if preflight['need_confirm'] else 'announced'})
+        if preflight['need_confirm']:
+            bound = replace(bound, ask=AskMode.PROPOSE_ONLY)
         launched_meta = dict(intake.meta)
         if plan_tag:
             launched_meta["model_tag"] = plan_tag
@@ -1517,7 +1539,7 @@ class ToolService:
             self.hang_store.set_wrap(
                 hang.task_id,
                 visible=True,
-                summary=_proposal_summary(bound, est_meta),
+                summary=_proposal_summary(bound, est_meta) + "\n" + preflight["text"],
                 wrap_meta={"source": "proposal"},
                 terminal=False,
             )
@@ -1528,6 +1550,7 @@ class ToolService:
                 task_id=hang.task_id,
                 meta=launched_meta,
             )
+            self._announce_estimate(intake, hang.task_id, preflight)
             return hang.task_id
         self.intake_store.update(
             intake.intake_id,
@@ -1545,6 +1568,10 @@ class ToolService:
         if limit:
             bound = replace(bound, meta={**bound.meta,
                 'timeout_s': min(timeout_s, max(0.01, (limit - utc_now()).total_seconds()))})
+        self._announce_estimate(intake, hang.task_id, preflight)
+        if not self._intake_current(intake, work_id=work_id):
+            self.hang_store.cancel(hang.task_id)
+            return None
         self.runner.start(bound, hang.task_id)
         return hang.task_id
 
@@ -1718,6 +1745,23 @@ class ToolService:
                     return record
         return None
 
+    def subscribe_estimates(self, listener):
+        with self._lock:
+            self.estimate_listeners.add(listener)
+
+    def unsubscribe_estimates(self, listener):
+        with self._lock:
+            self.estimate_listeners.discard(listener)
+
+    def _announce_estimate(self, intake, task_id, preview):
+        with self._lock:
+            listeners = tuple(self.estimate_listeners)
+        for listener in listeners:
+            try:
+                listener(intake.subject_id, intake.object_id, task_id, dict(preview))
+            except Exception:
+                logger.exception('Pre-execution estimate delivery failed')
+
     def approve(self, item_id: str) -> bool:
         """批准一个 propose_only 提案，改走 execute。只处理当前进程内的提案。"""
         request = self._proposed_requests.pop(item_id, None)
@@ -1738,6 +1782,11 @@ class ToolService:
                 float(approved.meta.get('timeout_s') or 60), max(0.01, (min(limits)-utc_now()).total_seconds()))})
         if intake is not None and intake.status == "proposed":
             self.intake_store.update(intake.intake_id, status="launched")
+        self.hang_store.patch_meta(item_id, {**hang.meta, 'preflight_state': 'approved'})
+        self.hang_store.set_wrap(item_id, visible=True, summary='预估已确认，开始执行；仍受原有预算限制。',
+                                 wrap_meta={'source': 'approval'}, terminal=False)
+        if approved.create is not None:
+            self._create_tasks.add(item_id)
         self.runner.start(approved, item_id)
         return True
 
@@ -1827,6 +1876,12 @@ class ToolService:
         # 这里是第二道防线——取消绝不能反过来解锁依赖它的后续步骤。
         if hang is None or hang.status == "cancelled":
             return
+        if item.kind is FeedbackKind.RESULT and item.result is not None and not hang.command.startswith('runtime:'):
+            for work in self.work_index.for_task(task_id):
+                self.work_index.record_attempt(work['work_id'], task_id,
+                    success=item.result.status is ToolStatus.OK and can_advance(item.result),
+                    time_ms=item.result.time_ms, cost=item.result.cost,
+                    reason=item.result.error or item.result.ideal_note or item.result.summary)
         if item.kind is FeedbackKind.RESULT:
             assessment = assessment_of(item.result) if item.result else {"verdict": "failed"}
             self.hang_store.patch_meta(task_id, {**hang.meta, "assessment": json.dumps(assessment, ensure_ascii=False)})
@@ -2334,7 +2389,7 @@ class ToolService:
             interrupted = bool(self.work_index.for_task(hang.task_id)) and hang.task_id not in self._session_tasks
             if not interrupted and idle <= open_ttl_s and lifetime <= open_max_lifetime_s:
                 continue
-            if interrupted and hang.kind == "propose":
+            if interrupted and (hang.kind == "propose" or hang.meta.get("preflight_state") == "waiting"):
                 continue  # an approval proposal has not run; do not call it interrupted execution
             if interrupted:
                 self.hang_store.patch_meta(hang.task_id, {**dict(hang.meta), "cancel_reason": "进程中断"})
@@ -2442,9 +2497,10 @@ class ToolService:
             if self._is_invalidated(hang.meta):
                 continue
             name = (hang.command or "").strip()
-            if hang.kind == "propose" and name:
+            waiting = hang.meta.get("preflight_state") == "waiting" or (hang.kind == "propose" and hang.meta.get("preflight_state") != "approved")
+            if waiting and name:
                 name = f"{name}（尚未执行）"
-            elif hang.kind == "propose":
+            elif waiting:
                 name = "提案（尚未执行）"
             elif hang.kind == "create" and not name:
                 name = str((hang.meta or {}).get("tool_intent") or "").strip() or "创建中"
@@ -2454,7 +2510,7 @@ class ToolService:
                 meta=hang.meta,
                 hang=hang,
             )
-            if hang.kind == "propose" and "尚未执行" not in desc:
+            if waiting and "尚未执行" not in desc:
                 desc = f"{desc}（尚未执行）" if desc else "提案：尚未执行"
             used_at = self._hang_used_at(hang)
 
@@ -2492,7 +2548,7 @@ class ToolService:
                     {
                         "id": hang.task_id,
                         "section": "in_use",
-                        "status": "使用中",
+                        "status": "等待确认，尚未执行" if waiting else "使用中",
                         "need": hang.need,
                         "tool_name": name or hang.command or "工具",
                         "tool_description": desc,
@@ -2536,6 +2592,7 @@ class ToolService:
                 if any(r['state'] != 'stopped' for r in jobs):
                     entry.update(section='in_use', status='记录受阻' if any(r['state']=='blocked' for r in jobs) else '持续记录中')
                     entry['new_info'] = entry['final_result']
+            entry["budget_note"] = "\n".join(filter(None, (self.work_index.budget_note(row) for row in works)))
             entry["work_open"] = any(not row["closed"] for row in works)
             entry["handling"] = ", ".join(
                 str(row["handling"].get(entry["id"], {}).get("disposition") or "待处理")
@@ -2566,15 +2623,27 @@ class ToolService:
                                    if f.kind is FeedbackKind.RESULT), None)
                     if source:
                         entry["used_at"] = source.at
-                if works and hang.status == "open" and hang.task_id not in self._session_tasks:
+                if works and hang.status == "open" and hang.task_id not in self._session_tasks and hang.meta.get("preflight_state") != "waiting":
                     entry.update(section="recent", status="失败",
                                  final_result="上次进程中断，已有任务索引保留；本次未自动重放工具")
         for entry in entries:
             hang = self.hang_store.get(str(entry["id"]))
             if hang:
+                if hang.meta.get('preflight'):
+                    entry['preflight'] = json.loads(hang.meta['preflight']).get('text', '')
+                    if hang.meta.get('preflight_state') == 'approved':
+                        entry['preflight'] = entry['preflight'].replace('等待确认，尚未执行。', '此预估已确认；实际执行进展以当前状态为准。')
                 terminal = next((f.result for f in reversed(hang.feedback) if f.result), None)
                 if terminal:
                     entry["verification"] = assessment_note(terminal)
+        for entry in entries:
+            hang = self.hang_store.get(str(entry['id']))
+            terminal = next((f.result for f in reversed(hang.feedback) if f.kind is FeedbackKind.RESULT and f.result is not None), None) if hang else None
+            if terminal is not None and entry.get('tool_name') != 'runtime:dialogue-recording':
+                entry['execution_state'] = '本次执行已结束'
+                content = terminal.result.get('content', '') if isinstance(terminal.result, Mapping) else ''
+                if content:
+                    entry['execution_excerpt'] = str(content)[-1800:]
         self._annotate_recording_updates(subject_id, entries)
         selected = select_tool_related_entries(
             dedupe_recent_tool_entries(entries), query=query, now=stamp, ttl_s=ttl_s

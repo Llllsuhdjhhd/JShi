@@ -256,3 +256,51 @@ def test_amendment_during_planning_replans_before_any_effect(tmp_path):
     service.drain_for_tests()
     assert len(planner.calls) == 2
     assert [r.params['path'] for r in engine.calls] == ['new']
+
+
+def test_review_timeout_retains_failure_reason_without_claiming_running():
+    class TimeoutModel:
+        def generate(self, request):
+            raise TimeoutError('private provider details')
+    result = review_execution(TimeoutModel(), ToolRequest(need='query'), [], {})
+    assert result.decision == 'blocked'
+    assert '超时' in result.summary and '执行已结束' in result.summary
+    assert 'private' not in result.summary
+
+
+def test_mixed_shell_receipt_is_verified_but_wrong_hash_still_fails(tmp_path):
+    import hashlib
+    from jshi.tool.verification import assess_pi
+    target = tmp_path / 'result.json'
+    target.write_text('{"opponent":"example"}', encoding='utf-8')
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    def check(hash_value):
+        output = 'query completed\n' + json.dumps({'artifacts': [{'path': str(target), 'sha256': hash_value}]})
+        return assess_pi([{'name': 'bash', 'output': output}], base=tmp_path)
+    assert check(digest)['verdict'] == 'passed'
+    assert check('0' * 64)['verdict'] == 'failed'
+
+
+def test_followup_material_distinguishes_stopped_work_and_keeps_evidence():
+    from jshi.tool.service import format_tool_related
+    text = format_tool_related([{'id': 'task', 'section': 'recent', 'status': '部分完成',
+        'execution_state': '本次执行已结束', 'execution_excerpt': '查询返回了候选赛程',
+        'end_reason': '监督模型响应超时', 'work_open': True, 'work_ids': ['work']}],
+        task_codes={'task':'T1'}, work_codes={'work':'W1'})
+    assert '执行已结束' in text and '不表示执行仍在运行' in text
+    assert 'refresh_reason' in text and 'W1' in text and '超时' in text
+    assert '查询返回了候选赛程' in text and '不代表完成' in text
+
+
+def test_provider_timeout_category_is_preserved():
+    from jshi.models.routing import ProviderTimeout
+    class Failing:
+        def generate(self, request):
+            raise ProviderTimeout(7, 'tool', 'response_body')
+    result = review_execution(Failing(), ToolRequest(need='query'), [], {})
+    assert '响应超时' in result.summary
+
+
+def test_nontext_receipt_does_not_crash_or_claim_verification(tmp_path):
+    from jshi.tool.verification import assess_pi
+    assert assess_pi([{'name': 'bash', 'output': {'artifacts': []}}], base=tmp_path)['verdict'] == 'unknown'

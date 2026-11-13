@@ -79,6 +79,8 @@ TOOL_PLAN_SCHEMA: Mapping[str, Any] = {
             "properties": {
                 "time_est_ms": {"type": ["integer", "null"]},
                 "cost_est": {"type": ["number", "null"]},
+                "cost_currency": {"type": "string"},
+                "basis": {"type": "string"},
                 "benefit": {"type": "string"},
                 "downside": {"type": "string"},
                 "need_confirm": {"type": "boolean"},
@@ -247,6 +249,7 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
 - params：只填工具声明支持的键。
 - expected_result：一句说清成功后的产出；写不出就空。
 - estimate：先看所选命令的 meta.observed。有 runs 和 avg_time_ms / avg_cost / avg_tokens 时，把 avg_time_ms 填进 time_est_ms，把 avg_cost 填进 cost_est；没有 observed 才用目录说明或模板槽位；仍没有依据时时间、费用填 null，benefit/downside 空，need_confirm false。
+- estimate补充：basis说明估算依据；cost_currency只填依据中明确的CNY/USD，不猜币种、不换算。未知费用不当零元；明显昂贵、涉及未获授权的外部收费或超过用户预算时need_confirm=true，普通任务保持false。估算只描述预计执行时间和可核实的模型/执行器费用，外部服务费用单独说明未知；不把停止上限当预计耗时。
 - create_tool：tool_name 建议名、tool_intent 能力意图、params_schema 参数 JSON Schema、expected_output 预期产出、cost_estimate 预估开销、feedback_plan 反馈方案（stages 阶段名、result_fields 结果字段）。fulfill_after_create：原需求是查找/执行任务时为 true，造好后后台接着用；原需求只要求造工具时为 false。非 create_tool 时为空对象。
 - error：ok=false 时才有，像匠石自己的认知，有主语；不要写字段名、变量名、JSON 键名，也不要照抄工具清单原文，字符串内不换行。例：「我手上现在没有能查天气的工具」。
 - 外部已经向用户说过需求的，定义要和那句一致，不另起需求。"""
@@ -307,6 +310,8 @@ class ToolPlanSkill(Skill[PlanSkillOutput]):
                 "estimate": {
                     "time_est_ms": raw_est.get("time_est_ms"),
                     "cost_est": raw_est.get("cost_est"),
+                    "cost_currency": str(raw_est.get("cost_currency") or ""),
+                    "basis": str(raw_est.get("basis") or ""),
                     "benefit": str(raw_est.get("benefit") or ""),
                     "downside": str(raw_est.get("downside") or ""),
                     "need_confirm": bool(raw_est.get("need_confirm", False)),

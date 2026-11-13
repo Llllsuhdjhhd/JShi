@@ -220,7 +220,7 @@ class ModelSettings:
             # Keep JEV's short wait independent of cognition's reasoning/JSON wait.
             # Existing slow fallback budgets still apply; background planning and
             # writes also need time to finish before their result can be read.
-            hot = purpose in {None, 'cognition', 'voice_jev', 'tool_wrap', 'vision'}
+            hot = purpose in {None, 'cognition', 'voice_jev', 'vision'}
             if not hot:
                 timeout = 45.0
             elif index > 0 and model in SLOW_FALLBACK_MODELS:

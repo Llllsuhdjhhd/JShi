@@ -127,6 +127,43 @@ class WorkIndex:
             row['supervision_status'] = ('in_progress' if result.get('phase') == 'progress' else result['decision'])
             self._save(row)
 
+    def record_attempt(self, work_id, task_id, *, success, time_ms=None, cost=None, reason=''):
+        """Count each completed execution once; progress and notification reads are free."""
+        import math
+        with self._lock:
+            row = deepcopy(self._records[work_id])
+            budget = row.setdefault('execution_budget', {'attempts': {}, 'consecutive_failures': 0,
+                'elapsed_ms': 0, 'known_cost': 0, 'unknown_cost_attempts': 0,
+                'failure_limit': 3, 'time_limit_ms': 600000})
+            if task_id in budget['attempts']:
+                return
+            def number(value):
+                return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 else None
+            duration, price = number(time_ms), number(cost)
+            budget['attempts'][task_id] = {'success': bool(success), 'time_ms': duration,
+                'cost': price, 'reason': str(reason)[:600]}
+            budget['elapsed_ms'] += duration or 0
+            budget['known_cost'] += price or 0
+            budget['unknown_cost_attempts'] += price is None
+            budget['consecutive_failures'] = 0 if success else budget['consecutive_failures'] + 1
+            budget['last_reason'] = str(reason)[:600]
+            budget['stop_reason'] = ('连续执行未通过达到3次，停止后续尝试' if budget['consecutive_failures'] >= budget['failure_limit'] else
+                '累计已报告执行耗时达到10分钟，停止后续尝试' if budget['elapsed_ms'] >= budget['time_limit_ms'] else '')
+            self._save(row)
+
+    @staticmethod
+    def budget_note(row):
+        budget = (row or {}).get('execution_budget')
+        if not budget:
+            return ''
+        return (f"已结束执行{len(budget['attempts'])}次，连续未通过{budget['consecutive_failures']}次；"
+                f"累计已报告执行耗时{budget['elapsed_ms']/1000:.1f}秒。"
+                + (budget.get('stop_reason') or '后续执行仍受3次连续失败、累计10分钟限制。')
+                + '最近执行说明：' + budget.get('last_reason', '')
+                + (f"另有{budget['unknown_cost_attempts']}次未报告费用，无法确认总费用。" if budget['unknown_cost_attempts'] else '')
+                + '已有成果和未完成要求保留；停止尝试不表示任务完成。'
+                + ('停止后不得承诺结果稍后自动回来，需说明原因和缺口。' if budget.get('stop_reason') else ''))
+
     def _project(self, row):
         value=deepcopy(row)
         owner=getattr(self,'person_owner',None)

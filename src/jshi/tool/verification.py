@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -50,7 +51,20 @@ def assess_pi(calls: list[dict], *, base: Path, created: bool = False) -> dict[s
         try:
             output = json.loads(call.get("output") or "")
         except (ValueError, TypeError):
-            continue
+            # A shell may print diagnostics before its JSON receipt. Only a complete
+            # object starting on its own line is eligible; never repair fragments.
+            output = None
+            text = call.get("output") or ""
+            if not isinstance(text, str):
+                continue
+            for match in re.finditer(r'(?m)^\s*\{', text):
+                try:
+                    candidate, _ = json.JSONDecoder().raw_decode(text[match.start():].lstrip())
+                except ValueError:
+                    continue
+                if isinstance(candidate, Mapping) and isinstance(candidate.get('artifacts'), list):
+                    output = candidate
+                    break
         if not isinstance(output, Mapping):
             continue
         for artifact in output.get("artifacts", ()) if isinstance(output.get("artifacts"), list) else ():

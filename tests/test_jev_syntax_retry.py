@@ -28,3 +28,15 @@ def test_bad_schema_is_not_retried_and_bad_json_stops_at_two_calls():
         result=VoiceJEV(model,mode='split',fallback_models=[]).decide_batch(
             'stone',[{'n':1,'text':'背景','who':'P1'}],[],{})
         assert result.model_error and model.calls==count
+
+
+def test_only_empty_extra_marker_is_ignored():
+    for extra, accepted in [(None, True), ({'route': 'main'}, False)]:
+        valid = entry(route='background', control='keep', interaction='none', process_refs=[], pending_refs=[])
+        valid['_extra'] = extra
+        class Model:
+            def generate(self, request):
+                return ModelResponse(text=json.dumps(valid), model='fake')
+        result = VoiceJEV(Model(), mode='split', fallback_models=[]).decide_batch(
+            'stone', [{'n': 1, 'text': '电视讲话', 'who': 'P1'}], [], {})
+        assert (not result.model_error) == accepted

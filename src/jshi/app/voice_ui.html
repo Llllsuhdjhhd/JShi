@@ -712,7 +712,7 @@ function modelNotice(row,text){
 }
 function positionModelPanel(){
   if(!latestModelInput)return;
-  const ui=latestModelInput.modelUi,rect=latestModelInput.getBoundingClientRect();
+  const ui=latestModelInput.modelUi,rect=(ui.panel.parentElement||latestModelInput).getBoundingClientRect();
   ui.panel.hidden=panelVisibility.inspector;
   const conversationLeft=Math.min(messageScroll.getBoundingClientRect().left,$('log').getBoundingClientRect().left);
   const space=conversationLeft-48;
@@ -753,7 +753,19 @@ function log(text, kind='notice', atMs=null) {
 const utteranceUpdates = new Map();
 function refreshUtteranceGroups(){
   const states={unknown:'表达状态待定',paused:'停顿待续',interrupted:'被插话',complete:'表达结束'};
+  const displayUpdates=[];
   for(const update of utteranceUpdates.values()){
+    let group=[];
+    for(const part of update.parts||[]){
+      const previous=group.at(-1);
+      if(previous&&Number.isFinite(part.start_ms)&&Number.isFinite(previous.end_ms)&&part.start_ms-previous.end_ms>1200){
+        displayUpdates.push({...update,parts:group});group=[];
+      }
+      group.push(part);
+    }
+    if(group.length)displayUpdates.push({...update,parts:group});
+  }
+  for(const update of displayUpdates){
     const parts=(update.parts||[]).filter(p=>p.input_id&&inputRows.has(p.input_id)&&!inputRows.get(p.input_id).mergedInto);
     if(!parts.length)continue;
     const first=inputRows.get(parts[0].input_id);
@@ -764,7 +776,7 @@ function refreshUtteranceGroups(){
     first.utteranceState.textContent=states[update.state]||'表达状态待定';
     if(parts.length>1){
       if(!first.fragmentDetails){const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='同次发言的声音片段';details.appendChild(summary);first.extra.appendChild(details);first.fragmentDetails=details;}
-      for(const part of parts.slice(1)){const row=inputRows.get(part.input_id);if(row?.p&&row.p!==first.p)first.fragmentDetails.appendChild(row.p);}
+      for(const part of parts.slice(1)){const row=inputRows.get(part.input_id);if(row?.p&&row.p!==first.p){if(row.p===latestModelInput){first.p.appendChild(row.p.modelUi.panel);first.p.appendChild(row.p.modelUi.button);}first.fragmentDetails.appendChild(row.p);}}
     }
   }
 }
@@ -868,6 +880,12 @@ function clearPlayback() {
   startedSegments.clear(); endedSegments.clear(); finishedSegments.clear();
 }
 function message(m) {
+  if(m.type==='tool_estimate'){
+    const row=log(m.text,'notice');
+    if(m.need_confirm){const button=document.createElement('button');button.textContent='确认执行';button.onclick=()=>{button.disabled=true;button.textContent='已提交确认';send({type:'tool_estimate_approve',task_id:m.task_id});};row.appendChild(button);}
+    return;
+  }
+
   if(m.type==='personal_label_error'){
     $('personal-status').textContent='未完成：'+m.text;
     for(const id of m.input_ids||[]){const row=inputRows.get(id);if(row?.training){row.training.pending=false;row.training.status.textContent=m.text;refreshTrainingLabel(row);if(row.training.autoSaved){const saved=row.training.autoSaved;row.training.autoSaved=null;message(saved);row.training.status.textContent=m.text;}}}return;
@@ -1042,6 +1060,11 @@ function message(m) {
       else if(first?.extra){
         row.mergedInto=m.input_ids[0];
         if(!first.fragmentDetails){const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='合并前的声音片段';details.appendChild(summary);first.extra.appendChild(details);first.fragmentDetails=details;}
+        if(row.p===latestModelInput&&row.p!==first.p){
+          // Keep the live inspector outside the collapsed merged fragment.
+          first.p.appendChild(row.p.modelUi.panel);
+          first.p.appendChild(row.p.modelUi.button);
+        }
         if(row.p!==first.p)first.fragmentDetails.appendChild(row.p);
       }
       row.body.title='同一音频范围的后到转写，不是新发言；后到不保证更准确，原文字见详情';});

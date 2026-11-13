@@ -170,6 +170,14 @@ def build_snapshot(payload, batch, delivery, *, source_ids=None):
 
 
 def task_context(process, subject_id, speakers, *, code_of=None):
+    from contextlib import nullcontext
+    store = getattr(getattr(process, 'tool_service', None), 'hang_store', None)
+    snapshot = getattr(store, 'read_snapshot', None)
+    with snapshot(subject_id) if callable(snapshot) else nullcontext():
+        return _task_context(process, subject_id, speakers, code_of=code_of)
+
+
+def _task_context(process, subject_id, speakers, *, code_of=None):
     """Read only tasks of actually bound/recognized participants, never a guessed owner."""
     service = getattr(process, 'tool_service', None)
     if service is None or not hasattr(service, 'hang_store'):
@@ -207,6 +215,8 @@ def task_context(process, subject_id, speakers, *, code_of=None):
                                   'budget_exceeded': '预算不足'}.get(outcome, '尚无终态结果'),
                        'result_available': terminal is not None and outcome in {'ok', 'partial'},
                        'completion_verified': any(r.get('kind') == 'verification' and r.get('verdict') == 'passed' for r in terminal.execution) if terminal else False,
+                       'failure_reason': (terminal.error or terminal.summary or terminal.ideal_note)[:400] if terminal and outcome != 'ok' else '',
+                       'running': terminal is None and hang.status == 'open',
                        'entered_main': hang.delivered_at is not None,
                        'delivery': delivery,
                        'closed': bool(work) and all(w.get('closed') for w in work)})

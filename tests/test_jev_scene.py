@@ -41,7 +41,9 @@ def test_scene_idle_refresh_count_chars_age_and_recent_main_guard():
     assert scene_refresh_reason({'events': []}, idle_seconds=100, pending_seconds=100) == ''
 
 
-def test_background_only_inputs_refresh_scene_without_starting_main(process):
+def test_background_only_inputs_refresh_scene_without_starting_main(process, monkeypatch):
+    # Isolate entry routing from independently scheduled autonomous reviews.
+    monkeypatch.setenv("JSHI_IDLE_DISABLE", "1")
     class Gate:
         def generate(self, req):
             rows = json.loads(req.input_text)['input']['lines']

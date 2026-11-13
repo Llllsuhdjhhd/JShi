@@ -502,7 +502,7 @@ def test_silent_operation_runs_main_but_never_delivers_its_reply(process):
     incoming, identities = envelope(process, '别说了，把下载取消')
     incoming = replace(incoming, jev_calls=({'silent_operation':True,
                       'main_prompt_hint':{'level':1,'recall_memory':False}},))
-    process._intake_tool_if_requested = lambda *args: seen.append(args[3].tool_intent.need)
+    process._intake_tool_if_requested = lambda *args, **kwargs: seen.append(args[3].tool_intent.need)
     spoken = []
     result = process.experience('stone', incoming.text, envelope=incoming,
         resolved_speaker=identities.candidate(incoming.speaker), on_verbal=spoken.append, defer_write=True)

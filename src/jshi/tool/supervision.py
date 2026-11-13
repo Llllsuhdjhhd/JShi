@@ -129,5 +129,12 @@ def review_execution(model, request, observations, assessment, *, assistant='', 
             decision = 'blocked'
             summary += '需要向原委托人确认：' + '；'.join(missing)
         return Review(decision, summary, instruction, tuple(checks), missing)
-    except Exception:
-        return Review('blocked', '监督检查未完成，保留已有成果，未确认任务完成。')
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception('Tool supervision failed')
+        reason = ('监督模型响应超时' if isinstance(exc, TimeoutError) or getattr(exc, 'status', None) == 408 else
+                  '监督服务认证或权限失败' if getattr(exc, 'status', None) in {401, 403} else
+                  '监督服务请求受限' if getattr(exc, 'status', None) == 429 else
+                  '监督输出格式或逐项验收字段不符合约定' if isinstance(exc, (ValueError, KeyError, TypeError)) else
+                  '监督调用失败（' + type(exc).__name__ + '）')
+        return Review('blocked', reason + '；本次执行已结束，已有输出保留但未通过目标验收，不会自动继续等待或重试。')
