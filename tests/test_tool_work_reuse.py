@@ -339,3 +339,13 @@ def test_agent_loop_receives_longer_budget_and_focus_instruction(tmp_path):
     prompt = PiEngine()._build_agent_loop_prompt(request, request.meta["agent_plan"])
     assert "不要阅读项目 README、源码、测试、Git 历史" in prompt
     assert "取得所需材料后及时汇总并结束会话" in prompt
+
+
+def test_generic_followup_keeps_old_unfinished_result(tmp_path):
+    service, _ = runtime(tmp_path)
+    tid = launch(service, ToolRequest(command='weather'))
+    handle(service, [tid])
+    later = utc_now() + timedelta(days=3)
+    entries = service.list_tool_related_entries('s','o',query='咋样，有结果了吗？',now=later)
+    assert any(e['id'] == tid for e in entries)
+    assert service.list_tool_related_entries('s','other',query='有结果了吗？',now=later) == ()

@@ -62,3 +62,26 @@ def test_reapproval_carries_removed_pause_reason_and_monotonic_messages(process)
             assert [m for m in messages if m['type']=='stop'][-1]['permit_seq'] > previous
         finally: await c.close()
     asyncio.run(run())
+
+
+def test_short_sound_after_sustained_end_does_not_strand_ready_reply(process):
+    async def run():
+        messages=[]
+        async def send(m): messages.append(m)
+        c=VoiceConversation(process,'stone',FakeCloud(),send)
+        try:
+            s=c.entry_scheduler.schedule
+            s.speech_hold=True
+            s.asr_wait_s=.01
+            s.transient_confirm_s=.01
+            await c.apply_schedule_effect(s.sustained_voice())
+            s.note_sustained_end()
+            old=s.current().transient_token
+            await c._start_plan((ResponseItem('verbal','查询已结束',()),),'lux-id',c.epoch,(c.epoch,1))
+            token=s.note_short_end()
+            assert s.expire_asr_wait(old).kind == 'none'
+            await c._confirm_transient(token,s.current().matter_id)
+            assert not s.blocks_start()
+            assert any(m['type']=='reply' for m in messages)
+        finally: await c.close()
+    asyncio.run(run())

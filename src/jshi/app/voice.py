@@ -142,6 +142,7 @@ class VoiceConversation:
         self.recorded_inputs = deque(maxlen=256)
         self.reply_epochs = {}
         self.tool_handling = {}
+        self.tool_notice_deliveries = {}
         self.turn_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jshi-voice-turn")
         # A started HTTP call cannot be cancelled: one leftover call and the work-collision
         # entry may still be finishing while a fresh batch starts.
@@ -3509,6 +3510,8 @@ class VoiceConversation:
         emitted = False
         self.turn_sequence += 1
         turn_key = (epoch, self.turn_sequence)
+        if envelope.tool_event_ids:
+            self.tool_notice_deliveries[turn_key] = tuple(envelope.tool_event_ids)
         self.reply_input_ids[turn_key] = [u.input_id for u in envelope.current_utterances]
         self.answer_status[turn_key] = 'running'
         envelope = replace(envelope, delivery_context='\n'.join(filter(None,
@@ -3727,11 +3730,15 @@ class VoiceConversation:
             handling = tuple({"task_id": tid, "disposition": "answered", "evidence": response.text,
                               "work_complete": True} for tid in response.tool_consumed)
         if handling:
+            ids = tuple(str(item.get('task_id')) for item in handling if item.get('task_id') in selected)
+            self.tool_notice_deliveries[turn_key] = tuple(dict.fromkeys((*self.tool_notice_deliveries.get(turn_key, ()), *ids)))
             self.tool_handling[turn_key] = (envelope.speaker.object_id, handling, selected,
                                         response.tool_intent.need if response.tool_intent else "")
             self._confirm_tool_delivery(turn_key)
         if not emitted and result.action_text:
             plan_ready(response.response_plan)
+        if not result.response_plan.verbal_text():
+            self.tool_notice_deliveries.pop(turn_key, None)
         return result.response_plan
 
     async def _start_reply(self, text: str, object_id: str, epoch: int) -> None:
@@ -3846,7 +3853,12 @@ class VoiceConversation:
 
     async def _confirm_transient(self, token, matter_id=None) -> None:
         await asyncio.sleep(self.entry_scheduler.schedule.transient_confirm_s)
-        effect = self.entry_scheduler.schedule.confirm_transient(token, matter_id)
+        schedule = self.entry_scheduler.schedule
+        matter = schedule.current()
+        if matter is not None and matter.matter_id == matter_id and matter.asr_pending:
+            await self._expire_asr_wait(token, matter_id)
+            return
+        effect = schedule.confirm_transient(token, matter_id)
         if effect.kind != 'none':
             await self.apply_schedule_effect(effect)
 
@@ -3992,6 +4004,9 @@ class VoiceConversation:
         except Exception as exc:
             logging.getLogger(__name__).exception("Voice synthesis failed")
             self.delivery.fail(d.reply_id, str(exc))
+            notices = self.tool_notice_deliveries.pop(self.reply_epochs.get(d.reply_id), ())
+            if notices:
+                self.process.tool_service.work_index.retry_interrupted_notices(notices)
             self.answer_status[self.reply_epochs.get(d.reply_id)] = 'failed'
             self.record("voice_delivery", self.delivery.snapshot())
             if d.reply_id not in self.direct_reply_ids:
@@ -4071,7 +4086,12 @@ class VoiceConversation:
     def _confirm_tool_delivery(self, epoch) -> None:
         d = self.reply_records.get(epoch)
         pending = self.tool_handling.get(epoch)
-        if d is None or d.state != "completed" or pending is None:
+        if d is None or d.state != "completed":
+            return
+        notices = self.tool_notice_deliveries.pop(epoch, ())
+        if notices:
+            self.process.tool_service.work_index.acknowledge_notices(notices)
+        if pending is None:
             return
         object_id, handling, selected, need = pending
         service = getattr(self.process, "tool_service", None)
@@ -4137,6 +4157,10 @@ class VoiceConversation:
         # Wait for cancellation and any in-progress local commit to finish.
         progress('等待已启动的主认知结束并保存')
         await asyncio.to_thread(self.turn_executor.shutdown, wait=True, cancel_futures=True)
+        notices = tuple(tid for ids in self.tool_notice_deliveries.values() for tid in ids)
+        if notices:
+            self.process.tool_service.work_index.retry_interrupted_notices(notices)
+        self.tool_notice_deliveries.clear()
         progress('保存待写片场')
         try:
             await asyncio.wait_for(self.write_queue.join(), 60)

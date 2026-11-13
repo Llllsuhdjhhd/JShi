@@ -311,9 +311,16 @@ def test_voice_notice_runs_main_and_waits_for_mock_playback_receipt(process):
                 await asyncio.sleep(.01)
             assert any(row['type'] == 'audio' for row in sent)
             assert not conversation.delivery.snapshot()['played_text']
+            assert process.tool_service.work_index.pending_notices('stone', 'lux-id')
             rid = conversation.delivery.snapshot()['reply_id']
             await conversation.acknowledge({'reply_id': rid, 'segment': 0, 'phase': 'completed'})
             assert conversation.delivery.snapshot()['played_text']
+            for _ in range(100):
+                if any(row['type'] == 'audio_end' for row in sent): break
+                await asyncio.sleep(.01)
+            for segment in range(len(conversation.reply_records[conversation.reply_epochs[rid]].texts)):
+                await conversation.acknowledge({'reply_id':rid, 'segment':segment, 'phase':'completed'})
+            assert not process.tool_service.work_index.pending_notices('stone', 'lux-id')
             assert len(process.cognition.requests) == 1
             assert process.cognition.requests[0].purpose == 'subject_activity'
             facts = process.repository.list_history('stone', HistoryKind.FACT, 1000)
@@ -371,3 +378,48 @@ def test_work_reference_compacts_and_restores_without_cross_person_leak(process,
     assert task not in result.current_state.tool_input
     assert intake[0]['work_id'] == process.tool_service.work_index.for_task(task)[0]['work_id']
     assert dict(result.current_state.work_codes)['W1'] == intake[0]['work_id']
+
+
+def test_disconnect_releases_unplayed_notice_for_one_automatic_retry(process):
+    import asyncio
+    from jshi.app.voice import VoiceConversation
+    from tests.test_voice import FakeCloud
+    async def run():
+        async def send(row): pass
+        task=failed_task(process)
+        index=process.tool_service.work_index
+        for round in range(2):
+            c=VoiceConversation(process,'stone',FakeCloud(),send)
+            index.attempt_notices((task,))
+            c.tool_notice_deliveries[(0,1)]=(task,)
+            await c.close()
+            notices=index.pending_notices('stone','lux-id')
+            assert len(notices)==1
+            assert notices[0]['attempted'] is (round == 1)
+    asyncio.run(run())
+
+
+def test_voice_tool_completion_wakes_without_followup_question(process, monkeypatch):
+    import asyncio
+    from jshi.app.voice import VoiceConversation
+    from jshi.core.envelope import SceneUtterance, SpeakerEvidence
+    from tests.test_voice import FakeCloud
+    monkeypatch.setenv('JSHI_IDLE_DISABLE','1')
+    async def run():
+        sent=[]
+        async def send(row): sent.append(row)
+        c=VoiceConversation(process,'stone',FakeCloud(),send,scene_idle_s=60)
+        try:
+            person=SpeakerEvidence('known','lux-id','lux','recognized','voiceprint')
+            c.scene.append(SceneUtterance('帮我查一下',person,0,100))
+            task=failed_task(process)
+            for _ in range(150):
+                if any(row['type']=='reply' for row in sent):break
+                await asyncio.sleep(.03)
+            assert any(row['type']=='reply' for row in sent)
+            assert process.cognition.requests
+            await asyncio.wait_for(c.turn_queue.join(),5)
+            assert task in c.last_debug['tool']['selected_tool_ids']
+            assert process.tool_service.work_index.pending_notices('stone','lux-id')
+        finally: await c.close()
+    asyncio.run(run())

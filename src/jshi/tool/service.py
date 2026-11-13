@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import threading
 from time import monotonic
 from urllib.error import URLError
@@ -239,6 +240,7 @@ def select_tool_related_entries(
     ``ttl_s`` 保留作兼容参数；已消化结果不再按时间自动重现。
     """
     del ttl_s
+    followup = bool(re.search(r'有结果|查到|查得|查得怎样|还在查|还在办|进展|进度|怎么样|咋样|继续查', query))
     terms = topic_terms(query)
     need_hits = min(RELEVANT_MIN_TERMS, len(terms))
     unseen: list[dict[str, Any]] = []
@@ -254,7 +256,7 @@ def select_tool_related_entries(
         result_at = item.get("updated_at") or _entry_used_at(item)
         fresh = (now - result_at).total_seconds() <= UNCONSUMED_TTL_S
         # Old open work remains in storage; only related old work belongs in this turn.
-        if (item.get("work_open") and fresh) or (item.get("delivered_at") is None and fresh):
+        if (item.get("work_open") and (fresh or followup)) or (item.get("delivered_at") is None and fresh):
             unseen.append(item)
             continue
         if not need_hits:

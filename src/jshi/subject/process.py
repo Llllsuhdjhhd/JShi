@@ -692,7 +692,8 @@ class SubjectProcess:
         except TurnCancelled:
             self.tool_service.work_index.retry_interrupted_notices(task_ids)
             raise
-        self.tool_service.work_index.acknowledge_notices(task_ids)
+        if not envelope.voice_delivery or not result.response_plan.verbal_text():
+            self.tool_service.work_index.acknowledge_notices(task_ids)
         return result
 
     @serialized
@@ -1364,7 +1365,10 @@ class SubjectProcess:
             acquaintance_store(self).provenance(subject_id,activity.id,
                 [item['input_id'] for item in current.input_items if item.get('input_id')])
         if hasattr(self.tool_service, 'work_index'):
-            self.tool_service.work_index.acknowledge_notices(handled_ids)
+            if current.audio_delivery and response.response_plan.verbal_text():
+                self.tool_service.work_index.attempt_notices(handled_ids)
+            else:
+                self.tool_service.work_index.acknowledge_notices(handled_ids)
         self._intake_tool_if_requested(subject_id, activity, speaker, response,
                                        current.input_text, envelope=envelope)
         # 阶段⑦ 收尾：关闭本活动。30 失败不影响完成。
