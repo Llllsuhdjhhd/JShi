@@ -115,19 +115,27 @@ def entry_schema(lines, refs):
     item = object_schema({'i': {'type': 'integer', 'enum': [r['i'] for r in lines]},
                           'person': {'enum': people}, 'certainty': {'enum': ['confirmed', 'tentative', 'unknown']},
                           'why': text_schema(80, minimum=1)})
+    item['properties']['score_override'] = {'type': 'boolean', 'description': '仅有现场反证需要修正三档分数确认时为true，why说明反证；短句、试用、旧门槛不足不是反证。'}
     current = [r['evidence_ref'] for r in lines]
     def references(values, minimum=0, maximum=None):
         return {'type': 'array', 'items': {'type': 'string', 'enum': values}, 'uniqueItems': True,
                 'minItems': minimum, 'maxItems': maximum if maximum is not None else len(values)}
-    return object_schema({'interaction': {'enum': ['direct', 'uncertain', 'none'],
+    result = object_schema({'interaction': {'enum': ['direct', 'uncertain', 'none'],
                                          'description': '是否向匠石交往，与姓名身份确定程度独立；不知道是谁也可以明确在呼唤匠石'},
                           'items': {'type': 'array', 'items': item, 'minItems': len(lines), 'maxItems': len(lines)},
                           'utterance_complete': {'enum': ['complete', 'incomplete', 'uncertain']},
-                          'control': {'enum': ['keep', 'stop', 'redirect']},
+                          'control': {'enum': ['keep', 'stop', 'redirect'],
+                                      'description': '核对当前生成/待播能否继续，不是本句是否要回答。原参与被外部纠正否定选stop；本句不是提问也可stop；无关旁聊不停止有独立依据的任务。'},
                           'route': {'enum': ['background', 'wait', 'prepare']},
                           'process_refs': references(current), 'pending_refs': references(current),
-                          'decision_reason': text_schema(120, minimum=1),
+                          'decision_reason': {**text_schema(120, minimum=1),
+                                              'description': '有生成/播放时先说明原参与的外部依据是否仍成立，再说明本句去向；不能只写本句旁聊而省略原表达能否继续。'},
                           'decision_refs': references(sorted(refs), 1, 6)})
+    result['properties'] = {'participation': object_schema({
+        'basis': text_schema(160, minimum=1),
+        'verdict': {'enum': ['continue', 'withdraw', 'uncertain', 'idle']}}), **result['properties']}
+    result['required'].insert(0, 'participation')
+    return result
 
 
 def unlisted_people_unknown(data, schema):
@@ -227,32 +235,14 @@ def validate(value, schema, path='$'):
             raise ValueError('JEV依据为空')
 
 
-def protect_continuation(data, batch):
-    """A positively addressed terminal 'continue' cannot authorize a stop."""
-    if data.get('control') != 'stop' or data.get('interaction') != 'direct' or not batch:
-        return data, False
-    row = batch[-1]
-    text = str(row.get('text', '')).strip()
-    if any(ch in text for ch in '“”「」『』"'):
-        return data, False
-    match = re.search(r'(?:你|匠石)?(?:接着(?:说|讲|问)|继续(?:说|讲|问)?)(?:啊|呀|吧|呢|好吗)*[。！？?!]*$', text)
-    if not match or re.search(r'(?:不|别|不要|不能|不用|不许|不必|无需|没让)(?:你|再)?$', text[:match.start()]):
-        return data, False
-    if match.start() and not re.search(r'[，,。？！?!：:\s]$',text[:match.start()]):
-        return data, False  # e.g. 我不希望你继续: not an independent affirmative command
-    ref = f'I{row["n"]}'
-    return {**data, 'control':'redirect', 'route':'prepare', 'utterance_complete':'complete',
-            'process_refs':[ref], 'pending_refs':[], 'decision_refs':[ref],
-            'decision_reason':'当前明确要求继续交谈，不以反问中的停止词执行停说'}, True
-
-
 def combined_instruction():
     # One output contract, not two complete instructions pasted together.
     from jshi.core.scene_updates import SCENE_UPDATE_READING
     def section(text, name, end):
         return text.split(f'【{name}】\n', 1)[1].split(f'【{end}】', 1)[0].strip()
     return ('【用途】\n你是匠石的JEV1合并判断。先完成入口判断，仅在route=prepare时完成回应准备。'
-            '人物、交往和控制只判断一次；不调用工具、不修改档案。\n\n【输入】\n'
+            '人物、交往和控制只判断一次；不调用工具、不修改档案。\n\n【先审查原表达】\n'
+            + section(ENTRY_INSTRUCTION, '先审查原表达', '输入') + '\n\n【输入】\n'
             + section(ENTRY_INSTRUCTION, '输入', '目标任务') + '\n'
             + section(PREPARATION_INSTRUCTION, '输入', '目标任务').replace(
                 'entry是本批入口结论', 'entry是你在本次请求内先完成的入口结论')
@@ -383,12 +373,23 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                         record['control_fallback']['applied'] = False
                         raise ValueError('JEV控制无效；当前非明确空闲，重新判断，不执行控制')
                 data, notes = entry_route_conflicts(data, output)
-                data, continued = protect_continuation(data, batch)
-                if continued:
-                    notes = [*notes, 'positive_continuation_not_stop']
                 if notes:
                     record['normalization'] = ','.join(filter(None, (record.get('normalization'), *notes)))
+                if isinstance(data, dict) and 'participation' not in data:
+                    retry_control = True
+                    raise ValueError('JEV缺少原表达参与依据判断，不能默认继续')
             validate(data, output)
+            verdict = (data.get('participation') or {}).get('verdict')
+            if stage in {'voice_jev', 'voice_jev_entry'} and (verdict == 'withdraw' or
+                    verdict == 'uncertain' and delivery.get('state') in {'thinking', 'playing', 'paused', 'queued'}):
+                # A semantic withdrawal cannot keep old generation/queue alive.
+                data['control'] = 'stop'
+                if data['route'] == 'wait':
+                    data.update(route='background', pending_refs=[], process_refs=[])
+                for key in ('front', 'preparation'):
+                    if key in data and data['route'] != 'prepare':
+                        data[key] = None
+                record['participation_control'] = verdict + '_stop'
             if not current():
                 raise JEVStaleError('JEV返回结果已过期')
             record.update(status='completed', raw=raw)
@@ -426,7 +427,6 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                                'model': result.model, 'ms': result.elapsed_ms, 'answers': dict(result.answers)})
                 if not current(): raise JEVStaleError('JEV决策返回已失效')
                 fields = names.value(decode_entry(result, names.value(snapshot['lines']), questions, config['entry_thresholds'][config['provider']]['address']), reverse=True)
-                fields, _ = protect_continuation(fields, batch)
                 validate(fields, schema)
                 gate._from_current(fields['items'], batch, '')
                 used_decision = True
@@ -455,7 +455,6 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                     if not current():
                         raise JEVStaleError('JEV决策返回已失效')
                     if fields is not None:
-                        fields, _ = protect_continuation(fields, batch)
                         # Stop promptly without waiting for name recognition. Host callback is the
                         # sole control owner; remember its receipt across identity and fallback.
                         if fields['control'] == 'stop' and on_entry:
@@ -480,7 +479,9 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                             if identity['source_conflict']:
                                 raise ValueError('人物或媒体来源改变交往判断')
                             people = identity['items']
-                        assembled = dict(fields, items=people)
+                        assembled = dict(fields, items=people, participation={
+                            'basis': '决策入口控制选择；实际证据见阶段记录',
+                            'verdict': 'withdraw' if fields['control'] == 'stop' else 'continue'})
                         validate(assembled, schema)
                         used_decision = True
                         if hasattr(bridge, 'report'):
@@ -523,6 +524,13 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             entry = call('voice_jev_entry', split_instruction(), user, schema)
             preparation = entry.pop('front', None)
         accepted = gate._from_current(entry['items'], batch, '')
+        # Carry the program's acoustic confirmation to preparation and main,
+        # rather than leaving a contradictory model identity in shared material.
+        entry['items'] = [{'i': i.n, 'person': i.speaker_pick,
+            'certainty': {'确定': 'confirmed', '可能': 'tentative', '不确定': 'unknown'}[i.speaker_level],
+            'why': i.speaker_reason,
+            **({'score_override': True} if any(r.get('i') == i.n and r.get('score_override') is True for r in entry['items']) else {})}
+            for i in accepted.items]
         bound = {r['n']: gate._selected_text(r) for r in batch if gate._selected_text(r)}
         if bound:
             accepted = replace(accepted, items=tuple(replace(i, speaker_pick=bound[i.n],
@@ -548,12 +556,11 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
             preparation = None
         current_refs = {f'I{r["n"]}' for r in batch if r.get('source') != 'visual_environment'}
         if (early_stop is None and entry['control'] == 'stop'
-                and entry['interaction'] == 'direct'
                 and current_refs.intersection(entry['decision_refs'])):
             if not current():
                 raise JEVStaleError('停止许可已失效')
             stopping = replace(accepted, action='stop', control='stop', route='background',
-                entry_route='background', interaction='direct',
+                entry_route='background', interaction=entry['interaction'],
                 utterance_complete=entry['utterance_complete'],
                 reason=entry['decision_reason'], decision_reason=entry['decision_reason'],
                 decision_refs=tuple(entry['decision_refs']))

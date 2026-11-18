@@ -1167,6 +1167,15 @@ class VoiceConversation:
     async def _archive_update(self,iid,**values):
         if self.sample_source and getattr(self.sample_source,'archive',None):
             try:
+                if {'speaker', 'classifier', 'classifier_result', 'voiceprint_candidates', 'identity_display'} & values.keys():
+                    from jshi.voice.identity_comparison import voice_confidence_marker
+                    speaker = values.get('speaker')
+                    if not isinstance(speaker, dict):
+                        current = self.annotations.get(iid) or self.source_speakers.get(iid)
+                        speaker = asdict(current) if current is not None else {}
+                    values['voice_confidence'] = voice_confidence_marker(speaker,
+                        self.candidate_cache.get(iid, []), self.input_records.get(iid, {}).get('personal_classifier', {}),
+                        self.identity_comparison(iid))
                 await asyncio.to_thread(self.sample_source.archive.update,iid,**values)
             except Exception:
                 logging.getLogger(__name__).exception('Recent audio diagnostics update failed')
@@ -1528,7 +1537,8 @@ class VoiceConversation:
                     self.record('web_text_input', {'input_id':u.input_id, 'text':u.text,
                         'speaker':asdict(u.speaker), 'at':u.received_at_ms})
                 else:
-                    self.record('voice_scene_input', asdict(u))
+                    self.record('voice_scene_input', {**asdict(u),
+                        'voice_confidence': self.voice_confidence_marker(u.input_id, u.speaker)})
                 self.recorded_inputs.append(u.input_id)
             code = self.assign_code(u.speaker.object_id, u.speaker.label) if u.speaker.method not in {"unassigned_audio", "visual_scene"} else "unknown"
             row = {"p": code, "text": u.text, "at": u.received_at_ms, "basis": u.speaker.method,
@@ -2164,6 +2174,11 @@ class VoiceConversation:
             comparison.update(mlp_high=False, mlp_priority=False)
         return comparison
 
+    def voice_confidence_marker(self, input_id, speaker):
+        from jshi.voice.identity_comparison import voice_confidence_marker
+        return voice_confidence_marker(asdict(speaker), self.candidate_cache.get(input_id, []),
+            self.input_records.get(input_id, {}).get('personal_classifier', {}), self.identity_comparison(input_id))
+
     def identity_display(self,input_id,speaker,certainty=''):
         from jshi.voice.identity_comparison import identity_display
         return identity_display(asdict(speaker),self.identity_comparison(input_id),certainty=certainty,
@@ -2204,18 +2219,18 @@ class VoiceConversation:
                 if existing is not None:
                     existing.update(verified=item.get('verified',True),threshold=item.get('threshold',.8))
                     if item.get('repeated_short_audio'):
-                        existing['applicability'] = '同一短句重复拼接的MLP参考，只支持可能人物；原声未变长，不是独立证据'
+                        existing['applicability'] = '同一短句重复拼接；按同一人物声纹与MLP三档分数条件确认，原声未变长，不是独立证据'
                     continue
                 profile=names.get(item['object_id'], (None, ''))[0]
                 if profile is None or profile.status=='rejected':continue
                 candidates.append({'who':self.assign_code(item['object_id'],profile.label),'score':item['score'],
                     'source':'personal_classifier','verified':item.get('verified',True),
-                    **({'applicability':'同一短句重复拼接的MLP参考，只支持可能人物；原声未变长，不是独立证据'}
+                    **({'applicability':'同一短句重复拼接；按同一人物声纹与MLP三档分数条件确认，原声未变长，不是独立证据'}
                        if item.get('repeated_short_audio') else {}),
                     'threshold':item.get('threshold',.8),'names':[profile.label,*profile.aliases]})
             comparison=self.identity_comparison(utterance.input_id)
-            joint={k:v for k,v in comparison.items() if k not in {'voice','mlp'}}
-            for kind in ('voice','mlp'):
+            joint={k:v for k,v in comparison.items() if k not in {'voice','mlp','confirmation'}}
+            for kind in ('voice','mlp','confirmation'):
                 if kind in comparison:
                     r=comparison[kind]
                     joint[kind]={'p':self.assign_code(r['object_id'],r.get('label','')),
@@ -2300,11 +2315,24 @@ class VoiceConversation:
         for index, utterance in enumerate(utterances, start=1):
             item = next((it for it in items if it.n == index), None)
             annotated = self.annotations.get(utterance.input_id)
-            speaker = annotated if annotated and annotated.method == 'manual_annotation' else utterance.speaker
+            speaker = annotated if annotated and annotated.method in {'manual_annotation', 'context_score_override'} else utterance.speaker
             if speaker.method == 'visual_scene':
                 updated.append(utterance)
                 self.annotations[utterance.input_id] = speaker
                 continue
+            score_identity = self.identity_comparison(utterance.input_id).get('confirmation')
+            score_override = bool(item and item.evidence_relation == 'score_override')
+            if score_identity and not score_override and speaker.method not in {'manual_annotation', 'user_selected', 'self_introduction', 'context_score_override'}:
+                profile = self.process.profiles.get(score_identity['object_id'])
+                if profile is not None and profile.status != 'rejected':
+                    speaker = replace(speaker, object_id=profile.object_id, label=profile.label,
+                                      method='score_confirmation', status='recognized')
+                    if persist:
+                        self.record('voice_attribution', {'input_id': utterance.input_id,
+                            'voice_initial': asdict(self.source_speakers.get(utterance.input_id, utterance.speaker)),
+                            'final': asdict(speaker), 'pick': self.assign_code(profile.object_id, profile.label),
+                            'level': '确定', 'reason': '同人三档分数确认：' + score_identity['rule'],
+                            'evidence_relation': 'score_confirmation'})
             if self.local_speakers is not None and hasattr(self.local_speakers, 'review_candidate'):
                 code = self.assign_code(speaker.object_id, speaker.label)
                 agreement = bool(item and speaker.status == 'recognized' and speaker.method == 'voiceprint_match'
@@ -2314,7 +2342,7 @@ class VoiceConversation:
                     self._sample_job(utterance.input_id, 'voice_candidate_review',
                         lambda iid=utterance.input_id, oid=speaker.object_id:
                         self.local_speakers.review_candidate(iid, oid, agreement=True))
-            if item and item.speaker_pick and speaker.method != "manual_annotation":
+            if item and item.speaker_pick and speaker.method != "manual_annotation" and (speaker.method != 'score_confirmation' or score_override):
                 initial = self.source_speakers.get(utterance.input_id, speaker)
                 oid = self.code_owner.get(item.speaker_pick)
                 allowed = {r["object_id"] for r in self.candidate_cache.get(utterance.input_id, ())
@@ -2328,9 +2356,11 @@ class VoiceConversation:
                         speaker = replace(speaker, object_id=oid, label=profile.label,
                             method="jev_attribution", status="recognized" if item.speaker_level == "确定" else "provisional")
                 elif (item.speaker_pick in {"unknown", "new"} and item.speaker_reason
-                      and (initial.method == "voiceprint_match" or speaker.method == 'personal_classifier')):
+                      and (initial.method == "voiceprint_match" or speaker.method == 'personal_classifier' or score_override)):
                     speaker = replace(speaker, object_id="input:" + utterance.input_id, label="声音归属待定",
                         method="unassigned_audio", status="unknown", confidence=None, voiceprint_id="")
+                if score_override:
+                    speaker = replace(speaker, method='context_score_override')
                 if persist:
                     self.record("voice_attribution", {"input_id": utterance.input_id,
                         "voice_initial": asdict(initial), "final": asdict(speaker),
@@ -2511,6 +2541,15 @@ class VoiceConversation:
         delivery['conversation'] = self.dialogue.recent(self.subject_id, cutoff=cutoff,
             exclude={u.input_id for u in utterances}, session=self.session_id, include_ids=True)
         delivery = self.dialogue.clean(delivery, subject=self.subject_id)
+        # Historical dialogue hides unplayed plans. The control judge still
+        # needs the specific expression it is deciding whether to stop.
+        # Restore only a bounded live snapshot, explicitly not external proof.
+        if delivery['state'] in {'thinking', 'playing', 'paused', 'queued'}:
+            delivery['expression_under_review'] = {
+                'basis': '匠石自身当前表达，仅供判断是否继续；不证明外部接纳，不是已播事实',
+                'partial': str((snapshot or {}).get('partial_text') or '')[:300],
+                'pending': str((snapshot or {}).get('pending_text') or '')[:300],
+                'trigger': str((self.active_turn or {}).get('input') or '')[:200]}
         delivery['answer_handling'] = self._answer_handling_context()
         from jshi.voice.wait_ack import model_key
         delivery['waiting'] = self.wait_ack_timing.guidance(model_key(self.process),
@@ -4451,6 +4490,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             await asyncio.shield(text_write_task)
 
     app.on_cleanup.append(finish_text_writes)
+    async def close_memory(app):
+        backend = getattr(process.memory, '_backend', process.memory)
+        close = getattr(backend, 'close', None)
+        if callable(close):
+            await asyncio.to_thread(close)
+    app.on_cleanup.append(close_memory)
     self_tests = {}
     trial = None
     if speaker_models and trial_root:
@@ -4624,7 +4669,10 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
 
     async def status(request):
         from jshi.voice.segmentation import segment_settings
+        memory_backend = getattr(process.memory, '_backend', process.memory)
+        memory_info = getattr(memory_backend, 'runtime_info', None)
         return web.json_response({"busy": busy, "cleanup_stage": cleanup_stage, "asr": getattr(local, 'backend', 'local') if local is not None else config.asr_backend,
+            'memory': memory_info() if callable(memory_info) else None,
             'text_scene_writing': text_write_task is not None and not text_write_task.done(),
             'text_scene_write_error': text_write_error,
             'text_jev_writing': text_jev_task is not None and not text_jev_task.done(),

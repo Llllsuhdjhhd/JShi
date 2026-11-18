@@ -70,7 +70,9 @@ def build_snapshot(payload, batch, delivery, *, source_ids=None):
                 'candidates': [support_evidence(c) for c in candidates if c.get('source') != 'scene']}
         joint = row.get('joint_evidence', {})
         if joint:
-            item['joint'] = {k: joint[k] for k in ('state', 'voice_reliable', 'mlp_high', 'mlp_priority') if k in joint}
+            item['joint'] = {k: joint[k] for k in ('state', 'voice_reliable', 'mlp_high', 'mlp_priority', 'confirmation_conflict') if k in joint}
+            if joint.get('confirmation'):
+                item['joint']['confirmation'] = deepcopy(joint['confirmation'])
             for kind in ('voice', 'mlp'):
                 if joint.get(kind, {}).get('p'):
                     item['joint'][kind] = {'p': joint[kind]['p']}
@@ -95,9 +97,12 @@ def build_snapshot(payload, batch, delivery, *, source_ids=None):
     # from oldest first used to retain an old assistant question but drop the
     # recent human exchange that explains the current addressee.
     def priority(row):
+        from .scene_material import mark_evidence_role
         at = row.get('at')
         timed = type(at) in (int, float) and math.isfinite(at)
-        return (row.get('kind') != 'understanding_update', not timed, -at if timed else 0)
+        return (row.get('kind') != 'understanding_update',
+                mark_evidence_role(row).get('evidence_role') == 'self_output',
+                not timed, -at if timed else 0)
     candidates.sort(key=lambda item: priority(item[0]))
     for row, input_id in candidates:
         person = row.get('p', row.get('speaker', row.get('who')))
@@ -124,7 +129,8 @@ def build_snapshot(payload, batch, delivery, *, source_ids=None):
         size += cost
         if correction:
             correction_size += cost
-        events.append(deepcopy(row))
+        from .scene_material import mark_evidence_role
+        events.append(mark_evidence_role(row))
     # Store events and dialogue are two views, not two chronological blocks.
     # Otherwise an old assistant question appended from dialogue appears after
     # the latest human-to-human question and invites a spurious continuation.
@@ -259,10 +265,18 @@ def entry_text(snapshot):
     from jshi.core.scene_context import scene_cautions
     updates = [r for r in snapshot['events'] if r.get('kind') == 'understanding_update']
     events = [r for r in snapshot['events'] if r.get('kind') != 'understanding_update']
-    return blocks([('当前输入', snapshot['lines']), ('现场认识更新·有范围的解释', updates),
+    activity = {'thinking': '匠石正在生成回应，尚未等于已经说出。',
+                'playing': '匠石正在播放；需判断当前这段表达是否仍适合继续。',
+                'paused': '匠石的表达已暂停，仍有未完成的表达。',
+                'queued': '匠石有已生成的待播表达，尚未等于已经说出。',
+                'idle': '当前没有进行中的生成或播放，不需撤回已结束的旧表达。',
+                'completed': '当前表达已完成，不需撤回已结束的旧表达。',
+                'stopped': '此前表达已停止；新的交往须按当前外部证据判断。'}.get(
+                    snapshot['state'].get('state'), '当前生成或播放状态未提供，不猜测正在说话。')
+    return blocks([('当前表达状态', activity), ('当前状态', snapshot['state']),
+                   ('当前输入', snapshot['lines']), ('现场认识更新·有范围的解释', updates),
                    ('当前现场·JEV2已编排', snapshot['scene']), ('有效观察', snapshot['environment']),
                    ('尚未编排的新事件', events), ('本批材料用法', scene_cautions(snapshot['lines'], snapshot['environment'])),
-                   ('当前状态', snapshot['state']),
                    ('相识情况', snapshot.get('acquaintance', {})), ('人物证据', snapshot['evidence']),
                    ('媒体关联', snapshot['media']),
                    ('任务材料范围', TASK_MATERIAL_SCOPE if snapshot['task_context'] else None),
@@ -347,6 +361,12 @@ def _recent_event_rows_for_main(snapshot, *, limit=6, cap=1200):
         if visual:
             label = '现场观察（非人物发言）'
         basis = row.get('basis') or ('视觉观察' if visual else '事件原文，交付状态未提供')
+        from .scene_material import mark_evidence_role
+        role = mark_evidence_role(row).get('evidence_role')
+        if role == 'self_output':
+            basis = '自身输出，仅记录已说，不证明交往成立；' + basis
+        elif role == 'external_input' and not visual:
+            basis = '外部原话，受话对象待结合问答判断；' + basis
         identity = (row.get('identity') or {}).get('certainty') or row.get('status') or '未提供'
         item = f'{when}，{label}（{basis}；人物可靠性：{identity}）：{row["text"]}'
         if size + len(item) > cap:

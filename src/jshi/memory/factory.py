@@ -65,8 +65,14 @@ def build_memory_backend(
     repository: SubjectRepository,
     data_dir: Path | None = None,
 ) -> MemoryBackendPort:
+    from .modules import acquire_module_runtime
+    acquire_module_runtime(data_dir or Path('.jshi'))
     name = memory_backend_name()
     if name == BACKEND_INPROCESS:
+        explicit=os.getenv('JSHI_INPROCESS_MEMORY_DATA_DIR')
+        if explicit:
+            from jshi.subject.repository import SubjectRepository
+            repository=SubjectRepository(Path(explicit)/'memory.sqlite3')
         backend: MemoryBackendPort = InProcessMemoryBackend(repository)
     elif name == BACKEND_REMS3:
         storage = rems_data_dir(data_dir or Path('.jshi'))

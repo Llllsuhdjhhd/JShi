@@ -39,32 +39,37 @@ class RemsLongTermExperience:
         ids = tuple(dict.fromkeys(oid for oid in object_ids if oid))
         if not ids or budget_chars <= 0:
             return ()
+        links=getattr(self,'person_links',None)
+        scope, project = links.recall_scope(subject_id, ids) if links is not None else (ids, None)
+        added=set(scope)-set(ids)
         result = self._module.recall(
             self._query_type(
                 subject_id=subject_id,
                 query=query,
-                object_ids=ids,
-                budget_chars=budget_chars,
-                person_limit=len(ids),
+                object_ids=scope,
+                budget_chars=budget_chars * (1 + len(added)),
+                person_limit=len(scope),
                 general_limit=0,
             )
         )
         entries=list(result.person)
-        links=getattr(self,'person_links',None)
-        if links is not None:
-            for link in links.links(subject_id):
-                if link['target'] not in ids: continue
-                recalled=self._module.recall(self._query_type(subject_id=subject_id,query=query,
-                    object_ids=(link['source'],),budget_chars=budget_chars,person_limit=1,general_limit=0))
-                for item in recalled.person:
-                    if links.project(subject_id,item.object_id,item.source_event_ids)==link['target']:
-                        from dataclasses import replace
-                        entries.append(replace(item,object_id=link['target']))
+        if project is not None:
+            from dataclasses import replace
+            project=links.projector(subject_id)
+            projected=[]
+            for item in entries:
+                person=project(item.object_id,item.source_event_ids)
+                if item.object_id in added and person not in ids: continue
+                projected.append(replace(item,object_id=person))
+            entries=projected
         used=0
         kept=[]
+        seen=set()
         for item in entries:
+            key=(item.object_id,item.content,tuple(item.source_event_ids))
+            if key in seen: continue
             if used+len(item.content)>budget_chars: continue
-            kept.append(item);used+=len(item.content)
+            kept.append(item);used+=len(item.content);seen.add(key)
         return tuple(
             PersonExperience(
                 object_id=item.object_id,

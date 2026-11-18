@@ -6,6 +6,8 @@ pushd "%JSHI_ROOT%" >nul
 
 if defined JSHI_PYTHON (
     set "JSHI_PYTHON_EXE=%JSHI_PYTHON%"
+) else if exist "%JSHI_ROOT%.jshi\python-path.txt" (
+    set /p "JSHI_PYTHON_EXE="<"%JSHI_ROOT%.jshi\python-path.txt"
 ) else if defined CONDA_PREFIX (
     set "JSHI_PYTHON_EXE=%CONDA_PREFIX%\python.exe"
 ) else if exist "%USERPROFILE%\miniconda3\python.exe" (

@@ -115,7 +115,7 @@ def test_stop_close_and_new_app_keep_audio_available_in_api(process):
     asyncio.run(run())
 
 
-def test_actual_classifier_features_and_version_are_saved_with_the_same_pcm(process,tmp_path):
+def test_classifier_repeated_features_keep_original_pcm_and_version(process,tmp_path):
     from tests.test_personal_speakers import speakers,publish
     from jshi.voice.personal import PersonalSpeakers
     engine=PersonalSpeakers(tmp_path/'models',process.profiles)
@@ -132,7 +132,10 @@ def test_actual_classifier_features_and_version_are_saved_with_the_same_pcm(proc
             row=archive.recent()[0];m=row['metadata']
             assert m['classifier']['ranking'][0]['version']==version
             assert m['features']['model_id']=='fixture-encoder'
-            assert m['features']['vectors']==[[1.,0.]] and m['features']['durations']==[1.]
+            assert m['features']['vectors']==[[1.,0.]] and m['features']['durations']==[3.]
+            assert m['classifier']['short_audio_hint']['original_seconds']==1.
+            assert m['classifier']['short_audio_hint']['repeat_count']==3
+            assert m['voice_confidence']['mlp_scores'][0]['repeated_short_audio'] is True
             assert m['classification_pcm_sha256']==hashlib.sha256(raw_wav(archive.wav(row['input_id']))).hexdigest()
         finally:await c.close()
     try:asyncio.run(run())

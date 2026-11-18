@@ -73,6 +73,8 @@ class RecalledFragment:
     visual_observations: tuple[dict, ...] = ()
     validity: str = "active"
     supersedes: tuple[str, ...] = ()  # Explicit source-backed correction links only.
+    origin_object_id: str | None = None  # Retrieval projection only; persisted source is unchanged.
+    identity_basis: str = ""  # Provenance-backed link, independent of voice confidence.
 
 
 class MemoryPort(Protocol):

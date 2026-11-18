@@ -71,6 +71,10 @@ class RecoveryIntake:
         self.audio, self.recognize, self.deliver, self.report = audio, recognize, deliver, report
         self.identity = identity
         self.covered = deque(maxlen=256)
+        # Complete final sentences own their provider audio envelope even when
+        # speaker alignment narrows the visible word bounds. Recovery alone uses
+        # these scopes; they must not hide later main-stream text revisions.
+        self.final_scopes = deque(maxlen=256)
         self.preliminary_spans = set()
         self.events = {}  # stable early input -> acoustic scope and later source packets
         self.attempted = deque(maxlen=256)
@@ -103,6 +107,9 @@ class RecoveryIntake:
             else:
                 merged.append([a, b])
         return sum(max(0, min(b, end)-max(a, start)) for a, b in merged) / (end-start)
+
+    def final_owns(self, start, end):
+        return end > start and any(a <= start and end <= b for a, b in self.final_scopes)
 
     def note_interim(self, transcript):
         """Keep the latest word-timed partial text from the main stream."""
@@ -142,7 +149,7 @@ class RecoveryIntake:
                 continue
             # A rolling window is not a new utterance. Remove already submitted
             # acoustic scopes, including their uncertain word-time edges.
-            scopes = sorted([*self.covered, *(e['bounds'] for e in self.events.values())])
+            scopes = sorted([*self.covered, *self.final_scopes, *(e['bounds'] for e in self.events.values())])
             cursor = s.start_ms
             gaps = []
             for a, b in scopes:
@@ -163,7 +170,7 @@ class RecoveryIntake:
         # Six seconds only prewarms identity. Ongoing speech does not create
         # an ASR request or a formal JEV input merely because time has elapsed.
         ready = end-s.end_ms >= self.ready_gap_ms
-        if not ready or self.covered_span(s.start_ms, s.end_ms):
+        if not ready or self.covered_span(s.start_ms, s.end_ms) or self.final_owns(s.start_ms, s.end_ms):
             return
         if any(max(0,min(s.end_ms,b)-max(s.start_ms,a)) >= .7*(s.end_ms-s.start_ms)
                for a,b in self.attempted):
@@ -308,6 +315,17 @@ class RecoveryIntake:
     async def publish(self, rows, *, preliminary=False, source=None, source_span=None, **arrival):
         """Late full-stream packets reconcile against already delivered audio."""
         async with async_lock(self.lock, self.report, 'reconcile_lock_wait', preliminary=preliminary):
+            if preliminary and source_span and self.final_owns(*source_span):
+                # The final may arrive while the recovery request is in flight.
+                self.report('recovery_final_owned', {'start_ms': source_span[0], 'end_ms': source_span[1]})
+                return
+            complete_source = False
+            if not preliminary and source is not None and source.final and not source.overlap:
+                import re
+                normalized = lambda text: ''.join(re.findall(r'\w', text)).casefold()
+                complete_source = bool(normalized(source.text)) and (
+                    normalized(''.join(r.text for r in rows)) == normalized(source.text)
+                    and all(r.audio_kind != 'revision_context' and not r.overlap for r in rows))
             if not preliminary and source is not None:
                 rows = self._reconcile_source(source, rows)
             previous_coverage = tuple(self.covered)
@@ -420,6 +438,8 @@ class RecoveryIntake:
                     self.events.pop(next(iter(self.events)))
                 self.preliminary_spans.intersection_update(self.covered)
                 await self.deliver(tuple(ready), **arrival)
+                if complete_source and all(r.audio_kind != 'revision_context' for r in ready):
+                    self.final_scopes.append((source.start_ms, source.end_ms))
 
     async def _run(self):
         while True:
@@ -433,7 +453,7 @@ class RecoveryIntake:
                 report_safely(self.report, 'recovery_work_timing', {'stage':'started',
                     'start_ms':s.start_ms,'end_ms':s.end_ms,
                     'queue_ms':round((started-queued)*1000,3),'boundary_age_ms':self._boundary_age_ms(s)})
-                if self.covered_span(s.start_ms, s.end_ms):
+                if self.covered_span(s.start_ms, s.end_ms) or self.final_owns(s.start_ms, s.end_ms):
                     continue
                 pcm = self.audio.segment(s.start_ms,s.end_ms)
                 if pcm is None:

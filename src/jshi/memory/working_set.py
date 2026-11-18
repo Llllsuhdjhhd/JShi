@@ -54,6 +54,20 @@ class RecallWorkingSetStore:
             if 'latest_run' not in columns:
                 db.execute("ALTER TABLE recall_working_sets ADD COLUMN latest_run TEXT DEFAULT ''")
 
+    def invalidate_people(self, subject, people):
+        """Drop projected cache views and reject commits from pre-change runs."""
+        people = set(people)
+        with self.store.connect() as db:
+            scopes = [r['scope'] for r in db.execute(
+                'SELECT scope FROM recall_working_sets WHERE subject=?', (subject,))]
+            for scope in scopes:
+                parsed = json.loads(scope)
+                if not people.intersection((*parsed[1], parsed[2] if len(parsed)>2 else None)):
+                    continue
+                db.execute('DELETE FROM recall_working_items WHERE subject=? AND scope=?', (subject, scope))
+                db.execute('UPDATE recall_working_sets SET version=version+1,latest_run=? WHERE subject=? AND scope=?',
+                           ('', subject, scope))
+
     def load_scope(self, request, *, ttl: float, similarity: float, reserve=False):
         if not request.object_ids:
             return 0, ()

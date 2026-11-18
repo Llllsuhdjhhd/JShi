@@ -164,9 +164,17 @@ class AcquaintanceStore:
         if len(targets)>1: raise ValueError('历史材料存在冲突的人物关联')
         return next(iter(targets),person)
 
-    def projector(self, subject):
+    def recall_scope(self, subject, requested):
+        """One link snapshot per recall; never widen a partial link's provenance."""
+        rows = self.links(subject)
+        requested = tuple(dict.fromkeys(filter(None, requested)))
+        expanded = tuple(dict.fromkeys((*requested, *(r['source'] for r in rows
+            if r['target'] in requested))))
+        return expanded, self.projector(subject, rows=rows)
+
+    def projector(self, subject, *, rows=None):
         """Same result as project(), reading links once for a whole listing."""
-        links=self.links(subject)
+        links=self.links(subject) if rows is None else rows
         if not links: return lambda person, sources: person
         proven={}
         def project(person, sources):

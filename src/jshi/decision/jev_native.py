@@ -17,13 +17,13 @@ def entry_questions(lines, schema):
         allowed = schema['properties']['items']['items']['properties']['person']['enum']
         candidates = {p: v for p, v in candidates.items() if p in allowed}
         questions[f'p{i}'] = choice(f'I{i}是谁说的。结合本句声音、现场、连续性和有效视觉；同轨、惯常角色不能独立确认；暂归重复不升级', candidates)
-        questions[f'c{i}'] = choice(f'I{i}人物确定度；confirmed须能区分其他合理来源，声音弱不自动推翻有效确认；unknown人物必须unknown',
+        questions[f'c{i}'] = choice(f'I{i}人物确定度；joint.confirmation为同一人物三档分数达标，分数上confirmed；有具体现场反证仍可复核，confirmation_conflict须消歧，身份确认不决定交往；unknown人物必须unknown',
                                    {'confirmed': '确认', 'tentative': '暂归', 'unknown': '未知'})
-        questions[f'a{i}'] = choice(f'I{i}是否涉及匠石。依据点名、有效面向设备、语义问答或未转向的持续交谈；时间接近不单独授予许可。旧招呼、同话题、匠石自己的插话不能证明。uncertain须有具体关联而非仅对象未知；旁聊、媒体、无依据选other',
+        questions[f'a{i}'] = choice(f'I{i}是否涉及匠石。依据点名、有效面向设备、语义问答或未转向的持续交谈；时间接近不单独授予许可。旧招呼、同话题、匠石自己的插话不能证明。先看外部双方（含另一AI或设备）的问答承接，不要求先确认姓名；自身输出不是交往证据，补识别碎片不是新呼唤。uncertain须有具体关联而非仅对象未知；旁聊、媒体、无依据选other',
                                    {'direct': '明确交往', 'linked': '已有具体关联但有缺口', 'other': '背景或无关联依据'})
         questions[f'e{i}'] = choice(f'I{i}意思是否足够处理。问完等别人回答不是未完，ASR定稿不等于说完；不补写半句',
                                    {'complete': '完整可处理', 'incomplete': '必须等后文', 'uncertain': '完整度不明'})
-    questions['effect'] = choice('对当前任务的控制，结合对象和语义；旁聊不控制匠石，无旧任务时明确新交往也可redirect',
+    questions['effect'] = choice('结合外部上下文判断当前参与及表达是否仍适合：keep继续，redirect交往仍成立但替换回应，stop参与前提或表达已不应继续。区分内容纠正与交往撤回；传达纠正不等于邀请追问。不按词面选控制，旁聊不撤销有效交往。给出当前外部依据',
                                  {'keep': '保持', 'stop': '停止表达', 'redirect': '转向', 'uncertain': '不明'})
     questions['work'] = choice('停止表达后是否还有独立操作，如取消下载；没有停止要求选none',
                                {'none': '无', 'required': '有操作', 'uncertain': '不明'})
@@ -55,7 +55,9 @@ def decode_entry(result, lines, questions, threshold):
                 if e == 'uncertain': pending.append(ref)
     effect = pick(result, 'effect', threshold); work = pick(result, 'work', threshold)
     if effect == 'uncertain' or work == 'uncertain': raise ValueError('control_uncertain')
-    if effect != 'keep' and all(a == 'other' for a in relations):
+    # Participation may have been withdrawn: no continuing interaction is
+    # compatible with stopping its old expression. It cannot start a new one.
+    if effect == 'redirect' and all(a == 'other' for a in relations):
         raise ValueError('background_control')
     route = 'prepare' if selected else 'wait' if pending else 'background'
     if effect == 'stop':
@@ -66,7 +68,9 @@ def decode_entry(result, lines, questions, threshold):
     if effect == 'redirect' and route != 'prepare': raise ValueError('redirect_scope')
     interaction = 'direct' if 'direct' in relations else 'uncertain' if 'linked' in relations else 'none'
     complete = 'uncertain' if selected and pending else 'incomplete' if pending else 'complete'
-    return dict(items=items, interaction=interaction, utterance_complete=complete, control=effect, route=route,
+    return dict(participation={'basis':'原生入口控制选择；实际证据见阶段记录',
+                              'verdict':'withdraw' if effect == 'stop' else 'continue'},
+                items=items, interaction=interaction, utterance_complete=complete, control=effect, route=route,
                 process_refs=selected, pending_refs=pending, decision_refs=[r['evidence_ref'] for r in lines][:6],
                 decision_reason='程序组合原生选择；原始答案与分数见阶段记录')
 

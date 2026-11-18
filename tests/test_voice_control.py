@@ -136,6 +136,38 @@ def test_stop_reaches_player_even_if_dialogue_disk_write_fails(process,monkeypat
     asyncio.run(run())
 
 
+def test_participation_withdrawal_cancels_playback_pending_and_late_generation(process):
+    from tests.test_jev_split_modes import Model as EntryModel, entry
+    async def run():
+        sent = []
+        async def send(message): sent.append(message)
+        model = EntryModel([entry('background', 'stop', interaction='none', front=None,
+            decision_reason='外部上下文已撤回匠石继续参与的前提')])
+        c = VoiceConversation(process, 'stone', FakeCloud(), send,
+                              jev=VoiceJEV(model, mode='split', fallback_models=[]))
+        c.person_reviewer = None
+        try:
+            old_epoch = c.epoch
+            items = (ResponseItem('verbal', '已经生成但还没有播完的内容。', ('lux-id',)),)
+            await c._start_plan(items, 'lux-id', old_epoch, (old_epoch, 1))
+            await c._start_plan(items, 'lux-id', old_epoch, (old_epoch, 2))
+            assert c.pending_plans
+            # The semantic result is supplied by the fixture. No stop word.
+            await c.accept(Transcript('这是我们两个之间的事。', 'A', 0, 2000, True))
+            await asyncio.wait_for(c.queue.join(), 3)
+            assert c.epoch > old_epoch and c.delivery.snapshot()['state'] == 'stopped'
+            assert not c.pending_plans
+            stop_index = max(i for i, m in enumerate(sent) if m['type'] == 'stop')
+            # A non-cancellable remote generation completing later cannot play.
+            await c._start_plan(items, 'lux-id', old_epoch, (old_epoch, 3))
+            await asyncio.sleep(.01)
+            assert not any(m['type'] == 'audio' for m in sent[stop_index + 1:])
+            assert len([r for r in model.requests if r.purpose == 'voice_jev_entry']) == 1
+        finally:
+            await c.close()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('utterance,control', [
     ('哦你别说你别说了哎呀你说得太多了停一下','stop'),
     ('先让我想想，现在不用你继续解释了','stop'),

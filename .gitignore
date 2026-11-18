@@ -23,6 +23,12 @@ step_inputs.jsonl
 .jshi/rems/rems.db-wal
 .jshi/rems/rems.db-shm
 .jshi/rems/qdrant/.lock
+# Independent local memory modules and machine-specific startup selection.
+.jshi/rems-dual-*/
+.jshi/memory-inprocess/
+.jshi/memory-modules.json
+.jshi/python-path.txt
+.jshi/.memory-module.lock
 .jshi/locomo-plus/
 .jshi-*/
 .jshi-try/

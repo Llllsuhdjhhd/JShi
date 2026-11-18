@@ -56,6 +56,28 @@ def test_prepare_local_recall_loads_cached_weights_once_without_network(monkeypa
     assert len(calls) == 1
 
 
+def test_explicit_memory_source_is_validated(monkeypatch, tmp_path):
+    from jshi.memory.rems3 import neighbor_rems_src
+    monkeypatch.setenv('JSHI_REMS_SOURCE_ROOT', str(tmp_path))
+    with pytest.raises(RemsUnavailableError):
+        neighbor_rems_src()
+    source=tmp_path/'src'/'rems'
+    source.mkdir(parents=True)
+    (source/'port.py').write_text('',encoding='utf-8')
+    assert neighbor_rems_src() == tmp_path/'src'
+
+
+def test_dual_pipeline_prepares_and_closes_through_public_lifecycle(tmp_path):
+    from unittest.mock import Mock
+    pipe=SimpleNamespace(prepare_recall=Mock(),close=Mock())
+    backend=Rems3MemoryBackend(pipeline=pipe,data_dir=tmp_path)
+    backend.prepare_local_recall()
+    pipe.prepare_recall.assert_called_once()
+    backend.close()
+    backend.close()
+    pipe.close.assert_called_once()
+
+
 class FakePipeline:
     def __init__(self) -> None:
         self.ingested = []

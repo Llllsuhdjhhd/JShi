@@ -160,7 +160,10 @@ def test_first_stage_is_compact_and_only_selects_prompt():
             schema = json.loads(req.system_extra.split('Schema：')[1])
             assert 'tool_needed' not in schema['properties']
             assert set(schema['properties']) == {'items', 'level', 'recall_memory', 'main_image', 'utterance_complete', 'control', 'route', 'reply', 'waiting_reply', 'decision_reason', 'decision_refs'}
-            assert set(schema['properties']['items']['items']['properties']) == {'i','person','certainty','why'}
+            item_schema = schema['properties']['items']['items']
+            assert set(item_schema['properties']) == {'i','person','certainty','why','score_override'}
+            assert item_schema['properties']['score_override'] == {'type': 'boolean'}
+            assert 'score_override' not in item_schema['required']
             return ModelResponse(model='gate', text=json.dumps({'level':1, 'recall_memory':False,
                 'items':[{'i':1,'person':'P1','certainty':'confirmed','why':'本句声纹明确，无具体冲突'}]}))
     model = Model()

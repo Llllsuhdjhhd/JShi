@@ -8,6 +8,51 @@ from jshi.voice.speaker_evidence import TrackLinker
 from jshi.voice.contracts import SpeechSegment
 
 
+def test_final_sentence_envelope_owns_trimmed_prefix_and_inflight_recovery():
+    async def run():
+        delivered = []
+        async def deliver(rows, **kw): delivered.extend(rows)
+        intake = RecoveryIntake(None, None, deliver, lambda *a: None)
+        intake.task.cancel()
+        try:
+            # Recorded 2026-11-16 incident: word alignment shrank a complete
+            # denial; a second decode of its 529 ms prefix returned only 匠。
+            source = Transcript('降石没有跟你说话。', '0', 288842, 292522, True)
+            aligned = replace(source, start_ms=290882, end_ms=291742)
+            await intake.publish((aligned,), source=source)
+            prefix = SpeechSegment([], 'a', 290353, 290882)
+            await intake.offer((prefix,), 290000, 293000)
+            assert not intake.pending
+            await intake.publish((Transcript('匠。', 'a', 290353, 290875, True),),
+                                 preliminary=True, source_span=(290353, 290882))
+            assert len(delivered) == 1
+            # Independent later one-word calls remain valid; no keyword filter.
+            await intake.publish((Transcript('匠。', 'a', 294000, 294522, True),),
+                                 preliminary=True, source_span=(294000, 294529))
+            assert len(delivered) == 2
+            # Main-stream corrections are not blocked by recovery-only scopes.
+            await intake.publish((replace(aligned, text='匠石，没有跟你说话。'),),
+                                 source=replace(source, text='匠石，没有跟你说话。'))
+            assert delivered[-1].replaces and '匠石' in delivered[-1].text
+        finally: await intake.close()
+    asyncio.run(run())
+
+
+def test_partial_alignment_does_not_claim_unheard_provider_envelope():
+    async def run():
+        async def deliver(*a, **kw): pass
+        intake = RecoveryIntake(None, None, deliver, lambda *a: None)
+        intake.task.cancel()
+        try:
+            source = Transcript('前一句。后一句。', '0', 0, 3000, True)
+            await intake.publish((replace(source, text='前一句。', end_ms=1000),), source=source)
+            assert not intake.final_scopes
+            await intake.offer((SpeechSegment([], 'b', 1800, 2600),), 0, 3000)
+            assert len(intake.pending) == 1
+        finally: await intake.close()
+    asyncio.run(run())
+
+
 def test_empty_result_can_retry_after_half_second_but_errors_keep_cooldown(monkeypatch):
     import jshi.voice.transcription_recovery as module
     async def run():

@@ -389,7 +389,8 @@ class VoiceJEV:
                     c["p"] for line in thin_batch for c in line.get("candidates", []) if c.get('source') != 'temporary_voice'], *[
                     line["p"] for line in thin_batch if line.get('identity') != 'unresolved']})},
                 "certainty": {"enum": ["confirmed", "tentative", "unknown"]},
-                "why": {"type": "string", "maxLength": 80}},
+                "why": {"type": "string", "maxLength": 80},
+                "score_override": {"type": "boolean"}},
                 "required": ["i", "person", "certainty", "why"], "additionalProperties": False},
                 "minItems": len(batch), "maxItems": len(batch)},
             "level": {"type": "integer", "enum": [1, 2, 3]},
@@ -611,7 +612,7 @@ class VoiceJEV:
                       if isinstance(row.get('input_id'), str) and row['input_id']}
         if delivery.get('utterance_context'):
             payload['utterance_context'] = delivery['utterance_context']
-        payload['playback'] = {k: delivery[k] for k in ('state', 'spoken', 'pending') if k in delivery}
+        payload['playback'] = {k: delivery[k] for k in ('state', 'spoken', 'pending', 'expression_under_review') if k in delivery}
         if delivery.get('environment'):
             payload['environment'] = delivery['environment']
         payload['short_chat'] = delivery.get('short_chat', {'allowed':False})
@@ -679,7 +680,12 @@ class VoiceJEV:
                 raise ValueError("JEV反驳明确声纹缺少依据")
             if pick == "unknown":
                 certainty = "unknown"
-            relation = "voice_only" if pick == voice.get("pick") else "semantic_only" if pick != "unknown" else "insufficient"
+            confirmation = (source.get('joint_evidence') or {}).get('confirmation') or {}
+            if not bound and row.get('score_override') is not True and confirmation.get('p') in allowed and not source.get('joint_evidence', {}).get('confirmation_conflict'):
+                pick, certainty = confirmation['p'], 'confirmed'
+                why = '程序按同人三档分数条件确认：' + confirmation.get('rule', '')
+            relation = ('score_override' if confirmation and row.get('score_override') is True else
+                        "voice_only" if pick == voice.get("pick") else "semantic_only" if pick != "unknown" else "insufficient")
             items.append(BatchItem(row["i"], "", reason=why, relevance="", identity_only=True,
                 speaker_pick=pick, speaker_level={"confirmed": "确定", "tentative": "可能", "unknown": "不确定"}[certainty],
                 speaker_reason=why, voice_pick=voice.get("pick", ""), voice_strength=voice.get("strength", "unavailable"),

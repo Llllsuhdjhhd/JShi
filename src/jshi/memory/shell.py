@@ -60,34 +60,42 @@ class MemoryShell:
         expanded = limit
         if adjustments and not _candidate_mode and limit is not None and limit > 0:
             expanded = limit * int(param('REFLECTION_CANDIDATE_MULTIPLIER'))
+        links = getattr(self, 'person_links', None)
+        requested = tuple(dict.fromkeys(filter(None, (interlocutor_object_id, object_id, *object_ids))))
+        scope, project = links.recall_scope(subject_id, requested) if links is not None else (requested, None)
+        added = set(scope) - set(requested)
+        # Gather a single pool with the previous per-person candidate allowance.
+        # Filtering/projection happens before the public result limit, not per link.
+        candidate_limit = expanded
+        if added and expanded is not None:
+            candidate_limit = expanded * (1 + len(added))
         fragments = tuple(self._backend.recall(
             subject_id,
             query,
-            limit=expanded,
+            limit=candidate_limit,
             object_id=object_id,
-            object_ids=object_ids,
+            object_ids=scope if added else object_ids,
             interlocutor_object_id=interlocutor_object_id,
             level=level,
             anchor_event_ids=tuple(dict.fromkeys((*anchor_event_ids, *positive))),
         ))
-        links = getattr(self, 'person_links', None)
-        if links is not None:
-            requested = set(filter(None,(object_id,interlocutor_object_id,*object_ids)))
-            extra=[]
-            for link in links.links(subject_id):
-                if link['target'] not in requested: continue
-                candidates=self._backend.recall(subject_id,query,limit=expanded,
-                    object_id=link['source'],object_ids=(),interlocutor_object_id=None,
-                    level=level,anchor_event_ids=())
-                for item in candidates:
-                    if links.project(subject_id,item.object_id,item.source_ids)==link['target']:
-                        extra.append(replace(item,object_id=link['target'],
-                            interlocutor=link['target'] if item.interlocutor==link['source'] else item.interlocutor,
-                            query_object_role='interlocutor' if link['target']==interlocutor_object_id else 'involved'))
+        if project is not None:
+            # A link may have been revoked while the backend was retrieving.
+            project = links.projector(subject_id)
             combined={}
-            for item in (*fragments,*extra):
-                projected=links.project(subject_id,item.object_id,item.source_ids)
-                combined[item.event_id]=replace(item,object_id=projected)
+            for item in fragments:
+                projected=project(item.object_id,item.source_ids)
+                # Added old identities are only a search scope, not an identity assertion.
+                if item.object_id in added and projected not in requested:
+                    continue
+                changed = projected != item.object_id
+                combined.setdefault(item.event_id, replace(item,object_id=projected,
+                    origin_object_id=(item.origin_object_id or item.object_id) if changed else item.origin_object_id,
+                    identity_basis='provenance_link' if changed else item.identity_basis,
+                    interlocutor=project(item.interlocutor,item.source_ids),
+                    interlocutor_object_ids=tuple(dict.fromkeys(project(p,item.source_ids) for p in item.interlocutor_object_ids)),
+                    query_object_role=('interlocutor' if projected==interlocutor_object_id else 'involved')
+                        if changed and projected in requested else item.query_object_role))
             fragments=tuple(combined.values())
         cap = len(fragments) if limit is None else max(0, limit)
         # 保留后端相关度不变，以归一化排名为基线，有限的反馈只改最终顺序。

@@ -13,7 +13,7 @@ from jshi.core.param_overlay import OverlayError, ensure_installed, load, rollba
 from jshi.core.params import active_zone_chars
 from jshi.effectiveness import InProcessEffectiveness, JsonlRatingStore
 from jshi.effectiveness.suggestions import write_baseline_if_absent
-from jshi.experienceledger import SqliteExperienceLedger
+from jshi.experienceledger import ConsumerKind, SqliteExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.memory import MemoryShell, RecallStrategyStore, build_memory_backend
 from jshi.memory.factory import BACKEND_REMS3, memory_backend_name
@@ -226,16 +226,20 @@ def _runtime(
     if vision_config.enabled or enable_vision:
         vision = VisionService(VisionStore(data_dir / 'vision', vision_config), vision_config)
         backend = VisualMemory(backend, vision.store)
+    activity_ledger=SqliteExperienceLedger(
+        data_dir / 'subject.sqlite3',active_window_chars=active_zone_chars(),
+        memory_namespace=os.getenv('JSHI_MEMORY_CURSOR_NAMESPACE'),
+        memory_initial_cursors=json.loads(os.getenv('JSHI_MEMORY_CURSOR_SEEDS','{}')))
+    if activity_ledger.memory_namespace:
+        for subject_id in identities.subject_ids():
+            activity_ledger.consumer_cursor(subject_id,ConsumerKind.MEMORY)
     process = SubjectProcess(
         subjects,
         identities,
         cognition,
         memory=MemoryShell(backend),
         long_term_experience=getattr(backend, "long_term_experience", None),
-        activity_ledger=SqliteExperienceLedger(
-            data_dir / "subject.sqlite3",
-            active_window_chars=active_zone_chars(),
-        ),
+        activity_ledger=activity_ledger,
         prompt_rules=prompt_rules,
         recall_strategy=recall_strategy,
         effectiveness=effectiveness,
@@ -253,12 +257,15 @@ def _runtime(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="匠石主体过程实验框架")
+    parser.add_argument('--memory-module', help='选择 memory-modules.json 中的记忆模块')
+    parser.add_argument('--memory-modules-file', type=Path, help='记忆模块配置文件；默认在 data-dir 下')
     parser.add_argument(
         "--data-dir",
         type=Path,
         default=Path(os.getenv("JSHI_DATA_DIR", ".jshi")),
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser('memory-modules', help='列出可选记忆模块，不打开数据库')
 
     visual = commands.add_parser('vision', help='独立环境观察与文字交谈入口')
     visual.add_argument('subject_id')
@@ -597,6 +604,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="退回上一版整份覆盖，版本号加一",
     )
+    for command_parser in dict.fromkeys(commands.choices.values()):
+        command_parser.add_argument('--memory-module', default=argparse.SUPPRESS,
+            help='本次启动使用的记忆模块；也可放在子命令前')
+        command_parser.add_argument('--memory-modules-file', type=Path, default=argparse.SUPPRESS,
+            help='记忆模块配置文件')
     return parser
 
 
@@ -642,6 +654,17 @@ def main() -> None:
 def _main() -> None:
     _load_local_env()
     args = _parser().parse_args()
+    from jshi.memory.modules import read_modules, select_module
+    try:
+        if args.command == 'memory-modules':
+            registry=read_modules(args.data_dir,args.memory_modules_file)
+            print(json.dumps({k:v for k,v in registry.items() if not k.startswith('_')},ensure_ascii=False,indent=2))
+            return
+        selected=select_module(args.memory_module,args.data_dir,args.memory_modules_file)
+        if selected:
+            print(f"[jshi] memory module: {selected['name']}",file=sys.stderr)
+    except (ValueError,KeyError) as exc:
+        raise SystemExit(str(exc)) from None
     if args.command == "voice-setup":
         from jshi.voice.model_assets import setup_models
         setup_models(args.data_dir, tts=args.tts, refine=args.refine, diarize=args.diarize, vad=args.vad, turn=args.turn, semantic_turn=args.semantic_turn, speaker_model=args.speaker_model)

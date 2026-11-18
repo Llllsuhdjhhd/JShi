@@ -1,0 +1,29 @@
+{
+  "default": "dual",
+  "modules": {
+    "dual": {
+      "description": "Long-event memory with parallel native Mem0",
+      "backend": "rems3",
+      "source_root": "../JShi_memory_old_days",
+      "data_dir": ".jshi/memory-dual-new",
+      "settings": {
+        "REMS_MEMORY_REFINEMENT__ENABLED": false,
+        "REMS_EVENT_MIN_CHARS": 2000,
+        "REMS_EVENT_LEN_FACTOR": 1.5,
+        "REMS_RECALL_EVENT_INDEX_LEVEL": "L1",
+        "REMS_RECALL_RERANK_ENABLED": true,
+        "REMS_RECENT_MEMORY__ENABLED": true,
+        "REMS_RECENT_MEMORY__PROCESS_ISOLATION": true,
+        "REMS_RECENT_MEMORY__RETENTION_DAYS": 365,
+        "REMS_RECENT_MEMORY__MAX_BYTES": 10000000000,
+        "REMS_RECENT_MEMORY__CLEANUP_TRIGGER_BYTES": 8000000000,
+        "REMS_RECENT_MEMORY__CLEANUP_TARGET_BYTES": 7000000000
+      }
+    },
+    "inprocess": {
+      "backend": "inprocess",
+      "data_dir": ".jshi/memory-inprocess-new",
+      "settings": {}
+    }
+  }
+}

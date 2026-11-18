@@ -140,6 +140,7 @@ def _ingest_from_dict(data: dict[str, Any]) -> MemoryIngestLedgerEntry:
 def _meta_to_dict(state: _SubjectLedgerState) -> dict[str, Any]:
     return {
         "cursors": {kind.value: sequence for kind, sequence in state.cursors.items()},
+        "memory_cursors": dict(state.memory_cursors),
         "context": _context_to_dict(state.context),
         "pending_sequences": list(state.pending_sequences),
     }
@@ -160,6 +161,7 @@ def _state_from_rows(
     return _SubjectLedgerState(
         segments=[_segment_from_dict(item) for item in segments],
         cursors=cursors,
+        memory_cursors={str(k):int(v) for k,v in data.get('memory_cursors',{}).items()},
         ingest_entries=[_ingest_from_dict(item) for item in ingest_entries],
         context=_context_from_dict(data.get("context")),
         pending_sequences=[int(item) for item in data.get("pending_sequences") or ()],
@@ -177,13 +179,17 @@ class SqliteExperienceLedger(InProcessExperienceLedger):
         path: str | Path,
         *,
         active_window_chars: int | None = None,
+        memory_namespace: str | None = None,
+        memory_initial_cursors: dict | None = None,
     ) -> None:
         super().__init__(
             active_window_chars=(
                 active_zone_chars()
                 if active_window_chars is None
                 else active_window_chars
-            )
+            ),
+            memory_namespace=memory_namespace,
+            memory_initial_cursors=memory_initial_cursors,
         )
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -71,6 +71,9 @@ def apply_link(process, link_id, *, personal=None, live_scene=None, local=None):
 
     def projection(row):
         # Readers consult the same active-link ledger, so revoke also invalidates views.
+        flow = getattr(process, 'recall_flow', None)
+        if flow is not None:
+            flow.working_set.invalidate_people(row['subject'], (row['source'], row['target']))
         if getattr(process.memory,'person_links',None) is not store: process.memory.person_links=store
         if process.long_term_experience is not None: process.long_term_experience.person_links=store
         process.tool_service.hang_store.person_links=store

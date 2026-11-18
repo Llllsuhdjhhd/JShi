@@ -32,6 +32,19 @@ def dialogue_row(payload):
     judgment = payload.get('judgment') or {}
     if judgment:
         row['identity'] = {k: judgment[k] for k in ('person', 'certainty') if k in judgment}
+    row = mark_evidence_role(row)
+    return row
+
+
+def mark_evidence_role(row):
+    """Label provenance, never infer addressee or acoustic identity from text."""
+    row = deepcopy(row)
+    if row.get('kind') == 'understanding_update':
+        row['evidence_role'] = 'interpretation'
+    elif row.get('p', row.get('who', row.get('speaker'))) == '匠石':
+        row['evidence_role'] = 'self_output'
+    elif row.get('text') and (row.get('p') or row.get('speaker') or row.get('who')):
+        row['evidence_role'] = 'external_input'
     return row
 
 

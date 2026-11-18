@@ -13,7 +13,7 @@ def test_memory_recall_links_only_wholly_scoped_evidence_and_reverts(tmp_path):
     key=links.link('s','a','lux',['i1'],basis='manual_annotation')
     class Backend:
         def recall(self,*args,**kwargs):
-            if kwargs.get('object_id')=='a':
+            if 'a' in kwargs.get('object_ids', ()):
                 return (RecalledFragment('m1','fact','初次问候',object_id='a',source_ids=('i1',)),
                     RecalledFragment('m2','fact','混合经历',object_id='a',source_ids=('i1','i2')))
             return ()
@@ -90,7 +90,7 @@ def test_experience_projection_requires_complete_source_chain(tmp_path):
         score:float=1
     class Module:
         def recall(self,query):
-            return SimpleNamespace(person=[Fragment('a','对方初次自报小陈')] if query.object_ids==('a',) else [])
+            return SimpleNamespace(person=[Fragment('a','对方初次自报小陈')] if 'a' in query.object_ids else [])
     module=RemsLongTermExperience(Module(),lambda **kw:SimpleNamespace(**kw))
     links=AcquaintanceStore(tmp_path/'people.db');module.person_links=links
     links.provenance('s','m1',['i1'])

@@ -504,7 +504,7 @@ class PersonalSpeakers:
                 'ranking': ranking, 'segments': len(vectors),
                 **({'short_audio_hint': {'original_seconds': len(pcm)/32000,
                     'repeat_count': repeats, 'feature_seconds': len(feature_pcm)/32000,
-                    'basis': '同一短句重复拼接，仅供可能人物参考，不增加独立证据'}} if repeated else {}),
+                    'basis': '同一短句重复拼接，人物确认结合声纹按三档条件判断，不增加独立证据'}} if repeated else {}),
                 'debug_features':{'model_id':model_id,'vectors':vectors,'durations':durations}}
 
     def submit_predict(self, pcm, speakers):

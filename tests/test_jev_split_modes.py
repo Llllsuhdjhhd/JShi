@@ -13,7 +13,7 @@ from tests.test_voice import process, FakeCloud, Model as MainModel
 
 
 def entry(route='prepare', control='redirect', **changes):
-    data = {'items': [{'i': 1, 'person': 'P1', 'certainty': 'confirmed', 'why': '前句确认，发言连续'}],
+    data = {'participation': {'basis':'测试提供的既有交往依据', 'verdict':'withdraw' if control=='stop' else 'continue'}, 'items': [{'i': 1, 'person': 'P1', 'certainty': 'confirmed', 'why': '前句确认，发言连续'}],
             'interaction': 'direct', 'utterance_complete': 'complete', 'control': control, 'route': route,
             'process_refs': ['I1'] if route == 'prepare' else [],
             'pending_refs': ['I1'] if route == 'wait' else [],
@@ -127,30 +127,32 @@ def test_background_wait_and_stop_skip_preparation(mode, first):
     assert result.action == ('stop' if first['control'] == 'stop' else 'ignore')
 
 
-@pytest.mark.parametrize('mode',['split','combined'])
-def test_positive_continue_never_applies_stop_even_if_model_returns_stop(mode):
-    first=entry(route='background',control='stop')
-    if mode=='combined':first={**first,'preparation':None}
-    retry = main_preparation() if mode == 'split' else preparation(route='self_reply',level=3,reply='好，我接着说。')
-    model=Model([first,retry])
-    gate=VoiceJEV(model,mode=mode,fallback_models=[])
-    controls=[]
-    result=gate.decide_batch('stone',[{'n':1,'who':'P1','text':'就这么停啊？你给他问他一个，你继续啊。'}],[],
-        {'state':'completed','short_chat':{'allowed':True,'person_code':'P1'}},
-        on_entry=lambda e:controls.append(e.control))
-    assert result.control!='stop' and 'stop' not in controls
-    assert not result.model_error
-    if mode == 'split':
-        assert result.route == 'main' and not result.direct_reply
-    else:
-        assert result.direct_reply == '好，我接着说。'
+@pytest.mark.parametrize('mode', ['split', 'combined'])
+@pytest.mark.parametrize('control,interaction', [('stop', 'none'), ('stop', 'direct'), ('keep', 'none')])
+def test_contextual_participation_result_is_not_rewritten_by_sentence_suffix(mode, control, interaction):
+    # A model fixture tests the control contract, not real semantic accuracy.
+    # In context the final "continue" addresses another participant.
+    first = entry('background', control, interaction=interaction,
+                  decision_reason='外部问答表明本轮参与对象改变', front=None)
+    if mode == 'combined':
+        first.pop('front')
+        first['preparation'] = None
+    model = Model([first])
+    controls = []
+    result = VoiceJEV(model, mode=mode, fallback_models=[]).decide_batch(
+        'stone', [{'n': 1, 'who': 'P1', 'text': '这边是我们两个在讨论，你继续啊。'}], [],
+        {'state': 'playing', 'jev_scene': 'P1与另一参与者交流；匠石正在插话。'},
+        on_entry=lambda value: controls.append(value.control))
+    assert result.judged and not result.model_error
+    assert controls == [control] and result.control == control
+    assert not result.direct_reply and not result.waiting_reply
+    assert len(model.requests) == 1
 
 
-@pytest.mark.parametrize('text',['别继续啊','不要继续说','不要你继续','我不希望你继续','他说“你继续啊”','你继续啊，别说了'])
-def test_stop_guard_does_not_override_negation_or_quotation(text):
-    from jshi.voice.jev_serial import protect_continuation
-    original=entry(route='background',control='stop')
-    assert protect_continuation(original,[{'n':1,'text':text}])==(original,False)
+@pytest.mark.parametrize('mode', ['split', 'combined'])
+def test_normal_correction_continues_when_model_preserves_participation(mode):
+    result, model = run(mode, entry(control='redirect', decision_reason='交往继续，修正回答内容'))
+    assert not result.model_error and result.control == 'redirect' and result.route == 'main'
 
 
 def test_control_applied_before_second_call_and_survives_failure():
@@ -748,3 +750,12 @@ def test_ack_budget_counts_speech_without_discouraging_natural_pauses(phrase, ex
         {'state': 'completed', 'waiting': {'allowed': True, 'levels': {'L3': {'expected_seconds': 2.2, 'max_chars': 4}}}})
     assert not result.model_error and result.waiting_reply == expected and result.route == 'main'
     assert len(model.requests) == 2
+
+
+def test_withdraw_assessment_cannot_leave_keep_or_wait_running():
+    result, model=run('split', first=entry('wait','keep', interaction='uncertain',
+        participation={'basis':'原表达没有外部接纳，先让位','verdict':'withdraw'},
+        process_refs=[],pending_refs=['I1']), delivery={'state':'playing'})
+    assert result.control=='stop' and result.route=='background'
+    assert not result.direct_reply and not result.waiting_reply
+    assert len(model.requests)==1

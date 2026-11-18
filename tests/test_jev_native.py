@@ -58,6 +58,24 @@ def test_background_does_not_require_complete_expression():
     assert decoded['route']=='background' and not decoded['pending_refs']
 
 
+def test_native_withdrawal_stops_without_continuing_interaction_or_fallback():
+    from tests.test_decision_runtime import answers
+    model = Model([])
+    controls = []
+    def bridge(state, **kw):
+        return DecisionResult('success', answers(kw['questions'], dict(
+            p1='unknown', c1='unknown', a1='other', e1='complete',
+            effect='stop', work='none'))), defaults()
+    bridge.protocol = 'native-v3'
+    bridge.report = lambda *a: None
+    result = VoiceJEV(model, mode='decision', fallback_models=[]).decide_batch(
+        's', [{'n': 1, 'text': '这是我们两个人的讨论。'}], [],
+        {'state': 'playing', '_decision_entry': bridge},
+        on_entry=lambda decision: controls.append(decision.control))
+    assert result.control == 'stop' and result.interaction == 'none'
+    assert not result.model_error and controls == ['stop'] and not model.requests
+
+
 def test_native_short_reply_only_generates_text_after_permissions():
     from tests.test_decision_runtime import answers
     model=Model([{'reply':'你好。'}])

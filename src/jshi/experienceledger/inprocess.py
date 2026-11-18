@@ -26,6 +26,7 @@ from .port import (
 class _SubjectLedgerState:
     segments: list[ExperienceSegment] = field(default_factory=list)
     cursors: dict[ConsumerKind, int] = field(default_factory=dict)
+    memory_cursors: dict[str, int] = field(default_factory=dict)
     ingest_entries: list[MemoryIngestLedgerEntry] = field(default_factory=list)
     context: ContextViewState = field(default_factory=empty_context_view)
     pending_sequences: list[int] = field(default_factory=list)
@@ -41,11 +42,31 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         self,
         *,
         active_window_chars: int | None = None,
+        memory_namespace: str | None = None,
+        memory_initial_cursors: dict | None = None,
     ) -> None:
         if active_window_chars is None:
             active_window_chars = active_zone_chars()
         self.active_window_chars = active_window_chars
         self._states: dict[str, _SubjectLedgerState] = {}
+        self.memory_namespace = memory_namespace
+        self.memory_initial_cursors = memory_initial_cursors or {}
+
+    def _ensure_memory_cursors(self, subject_id, state):
+        if not self.memory_namespace:
+            return
+        pending={}
+        current=state.cursors.get(ConsumerKind.MEMORY,0)
+        for name,seed in {**self.memory_initial_cursors,
+                          self.memory_namespace:self.memory_initial_cursors.get(self.memory_namespace,0)}.items():
+            if name not in state.memory_cursors:
+                value=seed.get(subject_id,0) if isinstance(seed,dict) else (current if seed is None else seed)
+                if not 0 <= value <= self.head_sequence(subject_id):
+                    raise ValueError(f'Initial memory cursor for {name} is outside the ledger')
+                pending[name]=value
+        if pending:
+            state.memory_cursors.update(pending)
+            self._after_write(subject_id)
 
     def _state(self, subject_id: str) -> _SubjectLedgerState:
         state = self._states.get(subject_id)
@@ -550,6 +571,13 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             raise ValueError(
                 f"cursor {through_sequence} exceeds head sequence {head}"
             )
+        self._ensure_memory_cursors(subject_id,state)
+        if consumer == ConsumerKind.MEMORY and self.memory_namespace:
+            updated=max(state.memory_cursors[self.memory_namespace],through_sequence)
+            state.memory_cursors[self.memory_namespace]=updated
+            state.cursors[ConsumerKind.MEMORY]=min(state.memory_cursors.values())
+            self._after_write(subject_id)
+            return updated
         current = state.cursors.get(consumer, 0)
         updated = max(current, through_sequence)
         state.cursors[consumer] = updated
@@ -561,7 +589,11 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         subject_id: str,
         consumer: ConsumerKind,
     ) -> int:
-        return self._state(subject_id).cursors.get(consumer, 0)
+        state=self._state(subject_id)
+        self._ensure_memory_cursors(subject_id,state)
+        if consumer == ConsumerKind.MEMORY and self.memory_namespace:
+            return state.memory_cursors[self.memory_namespace]
+        return state.cursors.get(consumer, 0)
 
     def head_sequence(self, subject_id: str) -> int:
         state = self._state(subject_id)
@@ -573,10 +605,12 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
         state = self._state(subject_id)
         if not state.segments:
             return 0
+        self._ensure_memory_cursors(subject_id,state)
         return min(
             state.cursors.get(ConsumerKind.ACTIVE_ZONE, 0),
             state.cursors.get(ConsumerKind.MEMORY, 0),
             state.cursors.get(ConsumerKind.AUDIT, 0),
+            *state.memory_cursors.values(),
         )
 
     def archive_before(self, subject_id: str, sequence: int) -> int:

@@ -5,6 +5,51 @@ from enum import Enum
 MLP_SCORE_FLOOR = .92
 
 
+def voice_confidence_marker(speaker, voice_candidates, classifier, comparison):
+    """Audit evidence per utterance, never a new person or a memory partition."""
+    def scores(rows, kind):
+        return [{key: row[key] for key in ('object_id', 'score', 'source', 'verified',
+                    'stale_labels', 'repeated_short_audio') if key in row} | {'kind': kind}
+                for row in rows if type(row.get('score')) in (int, float)
+                and math.isfinite(row['score'])]
+    return {'version': 1, 'attributed_object_id': speaker.get('object_id'),
+            'status': speaker.get('status'), 'method': speaker.get('method'),
+            'voice_similarity': scores((r for r in voice_candidates if r.get('source', 'voiceprint') in
+                {'voiceprint', 'voiceprint_match', 'repeated_short_audio'}), 'similarity'),
+            'mlp_scores': scores(classifier.get('ranking', ()), 'classification_score'),
+            'score_confirmation': dict(comparison.get('confirmation') or {}),
+            'score_conflict': bool(comparison.get('confirmation_conflict')),
+            'overlap': bool(classifier.get('overlap')),
+            'meaning': '本句声音证据；分数不是身份概率，不单独建立记忆身份'}
+
+
+def score_confirmation(voices, classifier):
+    """User-selected thresholds, evaluated before display rounding, per person."""
+    if classifier.get('overlap'):
+        return {}
+    models = {r['object_id']: r['score'] for r in classifier.get('ranking', ())
+              if r.get('object_id') and not r.get('stale_labels')
+              and type(r.get('score')) in (int, float) and math.isfinite(r['score'])
+              and 0 <= r['score'] <= 1}
+    qualified = {}
+    for row in voices:
+        score = row.get('score')
+        if (not row.get('object_id') or row.get('source', 'voiceprint') not in
+                {'voiceprint', 'voiceprint_match', 'repeated_short_audio'}
+                or type(score) not in (int, float) or not math.isfinite(score) or not -1 <= score <= 1):
+            continue
+        mlp = models.get(row['object_id'], 0)
+        rule = ('voice_gt_030' if score > .3 else
+                'voice_gt_020_mlp_gt_095' if score > .2 and mlp > .95 else
+                'voice_gt_015_mlp_gt_099' if score > .15 and mlp > .99 else '')
+        if rule:
+            qualified[row['object_id']] = {'object_id': row['object_id'],
+                'label': row.get('label', ''), 'rule': rule}
+    if len(qualified) == 1:
+        return {'confirmation': next(iter(qualified.values()))}
+    return {'confirmation_conflict': True} if qualified else {}
+
+
 class IdentitySource(str,Enum):
     MANUAL='人工'
     SELF='自述'
@@ -22,6 +67,7 @@ class IdentityState(str,Enum):
 
 
 def compare_identity(voice_candidates, classifier,*,voice_threshold=.33,voice_margin=.08):
+    confirmation = score_confirmation(voice_candidates, classifier)
     def valid(row):
         return bool(row.get('object_id')) and type(row.get('score')) in (int,float) and math.isfinite(row['score'])
     voices=sorted((r for r in voice_candidates if valid(r) and r.get('source','voiceprint') in
@@ -29,7 +75,7 @@ def compare_identity(voice_candidates, classifier,*,voice_threshold=.33,voice_ma
     models=sorted((r for r in classifier.get('ranking',[]) if valid(r) and 0<=r['score']<=1),
         key=lambda r:r['score'],reverse=True)
     if not models:
-        return {'state':'unavailable'}
+        return {'state':'unavailable', **confirmation}
     model=models[0]
     def threshold(r):
         value=r.get('threshold',.8)
@@ -38,7 +84,7 @@ def compare_identity(voice_candidates, classifier,*,voice_threshold=.33,voice_ma
         and (len(models)==1 or model['score']-models[1]['score']+1e-9>=.1))
     mlp={k:model[k] for k in ('object_id','label','score','threshold','verified','repeated_short_audio') if k in model}
     if not voices:
-        return {'state':'mlp_only','mlp_high':high,'mlp_priority':high,'mlp':mlp}
+        return {'state':'mlp_only','mlp_high':high,'mlp_priority':high,'mlp':mlp, **confirmation}
     voice=voices[0]
     reliable=(type(voice_threshold) in (int,float) and type(voice_margin) in (int,float)
         and voice.get('source')!='repeated_short_audio' and voice['score']>=voice_threshold
@@ -46,7 +92,7 @@ def compare_identity(voice_candidates, classifier,*,voice_threshold=.33,voice_ma
     return {'state':'agreement' if voice['object_id']==model['object_id'] else 'conflict',
         'voice_reliable':reliable,'mlp_priority':high and not reliable,
         'mlp_high':high,'voice':{k:voice[k] for k in ('object_id','label','score','source') if k in voice},
-        'mlp':mlp}
+        'mlp':mlp, **confirmation}
 
 
 def identity_display(speaker,comparison,*,certainty='',original=None,classifier=None):
@@ -62,6 +108,14 @@ def identity_display(speaker,comparison,*,certainty='',original=None,classifier=
         return view(speaker.get('label',''),'人工','确定',reason='用户人工指定')
     if method=='self_introduction' or speaker.get('status')=='introduced':
         return view(speaker.get('label',''),'自述','确定',reason='来自本人明确自我介绍')
+    confirmation = comparison.get('confirmation')
+    if confirmation and not comparison.get('confirmation_conflict') and method != 'context_score_override':
+        return view(confirmation.get('label', ''), '综合', '确定',
+                    reason='满足同一人物声纹与MLP三档确认条件之一：' + confirmation['rule'])
+    if method == 'context_score_override' and not confirmed:
+        return view(speaker.get('label', '归属待定'), '综合',
+                    '可能' if speaker.get('status') == 'provisional' else '待定',
+                    reason='存在现场反证，JEV已修正分数确认；具体依据见详情')
     if confirmed:
         if original.get('method')=='voiceprint_match' and original.get('object_id')==selected:
             return view(speaker['label'],'声纹','确定',original.get('confidence'),'原声纹可靠命中；分数是相似度')
@@ -82,7 +136,7 @@ def identity_display(speaker,comparison,*,certainty='',original=None,classifier=
                 '混合录音中MLP单一高分领先，仅显示可能候选；未确认所有声音来自此人；分数不是身份概率')
     if comparison.get('mlp_priority'):
         return view(mlp.get('label',''),'MLP','可能',mlp['score'],
-            '短句重复拼接的MLP参考，仅为可能人物，交JEV结合上下文判断；不是新增独立证据' if mlp.get('repeated_short_audio') else
+            '短句重复拼接的MLP候选，最终身份由同一人物声纹与MLP三档条件及上下文判断；不是新增独立证据' if mlp.get('repeated_short_audio') else
             '声纹未可靠命中，MLP单一高分领先；句首仅显示优先候选，尚未确认；分数不是身份概率')
     if speaker.get('status')=='provisional' or certainty=='可能':
         source='JEV' if method in {'jev_attribution','context_attribution'} else 'MLP' if method.startswith('personal_classifier') else '声纹'

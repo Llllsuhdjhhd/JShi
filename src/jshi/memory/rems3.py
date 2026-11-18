@@ -42,9 +42,13 @@ class RemsUnavailableError(RuntimeError):
 def neighbor_rems_src() -> Path | None:
     """邻仓 ``../Jshi_memory/src``（与本仓库并列）。没有 port.py 则不算。"""
     repo = Path(__file__).resolve().parents[3]
-    neighbor = repo.parent / "Jshi_memory" / "src"
+    explicit = (os.getenv("JSHI_REMS_SOURCE_ROOT") or "").strip()
+    neighbor = (Path(explicit).expanduser().resolve() / "src" if explicit else
+                repo.parent / "Jshi_memory" / "src")
     if (neighbor / "rems" / "port.py").is_file():
         return neighbor
+    if explicit:
+        raise RemsUnavailableError(f"JSHI_REMS_SOURCE_ROOT does not contain src/rems/port.py: {neighbor.parent}")
     return None
 
 
@@ -59,8 +63,8 @@ def prefer_neighbor_rems() -> Path | None:
     sys.path.insert(0, path)
     existing = sys.modules.get("rems")
     if existing is not None:
-        file = (getattr(existing, "__file__", "") or "").replace("\\", "/")
-        if "Jshi_memory" not in file:
+        file = getattr(existing, "__file__", "") or ""
+        if not file or Path(file).resolve().parent != (neighbor / "rems").resolve():
             for name in list(sys.modules):
                 if name == "rems" or name.startswith("rems."):
                     del sys.modules[name]
@@ -313,7 +317,9 @@ def disable_local_embedding_if_needed(pipeline: Any) -> bool:
 
 def build_rems_pipeline(data_dir: Path, pipeline_cls: Any, config_cls: Any) -> Any:
     data_dir.mkdir(parents=True, exist_ok=True)
-    config = config_cls()
+    # CLI profiles already selected the environment. Do not reapply another
+    # module's .env policy after select_module deliberately cleared it.
+    config = config_cls(_env_file=None) if os.getenv('JSHI_MEMORY_MODULE') else config_cls()
     apply_jshi_llm_settings(config)
     if hasattr(config, 'portrait_max_chars'):
         config.portrait_max_chars = 800
@@ -383,10 +389,17 @@ class Rems3MemoryBackend:
         self._experience_refresh_stopping = False
         self._experience_exit_hook = False
         self._experience_exit_wait_s = _env_float("JSHI_EXPERIENCE_EXIT_WAIT_S", 30.0)
+        self._closed = False
+        atexit.register(self.close)
 
     def prepare_local_recall(self):
         """Load cached embedding weights before opening the interactive voice UI."""
         if self._semantic_disabled:
+            return
+        prepare = getattr(self._pipeline, 'prepare_recall', None)
+        if callable(prepare):
+            prepare()
+            self._finish_simplified_reindex()
             return
         recall = getattr(self._pipeline, 'recall_pipeline', None)
         provider = getattr(recall, '_embedding', None)
@@ -397,6 +410,41 @@ class Rems3MemoryBackend:
                 if provider._model is None:
                     provider._model = SentenceTransformer(provider._model_name, local_files_only=True)
         self._finish_simplified_reindex()
+
+    def close(self):
+        """Finish owned work before releasing both memory databases."""
+        if self._closed:
+            return
+        self._wait_experience_refresh_on_exit()
+        worker = self._experience_refresh_worker
+        if worker is not None and worker.is_alive():
+            raise RuntimeError("Memory refresh is still running; storage remains open")
+        close = getattr(self._pipeline, 'close', None)
+        if callable(close):
+            close()
+        self._closed = True
+        atexit.unregister(self.close)
+
+    def runtime_info(self):
+        """Non-content diagnostics for confirming an explicit memory cutover."""
+        config = getattr(self._pipeline, 'config', None)
+        storage = getattr(config, 'storage', None)
+        recent = getattr(self._pipeline, 'recent_memory', None)
+        child = getattr(recent, '_process', None)
+        try:
+            child_pid = child.pid if child is not None and child.is_alive() else None
+        except ValueError:
+            child_pid = None
+        return {'module':os.getenv('JSHI_MEMORY_MODULE'),
+            'rerank_threads': getattr(config, 'recall_rerank_threads', None),
+            'rerank_device': getattr(config, 'recall_rerank_device', None),
+            'embedding_device': getattr(getattr(config, 'embedding', None), 'device', None),
+            'recent_runtime': getattr(recent, 'runtime_info', None),
+            'engine_source': getattr(sys.modules.get('rems'), '__file__', None),
+            'long_database': getattr(storage, 'database_url', None),
+            'recent_database': str(recent.root) if recent is not None else None,
+            'recent_process': type(recent).__name__ == 'Mem0RecentProcess',
+            'recent_worker_pid': child_pid}
 
     def _finish_simplified_reindex(self):
         """Use this process's sole Qdrant client before opening the voice endpoint."""
