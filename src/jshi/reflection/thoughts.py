@@ -76,17 +76,21 @@ class RecallReprocessingThought(MemoryThought):
 
 class PressureComparisonThought(MemoryThought):
     name = 'pressure_comparison'
-    required = ('ordered_ids', 'standard', 'admit_ids', 'reasons')
-    instruction = """比较 A、B 两个压力容器的样例，按当前情境的相对保留偏好排序。
-没有绝对价值分数。ordered_ids 必须包含本次全部样例 ID 各一次，从优先保留到优先让出空间。
-跨批比较，考虑重复、证据、认识增量、适用情境及空间成本。不要只偏爱新内容或经常召回的内容。
-需要更新标准时，standard 用语言描述取舍原则、适用条件、与旧标准的变化及不确定性；
-不需要更新时沿用旧标准。reasons 数组逐项写 id、reason，解释实际排序，不事后编造理由。
-admit_ids 是适合进入真实记忆的 ID 子集，按实际适用标准做宽松选择；不等于只留前几名。
-标准尚在形成时可作临时接纳，但说明暂定理由。这里比较的是抽样材料，不能宣称评审了整个库。"""
+    required = ('ordered_ids', 'standard', 'admit_ids', 'discard_ids', 'outlets', 'reasons')
+    instruction = """评价匠石这次看到的自省候选。S 是认识，P 是人物范围，E 是来源。代号仅在本次有效。来源相同不等于独立佐证。
+逐条看它比原经历多认识了什么，给出的依据支持到哪里，今后在哪种情境值得记住。个人经历本身的意义也可以构成理由。
+有具体用途且依据足够的放进 admit_ids，并在 outlets 为每条选一个或多个去处。memory 保存值得再想起的认识；personal_experience 保存匠石自身可借鉴的经验；person_experience 保存与该 P 相处的经验，仅有明确人物范围时可选。仅选经验也可以。不要把一次交往概括为对方一贯如此。
+只有复述、重复或缺乏保留理由的放进 discard_ids。其余留在试验区观察，说明还缺什么。两份名单都允许为空，二者不能重叠。容量有余也可以全部放弃。
+ordered_ids 列出本次所有 S 各一次，按相对保留偏好排列。reasons 对每个 S 写 id 和 reason，交代该项去留的依据。推测要写明不确定性，不能声称见过未提供的原文或后续效果。
+要求更新时，standard 用跨批可理解的文字总结取舍条件、与旧标准的变化及仍有疑问的地方，不写请求内代号。其余时候沿用旧标准。"""
     schema = {'type': 'object', 'properties': {
         'ordered_ids': {'type': 'array', 'items': {'type': 'string'}}, 'standard': {'type': 'string'},
         'admit_ids': {'type': 'array', 'items': {'type': 'string'}},
+        'discard_ids': {'type': 'array', 'items': {'type': 'string'}},
+        'outlets': {'type': 'array', 'items': {'type': 'object', 'properties': {
+            'id': {'type': 'string'}, 'kinds': {'type': 'array', 'items': {
+                'enum': ['memory', 'personal_experience', 'person_experience']}}},
+            'required': ['id', 'kinds']}},
         'reasons': {'type': 'array', 'items': {'type': 'object', 'properties': {
             'id': {'type': 'string'}, 'reason': {'type': 'string'}}, 'required': ['id', 'reason']}}},
-        'required': ['ordered_ids', 'standard', 'admit_ids', 'reasons']}
+        'required': ['ordered_ids', 'standard', 'admit_ids', 'discard_ids', 'outlets', 'reasons']}

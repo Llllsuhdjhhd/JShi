@@ -349,11 +349,11 @@ class PersonExperienceSource:
     name = "person_experience"
     status = "implemented"
 
-    def __init__(
-        self, experience: LongTermExperiencePort, *, budget_chars: int = 500
-    ) -> None:
+    def __init__(self, experience: LongTermExperiencePort | None, *, budget_chars: int = 500,
+                 reflection_store=None) -> None:
         self._experience = experience
         self._budget_chars = max(0, budget_chars)
+        self._reflection_store = reflection_store
 
     def load(self, ctx: AssemblyContext) -> LoadResult:
         speaker = ctx.speaker
@@ -369,7 +369,7 @@ class PersonExperienceSource:
             ctx.input_text,
             object_ids=(speaker.object_id,),
             budget_chars=self._budget_chars,
-        )
+        ) if self._experience is not None else ()
         fragments = tuple(
             AssemblyFragment(
                 source=self.name,
@@ -388,6 +388,19 @@ class PersonExperienceSource:
             for item in hits
             if item.object_id == speaker.object_id and item.content.strip()
         )
+        if self._reflection_store is not None:
+            remaining = self._budget_chars - sum(len(f.content) for f in fragments)
+            additions = []
+            for row in self._reflection_store.experiences(ctx.subject_id, 'person_experience',
+                                                         object_id=speaker.object_id):
+                content = '【自省形成的相处经验，可修订】' + row['content']
+                if len(content) <= remaining:
+                    additions.append(AssemblyFragment(source=self.name, id='reflection-person:' + row['id'],
+                        content=content, kind=self.name, object_id=speaker.object_id, query_object_role='interlocutor',
+                        source_ids=tuple(row['source_ids']), occurred_at=datetime.fromtimestamp(row['created']).astimezone(),
+                        variant='reflection', status='active', importance=0.7))
+                    remaining -= len(content)
+            fragments += tuple(additions)
         return LoadResult(fragments=fragments)
 
 

@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from jshi.core.param_overlay import override_snapshot
 from jshi.experienceledger import InProcessExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
 from jshi.models import ModelRequest, ModelResponse
@@ -107,12 +108,12 @@ class IntrospectionModel:
         )
 
 
-def runtime(tmp_path, model=None):
+def runtime(tmp_path, model=None, **options):
     # 本机用临时插件跑时 tmp_path 会在多次运行间复用：身份文件与库都换新名字，避免脏数据
     identities = IdentityRepository(tmp_path / f"identities-{uuid.uuid4().hex[:8]}.json")
     identities.create(IdentityProfile("stone", "匠石", "测试基础型", "我是匠石。"))
     repository = SubjectRepository(tmp_path / f"subject-{uuid.uuid4().hex[:8]}.sqlite3")
-    process = SubjectProcess(repository, identities, model or IntrospectionModel())
+    process = SubjectProcess(repository, identities, model or IntrospectionModel(), **options)
     process.profiles.create(
         ObjectProfile(
             object_id="OBJ-USER", label="user", source="test", status="confirmed"
@@ -259,6 +260,16 @@ def test_epistemic_source_detects_revised_and_carries_two_time_centers(tmp_path)
     assert request.entry_at_also == cognition.created_at
     assert request.origin == "manual_transition"
 
+    repository.add_history(
+        HistoryRecord(
+            subject_id="stone", kind=HistoryKind.SUBJECT, event_type="activity_completed", content={}
+        )
+    )
+    with override_snapshot({"INTROSPECTION_TRANSITION_HISTORY_LIMIT": 1}):
+        assert EpistemicRevisedSource().detect(ctx) == ()
+    with override_snapshot({"INTROSPECTION_TRANSITION_HISTORY_LIMIT": 2}):
+        assert EpistemicRevisedSource().detect(ctx)[0].entry_ref == request.entry_ref
+
 
 def test_idle_source_takes_earliest_unseen_segment_in_window():
     ledger = InProcessExperienceLedger()
@@ -304,6 +315,28 @@ def test_idle_source_skips_already_introspected():
 
     assert len(found) == 1
     assert found[0].entry_text == "第二段"
+
+
+def test_idle_source_uses_independent_segment_and_history_windows():
+    ledger = InProcessExperienceLedger()
+    segments = [
+        ledger.append_external("stone", actor_object_id="OBJ-USER", text_raw=text)
+        for text in ("甲", "乙", "丙")
+    ]
+    history = [
+        SimpleNamespace(
+            event_type="introspection_done", content={"entry_ref": f"segment:{segments[1].segment_id}"}
+        ),
+        SimpleNamespace(event_type="activity_completed", content={}),
+    ]
+    repo = SimpleNamespace(list_history=lambda subject_id, limit: history[-limit:])
+    ctx = _context(moment=MOMENT_IDLE, ledger=ledger, repository=repo)
+    for window, scan, expected in [(2, 1, "乙"), (2, 2, "丙"), (3, 2, "甲")]:
+        with override_snapshot({
+            "INTROSPECTION_IDLE_WINDOW": window,
+            "INTROSPECTION_IDLE_HISTORY_LIMIT": scan,
+        }):
+            assert IdleSource().detect(ctx)[0].entry_text == expected
 
 
 def test_merge_keeps_one_introspection_per_record():
@@ -493,6 +526,70 @@ def test_reflect_degrades_on_bad_json(tmp_path):
     assert "结构化解析失败" in result.content
     done = [item for item in _subject_history(repository) if item.event_type == "introspection_done"]
     assert done[-1].content["degraded"] is True
+
+
+def test_behavior_learning_can_reach_personal_world_without_event_memory(tmp_path):
+    class Model(IntrospectionModel):
+        def generate(self, request):
+            if request.purpose == 'introspection' and request.input_text.startswith('{"samples":'):
+                packet = json.loads(request.input_text)
+                key, = [sample['id'] for sample in packet['samples']]
+                return ModelResponse(model=self.name, text=json.dumps({
+                    'ordered_ids': [key], 'reasons': [{'id': key, 'reason': '用于以后估时'}],
+                    'standard': '', 'admit_ids': [key], 'discard_ids': [],
+                    'outlets': [{'id': key, 'kinds': ['personal_experience']}]}))
+            return super().generate(request)
+    process, _ = runtime(tmp_path, Model())
+    _experience(process)
+    process.reflect('stone', '回顾刚才的选择')
+    store = process.reflection_memory
+    assert store.pending_thought('stone')['mode'] == 'review_behavior_result'
+    assert not store.experiences('stone', 'personal_experience')
+    assert process.reflection_executor.tick('stone', force=True)
+    assert store.pending_thought('stone') is None
+    current = process.assemble_current_state('stone', '继续')
+    personal = [item for item in current.personal_items if item.entry_type == 'personal_experience']
+    assert len(personal) == 1 and personal[0].source_ids
+    assert '先估时再承诺' in personal[0].content
+    assert not store.recall_insights('stone', '先估时再承诺', None, 4)
+
+
+def test_manual_reflection_routes_a_cited_encounter_to_the_correct_person(tmp_path):
+    class Model(IntrospectionModel):
+        def generate(self, request):
+            if request.purpose == 'introspection':
+                if request.input_text.startswith('{"samples":'):
+                    sample, = json.loads(request.input_text)['samples']
+                    assert sample['person'] == 'P1' and sample['sources'] == ['E1']
+                    assert '我今天有些疲倦' in sample['excerpts']['E1']
+                    return ModelResponse(model=self.name, text=json.dumps({
+                        'ordered_ids': ['S1'], 'reasons': [{'id': 'S1', 'reason': '只适用于这次交流'}],
+                        'standard': '', 'admit_ids': ['S1'], 'discard_ids': [],
+                        'outlets': [{'id': 'S1', 'kinds': ['person_experience']}]}))
+                assert '[E1]' in request.input_text and 'OBJ-USER' not in request.input_text
+                self.payload = dict(SIX_ANSWERS, candidates=[{'content': '这次需要给对方留出回答时间',
+                                                            'source_refs': ['E1']}])
+            return super().generate(request)
+    process, _ = runtime(tmp_path, Model())
+    process.activity_ledger.append_external('stone', actor_object_id='OBJ-USER', text_raw='我今天有些疲倦')
+    process.reflect('stone', '回顾这次交谈')
+    assert process.reflection_executor.tick('stone', force=True)
+    entry, = process.reflection_memory.experiences('stone', 'person_experience', object_id='OBJ-USER')
+    assert entry['source_ids'] == [process.activity_ledger.list_experiences('stone')[0].segment_id]
+    assert not process.reflection_memory.experiences('stone', 'personal_experience')
+
+
+def test_replacing_result_evaluator_controls_behavior_without_changing_runner(tmp_path):
+    from jshi.reflection.result_evaluation import ReflectionResultEvaluator
+    class OnlyToolSuggestions(ReflectionResultEvaluator):
+        def behavior_outlets(self, answer):
+            return ['tool']
+    process, repo = runtime(tmp_path, reflection_result_evaluator=OnlyToolSuggestions())
+    _experience(process)
+    process.reflect('stone', '回顾一下')
+    candidate = next(r for r in _subject_history(repo) if r.event_type == 'introspection_candidate')
+    assert candidate.content['suggested_kinds'] == ['tool']
+    assert process.reflection_memory.pending_thought('stone') is None
 
 
 def test_candidate_records_needs_without_writing_personal_world(tmp_path):

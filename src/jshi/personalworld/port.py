@@ -57,13 +57,14 @@ class InProcessPersonalWorld:
         repository: SubjectRepository,
         values: ValuesPort | None = None,
         modules: Sequence[PersonalWorldModule] | None = None,
+        reflection_store=None,
     ) -> None:
         self._repository = repository
         self._values = values or InProcessValues(repository)
         self._modules = tuple(modules) if modules is not None else (
             ValuesModule(self._values),
             CommitmentModule(repository),
-            RemainderModule(repository),
+            RemainderModule(repository, reflection_store),
         )
 
     @property
@@ -164,8 +165,9 @@ class RemainderModule:
 
     name = "remainder"
 
-    def __init__(self, repository: SubjectRepository) -> None:
+    def __init__(self, repository: SubjectRepository, reflection_store=None) -> None:
         self._repository = repository
+        self._reflection_store = reflection_store
 
     def list_standing(self, subject_id: str) -> Sequence[PersonalItem]:
         del subject_id
@@ -179,6 +181,14 @@ class RemainderModule:
             )
             if item.kind in _REMAINDER_KINDS
         ]
+        if self._reflection_store is not None:
+            from datetime import datetime, timezone
+            for row in self._reflection_store.experiences(subject_id, 'personal_experience'):
+                formed = datetime.fromtimestamp(row['created'], timezone.utc)
+                items.append(PersonalItem(
+                    subject_id=subject_id, id='reflection:' + row['id'], kind=PersonalKind.SELF_UNDERSTANDING,
+                    content='【自省形成的个人经验，可修订】' + row['content'], source_ids=tuple(row['source_ids']),
+                    entry_type='personal_experience', created_at=formed, updated_at=formed))
         items.sort(
             key=lambda item: (item_importance(item), item.id),
             reverse=True,

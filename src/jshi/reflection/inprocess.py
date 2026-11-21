@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Callable, Sequence
 
@@ -40,7 +41,7 @@ from .port import (
 )
 from .queue import IntrospectionQueue
 from .runner import run_introspection
-from .scene import build_scene, render_scene
+from .scene import build_scene, person_codes, render_scene
 from .sources import default_sources, detect
 
 logger = logging.getLogger(__name__)
@@ -233,6 +234,7 @@ class InProcessReflection(IntrospectionPort):
                 repository=self.repository,
                 activity_close=self._activity_close,
                 model_tag=self._model_tag(answer),
+                result_evaluator=getattr(self._process, 'reflection_result_evaluator', None),
             )
         except Exception:
             logger.exception("introspection run failed")
@@ -247,6 +249,9 @@ class InProcessReflection(IntrospectionPort):
                 reason="run_failed",
             )
         self.queue.finish(request)
+        executor = getattr(self._process, 'reflection_executor', None)
+        if executor is not None and 'learn' in run.outlets:
+            executor.queue_behavior_result(run, scene)
         return run
 
     def _defer(self, request, scene):
@@ -263,7 +268,17 @@ class InProcessReflection(IntrospectionPort):
         ):
             return _rule_answer(request, scene)
         try:
-            return self._skill.run(self._model_request(request, scene))
+            answer = self._skill.run(self._model_request(request, scene))
+            interaction = answer.interaction_need
+            if interaction and interaction.get('object_id'):
+                codes = person_codes(request, scene.segments, scene.recalled)
+                actors = {code: person for person, code in codes.items()}
+                target = interaction['object_id']
+                if target in actors:
+                    answer = replace(answer, interaction_need=dict(interaction, object_id=actors[target]))
+                elif target not in codes:
+                    answer = replace(answer, interaction_need=None)
+            return answer
         except Exception:
             logger.exception("introspection skill failed")
             return IntrospectionAnswer(

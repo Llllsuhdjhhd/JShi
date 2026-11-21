@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from jshi.core.params import introspection_idle_window, reflection_param
+
 from ..port import (
     MOMENT_IDLE,
     IntrospectionLevel,
@@ -19,7 +21,6 @@ from ..port import (
 )
 from ..scene import segment_text
 
-_IDLE_HISTORY_SCAN = 200
 _INTROSPECTED_EVENTS = frozenset({"introspection_queued", "introspection_done"})
 
 
@@ -31,8 +32,6 @@ class IdleSource:
         segments = list(context.ledger.list_experiences(context.subject_id))
         if not segments:
             return ()
-        from jshi.core.params import introspection_idle_window
-
         idle_window = introspection_idle_window()
         window = segments[-idle_window:] if idle_window > 0 else segments
         seen = _introspected_refs(context)
@@ -58,7 +57,7 @@ class IdleSource:
 def _introspected_refs(context: SourceContext) -> set[str]:
     refs: set[str] = set()
     for record in context.repository.list_history(
-        context.subject_id, limit=_IDLE_HISTORY_SCAN
+        context.subject_id, limit=int(reflection_param("INTROSPECTION_IDLE_HISTORY_LIMIT"))
     ):
         if record.event_type not in _INTROSPECTED_EVENTS:
             continue

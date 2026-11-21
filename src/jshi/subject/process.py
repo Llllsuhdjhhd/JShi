@@ -393,6 +393,7 @@ class SubjectProcess:
         long_term_experience: LongTermExperiencePort | None = None,
         person_review_model: ModelPort | None = None,
         vision=None,
+        reflection_result_evaluator=None,
     ) -> None:
         self.repository = repository
         self.vision = vision
@@ -478,10 +479,12 @@ class SubjectProcess:
             self.memory,
             subject_name=self._subject_display_name,
         )
+        from jshi.reflection.memory_store import ReflectionMemoryStore
+        self.reflection_memory = ReflectionMemoryStore(data_dir / 'reflection_memory.sqlite3')
         if personal_world is None:
             from jshi.personalworld import InProcessPersonalWorld
 
-            personal_world = InProcessPersonalWorld(repository)
+            personal_world = InProcessPersonalWorld(repository, reflection_store=self.reflection_memory)
         self.personal_world = personal_world
         self.values = getattr(personal_world, "values", None)
         self.profiles = ObjectProfileRepository(repository.path)
@@ -500,11 +503,7 @@ class SubjectProcess:
                 ObjectSource(),
                 ActivityWindowSource(),
                 PersonalWorldSource(self.personal_world),
-                *(
-                    (PersonExperienceSource(self.long_term_experience),)
-                    if self.long_term_experience is not None
-                    else ()
-                ),
+                PersonExperienceSource(self.long_term_experience, reflection_store=self.reflection_memory),
                 PersonPortraitSource(self.memory),
                 MemorySource(
                     repository, memory=self.memory, profiles=self.profiles
@@ -522,12 +521,13 @@ class SubjectProcess:
         self.recall_traces = recall_traces or JsonlRecallTraceStore()
         self.zone_store = zone_store or ZoneStore()
         self._bind_tool_scene_loader()
+        from jshi.reflection.result_evaluation import ReflectionResultEvaluator
+        self.reflection_result_evaluator = (ReflectionResultEvaluator() if reflection_result_evaluator is None
+                                            else reflection_result_evaluator)
         self.reflection: ReflectionPort = reflection or InProcessReflection(
             self, model=introspection_model or cognition
         )
-        from jshi.reflection.memory_store import ReflectionMemoryStore
         from jshi.reflection.executor import ReflectionExecutor
-        self.reflection_memory = ReflectionMemoryStore(data_dir / 'reflection_memory.sqlite3')
         from jshi.memory.working_set import RecallWorkingSetStore
         from jshi.memory.recall_flow import RecallFlow
         self.recall_flow = RecallFlow(self.memory, self.reflection_memory,

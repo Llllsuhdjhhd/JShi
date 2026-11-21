@@ -30,7 +30,7 @@ INTROSPECTION_INSTRUCTION = """你在做一次自省：回头看看自己做过�
 ⑤b 要不要借助外部工具：只有"离开主体才办得到、有代价、经 200"才算工具（叫模型、召回记忆、
    装载个人世界都不算）。要就写清 tool_capability / tool_when / tool_worth
 ⑤c 要不要与某个对象进一步交流（道歉 / 回话 / 解释 / 确认）：要就写清对谁、要点、什么时候
-⑥ worth_learning：是否值得记下来并学习；值得就把要点放进 candidates
+⑥ worth_learning：有没有值得进一步评价的认识？它可以是值得记住的一件事、我自己的经验、或与特定人物的相处经验。有就把每条认识写进 candidates 的 content，source_refs 引用具体现场 E 或回忆 M。进一步交流的对象用本次人物 P。只需补答、请求工具或没有新认识时，可以留空。后续评价决定最终去处。
 
 材料不足就直说"材料不足"，不要编；不要写"我学到了很多"这类空话。"""
 
@@ -67,7 +67,9 @@ INTROSPECTION_JSON_SCHEMA: Mapping[str, Any] = {
             "required": ["kind"],
         },
         "worth_learning": {"type": "boolean"},
-        "candidates": {"type": "array", "items": {"type": "object"}},
+        "candidates": {"type": "array", "items": {"type": "object", "properties": {
+            "content": {"type": "string"}, "source_refs": {"type": "array", "items": {"type": "string"}}},
+            "required": ["content"]}},
     },
     "required": [
         "what",
@@ -103,12 +105,12 @@ class IntrospectionSkill(Skill[IntrospectionAnswer]):
             why=_text(data.get("why")),
             better=_text(data.get("better")),
             next_time=_text(data.get("next_time")),
-            tool_need=bool(data.get("tool_need")),
+            tool_need=data.get("tool_need") is True,
             tool_capability=_text(data.get("tool_capability")),
             tool_when=_text(data.get("tool_when")),
             tool_worth=_text(data.get("tool_worth")),
             interaction_need=interaction,
-            worth_learning=bool(data.get("worth_learning")),
+            worth_learning=data.get("worth_learning") is True,
             candidates=candidates,
             mode="model",
         )

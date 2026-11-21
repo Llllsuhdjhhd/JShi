@@ -64,7 +64,7 @@ class ReflectionMemoryStore:
                 theme TEXT, created REAL, done INTEGER DEFAULT 0);
             """)
             columns = {r['name'] for r in db.execute('PRAGMA table_info(observations)')}
-            for name, default in (('candidate_ids', '[]'), ('outcome', '{}')):
+            for name, default in (('candidate_ids', '[]'), ('outcome', '{}'), ('proposals', '[]')):
                 if name not in columns:
                     db.execute(f"ALTER TABLE observations ADD COLUMN {name} TEXT DEFAULT '{default}'")
             for name, default in (('run_id', ''), ('activity_id', ''), ('status', 'legacy'),
@@ -80,9 +80,15 @@ class ReflectionMemoryStore:
             insight_columns = {r['name'] for r in db.execute('PRAGMA table_info(insights)')}
             if 'last_used' not in insight_columns:
                 db.execute('ALTER TABLE insights ADD COLUMN last_used REAL DEFAULT 0')
+            if 'outlets' not in insight_columns:
+                db.execute("""ALTER TABLE insights ADD COLUMN outlets TEXT NOT NULL DEFAULT '["memory"]'""")
+            db.execute('CREATE INDEX IF NOT EXISTS insights_recent ON insights(subject,created DESC,id)')
 
     @contextmanager
-    def connect(self):
+    def connect(self, existing=None):
+        if existing is not None:
+            yield existing
+            return
         db = sqlite3.connect(self.path, timeout=float(param('REFLECTION_DB_TIMEOUT_SECONDS')))
         db.row_factory = sqlite3.Row
         try:
@@ -222,9 +228,10 @@ class ReflectionMemoryStore:
         with self.connect() as db:
             db.execute('UPDATE observations SET stage=? WHERE id=?', (stage, observation))
 
-    def set_candidates(self, observation, ids):
+    def set_proposals(self, observation, items):
         with self.connect() as db:
-            db.execute("UPDATE observations SET stage='compare',candidate_ids=? WHERE id=?", (dump(ids), observation))
+            db.execute("UPDATE observations SET stage=?,proposals=?,candidate_ids=? WHERE id=? AND stage='reprocess'",
+                       ('compare' if items else 'done', dump(items), dump([v['id'] for v in items]), observation))
 
     def save_feedback(self, observation, feedback, visible_ids):
         now = time.time()
@@ -270,58 +277,95 @@ class ReflectionMemoryStore:
         return {key: float(param('REFLECTION_FEEDBACK_WEIGHT')) * sum(values) / len(values)
                 for key, values in signals.items()}
 
-    def latest_standard(self, subject):
-        with self.connect() as db:
+    def latest_standard(self, subject, connection=None):
+        with self.connect(connection) as db:
             row = db.execute('SELECT * FROM standards WHERE subject=? ORDER BY id DESC LIMIT 1', (subject,)).fetchone()
         return dict(row) if row else None
 
-    def samples(self, subject):
-        with self.connect() as db:
+    def samples(self, subject, connection=None):
+        with self.connect(connection) as db:
             rows = db.execute('SELECT * FROM pressure WHERE subject=? ORDER BY bucket,rank,created DESC', (subject,)).fetchall()
         return [dict(row, item=json.loads(row['payload'])) for row in rows]
 
-    def add_candidates(self, subject, candidates, sources, object_id):
-        added = []
+    def prepare_candidates(self, candidates, sources, object_id, subject=None, *, evidence=None):
+        items = {}
         max_chars = int(param('REFLECTION_ITEM_CHARS'))
+        for candidate in candidates[:int(param('REFLECTION_COMPARE_ITEMS')) // 2]:
+            text = candidate.get('content')
+            all_refs = candidate.get('source_ids')
+            if not isinstance(text, str) or not text.strip() or len(text) > max_chars or not isinstance(all_refs, list):
+                continue
+            if not all(isinstance(ref, str) and ref in sources for ref in all_refs) or not all_refs:
+                continue
+            text = text.strip()
+            # 同一句认识可以分别针对不同人物，试验比较不能合并其范围。
+            scope = candidate.get('person_scope')
+            owner = object_id or scope or ''
+            ident = hashlib.sha256(dump([owner, text]).encode()).hexdigest()
+            item = {'id': ident, 'content': text, 'source_ids': list(dict.fromkeys(all_refs)),
+                    'object_id': owner, 'relation': str(candidate.get('relation', ''))[:max_chars],
+                    'kind': 'reflection_insight'}
+            if scope and scope == owner:
+                item['person_scope'] = scope
+            if len(dump(item).encode()) <= int(param('REFLECTION_PRESSURE_BYTES')):
+                if evidence:
+                    remaining = max_chars
+                    excerpts = {}
+                    for ref in item['source_ids']:
+                        snippet = str(evidence.get(ref) or '')[:remaining]
+                        if snippet:
+                            excerpts[ref] = snippet
+                            remaining -= len(snippet)
+                    item['evidence_excerpts'] = excerpts
+                items[ident] = item
+        if subject is not None and items:
+            # 升级前主键只取正文哈希。同一人物的旧认识继续沿用原 ID。
+            with self.connect() as db:
+                for item in items.values():
+                    old = hashlib.sha256(item['content'].encode()).hexdigest()
+                    row = db.execute('SELECT payload FROM pressure WHERE subject=? AND id=? UNION ALL '
+                                     'SELECT payload FROM insights WHERE subject=? AND id=? LIMIT 1',
+                                     (subject, old, subject, old)).fetchone()
+                    if row and json.loads(row[0]).get('object_id', '') == item['object_id']:
+                        item['id'] = old
+        return list(items.values())
+
+    def add_candidates(self, subject, candidates, sources, object_id):
+        items = self.prepare_candidates(candidates, sources, object_id, subject)
         with self.connect() as db:
-            for candidate in candidates[:int(param('REFLECTION_COMPARE_ITEMS')) // 2]:
-                text = str(candidate.get('content', '')).strip()
-                all_refs = candidate.get('source_ids', [])
-                if not isinstance(all_refs, list):
-                    continue
-                refs = tuple(dict.fromkeys(str(x) for x in all_refs))
-                if not text or len(text) > max_chars or not refs or not set(refs) <= sources:
-                    continue
-                ident = hashlib.sha256(text.encode()).hexdigest()
-                if db.execute('SELECT 1 FROM pressure WHERE subject=? AND id=?', (subject, ident)).fetchone():
-                    continue
-                # 先填 A，再填 B；后续交替更新，两个容器永不封闭。
-                totals = {r['bucket']: r['n'] for r in db.execute(
-                    'SELECT bucket,SUM(bytes) n FROM pressure WHERE subject=? GROUP BY bucket', (subject,))}
-                state = db.execute('SELECT phase FROM pressure_state WHERE subject=?', (subject,)).fetchone()
-                phase = state[0] if state else 'A'
-                bucket = phase[-1]
-                item = {'id': ident, 'content': text, 'source_ids': refs, 'object_id': object_id or '',
-                        'relation': str(candidate.get('relation', ''))[:max_chars], 'kind': 'reflection_insight'}
-                payload = dump(item)
-                size = len(payload.encode())
-                if size > int(param('REFLECTION_PRESSURE_BYTES')):
-                    continue
-                rank = db.execute('SELECT COALESCE(MAX(rank),0)+1 FROM pressure WHERE subject=? AND bucket=?',
-                                  (subject, bucket)).fetchone()[0]
-                db.execute('INSERT INTO pressure VALUES(?,?,?,?,?,?,?)',
-                           (subject, ident, bucket, payload, size, rank, time.time()))
-                if phase.startswith('rolling'):
-                    phase = 'rollingB' if bucket == 'A' else 'rollingA'
-                elif totals.get(bucket, 0) + size >= int(param('REFLECTION_PRESSURE_BYTES')):
-                    phase = 'B' if bucket == 'A' else 'rollingA'
-                db.execute('INSERT OR REPLACE INTO pressure_state VALUES(?,?)', (subject, phase))
-                added.append(ident)
+            return self._insert_samples(subject, items, db)
+
+    def _insert_samples(self, subject, items, db):
+        added = []
+        for item in items:
+            ident = item['id']
+            if db.execute('SELECT 1 FROM pressure WHERE subject=? AND id=?', (subject, ident)).fetchone():
+                continue
+            # 先填 A，再填 B；后续交替更新，两个容器永不封闭。
+            totals = {r['bucket']: r['n'] for r in db.execute(
+                'SELECT bucket,SUM(bytes) n FROM pressure WHERE subject=? GROUP BY bucket', (subject,))}
+            state = db.execute('SELECT phase FROM pressure_state WHERE subject=?', (subject,)).fetchone()
+            phase = state[0] if state else 'A'
+            bucket = phase[-1]
+            payload = dump({key: value for key, value in item.items() if key != 'evidence_excerpts'})
+            size = len(payload.encode())
+            if size > int(param('REFLECTION_PRESSURE_BYTES')):
+                continue
+            rank = db.execute('SELECT COALESCE(MAX(rank),0)+1 FROM pressure WHERE subject=? AND bucket=?',
+                              (subject, bucket)).fetchone()[0]
+            db.execute('INSERT INTO pressure VALUES(?,?,?,?,?,?,?)',
+                       (subject, ident, bucket, payload, size, rank, time.time()))
+            if phase.startswith('rolling'):
+                phase = 'rollingB' if bucket == 'A' else 'rollingA'
+            elif totals.get(bucket, 0) + size >= int(param('REFLECTION_PRESSURE_BYTES')):
+                phase = 'B' if bucket == 'A' else 'rollingA'
+            db.execute('INSERT OR REPLACE INTO pressure_state VALUES(?,?)', (subject, phase))
+            added.append(ident)
         return added
 
-    def order_and_trim(self, subject, ordered_ids):
+    def order_and_trim(self, subject, ordered_ids, connection=None):
         """局部比较只改样本间的相对位置，未比较的样本不凭空打分。"""
-        with self.connect() as db:
+        with self.connect(connection) as db:
             for bucket in ('A', 'B'):
                 rows = db.execute('SELECT id,rank FROM pressure WHERE subject=? AND bucket=? ORDER BY rank,created',
                                   (subject, bucket)).fetchall()
@@ -339,11 +383,12 @@ class ReflectionMemoryStore:
                     db.execute('DELETE FROM pressure WHERE subject=? AND id=?', (subject, row['id']))
                     total -= row['bytes']
 
-    def standard_due(self, subject):
-        rows = self.samples(subject)
+    def standard_due(self, subject, connection=None):
+        with self.connect(connection) as db:
+            rows = db.execute('SELECT id,bucket,bytes FROM pressure WHERE subject=?', (subject,)).fetchall()
         if not rows:
             return False
-        previous = self.latest_standard(subject)
+        previous = self.latest_standard(subject, connection)
         if previous is None:
             return len(rows) >= 4
         baseline = set(json.loads(previous['snapshot']))
@@ -361,35 +406,110 @@ class ReflectionMemoryStore:
             row = db.execute('SELECT position FROM comparison_cursors WHERE subject=?', (subject,)).fetchone()
         return row[0] if row else 0
 
-    def advance_comparison(self, subject, count):
-        with self.connect() as db:
+    def advance_comparison(self, subject, count, connection=None):
+        with self.connect(connection) as db:
             db.execute('INSERT INTO comparison_cursors VALUES(?,?) ON CONFLICT(subject) '
                        'DO UPDATE SET position=position+excluded.position', (subject, count))
 
-    def save_standard(self, subject, text, evidence):
-        snapshot = [r['id'] for r in self.samples(subject)]
-        with self.connect() as db:
+    def save_standard(self, subject, text, evidence, connection=None):
+        with self.connect(connection) as db:
+            snapshot = [r[0] for r in db.execute('SELECT id FROM pressure WHERE subject=?', (subject,))]
             db.execute('INSERT INTO standards(subject,text,evidence,snapshot,created) VALUES(?,?,?,?,?)',
                        (subject, text, dump(evidence), dump(snapshot), time.time()))
 
-    def admit(self, subject, ids, base_bytes):
+    def admit(self, subject, ids, base_bytes, *, outlets=None, connection=None):
         """实际记忆独立于压力样本；淘汰压力样本不删除已沉淀记忆。"""
         ratio = float(param('REFLECTION_MEMORY_RATIO'))
         cap = min(int(param('REFLECTION_MEMORY_BYTES')),
                   max(int(param('REFLECTION_MEMORY_BOOTSTRAP_BYTES')), int(base_bytes * ratio / (1 - ratio))))
         stored = []
-        with self.connect() as db:
+        with self.connect(connection) as db:
             used = db.execute('SELECT COALESCE(SUM(bytes),0) FROM insights WHERE subject=?', (subject,)).fetchone()[0]
+            memory_used = db.execute("SELECT COALESCE(SUM(bytes),0) FROM insights WHERE subject=? AND EXISTS "
+                                     "(SELECT 1 FROM json_each(outlets) WHERE value='memory')", (subject,)).fetchone()[0]
             for ident in ids:
                 row = db.execute('SELECT * FROM pressure WHERE subject=? AND id=?', (subject, ident)).fetchone()
-                if row is None or used + row['bytes'] > cap:
+                if row is None:
                     continue
-                result = db.execute('INSERT OR IGNORE INTO insights(subject,id,payload,bytes,created) VALUES(?,?,?,?,?)',
-                                    (subject, ident, row['payload'], row['bytes'], time.time()))
-                if result.rowcount:
+                kinds = list(outlets[ident]) if outlets is not None else ['memory']
+                if 'person_experience' in kinds:
+                    item = json.loads(row['payload'])
+                    if not item.get('person_scope') or item['person_scope'] != item.get('object_id'):
+                        kinds.remove('person_experience')
+                existing = db.execute('SELECT outlets FROM insights WHERE subject=? AND id=?', (subject, ident)).fetchone()
+                old = json.loads(existing[0]) if existing else []
+                if 'memory' in kinds and 'memory' not in old and memory_used + row['bytes'] > cap:
+                    kinds.remove('memory')
+                if not kinds or (not existing and used + row['bytes'] > int(param('REFLECTION_MEMORY_BYTES'))):
+                    continue
+                merged = list(dict.fromkeys([*old, *kinds]))
+                if merged == old:
+                    continue
+                if existing:
+                    db.execute('UPDATE insights SET outlets=? WHERE subject=? AND id=?', (dump(merged), subject, ident))
+                else:
+                    db.execute('INSERT INTO insights(subject,id,payload,bytes,created,outlets) VALUES(?,?,?,?,?,?)',
+                               (subject, ident, row['payload'], row['bytes'], time.time(), dump(kinds)))
                     used += row['bytes']
-                    stored.append(ident)
+                if 'memory' in kinds and 'memory' not in old:
+                    memory_used += row['bytes']
+                stored.append(ident)
         return stored
+
+    def commit_review(self, subject, task, proposals, decision, base_bytes, *, update_standard):
+        """去留、试验区限额和任务进度一并提交。中断时从原任务重试。"""
+        reviewed = set(decision.ordered)
+        discarded = set(decision.discard)
+        remaining = [item for item in proposals if item['id'] not in reviewed]
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            observation, job = task.get('id'), task.get('job_id')
+            if observation:
+                row = db.execute("SELECT proposals FROM observations WHERE subject=? AND id=? AND stage='compare'",
+                                 (subject, observation)).fetchone()
+                if not row or json.loads(row[0]) != proposals:
+                    return None
+            if job:
+                row = db.execute('SELECT payload FROM thought_jobs WHERE subject=? AND id=? AND done=0',
+                                 (subject, job)).fetchone()
+                if not row or json.loads(row[0])['proposals'] != proposals:
+                    return None
+            db.executemany('DELETE FROM pressure WHERE subject=? AND id=?', [(subject, key) for key in discarded])
+            kept = reviewed - discarded
+            self._insert_samples(subject, [item for item in proposals if item['id'] in kept], db)
+            admitted = self.admit(subject, decision.admit, base_bytes, outlets=decision.outlets, connection=db)
+            self.order_and_trim(subject, decision.ordered, db)
+            self.advance_comparison(subject, max(1, len(reviewed) // 2), db)
+            updated = update_standard and self.standard_due(subject, db)
+            if updated:
+                prev = self.latest_standard(subject, db)
+                self.save_standard(subject, decision.standard, {
+                    'ordered_ids': list(decision.ordered), 'reasons': decision.reasons,
+                    'previous_version': prev['id'] if prev else None}, db)
+            if observation:
+                db.execute('UPDATE observations SET proposals=?,stage=? WHERE subject=? AND id=?',
+                           (dump(remaining), 'compare' if remaining else 'done', subject, observation))
+            if job:
+                db.execute('UPDATE thought_jobs SET payload=?,done=? WHERE subject=? AND id=?',
+                           (dump({'proposals': remaining}), int(not remaining), subject, job))
+            delivered = {}
+            for key in decision.admit:
+                row = db.execute('SELECT outlets FROM insights WHERE subject=? AND id=?', (subject, key)).fetchone()
+                delivered[key] = [kind for kind in decision.outlets[key] if row and kind in json.loads(row[0])]
+        return admitted, updated, delivered
+
+    def experiences(self, subject, outlet, *, object_id=None, limit=4):
+        """已接纳的自身经验或指定人物的相处经验。试验样本与普通记忆不在此视图中。"""
+        if outlet not in ('personal_experience', 'person_experience') or limit <= 0:
+            return []
+        if outlet == 'person_experience' and not object_id:
+            return []
+        with self.connect() as db:
+            rows = db.execute('SELECT payload,created FROM insights WHERE subject=? AND EXISTS '
+                              '(SELECT 1 FROM json_each(outlets) WHERE value=?) '
+                              "AND (? IS NULL OR json_extract(payload,'$.object_id')=?) "
+                              'ORDER BY created DESC,id LIMIT ?', (subject, outlet, object_id, object_id, limit))
+            return [dict(json.loads(row['payload']), created=row['created']) for row in rows]
 
     def recall_insights(self, subject, query, object_id, limit, allowed_objects=()):
         from jshi.memory.port import RecalledFragment
@@ -399,7 +519,8 @@ class ReflectionMemoryStore:
                 return []
             clauses = ' OR '.join("payload LIKE ? ESCAPE '\\'" for _ in terms)
             patterns = ['%' + term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%' for term in terms]
-            rows = db.execute('SELECT * FROM insights WHERE subject=? AND (' + clauses + ') '
+            rows = db.execute("SELECT * FROM insights WHERE subject=? AND EXISTS "
+                              "(SELECT 1 FROM json_each(outlets) WHERE value='memory') AND (" + clauses + ') '
                               'ORDER BY last_used DESC,created DESC LIMIT ?',
                               (subject, *patterns, int(param('REFLECTION_INSIGHT_CANDIDATES')))).fetchall()
         result = []

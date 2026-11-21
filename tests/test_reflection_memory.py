@@ -37,6 +37,7 @@ class ThoughtsModel:
     name = 'offline-thoughts'
     after_call = None
     bad = False
+    comparison = None
 
     def generate(self, request):
         data = json.loads(request.input_text)
@@ -45,7 +46,11 @@ class ThoughtsModel:
         if 'samples' in data:
             ids = [r['id'] for r in data['samples']]
             result = {'ordered_ids': ids[::-1], 'standard': '保留有证据、能够解释等待条件的认识。',
-                      'admit_ids': ids, 'reasons': [{'id': i, 'reason': '有具体条件与依据'} for i in ids]}
+                      'admit_ids': ids, 'discard_ids': [],
+                      'outlets': [{'id': i, 'kinds': ['memory']} for i in ids],
+                      'reasons': [{'id': i, 'reason': '有具体条件与依据'} for i in ids]}
+            if self.comparison:
+                result.update(self.comparison(data['samples']))
         elif '发现新关系' in request.system_extra:
             result = {'candidates': [{'content': 'waiting condition：我认为等待应结合完整表达判断。',
                                      'source_ids': [data['events'][0]['event_id']], 'relation': '相似情境比较'}]}
@@ -255,3 +260,103 @@ def test_worker_can_restart_after_host_disconnect(system):
     finally:
         executor.detach(second)
         executor._thread.join(timeout=1)
+
+
+@pytest.mark.parametrize('outcome', ['discard', 'trial', 'experiences', 'multiple'])
+def test_review_routes_independently_of_free_space(system, outcome):
+    store, backend, memory, executor, model = system
+    from dataclasses import replace
+    backend.items = [replace(item, interlocutor_object_ids=('person',)) for item in backend.items]
+    def choose(samples):
+        assert len(samples) == 1
+        sample, = samples
+        assert sample['id'] == 'S1' and sample['person'] == 'P1'
+        assert sample['excerpts']['E1'] and sample['sources'] == ['E1']
+        key = sample['id']
+        keep = outcome in ('experiences', 'multiple')
+        kinds = ['personal_experience', 'person_experience']
+        if outcome == 'multiple':
+            kinds.append('memory')
+        return {'admit_ids': [key] if keep else [], 'discard_ids': [key] if outcome == 'discard' else [],
+                'outlets': [{'id': key, 'kinds': kinds}] if keep else []}
+    model.comparison = choose
+    memory.recall('stone', 'waiting condition', object_id='person', limit=6)
+    assert executor.tick('stone', force=True)
+    assert executor.tick('stone', force=True)
+    assert not store.samples('stone')
+    assert executor.tick('stone', force=True)
+    assert store.pending('stone') is None
+    assert bool(store.samples('stone')) == (outcome != 'discard')
+    assert bool(store.recall_insights('stone', 'waiting condition', 'person', 5)) == (outcome == 'multiple')
+    for kind in ('personal_experience', 'person_experience'):
+        assert bool(store.experiences('stone', kind, object_id='person')) == (outcome in ('experiences', 'multiple'))
+        assert not store.experiences('other', kind, object_id='person')
+    assert not store.experiences('stone', 'person_experience', object_id='stranger')
+    from jshi.assembly.sources import PersonExperienceSource
+    source = PersonExperienceSource(None, reflection_store=store)
+    speaker = SimpleNamespace(object_id='person', status='confirmed')
+    ctx = SimpleNamespace(subject_id='stone', input_text='waiting condition', speaker=speaker)
+    assert bool(source.load(ctx).fragments) == (outcome in ('experiences', 'multiple'))
+    speaker.status = 'unknown'
+    assert not source.load(ctx).fragments
+
+
+def test_invalid_routes_retry_without_leaking_candidates(system):
+    store, _, memory, executor, model = system
+    memory.recall('stone', 'waiting condition', object_id='person', limit=6)
+    assert executor.tick('stone', force=True)
+    assert executor.tick('stone', force=True)
+    model.comparison = lambda samples: {'outlets': [{'id': 'S1', 'kinds': ['person_experience']}]}
+    assert not executor.tick('stone', force=True)  # 仅查询对象，缺少交往证据
+    assert store.pending('stone')['stage'] == 'compare'
+    assert not store.samples('stone')
+    model.comparison = lambda samples: {'discard_ids': ['S1']}  # 同时入选与放弃
+    assert not executor.tick('stone', force=True)
+    model.comparison = None
+    assert executor.tick('stone', force=True)
+    assert len(store.samples('stone')) == 1
+
+
+def test_preupgrade_memory_keeps_its_outlet_and_scoped_identity(tmp_path):
+    import hashlib
+    import sqlite3
+    key = hashlib.sha256(b'older experience').hexdigest()
+    path = tmp_path / 'legacy.sqlite3'
+    item = {'id': key, 'content': 'older experience', 'relation': 'basis', 'object_id': 'p',
+            'source_ids': ['e'], 'kind': 'reflection_insight'}
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE insights(subject TEXT,id TEXT,payload TEXT,bytes INTEGER,created REAL,'
+                   'PRIMARY KEY(subject,id))')
+        db.execute('INSERT INTO insights VALUES(?,?,?,?,?)', ('s', key, dump(item), 123, time.time()))
+    db.close()
+    store = ReflectionMemoryStore(path)
+    assert store.recall_insights('s', 'older experience', 'p', 2)[0].event_id == 'insight:' + key
+    assert not store.experiences('s', 'personal_experience')
+    assert store.prepare_candidates([item], {'e'}, 'p', 's')[0]['id'] == key
+    assert store.prepare_candidates([item], {'e'}, 'other', 's')[0]['id'] != key
+
+
+def test_memory_quota_does_not_block_an_independent_experience_outlet(system, monkeypatch):
+    store, _, _, _, _ = system
+    monkeypatch.setitem(params.REFLECTION_DEFAULTS, 'REFLECTION_MEMORY_BOOTSTRAP_BYTES', (256, 256, 1024, 'int'))
+    key, = seed(store, 'waiting condition ' * 20)
+    assert store.admit('stone', [key], 0, outlets={key: ('memory', 'personal_experience')}) == [key]
+    assert store.experiences('stone', 'personal_experience')
+    assert not store.recall_insights('stone', 'waiting condition', 'person', 4)
+
+
+def test_failure_while_committing_keeps_review_work_atomic(system, monkeypatch):
+    store, _, memory, executor, _ = system
+    memory.recall('stone', 'waiting condition', object_id='person', limit=4)
+    assert executor.tick('stone', force=True)
+    assert executor.tick('stone', force=True)
+    def fail(*args):
+        raise RuntimeError('simulated commit interruption')
+    with monkeypatch.context() as patch:
+        patch.setattr(store, 'order_and_trim', fail)
+        assert not executor.tick('stone', force=True)
+    assert not store.samples('stone')
+    assert not store.recall_insights('stone', 'waiting condition', 'person', 4)
+    assert store.pending('stone')['stage'] == 'compare'
+    assert executor.tick('stone', force=True)
+    assert len(store.samples('stone')) == 1

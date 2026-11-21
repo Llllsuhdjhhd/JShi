@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from jshi.core.params import reflection_param
+
 from ..port import (
     MOMENT_AFTER_ACTIVITY,
     MOMENT_IDLE,
@@ -24,13 +26,12 @@ from ..port import (
 class EpistemicRevisedSource:
     name = "epistemic_revised"
     moments = frozenset({MOMENT_AFTER_ACTIVITY, MOMENT_IDLE})
-    history_scan = 50
     target_states = frozenset({"revised", "rejected"})
 
     def detect(self, context: SourceContext) -> tuple[IntrospectionRequest, ...]:
         found: list[IntrospectionRequest] = []
         history = context.repository.list_history(
-            context.subject_id, limit=self.history_scan
+            context.subject_id, limit=int(reflection_param("INTROSPECTION_TRANSITION_HISTORY_LIMIT"))
         )
         for record in history:
             if record.event_type != "epistemic_transition":

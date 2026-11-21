@@ -12,7 +12,8 @@ from jshi.core.params import introspection_enabled, reflection_param as param
 from jshi.models import ModelRequest
 from jshi.skill.base import SkillError
 from .memory_store import dump, similarity
-from .thoughts import RecallEvaluationThought, RecallReprocessingThought, PressureComparisonThought
+from .thoughts import RecallEvaluationThought, RecallReprocessingThought
+from .result_evaluation import ReflectionResultEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +26,13 @@ class ReflectionExecutor:
     def __init__(self, process, legacy, store, model):
         self.process, self.legacy, self.store = process, legacy, store
         self.model = model
+        self.result_evaluator = getattr(process, 'reflection_result_evaluator', None)
+        if self.result_evaluator is None:
+            self.result_evaluator = ReflectionResultEvaluator()
         self.skills = {
             'evaluate': RecallEvaluationThought(model),
             'reprocess': RecallReprocessingThought(model),
-            'compare': PressureComparisonThought(model),
+            'compare': self.result_evaluator.comparison_skill(model),
         }
         self.handlers = {'evaluate': self.evaluate, 'reprocess': self.reprocess, 'compare': self.compare,
                          'behavior': self.behavior}
@@ -110,7 +114,11 @@ class ReflectionExecutor:
             if generic:
                 self.checkpoint()
                 self.store.ran(subject_id, now)
-                self.handlers[generic['mode']](subject_id, json.loads(generic['payload']))
+                payload = json.loads(generic['payload'])
+                if generic['mode'] == 'review_behavior_result':
+                    self.compare(subject_id, dict(payload, job_id=generic['id'], activity_id=generic['theme']))
+                    return True
+                self.handlers[generic['mode']](subject_id, payload)
                 self.checkpoint()
                 self.store.finish_thought(generic['id'])
                 self.audit(subject_id, generic['mode'], {'job_id': generic['id']})
@@ -282,14 +290,75 @@ class ReflectionExecutor:
             answer['candidates'] = [dict(item, source_ids=[references[ref] for ref in item.get('source_ids', ())])
                                     for item in answer['candidates'] if isinstance(item, dict)
                                     and item.get('source_ids') and all(ref in references for ref in item['source_ids'])]
-        ids = self.store.add_candidates(subject, [r for r in answer['candidates'] if isinstance(r, dict)],
-                                       {r['event_id'] for r in materials['events']}, task['object_id'])
-        self.store.set_candidates(task['id'], ids)
+        events = materials['events']
+        candidates = self.result_evaluator.recall_proposals(answer['candidates'], events)
+        # 查询对象可能只是被提及的人。相处经验要求所引事件能归到同一交往对象。
+        actors, evidence = {}, {}
+        for event in events:
+            people = set(event.get('interlocutor_object_ids') or ())
+            if not people and event.get('object_id') and event.get('query_object_role') == 'interlocutor':
+                people.add(event['object_id'])
+            actors[event['event_id']] = people
+            evidence[event['event_id']] = event.get('content') or event.get('text', '')
+        candidates = [dict(item) for item in candidates]
+        for item in candidates:
+            item.pop('person_scope', None)
+            refs = item.get('source_ids')
+            if isinstance(refs, list) and refs and all(isinstance(ref, str) for ref in refs):
+                groups = [actors.get(ref, set()) for ref in refs]
+                if len(groups[0]) == 1 and all(group == groups[0] for group in groups):
+                    person = next(iter(groups[0]))
+                    if not task['object_id'] or task['object_id'] == person:
+                        item['person_scope'] = person
+        items = self.store.prepare_candidates(candidates, set(evidence), task['object_id'], subject, evidence=evidence)
+        ids = [item['id'] for item in items]
+        self.store.set_proposals(task['id'], items)
         self.audit(subject, 'recall_reprocessing', {'observation': task['id'], 'candidate_ids': ids, **answer})
 
+    def queue_behavior_result(self, run, scene):
+        from .scene import segment_text
+        references = {}
+        for index, segment in enumerate(scene.segments, 1):
+            references[f'E{index}'] = (segment.segment_id, segment_text(segment), segment.actor_object_id)
+        for index, item in enumerate(scene.recalled, 1):
+            if item.kind != 'reflection_insight' and not item.event_id.startswith('insight:'):
+                people = item.interlocutor_object_ids
+                person = people[0] if len(people) == 1 else None
+                references[f'M{index}'] = (item.event_id, item.content or item.text, person)
+        if not references:
+            return
+        source = run.cognitive_content_id
+        evidence = {ident: text for ident, text, _ in references.values()}
+        evidence[source] = run.answer.choice_and_result
+        candidates = []
+        for item in run.answer.candidates:
+            codes = item.get('source_refs', [])
+            if not isinstance(codes, list) or any(not isinstance(code, str) or code not in references for code in codes):
+                continue
+            cited = [references[code] for code in codes]
+            people = {person for _, _, person in cited}
+            candidates.append(dict(content=item.get('content'), relation=run.answer.why,
+                source_ids=[ident for ident, _, _ in cited] or [source],
+                person_scope=next(iter(people)) if len(people) == 1 else None))
+        subject = run.request.subject_id
+        candidates = self.result_evaluator.recall_proposals(candidates, [{'text': t} for t in evidence.values()])
+        items = self.store.prepare_candidates(candidates, set(evidence), run.request.object_id, subject, evidence=evidence)
+        if items:
+            job = self.store.enqueue_thought(subject, 'review_behavior_result', {'proposals': items}, run.activity_id)
+            if job is None:
+                self.audit(subject, 'result_review_skipped', {'activity_id': run.activity_id, 'reason': 'queue_full'})
+
     def compare(self, subject, task):
+        self._record_activity_id = task.get('activity_id') or ('reflection-' + str(task['id']) if task.get('id') else '')
+        proposals = task.get('proposals', [])
+        if isinstance(proposals, str):
+            proposals = json.loads(proposals)
         rows = self.store.samples(subject)
-        new_ids = set(json.loads(task.get('candidate_ids', '[]')))
+        previous_ids = {row['id'] for row in rows}
+        rows.extend({'id': item['id'], 'bucket': 'pending', 'item': item}
+                    for item in proposals if item['id'] not in previous_ids)
+        new_ids = ({item['id'] for item in proposals} if proposals
+                   else set(json.loads(task.get('candidate_ids', '[]'))))
         if not rows:
             if task.get('id'):
                 self.store.finish_stage(task['id'], 'done')
@@ -309,37 +378,26 @@ class ReflectionExecutor:
             if row not in sample:
                 sample.append(row)
         previous = self.store.latest_standard(subject)
-        due = self.store.standard_due(subject)
-        payload = {'samples': [{'bucket': r['bucket'], **r['item']} for r in sample],
-                   'previous_standard': previous['text'] if previous else '', 'update_standard': due,
-                   'capacity_per_bucket': int(param('REFLECTION_PRESSURE_BYTES'))}
-        while len(dump(payload)) > int(param('REFLECTION_CONTEXT_CHARS')) and len(sample) > 1:
-            sample.pop()
-            payload['samples'].pop()
-        answer = self.ask('compare', subject, payload)
-        visible = {r['id'] for r in sample}
-        ordered = answer['ordered_ids']
-        reasons = answer['reasons']
-        if (len(ordered) != len(visible) or set(ordered) != visible or
-            any(not isinstance(r, dict) for r in reasons) or
-            {r.get('id') for r in reasons} != visible or
-            any(not str(r.get('reason', '')).strip() for r in reasons) or
-            not set(answer['admit_ids']) <= visible or (due and not answer['standard'].strip()) or
-            len(answer['standard']) > int(param('REFLECTION_STANDARD_CHARS'))):
-            raise SkillError('comparison IDs/reasons do not match visible sample')
-        self.store.order_and_trim(subject, ordered)
-        self.store.advance_comparison(subject, max(1, len(sample) // 2))
-        due = due and self.store.standard_due(subject)
-        if due:
-            self.store.save_standard(subject, answer['standard'], {'ordered_ids': ordered, 'reasons': reasons,
-                                      'previous_version': previous['id'] if previous else None})
+        due = self.store.standard_due(subject) or (previous is None and len(rows) >= 4)
+        decision = self.result_evaluator.compare(sample, previous['text'] if previous else '', due,
+                                                 lambda payload: self.ask('compare', subject, payload))
+        visible = {row['id'] for row in sample}
+        if not decision.ordered or not set(decision.ordered) <= visible or (proposals and not new_ids.intersection(decision.ordered)):
+            raise SkillError('result review did not cover the pending sample')
+        decision.validate(decision.ordered, update_standard=due)
         size_fn = getattr(self.process.memory, 'memory_bytes', None)
         base_bytes = size_fn(subject) if callable(size_fn) else 0
-        admitted = self.store.admit(subject, answer['admit_ids'], base_bytes)
-        if task.get('id'):
-            self.store.finish_stage(task['id'], 'done')
-        self.audit(subject, 'pressure_comparison', {'sample_ids': ordered, 'standard_updated': due,
-                                                  'admitted_ids': admitted, **answer})
+        self.checkpoint()
+        committed = self.store.commit_review(subject, task, proposals, decision, base_bytes, update_standard=due)
+        if committed is not None:
+            admitted, updated, delivered = committed
+            self.audit(subject, 'pressure_comparison', {
+                'observation': task.get('id'), 'job_id': task.get('job_id'), 'origin_activity': task.get('activity_id'),
+                'sample_ids': list(decision.ordered), 'ordered_ids': list(decision.ordered),
+                'standard_updated': updated, 'standard': decision.standard, 'admitted_ids': admitted,
+                'admit_ids': list(decision.admit), 'discard_ids': list(decision.discard),
+                'outlets': decision.outlets, 'delivered_outlets': delivered, 'reasons': [{'id': key, 'reason': reason}
+                                                        for key, reason in decision.reasons.items()]})
 
     def behavior(self, subject, task):
         self.checkpoint()

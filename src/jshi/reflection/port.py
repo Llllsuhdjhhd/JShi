@@ -178,6 +178,7 @@ class IntrospectionRun:
     duration_ms: float = 0.0
     model_tag: str = ""
     reason: str = ""
+    outlets: tuple[str, ...] = ()
 
 
 @dataclass

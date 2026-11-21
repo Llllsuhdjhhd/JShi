@@ -121,6 +121,14 @@ def build_scene(
     )
 
 
+def person_codes(request, segments, recalled):
+    people = [request.object_id, *(getattr(s, 'actor_object_id', None) for s in segments)]
+    for item in recalled:
+        people.extend(getattr(item, 'interlocutor_object_ids', ()) or ())
+        people.append(getattr(item, 'object_id', None))
+    return {person: f'P{index}' for index, person in enumerate(dict.fromkeys(p for p in people if p), 1)}
+
+
 def render_scene(
     request: IntrospectionRequest,
     segments: tuple[object, ...],
@@ -128,9 +136,16 @@ def render_scene(
     window: tuple[datetime, datetime],
 ) -> str:
     """把现场写成给模型看的正文（六问的输入）。"""
+    actors = person_codes(request, segments, recalled)
+    topic = request.entry_text
+    for index, segment in enumerate(segments, 1):
+        if request.entry_ref == f"segment:{getattr(segment, 'segment_id', '')}" and topic == segment_text(segment):
+            topic = f'E{index}'
+            break
     lines = [
-        f"【现场｜条目 {request.entry_ref}｜来源 {request.trigger.value}】",
-        f"对象：{request.object_id or '主体自己'}",
+        f"【现场｜来源 {request.trigger.value}】",
+        f"对象：{actors.get(request.object_id, '主体自己')}",
+        f"所审视的事：{topic}",
         f"当时：{_fmt(window[0])} ~ {_fmt(window[1])}",
         "",
         f"— 当时的上下文与前后现场（{len(segments)} 段，按时间）—",
@@ -138,9 +153,10 @@ def render_scene(
     if segments:
         for index, segment in enumerate(segments, start=1):
             kind = getattr(getattr(segment, "output_kind", None), "value", "?")
-            actor = getattr(segment, "actor_object_id", None) or "系统"
+            actor = actors.get(getattr(segment, "actor_object_id", None)) or getattr(
+                getattr(segment, 'actor_kind', None), 'value', '系统')
             lines.append(
-                f"[{index}] {_fmt(getattr(segment, 'occurred_at', None))} "
+                f"[E{index}] {_fmt(getattr(segment, 'occurred_at', None))} "
                 f"{kind}/{actor}：{segment_text(segment)}"
             )
     else:
@@ -155,7 +171,9 @@ def render_scene(
                 or getattr(fragment, "text", "")
                 or ""
             )
-            lines.append(f"[{index}] {body}")
+            people = getattr(fragment, 'interlocutor_object_ids', ()) or ()
+            labels = '、'.join(actors[p] for p in people if p in actors)
+            lines.append(f"[M{index}] {_fmt(getattr(fragment, 'occurred_at', None))} {labels} {body}".strip())
     else:
         lines.append("（没有召回）")
     return "\n".join(lines)
@@ -192,4 +210,4 @@ def _brief(value: object) -> str:
 
 
 def _fmt(value: datetime | None) -> str:
-    return value.isoformat(timespec="seconds") if value else "?"
+    return value.isoformat(timespec="minutes") if value else "?"

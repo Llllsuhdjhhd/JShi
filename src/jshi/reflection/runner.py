@@ -33,6 +33,7 @@ def run_introspection(
     repository: object,
     activity_close: object,
     model_tag: str = "",
+    result_evaluator=None,
 ) -> IntrospectionRun:
     """把现场 + 六问写成记录，返回这次自省的结果。"""
     # 延迟导入：避免 reflection → jshi.subject.__init__ → process → reflection 的环
@@ -111,7 +112,7 @@ def run_introspection(
         )
     )
 
-    candidate = candidate_payload(request, answer, scene)
+    candidate = candidate_payload(request, answer, scene, result_evaluator)
     if candidate is not None:
         repository.add_history(
             HistoryRecord(
@@ -140,6 +141,7 @@ def run_introspection(
         duration_ms=duration_ms,
         model_tag=model_tag,
         reason=answer.mode,
+        outlets=tuple(candidate['suggested_kinds']) if candidate else (),
     )
 
 
@@ -147,15 +149,13 @@ def candidate_payload(
     request: IntrospectionRequest,
     answer: IntrospectionAnswer,
     scene: IntrospectionScene,
+    result_evaluator=None,
 ) -> dict[str, Any] | None:
     """⑥ / ⑤b / ⑤c 有内容时，写一条**占位候选**（500 与审核未立，只落记录）。"""
-    kinds: list[str] = []
-    if answer.worth_learning:
-        kinds.append("learn")
-    if answer.tool_need:
-        kinds.append("tool")
-    if answer.interaction_need:
-        kinds.append("commitment")
+    if result_evaluator is None:
+        from .result_evaluation import ReflectionResultEvaluator
+        result_evaluator = ReflectionResultEvaluator()
+    kinds = result_evaluator.behavior_outlets(answer)
     if not kinds:
         return None
     return {
