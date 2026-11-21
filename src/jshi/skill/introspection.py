@@ -17,20 +17,19 @@ from jshi.reflection.port import IntrospectionAnswer
 
 from .base import Skill
 
-INTROSPECTION_INSTRUCTION = """你在做一次自省：回头看看自己做过的事。给你的"现场"由三部分组成——
-当时的上下文、那件事前后的现场、以及从记忆里回溯到的相关片段。
+INTROSPECTION_INSTRUCTION = """你在做一次内在思考。围绕给定问题收集事实，核对原来的理解，再回答六问。现场可能包含当时的经历、工具实际回报和回溯到的原事件。
 
-按六问回答，用第一人称、具体、不空泛：
+按原顺序回答六问；依照交来的问题使用本次实际可见的现场。区分事发时能知道的事实、后来得知的结果和今天的解释。比较旧事时说明异同、反例及其他可能解释。题目超出材料覆盖范围时，写明能回答的范围及收窄的依据。
 
 ① what：发生了什么；先把现场的背景说清（对象、场景、前因、当时看见的材料）
-② choice_and_result：我当时怎么选的、结果如何；参数/取值也套进这个语境（当时取什么值、效果如何）
+② choice_and_result：我当时怎么选的、结果如何。比较或回忆题可说明我想起了什么、当时怎样理解，效果未知就保留未知。
 ③ why（归因）：分开写"我能控制的 / 环境的 / 偶然的"，再补一句"如果是别人做的，我会怎么归因"
-④ better：我哪里可以做得更好、代价是什么；不空泛自夸或自责
+④ better：我可以怎样做得更好、代价是什么；比较或回忆题可核对原解释需要怎样修正。原判断合理时可以确认它。
 ⑤a next_time：以后我应该怎么做，写成"什么情形下做什么"
 ⑤b 要不要借助外部工具：只有"离开主体才办得到、有代价、经 200"才算工具（叫模型、召回记忆、
    装载个人世界都不算）。要就写清 tool_capability / tool_when / tool_worth
 ⑤c 要不要与某个对象进一步交流（道歉 / 回话 / 解释 / 确认）：要就写清对谁、要点、什么时候
-⑥ worth_learning：有没有值得进一步评价的认识？它可以是值得记住的一件事、我自己的经验、或与特定人物的相处经验。有就把每条认识写进 candidates 的 content，source_refs 引用具体现场 E 或回忆 M。进一步交流的对象用本次人物 P。只需补答、请求工具或没有新认识时，可以留空。后续评价决定最终去处。
+⑥ worth_learning：值得进一步评价的纠正或总结写入 candidates 的 content，source_refs 仅引用本次可见的现场 E、原回忆 M 或工具结果 T。进一步交流的对象用本次人物 P。尚待证实的解释或问题单列 open_question，需要等待的事实写 waiting_for，均可留空。候选可为空；试行效果等实际采用后才评价。
 
 材料不足就直说"材料不足"，不要编；不要写"我学到了很多"这类空话。"""
 
@@ -67,6 +66,8 @@ INTROSPECTION_JSON_SCHEMA: Mapping[str, Any] = {
             "required": ["kind"],
         },
         "worth_learning": {"type": "boolean"},
+        "open_question": {"type": "string"},
+        "waiting_for": {"type": "string"},
         "candidates": {"type": "array", "items": {"type": "object", "properties": {
             "content": {"type": "string"}, "source_refs": {"type": "array", "items": {"type": "string"}}},
             "required": ["content"]}},
@@ -111,6 +112,8 @@ class IntrospectionSkill(Skill[IntrospectionAnswer]):
             tool_worth=_text(data.get("tool_worth")),
             interaction_need=interaction,
             worth_learning=data.get("worth_learning") is True,
+            open_question=_text(data.get("open_question")),
+            waiting_for=_text(data.get("waiting_for")),
             candidates=candidates,
             mode="model",
         )

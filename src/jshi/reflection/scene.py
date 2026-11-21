@@ -17,16 +17,20 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from jshi.core.params import (
     introspection_recall_limit,
     introspection_scene_max_segments,
     introspection_scene_window_seconds,
+    reflection_param,
 )
+from jshi.core.scene_text import observation_text
 from jshi.experienceledger.port import SegmentStatus, segment_view_text
+from jshi.memory.port import RecalledFragment
 
-from .port import IntrospectionRequest, IntrospectionScene
+from .port import IntrospectionRequest, IntrospectionScene, IntrospectionTrigger
 
 _USABLE_STATUSES = (SegmentStatus.ACCEPTED, SegmentStatus.CONSUMED)
 
@@ -53,6 +57,7 @@ def build_scene(
     window_seconds: int | None = None,
     max_segments: int | None = None,
     recall_limit: int | None = None,
+    for_question: bool = False,
 ) -> IntrospectionScene | None:
     """按时间窗取段 + 召回一次，拼成现场；没材料返回 ``None``。"""
     if window_seconds is None:
@@ -63,16 +68,34 @@ def build_scene(
         recall_limit = introspection_recall_limit()
     centers = request.centers
     delta = timedelta(seconds=max(1, int(window_seconds)))
-    try:
-        all_segments = list(ledger.list_experiences(request.subject_id))
-    except Exception:
-        all_segments = []
+    anchors = tuple(request.evidence.get("segment_ids", ())) if for_question else ()
+    recall_question = for_question and request.origin == "recall_reprocess"
+    if recall_question and not anchors:
+        all_segments = ()
+    elif anchors and hasattr(ledger, "experiences_by_ids"):
+        all_segments = ledger.experiences_by_ids(request.subject_id, anchors[:max_segments])
+    elif for_question and hasattr(ledger, "read_experience_page"):
+        rows = {}
+        for center in dict.fromkeys(centers):
+            page = ledger.read_experience_page(request.subject_id, start=center - delta,
+                end=center + delta + timedelta(microseconds=1), limit=max_segments,
+                newest_first=True, object_id=request.object_id)
+            rows.update((row.segment_id, row) for row in page)
+        all_segments = rows.values()
+    else:
+        try:
+            all_segments = ledger.list_experiences(request.subject_id)
+        except Exception:
+            if for_question:
+                raise
+            all_segments = ()
 
     picked = [
         segment
         for segment in all_segments
         if getattr(segment, "status", None) in _USABLE_STATUSES
-        and _within(segment, centers, window_seconds)
+        and getattr(segment, "subject_id", request.subject_id) == request.subject_id
+        and (segment.segment_id in anchors if anchors else _within(segment, centers, window_seconds))
     ]
     picked.sort(key=lambda item: getattr(item, "sequence", 0))
     if len(picked) > max_segments:
@@ -82,19 +105,18 @@ def build_scene(
     if not query and picked:
         query = segment_text(picked[0])
     recalled: tuple[object, ...] = ()
-    if query and memory is not None:
+    needs_examples = (not anchors and not request.evidence.get("tool_facts")
+                      or request.evidence.get("method") == "recall")
+    if recall_question:
+        recalled = _observation_fragments(request.evidence.get("recall_events", ()))
+    elif query and memory is not None and (not for_question or needs_examples):
         try:
-            recalled = tuple(
-                memory.recall(
-                    request.subject_id,
-                    query,
-                    limit=recall_limit,
-                    object_id=request.object_id,
-                    level=1,
-                )
-                or ()
-            )
+            with _internal_recall(memory):
+                recalled = tuple(memory.recall(request.subject_id, query, limit=recall_limit,
+                                               object_id=request.object_id, level=1) or ())
         except Exception:
+            if for_question:
+                raise
             recalled = ()
 
     if not picked and not recalled:
@@ -116,9 +138,179 @@ def build_scene(
         window=window,
         segments=segments,
         recalled=recalled,
-        text=render_scene(request, segments, recalled, window),
+        text="" if for_question else render_scene(request, segments, recalled, window),
         source_ids=source_ids,
     )
+
+
+@contextmanager
+def _internal_recall(memory):
+    local = getattr(memory, "_reflection_local", None)
+    if local is None:
+        yield
+        return
+    previous = getattr(local, "internal", False)
+    local.internal = True
+    try:
+        yield
+    finally:
+        local.internal = previous
+
+
+def _observation_fragments(events):
+    fragments = []
+    seen = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        ident = event.get("event_id")
+        content = event.get("content") or event.get("text")
+        if not isinstance(ident, str) or not ident or ident in seen or not isinstance(content, str) or not content.strip():
+            continue
+        if ident.startswith("insight:") or event.get("kind") == "reflection_insight" or event.get("validity", "active") != "active":
+            continue
+        seen.add(ident)
+        stamp = event.get("occurred_at")
+        try:
+            when = datetime.fromisoformat(str(stamp)) if stamp else None
+        except ValueError:
+            when = None
+        people = tuple(event.get("interlocutor_object_ids") or ())
+        if not people and event.get("query_object_role") == "interlocutor" and event.get("object_id"):
+            people = (event["object_id"],)
+        fragments.append(RecalledFragment(ident, "recalled_event", content, content=content,
+                                          kind=event.get("kind", "fact"), occurred_at=when,
+                                          interlocutor_object_ids=people))
+    return tuple(fragments)
+
+
+def _tool_return_excerpt(result):
+    """Surface bounded business values. Keep raw diagnostics, paths and identifiers in the record."""
+    if not isinstance(result, dict):
+        return ""
+    parts = []
+    for key in ("content", "summary", "text", "excerpt", "answer", "value", "unit", "temperature", "count",
+                "duration", "passed", "created", "echo", "结果", "数值", "单位"):
+        value = result.get(key)
+        if isinstance(value, (bool, int, float)) or isinstance(value, str) and value.strip():
+            body = observation_text(str(value)).strip()
+            if not body.startswith(("{", "[", "Traceback ")) and "\n" not in body:
+                parts.append(f"{key}={body[:180]}")
+    return "，".join(parts)[:400]
+
+
+def freeze_question_materials(request, ledger, memory, repository=None):
+    """Snapshot the exact user text and its private citation map, before the call."""
+    scene = build_scene(request, ledger=ledger, memory=memory, for_question=True)
+    segments = scene.segments if scene else ()
+    memories = scene.recalled if scene else ()
+    actors = {}
+    participants_by_ref = {}
+    refs = {}
+    limit = int(reflection_param("REFLECTION_CONTEXT_CHARS"))
+    lines = [f"【待思考的问题】{request.entry_text[:limit // 6]}"]
+    reason = request.evidence.get("reason")
+    if reason:
+        lines.append("选题缘由：" + str(reason)[:limit // 8])
+    for key, label in (("previous_open_question", "上次留下的疑问"), ("previous_waiting_for", "上次等待的条件")):
+        previous = request.evidence.get(key)
+        if isinstance(previous, str) and previous.strip():
+            lines.append(label + "（仍待核对）：" + previous.strip()[:limit // 12])
+    if request.object_id:
+        actors[request.object_id] = "P1"
+        lines.append("问题涉及的人：P1")
+    lines.append("题目线索时间：" + _fmt(request.entry_at))
+    if "baseline_status" in request.evidence:
+        count = request.evidence.get("baseline_sample_count", 0)
+        lines.append(f"发现时的前七天参照：同来源取样 {count} 段，不能据此推及一周全部活动。"
+                     if count else "发现时的前七天参照：没有可对照的样本。")
+    lines.append("【可核对的现场】")
+    remaining = limit - len("\n".join(lines)) - 140
+    counts = {"E": 0, "M": 0, "T": 0}
+    partial = []
+    tool_facts = () if request.origin == "recall_reprocess" else request.evidence.get("tool_facts", ())
+    cognition = None
+    revision = request.trigger == IntrospectionTrigger.EPISTEMIC_REVISED and request.entry_ref.startswith("cognition:")
+    if revision and repository is not None:
+        try:
+            cognition = repository.get_cognitive_content(request.entry_ref.removeprefix("cognition:"))
+        except KeyError:
+            pass
+    source_count = len(segments) + len(memories) + len(tool_facts) + int(revision)
+    excerpt_limit = max(100, remaining // max(1, source_count))
+
+    def add(kind, ident, body, label, people=()):
+        nonlocal remaining
+        if not ident or not isinstance(body, str) or not body.strip():
+            return
+        code = kind + str(counts[kind] + 1)
+        participants = tuple(dict.fromkeys(p for p in people if p))
+        codes = dict(actors)
+        for person in participants:
+            codes.setdefault(person, f"P{len(codes) + 1}")
+        attribution = "、".join(codes[p] for p in participants)
+        heading = f"[{code}] {label} {attribution}："
+        available = min(excerpt_limit, remaining - len(heading) - 1)
+        if available < min(25, len(body)):
+            return
+        if len(body) > available:
+            body = body[:available - 5] + "…（节选）"
+            partial.append(code)
+        remaining -= len(heading) + len(body) + 1
+        counts[kind] += 1
+        actors.update(codes)
+        participants_by_ref[code] = list(participants)
+        refs[code] = [ident, body, participants[0] if len(participants) == 1 else None]
+        lines.append(heading + body)
+
+    if cognition is not None and cognition.subject_id == request.subject_id:
+        add("E", request.entry_ref, cognition.content, "此前形成的认识 " + _fmt(cognition.created_at))
+    for item in segments:
+        body = observation_text(segment_view_text(item))
+        if not body:
+            state = item.state_delta or {}
+            body = next((state[key] for key in ("summary", "reason", "description") if isinstance(state.get(key), str)), "")
+        add("E", item.segment_id, body, _fmt(item.occurred_at) + " " + item.output_kind.value,
+            (item.actor_object_id,) if item.actor_object_id else ())
+    for item in memories:
+        if item.kind == "reflection_insight" or item.event_id.startswith("insight:") or item.validity != "active":
+            continue
+        people = item.interlocutor_object_ids or (
+            (item.object_id,) if item.query_object_role == "interlocutor" and item.object_id else ())
+        add("M", item.event_id, observation_text(item.content or item.text), "原事件 " + _fmt(item.occurred_at), people)
+    for fact in tool_facts:
+        fields = [f"{name}：{fact[key]}" for key, name in (
+            ("need", "原要求"), ("status", "登记状态"), ("summary", "回报摘要"), ("ideal_note", "与预期的差异"))
+            if fact.get(key)]
+        if fact.get("error") and fact["error"] != fact.get("summary"):
+            fields.append("错误：" + str(fact["error"]))
+        if not fact.get("summary") and not fact.get("error"):
+            excerpt = _tool_return_excerpt(fact.get("actual_result"))
+            fields.append("实际返回节选：" + excerpt if excerpt else "没有呈现可核对的返回值。")
+        for key, label in (("time_ms", "工具耗时（毫秒）"), ("cost", "记录的成本")):
+            if isinstance(fact.get(key), (float, int)) and not isinstance(fact[key], bool):
+                fields.append(f"{label}：{fact[key]}")
+        try:
+            when = datetime.fromisoformat(str(fact["at"]))
+        except (ValueError, KeyError):
+            when = None
+        add("T", fact.get("source_id"), "；".join(fields), "工具回报 " + _fmt(when))
+    presented = {v[0] for v in refs.values()}
+    if request.origin == "recall_reprocess":
+        wanted = [*request.evidence.get("segment_ids", ()), *(item.event_id for item in memories)]
+    else:
+        wanted = [*request.evidence.get("segment_ids", ()),
+                  *(fact["source_id"] for fact in tool_facts if fact.get("source_id"))]
+        if revision:
+            wanted.append(request.entry_ref)
+    missing = [ident for ident in wanted if ident not in presented]
+    if missing:
+        lines.append(f"有 {len(missing)} 条指定材料未呈现。")
+    if not refs:
+        lines.append("（本次没有可核对的原件）")
+    return {"text": "\n".join(lines), "references": refs, "actors": actors, "missing": missing, "partial": partial,
+            "participants": participants_by_ref, "counts": counts,
+            "subject": request.subject_id, "request_id": request.request_id}
 
 
 def person_codes(request, segments, recalled):

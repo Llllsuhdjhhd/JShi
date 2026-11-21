@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field, replace
+from itertools import islice
 from datetime import datetime
 from typing import Mapping, Sequence
 
@@ -423,6 +425,31 @@ class InProcessExperienceLedger(ExperienceLedgerPort):
             for segment in self._state(subject_id).segments
             if segment.sequence > after_sequence
         )
+
+    def read_experience_page(
+        self, subject_id: str, *, after_sequence: int = 0, limit: int = 8,
+        start: datetime | None = None, end: datetime | None = None,
+        newest_first: bool = False, object_id: str | None = None,
+    ) -> tuple[ExperienceSegment, ...]:
+        rows = self._state(subject_id).segments
+        begin = bisect_right(rows, after_sequence, key=lambda row: row.sequence)
+        positions = range(begin, len(rows))
+        if newest_first:
+            positions = reversed(positions)
+        eligible = (rows[i] for i in positions
+                    if rows[i].status != SegmentStatus.ARCHIVED
+                    and (object_id is None or rows[i].actor_object_id == object_id)
+                    and (start is None or rows[i].occurred_at >= start)
+                    and (end is None or rows[i].occurred_at < end))
+        return tuple(islice(eligible, max(0, limit)))
+
+    def experiences_by_ids(
+        self, subject_id: str, segment_ids: Sequence[str],
+    ) -> tuple[ExperienceSegment, ...]:
+        wanted = dict.fromkeys(segment_ids)
+        found = {row.segment_id: row for row in self._state(subject_id).segments
+                 if row.segment_id in wanted and row.status != SegmentStatus.ARCHIVED}
+        return tuple(found[key] for key in wanted if key in found)
 
     @staticmethod
     def _coerce_assessment(

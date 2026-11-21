@@ -9,9 +9,11 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from jshi.core.params import reflection_param as param
 from jshi.textutil import query_terms
+from .question_store import QuestionStore
 
 
 def dump(value):
@@ -33,6 +35,8 @@ def evaluation_enabled(row):
 class ReflectionMemoryStore:
     def __init__(self, path: Path):
         self.path = Path(path)
+        self.questions = QuestionStore(self)
+        self.discovery_supported = True
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db:
             db.execute('PRAGMA journal_mode=WAL')
@@ -42,6 +46,9 @@ class ReflectionMemoryStore:
                 id INTEGER PRIMARY KEY, subject TEXT, query TEXT, object_id TEXT,
                 payload TEXT, created REAL, stage TEXT DEFAULT 'evaluate');
             CREATE INDEX IF NOT EXISTS observation_subject ON observations(subject,stage,id);
+            CREATE TABLE IF NOT EXISTS inner_rating_exports (
+                observation INTEGER PRIMARY KEY, subject TEXT NOT NULL, token TEXT, lease_until REAL);
+            CREATE INDEX IF NOT EXISTS inner_rating_subject ON inner_rating_exports(subject, observation);
             CREATE TABLE IF NOT EXISTS feedback (
                 subject TEXT, observation INTEGER, event_id TEXT, query TEXT,
                 object_id TEXT, effect REAL, reason TEXT, created REAL,
@@ -57,18 +64,22 @@ class ReflectionMemoryStore:
                 PRIMARY KEY(subject,id));
             CREATE TABLE IF NOT EXISTS schedules (
                 subject TEXT PRIMARY KEY, last_run REAL);
+            CREATE TABLE IF NOT EXISTS inner_route (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL, mode INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS pressure_state (subject TEXT PRIMARY KEY, phase TEXT);
             CREATE TABLE IF NOT EXISTS comparison_cursors (subject TEXT PRIMARY KEY, position INTEGER);
             CREATE TABLE IF NOT EXISTS thought_jobs (
                 id INTEGER PRIMARY KEY, subject TEXT, mode TEXT, payload TEXT,
                 theme TEXT, created REAL, done INTEGER DEFAULT 0);
             """)
+            self.questions.initialize(db)
+            db.execute('BEGIN IMMEDIATE')
             columns = {r['name'] for r in db.execute('PRAGMA table_info(observations)')}
             for name, default in (('candidate_ids', '[]'), ('outcome', '{}'), ('proposals', '[]')):
                 if name not in columns:
                     db.execute(f"ALTER TABLE observations ADD COLUMN {name} TEXT DEFAULT '{default}'")
             for name, default in (('run_id', ''), ('activity_id', ''), ('status', 'legacy'),
-                                  ('scope', '[]'), ('details', '{}'), ('evaluation', '{}')):
+                                  ('scope', '[]'), ('details', '{}'), ('evaluation', '{}'), ('deep_owner', 'legacy')):
                 if name not in columns:
                     db.execute(f"ALTER TABLE observations ADD COLUMN {name} TEXT DEFAULT '{default}'")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS recall_run_unique ON observations(run_id) WHERE run_id!=''")
@@ -97,6 +108,25 @@ class ReflectionMemoryStore:
         finally:
             db.close()
 
+    def discovery_mode(self, connection=None):
+        """A newer on-disk overlay owns the routing watermark across process restarts."""
+        from jshi.core.param_overlay import current_snapshot
+        if not self.discovery_supported:
+            return 0
+        mode = int(param('INNER_ACTIVITY_MODE'))
+        snapshot = current_snapshot()
+        if snapshot is not None and snapshot.path is None:
+            # Explicit test override has no persisted overlay epoch.
+            return mode
+        with self.connect(connection) as db:
+            row = db.execute('SELECT version,mode FROM inner_route WHERE singleton=1').fetchone()
+            if snapshot is None or (row and row['version'] >= snapshot.version):
+                return row['mode'] if row else mode
+            db.execute('INSERT INTO inner_route(singleton,version,mode) VALUES(1,?,?) '
+                       'ON CONFLICT(singleton) DO UPDATE SET version=excluded.version,mode=excluded.mode '
+                       'WHERE inner_route.version<excluded.version', (snapshot.version, mode))
+            return db.execute('SELECT mode FROM inner_route WHERE singleton=1').fetchone()[0]
+
     def observe(self, subject, query, object_id, fragments):
         if not query.strip() or not fragments:
             return
@@ -113,7 +143,8 @@ class ReflectionMemoryStore:
                 return
             db.execute("INSERT INTO observations(subject,query,object_id,payload,created) VALUES(?,?,?,?,?)",
                        (subject, query, object_id or '', dump(items), time.time()))
-            db.execute("DELETE FROM observations WHERE subject=? AND stage='done' AND id NOT IN "
+            db.execute("DELETE FROM observations WHERE subject=? AND stage='done' "
+                       "AND id NOT IN (SELECT observation FROM inner_rating_exports) AND id NOT IN "
                        "(SELECT id FROM observations WHERE subject=? ORDER BY id DESC LIMIT ?)",
                        (subject, subject, int(param('REFLECTION_OBSERVATIONS'))))
 
@@ -138,19 +169,23 @@ class ReflectionMemoryStore:
                    'policy_version': request.policy_version, 'session_id': request.session_id,
                    'mode': request.mode}
         with self.connect() as db:
-            db.execute('INSERT OR IGNORE INTO observations(subject,query,object_id,payload,created,stage,run_id,activity_id,status,scope,details,outcome) '
-                       'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+            db.execute('BEGIN IMMEDIATE')
+            owner = 'discovery' if request.run_id and self.discovery_mode(db) == 2 else 'legacy'
+            db.execute('INSERT OR IGNORE INTO observations(subject,query,object_id,payload,created,stage,run_id,activity_id,status,scope,details,outcome,deep_owner) '
+                       'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
                        (request.subject_id, request.query_text, request.interlocutor_object_id or '',
                         dump(items), request.created_at or time.time(), 'waiting', request.run_id,
-                        request.activity_id, batch.status, dump(request.object_ids), dump(details), dump(outcome)))
+                        request.activity_id, batch.status, dump(request.object_ids), dump(details), dump(outcome), owner))
             # Bounded per subject; completed history is reclaimed before pending work.
             keep = int(param('REFLECTION_OBSERVATIONS'))
-            db.execute("DELETE FROM observations WHERE subject=? AND stage='done' AND id NOT IN "
+            db.execute("DELETE FROM observations WHERE subject=? AND stage='done' "
+                       "AND id NOT IN (SELECT observation FROM inner_rating_exports) AND id NOT IN "
                        '(SELECT id FROM observations WHERE subject=? ORDER BY id DESC LIMIT ?)',
                        (request.subject_id, request.subject_id, keep))
 
     def link_run_outcome(self, run_id, plan, ratings):
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM observations WHERE run_id=?', (run_id,)).fetchone()
             if row is None:
                 return
@@ -163,7 +198,8 @@ class ReflectionMemoryStore:
             if stage == 'evaluate' and pending_count >= int(param('REFLECTION_OBSERVATIONS')):
                 stage = 'done'
                 outcome['evaluation_skipped'] = 'queue_capacity'
-            db.execute('UPDATE observations SET outcome=?,stage=? WHERE run_id=?', (dump(outcome), stage, run_id))
+            db.execute("UPDATE observations SET outcome=?,stage=CASE WHEN stage='waiting' THEN ? ELSE stage END "
+                       "WHERE run_id=?", (dump(outcome), stage, run_id))
             for ident in outcome.get('model_visible_ids', ()):
                 if ident.startswith('insight:'):
                     db.execute('UPDATE insights SET last_used=? WHERE subject=? AND id=?',
@@ -176,7 +212,8 @@ class ReflectionMemoryStore:
                 outcome = json.loads(row['outcome'])
                 outcome['response_status'] = status
                 stage = 'evaluate' if evaluation_enabled(row) else 'done'
-                db.execute('UPDATE observations SET outcome=?,stage=? WHERE run_id=?', (dump(outcome), stage, run_id))
+                db.execute("UPDATE observations SET outcome=?,stage=CASE WHEN stage='waiting' THEN ? ELSE stage END "
+                           "WHERE run_id=?", (dump(outcome), stage, run_id))
 
     def link_delivery(self, activity_id, status):
         with self.connect() as db:
@@ -193,11 +230,56 @@ class ReflectionMemoryStore:
                 outcome['working_set_committed'] = bool(committed)
                 db.execute('UPDATE observations SET outcome=? WHERE run_id=?', (dump(outcome), run_id))
 
-    def save_evaluation(self, observation, evaluation, reviewed_ids):
+    def save_evaluation(self, observation, evaluation, reviewed_ids, connection=None):
         value = dict(evaluation, reviewed_ids=sorted(reviewed_ids), evaluator_version='recall-evaluation-v2',
                      evaluated_at=time.time())
+        with self.connect(connection) as db:
+            db.execute('UPDATE observations SET evaluation=? WHERE subject=? AND id=?',
+                       (dump(value), observation['subject'], observation['id']))
+
+    def finish_discovery_evaluation(self, task, answer, reviewed_ids, question):
+        """Persist the feedback, six-question handoff and old observation close together."""
         with self.connect() as db:
-            db.execute('UPDATE observations SET evaluation=? WHERE id=?', (dump(value), observation['id']))
+            db.execute('BEGIN IMMEDIATE')
+            updated = db.execute("UPDATE observations SET stage='done' WHERE id=? AND subject=? AND stage='evaluate' "
+                                 "AND run_id!='' AND deep_owner='discovery'",
+                                 (task['id'], task['subject'])).rowcount
+            if not updated:
+                return False
+            self.save_feedback(task, [r for r in answer['feedback'] if isinstance(r, dict)], reviewed_ids, connection=db)
+            self.save_evaluation(task, answer, reviewed_ids, connection=db)
+            if question is not None:
+                self.questions.submit_one(db, task['subject'], question)
+            db.execute('INSERT INTO inner_rating_exports(observation,subject) VALUES(?,?)',
+                       (task['id'], task['subject']))
+            return True
+
+    def pending_projection(self, subject):
+        with self.connect() as db:
+            row = db.execute('SELECT observation AS id FROM inner_rating_exports WHERE subject=? AND '
+                             '(token IS NULL OR lease_until<=?) ORDER BY observation LIMIT 1',
+                             (subject, time.time())).fetchone()
+        return dict(row) if row else None
+
+    def claim_projection(self, subject, observation):
+        token = uuid4().hex
+        now = time.time()
+        with self.connect() as db:
+            taken = db.execute('UPDATE inner_rating_exports SET token=?,lease_until=? WHERE subject=? '
+                               'AND observation=? AND (token IS NULL OR lease_until<=?)',
+                               (token, now+300, subject, observation, now)).rowcount
+            if not taken:
+                return None
+            row = db.execute('SELECT id,activity_id,outcome,evaluation FROM observations WHERE subject=? AND id=?',
+                             (subject, observation)).fetchone()
+            return dict(row, projection_token=token)
+
+    def finish_projection(self, subject, task, *, success):
+        with self.connect() as db:
+            sql = ('DELETE FROM inner_rating_exports' if success else
+                   'UPDATE inner_rating_exports SET token=NULL, lease_until=NULL')
+            db.execute(sql + ' WHERE subject=? AND observation=? AND token=?',
+                       (subject, task['id'], task['projection_token']))
 
     def pending(self, subject):
         with self.connect() as db:
@@ -209,8 +291,9 @@ class ReflectionMemoryStore:
             # A crash/cancellation cannot strand a waiting run forever.
             db.execute("UPDATE observations SET stage='evaluate' WHERE subject=? AND stage='waiting' AND created<?",
                        (subject, time.time() - float(param('RECALL_OUTCOME_WAIT_SECONDS'))))
-            row = db.execute("SELECT * FROM observations WHERE subject=? AND stage NOT IN ('done','waiting') ORDER BY id LIMIT 1",
-                             (subject,)).fetchone()
+            row = db.execute("SELECT * FROM observations WHERE subject=? AND stage NOT IN ('done','waiting') "
+                             "AND (? OR deep_owner!='discovery') ORDER BY id LIMIT 1",
+                             (subject, int(self.discovery_supported))).fetchone()
         return dict(row) if row else None
 
     def link_outcome(self, subject, since, visible_ids, activity_id, plan):
@@ -233,9 +316,9 @@ class ReflectionMemoryStore:
             db.execute("UPDATE observations SET stage=?,proposals=?,candidate_ids=? WHERE id=? AND stage='reprocess'",
                        ('compare' if items else 'done', dump(items), dump([v['id'] for v in items]), observation))
 
-    def save_feedback(self, observation, feedback, visible_ids):
+    def save_feedback(self, observation, feedback, visible_ids, connection=None):
         now = time.time()
-        with self.connect() as db:
+        with self.connect(connection) as db:
             for item in feedback:
                 event_id = str(item.get('event_id', ''))
                 effect = {'helpful': 1, 'irrelevant': -1, 'misleading': -1, 'neutral': 0}.get(item.get('judgment'))
@@ -547,13 +630,18 @@ class ReflectionMemoryStore:
             row = db.execute('SELECT last_run FROM schedules WHERE subject=?', (subject,)).fetchone()
         return row[0] if row else 0
 
-    def enqueue_thought(self, subject, mode, payload, theme):
-        with self.connect() as db:
-            existing = db.execute('SELECT id FROM thought_jobs WHERE subject=? AND mode=? AND theme=? AND done=0',
-                                  (subject, mode, theme)).fetchone()
+    def enqueue_thought(self, subject, mode, payload, theme, connection=None):
+        with self.connect(connection) as db:
+            if connection is None:
+                db.execute('BEGIN IMMEDIATE')
+            # Review themes are immutable originating activity IDs. A consumed review
+            # is still a delivery receipt if a producer restarts before acknowledging it.
+            existing = db.execute("SELECT id FROM thought_jobs WHERE subject=? AND mode=? AND theme=? "
+                                  "AND (done=0 OR mode='review_behavior_result')", (subject, mode, theme)).fetchone()
             if existing:
                 return existing[0]
-            count = db.execute('SELECT COUNT(*) FROM thought_jobs WHERE subject=? AND done=0', (subject,)).fetchone()[0]
+            count = db.execute("SELECT COUNT(*) FROM thought_jobs WHERE subject=? AND done=0 AND mode!='six_questions'",
+                               (subject,)).fetchone()[0]
             from jshi.core.params import introspection_max_queue
             if count >= introspection_max_queue():
                 return None
@@ -562,7 +650,8 @@ class ReflectionMemoryStore:
 
     def pending_thought(self, subject):
         with self.connect() as db:
-            row = db.execute('SELECT * FROM thought_jobs WHERE subject=? AND done=0 ORDER BY id LIMIT 1', (subject,)).fetchone()
+            row = db.execute("SELECT * FROM thought_jobs WHERE subject=? AND done=0 AND mode!='six_questions' "
+                             "ORDER BY id LIMIT 1", (subject,)).fetchone()
         return dict(row) if row else None
 
     def finish_thought(self, ident):

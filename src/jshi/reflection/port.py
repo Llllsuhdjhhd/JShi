@@ -163,6 +163,8 @@ class IntrospectionAnswer:
     raw_text: str = ""
     degraded: bool = False  # 结构化解析失败，降级为原文
     mode: str = "model"  # model | rule | fallback
+    open_question: str = ""
+    waiting_for: str = ""
 
 
 @dataclass(frozen=True)
@@ -196,6 +198,7 @@ class SourceContext:
     plan: Any = None
     action_id: str = ""
     object_id: str | None = None
+    source_owners: Any = None
 
 
 class IntrospectionSource(Protocol):

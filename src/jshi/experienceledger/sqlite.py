@@ -4,7 +4,9 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
+from contextlib import closing
+from itertools import islice
 
 from jshi.core.params import active_zone_chars
 from jshi.experienceledger.inprocess import InProcessExperienceLedger, _SubjectLedgerState
@@ -241,6 +243,62 @@ class SqliteExperienceLedger(InProcessExperienceLedger):
             )
             """
         )
+
+        connection.execute("CREATE INDEX IF NOT EXISTS experience_ref_idx ON experience_segments(subject_id,segment_id)")
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS experience_day_idx ON experience_segments
+            (subject_id,julianday(json_extract(payload,'$.occurred_at')))
+        """)
+
+    def _migrate_legacy_payload(self, db, subject_id):
+        old = db.execute("""SELECT 1 FROM experience_ledger WHERE subject_id=? AND
+            (json_type(payload,'$.segments') IS NOT NULL OR json_type(payload,'$.ingest_entries') IS NOT NULL)""",
+                         (subject_id,)).fetchone()
+        if old:
+            self._load_rows(db, subject_id)
+
+    def read_experience_page(
+        self, subject_id: str, *, after_sequence: int = 0, limit: int = 8,
+        start: datetime | None = None, end: datetime | None = None,
+        newest_first: bool = False, object_id: str | None = None,
+    ) -> tuple[ExperienceSegment, ...]:
+        where = ["subject_id=?", "sequence>?", "coalesce(json_extract(payload,'$.status'),'accepted')!='archived'"]
+        args = [subject_id, after_sequence]
+        if object_id is not None:
+            where.append("json_extract(payload,'$.actor_object_id')=?")
+            args.append(object_id)
+        # SQLite's Julian conversion rounds to milliseconds. Use the indexed
+        # interval to locate rows, then compare the original instants exactly.
+        for value, operator, margin in ((start, '>=', '-'), (end, '<=', '+')):
+            if value is not None:
+                where.append(f"julianday(json_extract(payload,'$.occurred_at')) {operator} julianday(?) {margin} 0.00000002")
+                args.append(value.isoformat())
+        order = "DESC" if newest_first else "ASC"
+        sql = f"SELECT payload FROM experience_segments WHERE {' AND '.join(where)} ORDER BY sequence {order}"
+        with closing(self._connect()) as db, db:
+            self._migrate_legacy_payload(db, subject_id)
+            records = (_segment_from_dict(json.loads(row[0])) for row in db.execute(sql, args))
+            bounded = (row for row in records if (start is None or row.occurred_at >= start)
+                       and (end is None or row.occurred_at < end))
+            return tuple(islice(bounded, max(0, limit)))
+
+    def experiences_by_ids(
+        self, subject_id: str, segment_ids: Sequence[str],
+    ) -> tuple[ExperienceSegment, ...]:
+        keys = tuple(dict.fromkeys(segment_ids))
+        found = {}
+        with closing(self._connect()) as db, db:
+            self._migrate_legacy_payload(db, subject_id)
+            for offset in range(0, len(keys), 200):
+                batch = keys[offset:offset + 200]
+                marks = ','.join('?' for _ in batch)
+                rows = db.execute(f"SELECT payload FROM experience_segments WHERE subject_id=? AND segment_id IN ({marks})",
+                                  (subject_id, *batch))
+                for row in rows:
+                    segment = _segment_from_dict(json.loads(row[0]))
+                    if segment.status != SegmentStatus.ARCHIVED:
+                        found[segment.segment_id] = segment
+        return tuple(found[key] for key in keys if key in found)
 
     def _load(self, subject_id: str) -> _SubjectLedgerState | None:
         connection = self._connect()

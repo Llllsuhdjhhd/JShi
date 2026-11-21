@@ -426,6 +426,8 @@ ZONE_FLUSH_CONSTRAINT = ParamConstraint(
 
 # 回忆自省：容量按 UTF-8 正文字节计，不含 SQLite 索引/页开销。
 REFLECTION_DEFAULTS = {
+    # 0 维持旧入口，1 在隔离记录中观察发现助手，2 由助手交题给六问。
+    "INNER_ACTIVITY_MODE": (0, 0, 2, "int"),
     # 0=legacy, 1=shadow selection, 2=active recall flow.
     "RECALL_FLOW_MODE": (2, 0, 2, "int"),
     "RECALL_CANDIDATE_LIMIT": (12, 1, 60, "int"),

@@ -66,10 +66,11 @@ def merge(
     ``urgency`` 取高；``entry_text`` 取长的那条；``entry_at_also`` 取先到的非空值。
     不合并 → 同一次活动会被开成两条自省，回顾同一件事。
     """
-    grouped: dict[str, IntrospectionRequest] = {}
-    signals: dict[str, list[dict]] = {}
+    grouped: dict[tuple, IntrospectionRequest] = {}
+    signals: dict[tuple, list[dict]] = {}
     for request in requests:
-        key = request.theme
+        # Different revisions of one cognition remain separate source facts.
+        key = (request.theme, request.evidence.get('transition_ref', ''))
         current = grouped.get(key)
         if current is None:
             grouped[key] = request

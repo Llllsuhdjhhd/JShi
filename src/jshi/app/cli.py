@@ -373,6 +373,15 @@ def _parser() -> argparse.ArgumentParser:
     introspect_idle.add_argument("subject_id")
     introspect_idle.add_argument("--object-id", default=None)
 
+    followup = commands.add_parser("introspect-followup", help="把新发生的一段经历交回原题")
+    followup.add_argument("subject_id")
+    followup.add_argument("question_id", help="原问题编号，也可用 reflect 返回的认知编号")
+    followup.add_argument("segment_id", nargs="?", help="实际经历的原段编号，省略则查看建议及已关联记录")
+    followup.add_argument("--stage", choices=("evidence", "adopted", "outcome"), default="evidence",
+                          help="普通补证、实际采用或观察到的结果")
+    followup.add_argument("--suggestion", choices=("next_time", "tool", "interaction"),
+                          help="本次事实关联哪条原建议")
+
     introspect_candidates = commands.add_parser(
         "introspect-candidates", help="300：列出自省候选（只读）"
     )
@@ -758,6 +767,20 @@ def _main() -> None:
         print(f"[认知 {result.id}；状态 {result.epistemic_status.value}]")
     elif args.command == "introspect-idle":
         _run_introspect_idle(process, args.subject_id, args.object_id)
+    elif args.command == "introspect-followup":
+        try:
+            if args.segment_id is None:
+                if args.stage != "evidence" or args.suggestion is not None:
+                    raise ValueError("登记阶段或建议需要提供实际经历原段")
+                report = process.reflection_executor.inner.questions.followups(args.subject_id, args.question_id)
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+                return
+            question = process.revisit_introspection(args.subject_id, args.question_id, args.segment_id,
+                                                     stage=args.stage, suggestion=args.suggestion)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        stage = {"evidence": "补充材料", "adopted": "实际采用", "outcome": "观察结果"}[args.stage]
+        print(f"已关联原段。登记为{stage}，所指原题 {args.question_id}，复核问题编号 {question.request_id}。")
     elif args.command == "introspect-candidates":
         _run_introspect_candidates(process, args.subject_id, args.limit)
     elif args.command == "add-personal":
@@ -911,7 +934,7 @@ def _run_introspect_idle(process, subject_id: str, object_id: str | None) -> Non
     if request is None:
         print("没有可回顾的条目（或命中冷却 / 已自省过）。")
         return
-    print(f"已入队：{request.entry_ref}（{request.level.value}/{request.urgency.value}）")
+    print(f"已入队：{request.entry_ref}（{request.level.value}/{request.urgency.value}），问题编号 {request.request_id}")
     runs = process.drain_introspection(subject_id, limit=1)
     if not runs:
         print("队列里没有可执行的自省。")

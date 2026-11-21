@@ -46,26 +46,24 @@ class EpistemicRevisedSource:
             cognition = _load_cognition(context, content_id)
             if cognition is None:
                 continue
-            found.append(
-                IntrospectionRequest(
-                    subject_id=context.subject_id,
-                    trigger=IntrospectionTrigger.EPISTEMIC_REVISED,
-                    entry_ref=f"cognition:{content_id}",
-                    entry_at=record.created_at,  # 迁移发生时
-                    entry_at_also=getattr(cognition, "created_at", None),  # 认识形成时
-                    entry_text=str(getattr(cognition, "content", "") or ""),
-                    level=IntrospectionLevel.MEDIUM,
-                    urgency=IntrospectionUrgency.SOON,
-                    object_id=context.object_id,
-                    evidence={
-                        "from": str(content.get("from", "")),
-                        "to": to_state,
-                        "reason": str(content.get("reason", "")),
-                    },
-                    origin="manual_transition",
-                )
-            )
+            found.append(self.from_record(record, cognition))
         return tuple(found)
+
+    @staticmethod
+    def from_record(record, cognition):
+        content = record.content
+        evidence = {key: str(content.get(key, "")) for key in ("from", "to", "reason")}
+        if getattr(record, "id", None):
+            evidence["transition_ref"] = "transition:" + record.id
+        if content.get("segment_id"):
+            evidence["segment_ids"] = [content["segment_id"]]
+        return IntrospectionRequest(
+            subject_id=record.subject_id, trigger=IntrospectionTrigger.EPISTEMIC_REVISED,
+            entry_ref=f"cognition:{cognition.id}", entry_at=record.created_at,
+            entry_at_also=cognition.created_at, entry_text=cognition.content,
+            level=IntrospectionLevel.MEDIUM, urgency=IntrospectionUrgency.SOON,
+            evidence=evidence, origin="manual_transition",
+        )
 
 
 def _load_cognition(context: SourceContext, content_id: str):

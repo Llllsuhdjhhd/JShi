@@ -14,6 +14,7 @@ from jshi.skill.base import SkillError
 from .memory_store import dump, similarity
 from .thoughts import RecallEvaluationThought, RecallReprocessingThought
 from .result_evaluation import ReflectionResultEvaluator
+from .inner_runtime import InnerActivityRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,10 @@ class YieldToConversation(Exception):
 
 
 class ReflectionExecutor:
-    def __init__(self, process, legacy, store, model):
+    def __init__(self, process, legacy, store, model, *, discovery_assistant=None):
         self.process, self.legacy, self.store = process, legacy, store
+        self.inner = InnerActivityRuntime(process, legacy, store, discovery_assistant)
+        self._next_phase = {}
         self.model = model
         self.result_evaluator = getattr(process, 'reflection_result_evaluator', None)
         if self.result_evaluator is None:
@@ -99,7 +102,8 @@ class ReflectionExecutor:
         if not introspection_enabled() or busy():
             return False
         pending = self.store.pending(subject_id)
-        continuing = pending and pending['stage'] != 'evaluate'
+        continuing = (pending and pending['stage'] != 'evaluate') or (
+            self.inner.supported and self.inner.questions.has_pending(subject_id))
         if not force and (now - self._last_input < float(param('REFLECTION_IDLE_SECONDS'))
                           or now < self._retry_after.get(subject_id, 0)
                           or (not continuing and now - self.store.last_run(subject_id) < float(param('REFLECTION_INTERVAL_SECONDS')))):
@@ -111,17 +115,16 @@ class ReflectionExecutor:
         try:
             generic = self.store.pending_thought(subject_id)
             task = self.store.pending(subject_id)
+            projection = self.store.pending_projection(subject_id)
+            route = self.inner.mode()
+            # Accepted new-format work retains its owner during rollback.
+            if route or projection or (self.inner.supported and (self.inner.questions.has_pending(subject_id)
+                                                   or self.inner.questions.has_signals(subject_id))):
+                return self._routed_tick(subject_id, now, route, generic, task, projection)
             if generic:
                 self.checkpoint()
                 self.store.ran(subject_id, now)
-                payload = json.loads(generic['payload'])
-                if generic['mode'] == 'review_behavior_result':
-                    self.compare(subject_id, dict(payload, job_id=generic['id'], activity_id=generic['theme']))
-                    return True
-                self.handlers[generic['mode']](subject_id, payload)
-                self.checkpoint()
-                self.store.finish_thought(generic['id'])
-                self.audit(subject_id, generic['mode'], {'job_id': generic['id']})
+                self._generic(subject_id, generic)
                 return True
             if task:
                 mode = task['stage']
@@ -145,6 +148,57 @@ class ReflectionExecutor:
             self._busy = lambda: False
             self._active_stop = None
             self._lock.release()
+
+    def _generic(self, subject, job):
+        payload = json.loads(job['payload'])
+        if job['mode'] == 'review_behavior_result':
+            self.compare(subject, dict(payload, job_id=job['id'], activity_id=job['theme']))
+            return
+        self.handlers[job['mode']](subject, payload)
+        self.checkpoint()
+        self.store.finish_thought(job['id'])
+        self.audit(subject, job['mode'], {'job_id': job['id']})
+
+    def _routed_tick(self, subject, now, mode, generic, observation, projection):
+        """Give each source one turn even when another source is continually busy."""
+        inner = self.inner
+        phases = ['outlets', 'projection', 'recall', 'six', 'signals', 'maintenance', 'old', 'browse']
+        start = self._next_phase.get(subject, 0)
+        self.checkpoint()
+        for offset in range(len(phases)):
+            index = (start + offset) % len(phases)
+            phase = phases[index]
+            if phase == 'outlets' and generic:
+                action = lambda: self._generic(subject, generic)
+            elif phase == 'projection' and projection:
+                action = lambda: self.retry_projection(subject, projection)
+            elif phase == 'recall' and observation:
+                action = lambda: self.handlers[observation['stage']](subject, observation)
+            elif phase == 'six' and inner.questions.has_pending(subject):
+                action = lambda: inner.drain(subject, checkpoint=self.checkpoint)
+            elif phase == 'signals' and inner.questions.has_signals(subject):
+                action = lambda: inner.scan_signals(subject, checkpoint=self.checkpoint)
+            elif phase == 'signals' and mode == 1 and inner.questions.has_signals(subject, shadow=True):
+                action = lambda: inner.scan_signals(subject, shadow=True, checkpoint=self.checkpoint)
+            elif phase == 'maintenance' and self.store.standard_due(subject):
+                action = lambda: self.compare(subject, {'candidate_ids': '[]'})
+            elif phase == 'old' and (mode != 2 or inner.questions.legacy_pending(subject)
+                    or self._legacy_queued(subject)):
+                action = (lambda: self._drain_legacy(subject)) if mode == 2 else (
+                    lambda: self.behavior(subject, {}))
+            elif phase == 'browse' and mode:
+                action = lambda: inner.scan(subject, shadow=mode == 1, checkpoint=self.checkpoint)
+            else:
+                continue
+            self._next_phase[subject] = (index + 1) % len(phases)
+            self.store.ran(subject, now)
+            action()
+            return True
+        return False
+
+    def _legacy_queued(self, subject):
+        queue = getattr(self.legacy, 'queue', None)
+        return queue is not None and any(r.subject_id == subject for r in queue.pending())
 
     def ask(self, mode, subject, payload):
         self.checkpoint()
@@ -195,6 +249,8 @@ class ReflectionExecutor:
                 'note': '返回的候选不等于主认知真正使用；缺少结果证据时只评价相关性。'}
 
     def evaluate(self, subject, task):
+        if task.get('deep_owner') == 'discovery' and not self.inner.supported:
+            return
         self._record_activity_id = task.get('activity_id') or 'reflection-' + str(task['id'])
         materials = self.materials(subject, task)
         payload, references = self.compact_materials(materials) if task.get('run_id') else (materials, {})
@@ -204,14 +260,35 @@ class ReflectionExecutor:
                                   for item in answer['feedback'] if isinstance(item, dict)
                                   and item.get('event_id') in references]
         visible = {item['event_id'] for item in materials['events']}
-        self.store.save_feedback(task, [r for r in answer['feedback'] if isinstance(r, dict)], visible)
-        self.store.save_evaluation(task, answer, visible)
         reprocess = (answer.get('needs_reprocess') is True and bool(str(answer.get('reprocess_reason', '')).strip())
                      and bool(materials['events'])) if task.get('run_id') else True
-        self.store.finish_stage(task['id'], 'reprocess' if reprocess else 'done')
-        if task.get('run_id'):
+        if task.get('deep_owner') == 'discovery':
+            question = (self.inner.recall_question(subject, task, materials, answer['reprocess_reason'])
+                        if reprocess else None)
+            self.checkpoint()
+            if not self.store.finish_discovery_evaluation(task, answer, visible, question):
+                return
+        else:
+            self.store.save_feedback(task, [r for r in answer['feedback'] if isinstance(r, dict)], visible)
+            self.store.save_evaluation(task, answer, visible)
+            self.store.finish_stage(task['id'], 'reprocess' if reprocess else 'done')
+        if task.get('deep_owner') == 'discovery':
+            self.retry_projection(subject, task)
+        elif task.get('run_id'):
             self.export_ratings(subject, task, answer, visible)
         self.audit(subject, 'recall_evaluation', {'observation': task['id'], 'visible_ids': sorted(visible), **answer})
+
+    def retry_projection(self, subject, pending):
+        task = self.store.claim_projection(subject, pending['id'])
+        if task is None:
+            return
+        try:
+            answer = json.loads(task['evaluation'])
+            self.export_ratings(subject, task, answer, set(answer['reviewed_ids']))
+        except Exception:
+            self.store.finish_projection(subject, task, success=False)
+            raise
+        self.store.finish_projection(subject, task, success=True)
 
     @staticmethod
     def compact_materials(materials):
@@ -325,28 +402,35 @@ class ReflectionExecutor:
                 people = item.interlocutor_object_ids
                 person = people[0] if len(people) == 1 else None
                 references[f'M{index}'] = (item.event_id, item.content or item.text, person)
-        if not references:
-            return
-        source = run.cognitive_content_id
-        evidence = {ident: text for ident, text, _ in references.values()}
-        evidence[source] = run.answer.choice_and_result
-        candidates = []
-        for item in run.answer.candidates:
-            codes = item.get('source_refs', [])
-            if not isinstance(codes, list) or any(not isinstance(code, str) or code not in references for code in codes):
-                continue
-            cited = [references[code] for code in codes]
-            people = {person for _, _, person in cited}
-            candidates.append(dict(content=item.get('content'), relation=run.answer.why,
-                source_ids=[ident for ident, _, _ in cited] or [source],
-                person_scope=next(iter(people)) if len(people) == 1 else None))
         subject = run.request.subject_id
-        candidates = self.result_evaluator.recall_proposals(candidates, [{'text': t} for t in evidence.values()])
-        items = self.store.prepare_candidates(candidates, set(evidence), run.request.object_id, subject, evidence=evidence)
+        items = self.behavior_proposals(run.request, run.answer, references, fallback_source=run.cognitive_content_id)
         if items:
             job = self.store.enqueue_thought(subject, 'review_behavior_result', {'proposals': items}, run.activity_id)
             if job is None:
                 self.audit(subject, 'result_review_skipped', {'activity_id': run.activity_id, 'reason': 'queue_full'})
+
+    def behavior_proposals(self, request, answer, references, *, fallback_source=None):
+        """Resolve only references in the frozen input. Legacy self-citations are explicit."""
+        if not references:
+            return []
+        evidence = {ident: text for ident, text, _ in references.values()}
+        if fallback_source:
+            evidence[fallback_source] = answer.choice_and_result
+        candidates = []
+        for item in answer.candidates:
+            codes = item.get('source_refs', [])
+            if not isinstance(codes, list) or any(not isinstance(code, str) or code not in references for code in codes):
+                continue
+            if not codes and not fallback_source:
+                continue
+            cited = [references[code] for code in codes]
+            people = {person for _, _, person in cited}
+            candidates.append(dict(content=item.get('content'), relation=answer.why,
+                source_ids=[ident for ident, _, _ in cited] or [fallback_source],
+                person_scope=next(iter(people)) if len(people) == 1 else None))
+        candidates = self.result_evaluator.recall_proposals(candidates, [{'text': t} for t in evidence.values()])
+        return self.store.prepare_candidates(candidates, set(evidence), request.object_id, request.subject_id,
+                                             evidence=evidence)
 
     def compare(self, subject, task):
         self._record_activity_id = task.get('activity_id') or ('reflection-' + str(task['id']) if task.get('id') else '')
@@ -402,15 +486,11 @@ class ReflectionExecutor:
     def behavior(self, subject, task):
         self.checkpoint()
         self.legacy.enqueue_idle(subject)
-        memory = self.process.memory
-        local = getattr(memory, '_reflection_local', None)
-        if local is not None:
-            local.internal = True
-        try:
-            self.legacy.drain(subject, limit=1)
-        finally:
-            if local is not None:
-                local.internal = False
+        self._drain_legacy(subject)
+
+    def _drain_legacy(self, subject):
+        with self.inner.internal_read():
+            return self.legacy.drain(subject, limit=1)
 
     def audit(self, subject, mode, content):
         from jshi.subject.domain import Activity, ActivityKind, CognitiveContent, CognitiveKind, EpistemicStatus, EvidenceKind, HistoryKind, HistoryRecord

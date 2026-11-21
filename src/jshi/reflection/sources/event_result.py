@@ -46,7 +46,8 @@ class EventResultSource:
                 level=IntrospectionLevel.MEDIUM,
                 urgency=IntrospectionUrgency.SOON,
                 object_id=context.object_id,
-                evidence={"tool_failures": failures},
+                evidence={"tool_failures": failures, "source_versions": [
+                    item["source_id"] for item in failures if item.get("source_id")]},
             ),
         )
 
@@ -72,14 +73,20 @@ def _tool_failures(context: SourceContext) -> list[dict[str, object]]:
             note = str(getattr(result, "ideal_note", "") or "")
             if status == "ok" and (ideal or not note):
                 continue
-            failures.append(
-                {
+            failure = {
                     "status": status,
                     "ideal": ideal,
                     "ideal_note": note,
                     "summary": str(getattr(result, "summary", "") or ""),
-                }
-            )
+            }
+            # Old/custom ports can provide only a text summary. Mark ownership only
+            # when the stored receipt carries the same stable identity as discovery.
+            if getattr(record, 'task_id', None) and getattr(feedback, 'event_id', None):
+                from ..discovery import requests_for_tool_record
+                requests = requests_for_tool_record(context.subject_id, record, (feedback,))
+                if requests:
+                    failure["source_id"] = requests[0].evidence["source_versions"][0]
+            failures.append(failure)
     return failures
 
 

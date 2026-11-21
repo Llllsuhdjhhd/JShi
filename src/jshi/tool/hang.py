@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -13,6 +14,9 @@ import json
 import logging
 import os
 import threading
+import time
+from weakref import WeakMethod
+from uuid import NAMESPACE_URL, uuid5
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -82,6 +86,8 @@ class HangRecord:
     # 最近一次工具侧变化（反馈、阶段、包装、注销）；回写与送达标记不改它。
     updated_at: datetime = field(default_factory=utc_now)
     created_at: datetime = field(default_factory=utc_now)
+    # Journal positions for committed RESULT feedback, keyed by its index in feedback.
+    result_positions: Mapping[str, int] = field(default_factory=dict, compare=False, repr=False)
 
 
 def truncate_note(need: str, limit: int = NOTE_MAX_CHARS) -> str:
@@ -184,7 +190,7 @@ def _dt(raw: Any) -> datetime:
         return utc_now()
 
 
-def _feedback_from_dict(data: Mapping[str, Any]) -> ToolFeedback:
+def _feedback_from_dict(data: Mapping[str, Any], fallback_identity: str = "") -> ToolFeedback:
     estimate = None
     raw_est = data.get("estimate")
     if isinstance(raw_est, Mapping):
@@ -235,8 +241,15 @@ def _feedback_from_dict(data: Mapping[str, Any]) -> ToolFeedback:
         kind = FeedbackKind(kind_raw)
     except ValueError:
         kind = FeedbackKind.RESULT
+    meta = dict(data["meta"]) if isinstance(data.get("meta"), Mapping) else {}
+    try:
+        known_time = datetime.fromisoformat(str(data.get("at") or "")).utcoffset() is not None
+    except ValueError:
+        known_time = False
+    if not known_time:
+        meta["recorded_time_unknown"] = True
     return ToolFeedback(
-        event_id=str(data.get("event_id") or new_id()),
+        event_id=str(data.get("event_id") or uuid5(NAMESPACE_URL, fallback_identity)),
         request_id=str(data.get("request_id") or ""),
         kind=kind,
         at=_dt(data.get("at")),
@@ -244,7 +257,7 @@ def _feedback_from_dict(data: Mapping[str, Any]) -> ToolFeedback:
         estimate=estimate,
         progress=progress,
         result=result,
-        meta=dict(data.get("meta") or {}) if isinstance(data.get("meta"), Mapping) else {},
+        meta=meta,
     )
 
 
@@ -270,6 +283,7 @@ def _record_to_dict(record: HangRecord) -> dict[str, Any]:
         "plan_total": record.plan_total,
         "note": record.note,
         "feedback": [_feedback_to_dict(item) for item in record.feedback],
+        "result_positions": dict(record.result_positions),
         "stages": [stage.as_dict() for stage in record.stages],
         "visible": record.visible,
         "summary": record.summary,
@@ -285,8 +299,8 @@ def _record_to_dict(record: HangRecord) -> dict[str, Any]:
 
 def _record_from_dict(data: Mapping[str, Any]) -> HangRecord:
     feedback = tuple(
-        _feedback_from_dict(item)
-        for item in (data.get("feedback") or ())
+        _feedback_from_dict(item, f"jshi/tool-feedback/{data.get('task_id')}/{i}")
+        for i, item in enumerate(data.get("feedback") or ())
         if isinstance(item, Mapping)
     )
     stages = tuple(
@@ -346,6 +360,7 @@ def _record_from_dict(data: Mapping[str, Any]) -> HangRecord:
         ),
         updated_at=_dt(data.get("updated_at")),
         created_at=_created_at(data),
+        result_positions=dict(data.get("result_positions") or {}),
     )
 
 
@@ -381,7 +396,11 @@ class HangStore:
         self._max_responses = max(1, int(max_responses))
         self._lines = 0
         self._bytes = 0
+        self._result_index: dict[str, list[tuple[int, str, int]]] = {}
+        self._last_result_position = 0
+        self._result_listeners = []
         self._load()
+        self._index_existing_results()
         if self._needs_compaction():
             with self._lock:
                 self._compact()
@@ -404,6 +423,73 @@ class HangStore:
             record = _record_from_dict(data)
             self._records[record.task_id] = record
         self._bytes = self.path.stat().st_size
+
+    def _index_existing_results(self):
+        # Legacy feedback has no receipt cursor. Assign it in stable order once on
+        # load; ordinary subsequent writes/compaction persist those positions too.
+        legacy = []
+        reserved = set()
+        for task, record in self._records.items():
+            for i, item in enumerate(record.feedback):
+                if item.kind != FeedbackKind.RESULT or item.result is None:
+                    continue
+                pos = record.result_positions.get(str(i))
+                if not pos:
+                    stamp = 0 if item.meta.get("recorded_time_unknown") else item.at.timestamp()
+                    legacy.append((stamp, task, i))
+                    continue
+                reserved.add(pos)
+                self._last_result_position = max(self._last_result_position, pos)
+                self._result_index.setdefault(record.subject_id, []).append((pos, task, i))
+        positions_by_task: dict[str,dict[str,int]] = {}
+        previous = 0
+        for stamp, task, i in sorted(legacy):
+            pos = max(previous + 1, int(stamp * 1_000_000) * 1000)
+            while pos in reserved:
+                pos += 1
+            record = self._records[task]
+            if task not in positions_by_task:
+                positions_by_task[task] = dict(record.result_positions)
+            positions_by_task[task][str(i)] = pos
+            self._result_index.setdefault(record.subject_id, []).append((pos, task, i))
+            previous = pos
+        self._last_result_position = max(self._last_result_position, previous)
+        for task, positions in positions_by_task.items():
+            self._records[task] = replace(self._records[task], result_positions=positions)
+        for rows in self._result_index.values():
+            rows.sort()
+
+    def add_result_listener(self, listener):
+        """Observe committed results without taking ownership of notifications."""
+        ref = WeakMethod(listener)
+        with self._lock:
+            self._result_listeners = [item for item in self._result_listeners if item() is not None]
+            if ref not in self._result_listeners:
+                self._result_listeners.append(ref)
+
+    def result_records_for_activity(self, subject_id, activity_id, object_id):
+        with self._lock:
+            return tuple(r for r in self._records.values()
+                         if r.subject_id == subject_id and r.field_ref.get("activity_id") == activity_id
+                         and (r.object_id == object_id or self._linked_owner(r) == object_id))
+
+    def read_result_page(self, subject_id, *, after=0, limit=8, object_id=None):
+        """Read durable results by arrival, independently of notification delivery."""
+        if limit <= 0:
+            return ()
+        with self._lock:
+            rows = self._result_index.get(subject_id, ())
+            start = bisect_right(rows, after, key=lambda row: row[0])
+            result = []
+            for index in range(start, len(rows)):
+                pos, task, i = rows[index]
+                record = self._records.get(task)
+                if record is None or (object_id is not None and record.object_id != object_id):
+                    continue
+                result.append((pos, record, record.feedback[i]))
+                if len(result) == limit:
+                    break
+            return tuple(result)
 
     def _append(self, record: HangRecord) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -455,8 +541,12 @@ class HangStore:
             logger.warning("记挂账本压缩失败，继续追加：%s", self.path, exc_info=True)
             temp.unlink(missing_ok=True)
             return
-        for task_id in set(self._records) - set(lines):
+        removed = set(self._records) - set(lines)
+        for task_id in removed:
             self._records.pop(task_id, None)
+        if removed:
+            for subject, rows in self._result_index.items():
+                self._result_index[subject] = [row for row in rows if row[1] not in removed]
         self._lines = len(ordered)
         self._bytes = total
 
@@ -568,10 +658,32 @@ class HangStore:
             if record.status in {"cancelled", "notified"}:
                 return None
             merged = record.feedback + incoming
-            updated = replace(record, feedback=merged, updated_at=utc_now())
+            positions = dict(record.result_positions)
+            new_results = []
+            for i, item in enumerate(incoming, start=len(record.feedback)):
+                if item.kind == FeedbackKind.RESULT and item.result is not None:
+                    self._last_result_position = max(time.time_ns(), self._last_result_position + 1)
+                    positions[str(i)] = self._last_result_position
+                    new_results.append((self._last_result_position, task_id, i))
+            updated = replace(record, feedback=merged, updated_at=utc_now(), result_positions=positions)
             self._records[task_id] = updated
-            self._append(updated)
-            return updated
+            try:
+                self._append(updated)
+            except OSError:
+                self._records[task_id] = record
+                raise
+            self._result_index.setdefault(record.subject_id, []).extend(new_results)
+            listeners = tuple(self._result_listeners) if new_results else ()
+        if listeners:
+            terminal = tuple(merged[i] for _, _, i in new_results)
+            for ref in listeners:
+                listener = ref()
+                if listener is not None:
+                    try:
+                        listener(updated, terminal)
+                    except Exception:
+                        logger.exception("tool result listener failed; result remains available for a later scan")
+        return updated
 
     def append_stage(
         self, task_id: str, stage: ToolStageEvent

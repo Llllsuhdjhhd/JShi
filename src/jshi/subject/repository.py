@@ -6,7 +6,7 @@ import logging
 import queue
 import sqlite3
 import threading
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -280,8 +280,8 @@ class SubjectRepository:
             )
         return updated
 
-    def add_activity(self, activity: Activity) -> None:
-        with self._connect() as connection:
+    def add_activity(self, activity: Activity, *, connection=None) -> None:
+        with nullcontext(connection) if connection is not None else self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO activities (
@@ -374,8 +374,8 @@ class SubjectRepository:
             rows = connection.execute(query, arguments).fetchall()
         return tuple(_activity(row) for row in rows)
 
-    def add_cognitive_content(self, content: CognitiveContent) -> None:
-        with self._connect() as connection:
+    def add_cognitive_content(self, content: CognitiveContent, *, connection=None) -> None:
+        with nullcontext(connection) if connection is not None else self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO cognitive_contents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -431,8 +431,8 @@ class SubjectRepository:
             ).fetchall()
         return tuple(_cognitive(row) for row in rows)
 
-    def add_transition(self, transition: StateTransition) -> None:
-        with self._connect() as connection:
+    def add_transition(self, transition: StateTransition, *, connection=None) -> None:
+        with nullcontext(connection) if connection is not None else self._connect() as connection:
             connection.execute(
                 "INSERT INTO transitions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -460,9 +460,9 @@ class SubjectRepository:
             ).fetchall()
         return tuple(_transition(row) for row in rows)
 
-    def add_history(self, record: HistoryRecord) -> None:
+    def add_history(self, record: HistoryRecord, *, connection=None) -> None:
         """Queued in order; list_history sees every record added before it."""
-        self._history.put((
+        values = (
             record.id,
             record.subject_id,
             record.kind.value,
@@ -470,7 +470,26 @@ class SubjectRepository:
             json.dumps(record.content, ensure_ascii=False),
             _dump_ids(record.source_ids),
             record.created_at.isoformat(),
-        ))
+        )
+        if connection is None:
+            self._history.put(values)
+        else:
+            connection.execute(_HISTORY_INSERT, values)
+
+    def commit_internal_result(self, activity, cognition, histories, transition):
+        """Publish one finished internal activity atomically; the stable activity id is its receipt."""
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT subject_id FROM activities WHERE id=?", (activity.id,)).fetchone()
+            if existing is not None:
+                if existing["subject_id"] != activity.subject_id:
+                    raise ValueError("internal activity receipt belongs to another subject")
+                return
+            self.add_activity(activity, connection=db)
+            self.add_cognitive_content(cognition, connection=db)
+            self.add_transition(transition, connection=db)
+            for record in histories:
+                self.add_history(record, connection=db)
 
     def list_history(
         self, subject_id: str, kind: HistoryKind | None = None, limit: int = 100
@@ -486,6 +505,33 @@ class SubjectRepository:
         with self._connect() as connection:
             rows = connection.execute(query, arguments).fetchall()
         return tuple(reversed([_history(row) for row in rows]))
+
+    def completed_reflection_sources(self, subject_id: str) -> tuple[str, ...]:
+        """Recover exact segment and transition anchors from completed pre-upgrade reviews."""
+        self.flush_history()
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT json_extract(content,'$.entry_ref'),json_extract(content,'$.entry_at'),"
+                "json_extract(content,'$.trigger') FROM histories WHERE subject_id=? "
+                "AND event_type='introspection_done' AND json_extract(content,'$.request_id') IS NULL",
+                (subject_id,),
+            )
+            keys = []
+            transitions = {}
+            for ref, stamp, trigger in rows:
+                if trigger == 'idle' and ref and ref.startswith('segment:'):
+                    keys.append(ref)
+                if trigger == 'epistemic_revised' and ref and ref.startswith('cognition:') and stamp:
+                    transitions[(ref.removeprefix('cognition:'), stamp)] = []
+            if transitions:
+                changes = connection.execute(
+                    "SELECT id,created_at,json_extract(content,'$.cognitive_content_id') FROM histories "
+                    "WHERE subject_id=? AND event_type='epistemic_transition'", (subject_id,))
+                for ident, stamp, cognition in changes:
+                    if (cognition, stamp) in transitions:
+                        transitions[(cognition, stamp)].append(ident)
+                keys.extend('transition:' + ids[0] for ids in transitions.values() if len(ids) == 1)
+        return tuple(keys)
 
 
 _HISTORY_INSERT = """

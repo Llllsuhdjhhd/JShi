@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from typing import Any, Mapping
+from uuid import NAMESPACE_URL, uuid5
 
 from .port import (
     IntrospectionAnswer,
@@ -23,6 +25,11 @@ from .port import (
     IntrospectionScene,
     IntrospectionStatus,
 )
+
+
+def internal_result_id(kind, subject, job_key):
+    scope = json.dumps([subject, job_key], ensure_ascii=False)
+    return str(uuid5(NAMESPACE_URL, kind + ":" + scope))
 
 
 def run_introspection(
@@ -34,18 +41,22 @@ def run_introspection(
     activity_close: object,
     model_tag: str = "",
     result_evaluator=None,
+    job_key: str | None = None,
+    coverage: Mapping[str, Any] | None = None,
 ) -> IntrospectionRun:
     """把现场 + 六问写成记录，返回这次自省的结果。"""
     # 延迟导入：避免 reflection → jshi.subject.__init__ → process → reflection 的环
     from jshi.subject.domain import (
         Activity,
         ActivityKind,
+        ActivityStatus,
         CognitiveContent,
         CognitiveKind,
         EpistemicStatus,
         EvidenceKind,
         HistoryKind,
         HistoryRecord,
+        StateTransition,
     )
 
     started = time.perf_counter()
@@ -55,8 +66,10 @@ def run_introspection(
         kind=ActivityKind.INTERNAL,
         trigger=request.entry_ref,
     )
-    repository.add_activity(activity)
-    repository.add_history(
+    if job_key is not None:
+        activity = replace(activity, id=internal_result_id("activity", subject_id, job_key))
+    histories = []
+    histories.append(
         HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.SUBJECT,
@@ -82,10 +95,11 @@ def run_introspection(
         source_ids=scene.source_ids,
         model=model_tag or None,
     )
-    repository.add_cognitive_content(cognition)
+    if job_key is not None:
+        cognition = replace(cognition, id=internal_result_id("cognition", subject_id, job_key))
 
     duration_ms = round((time.perf_counter() - started) * 1000, 3)
-    repository.add_history(
+    histories.append(
         HistoryRecord(
             subject_id=subject_id,
             kind=HistoryKind.SUBJECT,
@@ -107,6 +121,7 @@ def run_introspection(
                 "interaction_need": _plain(answer.interaction_need),
                 "duration_ms": duration_ms,
                 "model_tag": model_tag,
+                **(coverage or {}),
             },
             source_ids=(activity.id, cognition.id, *scene.source_ids),
         )
@@ -114,7 +129,7 @@ def run_introspection(
 
     candidate = candidate_payload(request, answer, scene, result_evaluator)
     if candidate is not None:
-        repository.add_history(
+        histories.append(
             HistoryRecord(
                 subject_id=subject_id,
                 kind=HistoryKind.SUBJECT,
@@ -124,13 +139,21 @@ def run_introspection(
             )
         )
 
-    activity_close.close(
-        subject_id,
-        activity.id,
-        final_response_statuses=(),
-        action_id="",
-        reason="introspection_finished",
-    )
+    if job_key is None:
+        repository.add_activity(activity)
+        repository.add_cognitive_content(cognition)
+        for record in histories:
+            repository.add_history(record)
+        activity_close.close(subject_id, activity.id, final_response_statuses=(), action_id="",
+                             reason="introspection_finished")
+    else:
+        completed = replace(activity, status=ActivityStatus.COMPLETED)
+        histories.append(HistoryRecord(subject_id=subject_id, kind=HistoryKind.SUBJECT,
+            event_type="activity_completed", content={"activity_id": activity.id, "to": "completed",
+                "reason": "introspection_finished", "response_statuses": []}))
+        transition = StateTransition(subject_id=subject_id, target_type="activity", target_id=activity.id,
+            from_state=activity.status.value, to_state=completed.status.value, reason="introspection_finished")
+        repository.commit_internal_result(completed, cognition, histories, transition)
     return IntrospectionRun(
         request=request,
         scene_source_ids=scene.source_ids,
@@ -206,6 +229,10 @@ def render_answer(answer: IntrospectionAnswer) -> str:
     ]
     if answer.candidates:
         lines.append(f"候选：{_plain(list(answer.candidates))}")
+    if answer.open_question:
+        lines.append(f"待证问题：{answer.open_question}")
+    if answer.waiting_for:
+        lines.append(f"待补材料：{answer.waiting_for}")
     return "\n".join(lines)
 
 

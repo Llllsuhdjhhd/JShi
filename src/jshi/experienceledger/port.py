@@ -215,6 +215,16 @@ class ExperienceLedgerPort(Protocol):
         after_sequence: int = 0,
     ) -> tuple[ExperienceSegment, ...]: ...
 
+    def read_experience_page(
+        self, subject_id: str, *, after_sequence: int = 0, limit: int = 8,
+        start: datetime | None = None, end: datetime | None = None,
+        newest_first: bool = False, object_id: str | None = None,
+    ) -> tuple[ExperienceSegment, ...]: ...
+
+    def experiences_by_ids(
+        self, subject_id: str, segment_ids: Sequence[str],
+    ) -> tuple[ExperienceSegment, ...]: ...
+
     def active_window(
         self,
         subject_id: str,

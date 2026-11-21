@@ -394,6 +394,7 @@ class SubjectProcess:
         person_review_model: ModelPort | None = None,
         vision=None,
         reflection_result_evaluator=None,
+        discovery_assistant=None,
     ) -> None:
         self.repository = repository
         self.vision = vision
@@ -538,7 +539,11 @@ class SubjectProcess:
         if isinstance(self.memory, MemoryShell):
             self.memory.reflection_store = self.reflection_memory
         self.reflection_executor = ReflectionExecutor(
-            self, self.reflection, self.reflection_memory, introspection_model or cognition)
+            self, self.reflection, self.reflection_memory, introspection_model or cognition,
+            discovery_assistant=discovery_assistant)
+        listen = getattr(self.hang_store, "add_result_listener", None)
+        if callable(listen) and self.reflection_executor.inner.supported:
+            listen(self.reflection_executor.inner.note_tool_result)
 
     # ------------------------------------------------------------------
     # 阶段②/③ 前置：活跃区装载与单一路径组装
@@ -3319,7 +3324,16 @@ class SubjectProcess:
     # ------------------------------------------------------------------
 
     def reflect(self, subject_id: str, prompt: str) -> CognitiveContent:
+        inner = self.reflection_executor.inner
+        if inner.mode() == 2:
+            return inner.reflect(subject_id, prompt)
         return self.reflection.reflect(subject_id, prompt)
+
+    def revisit_introspection(self, subject_id: str, request_id: str, segment_id: str, *,
+                              stage: str = 'evidence', suggestion: str | None = None) -> IntrospectionRequest:
+        """把实际经历交回原题，按需登记为某条建议的采用或观察结果。"""
+        return self.reflection_executor.inner.revisit(subject_id, request_id, segment_id,
+                                                     stage=stage, suggestion=suggestion)
 
     # -- 300 自省的宿主接口 -------------------------------------------------
     # 钩子只入队；真正跑模型的动作（drain）由宿主在两拍之间调，不进本轮关键路径。
@@ -3328,11 +3342,19 @@ class SubjectProcess:
         self, subject_id: str, *, object_id: str | None = None
     ) -> IntrospectionRequest | None:
         """闲时回顾入口：只入队，不跑模型（何时 drain 由宿主决定）。"""
+        inner = self.reflection_executor.inner
         fn = getattr(self.reflection, "enqueue_idle", None)
-        if not callable(fn):
-            return None
         try:
-            return fn(subject_id, object_id=object_id)
+            mode = inner.mode()
+            if mode == 2:
+                requests = inner.scan(subject_id, object_id=object_id)
+                return requests[0] if requests else None
+            if mode == 1:
+                try:
+                    inner.scan(subject_id, object_id=object_id, shadow=True)
+                except Exception:
+                    logger.exception("shadow discovery failed")
+            return fn(subject_id, object_id=object_id) if callable(fn) else None
         except Exception:
             logger.exception("introspect_idle failed")
             return None
@@ -3341,14 +3363,17 @@ class SubjectProcess:
         self, subject_id: str | None = None, *, limit: int = 1
     ) -> tuple[IntrospectionRun, ...]:
         """执行已入队的自省（宿主在两拍之间调用；失败不影响正常活动）。"""
+        inner = self.reflection_executor.inner
+        runs = ()
         fn = getattr(self.reflection, "drain", None)
-        if not callable(fn):
-            return ()
         try:
-            return tuple(fn(subject_id, limit=limit) or ())
+            if inner.enabled:
+                runs = inner.drain(subject_id, limit=limit)
+            if len(runs) < max(1, limit) and callable(fn):
+                runs += tuple(fn(subject_id, limit=max(1, limit) - len(runs)) or ())
         except Exception:
             logger.exception("drain_introspection failed")
-            return ()
+        return runs
 
     def _maybe_introspect_after_activity(
         self,
@@ -3362,7 +3387,17 @@ class SubjectProcess:
         fn = getattr(self.reflection, "enqueue_from_sources", None)
         if not callable(fn):
             return
+        inner = self.reflection_executor.inner
         try:
+            mode = inner.mode()
+            if mode == 2:
+                inner.note_activity(subject_id, activity, plan, action_id, speaker, shadow=False)
+                return
+            if mode == 1:
+                try:
+                    inner.note_activity(subject_id, activity, plan, action_id, speaker, shadow=True)
+                except Exception:
+                    logger.exception("shadow activity discovery failed")
             fn(
                 MOMENT_AFTER_ACTIVITY,
                 subject_id,
@@ -3475,30 +3510,19 @@ class SubjectProcess:
         )
         updated = self.repository.update_epistemic_status(content_id, to_status)
         self.repository.add_transition(transition)
-        self.repository.add_history(
-            HistoryRecord(
-                subject_id=current.subject_id,
-                kind=HistoryKind.SUBJECT,
-                event_type="epistemic_transition",
-                content={
-                    "cognitive_content_id": content_id,
-                    "from": transition.from_state,
-                    "to": transition.to_state,
-                    "reason": reason,
-                },
-                source_ids=(transition.id, *source_ids),
-            )
+        delta = {"cognitive_content_id": content_id, "from": transition.from_state,
+                 "to": transition.to_state, "reason": reason}
+        refs = (transition.id, *source_ids)
+        segment = self.activity_ledger.append_subject_state(current.subject_id, state_delta=delta, source_ids=refs)
+        record = HistoryRecord(
+            subject_id=current.subject_id, kind=HistoryKind.SUBJECT, event_type="epistemic_transition",
+            content=dict(delta, segment_id=segment.segment_id), source_ids=refs, created_at=transition.created_at,
         )
-        self.activity_ledger.append_subject_state(
-            current.subject_id,
-            state_delta={
-                "cognitive_content_id": content_id,
-                "from": transition.from_state,
-                "to": transition.to_state,
-                "reason": reason,
-            },
-            source_ids=(transition.id, *source_ids),
-        )
+        self.repository.add_history(record)
+        try:
+            self.reflection_executor.inner.note_revision(record, current)
+        except Exception:
+            logger.exception("failed to record revised cognition for discovery")
         return updated
 
     def add_personal_item(

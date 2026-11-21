@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime
 from typing import Any, Callable, Sequence
 
@@ -41,7 +41,7 @@ from .port import (
 )
 from .queue import IntrospectionQueue
 from .runner import run_introspection
-from .scene import build_scene, person_codes, render_scene
+from .scene import build_scene, freeze_question_materials, person_codes, render_scene
 from .sources import default_sources, detect
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,7 @@ class InProcessReflection(IntrospectionPort):
         self.memory = getattr(process, "memory", None)
         self.hang_store = getattr(process, "hang_store", None)
         self._activity_close = process.activity_close
+        self._owners = getattr(getattr(process, 'reflection_memory', None), 'questions', None)
         self._enabled = introspection_enabled() if enabled is None else bool(enabled)
         self._now = now
         self._model = model if model is not None else getattr(process, "cognition", None)
@@ -121,6 +122,7 @@ class InProcessReflection(IntrospectionPort):
             plan=plan,
             action_id=action_id,
             object_id=object_id,
+            source_owners=self._owners,
         )
         try:
             return detect(tuple(self._sources), moment, context)
@@ -133,7 +135,10 @@ class InProcessReflection(IntrospectionPort):
             self._record_dropped(request, "disabled")
             return IntrospectionStatus.DROPPED
         request = self._assess(request)
-        result = self.queue.enqueue(request)
+        if self._owners is not None:
+            result = self._owners.enqueue_legacy(request, self.queue)
+        else:
+            result = self.queue.enqueue(request)
         if result.status is IntrospectionStatus.QUEUED:
             self._record_queued(request)
             if result.evicted is not None:
@@ -172,6 +177,25 @@ class InProcessReflection(IntrospectionPort):
         runs: list[IntrospectionRun] = []
         for _ in range(max(1, int(limit))):
             request = self.queue.pop_next(subject_id)
+            if self._owners is not None:
+                if request is not None:
+                    adopted = self._owners.enqueue_legacy(request, self.queue, already_queued=True)
+                    tracked = adopted is not None
+                else:
+                    tracked = True
+                if tracked:
+                    work = self._owners.claim_legacy(subject_id, request)
+                    if work is None:
+                        continue
+                    request, token = work
+                    done = False
+                    try:
+                        run = self._run(request, job_key='legacy:' + request.request_id)
+                        done = run.status in (IntrospectionStatus.DONE, IntrospectionStatus.DROPPED)
+                        runs.append(run)
+                    finally:
+                        self._owners.finish_legacy(request, token, done=done)
+                    continue
             if request is None:
                 break
             runs.append(self._run(request))
@@ -200,7 +224,7 @@ class InProcessReflection(IntrospectionPort):
     # 内部：一次自省
     # ------------------------------------------------------------------
 
-    def _run(self, request: IntrospectionRequest) -> IntrospectionRun:
+    def _run(self, request: IntrospectionRequest, *, job_key=None) -> IntrospectionRun:
         scene = build_scene(
             request,
             ledger=self.ledger,
@@ -234,6 +258,7 @@ class InProcessReflection(IntrospectionPort):
                 repository=self.repository,
                 activity_close=self._activity_close,
                 model_tag=self._model_tag(answer),
+                job_key=job_key,
                 result_evaluator=getattr(self._process, 'reflection_result_evaluator', None),
             )
         except Exception:
@@ -260,6 +285,75 @@ class InProcessReflection(IntrospectionPort):
             answer=IntrospectionAnswer(mode='deferred'), activity_id='', cognitive_content_id='',
             status=IntrospectionStatus.QUEUED, reason='conversation_priority')
 
+    def collect_question(self, request: IntrospectionRequest) -> dict:
+        return freeze_question_materials(request, self.ledger, self.memory, self.repository)
+
+    def prepare_question(self, request: IntrospectionRequest, *, collected=None) -> dict:
+        """Compute a replayable answer without publishing any candidate or subject history."""
+        if collected is None:
+            collected = self.collect_question(request)
+        if collected["subject"] != request.subject_id or collected["request_id"] != request.request_id:
+            raise ValueError("question snapshot does not match the request")
+        refs = collected["references"]
+        scene = IntrospectionScene(request=request, window=(request.entry_at, request.entry_at),
+                                   text=collected["text"], source_ids=tuple(row[0] for row in refs.values()))
+        counts = collected["counts"]
+        recall_question = request.origin == "recall_reprocess"
+        insufficient = (recall_question and not counts["M"]) or (
+            not refs and request.trigger != IntrospectionTrigger.MANUAL)
+        if insufficient:
+            answer = IntrospectionAnswer(what=NO_MATERIAL, mode="rule", waiting_for="可核对的原始材料")
+        elif self._skill is None or request.level == IntrospectionLevel.LOW:
+            answer = replace(_rule_answer(request, scene), what=(
+                f"{request.entry_text}；现场 {counts['E']} 段，回溯 {counts['M']} 条，工具回报 {counts['T']} 条。"))
+        else:
+            answer = self._model_answer(request, scene, collected["actors"])
+        # Only cited conclusions proceed to evaluation. Open questions stay in the history.
+        pending = {answer.open_question.strip(), answer.waiting_for.strip(), ""}
+        candidates = tuple(
+            item for item in answer.candidates
+            if isinstance(item.get("content"), str) and item["content"].strip() not in pending
+            and isinstance(item.get("source_refs"), list) and item["source_refs"]
+            and all(isinstance(code, str) and code in refs for code in item["source_refs"])
+            and (not recall_question or any(code.startswith("M") for code in item["source_refs"]))
+        )
+        answer = replace(answer, candidates=candidates)
+        if collected["missing"] and not answer.waiting_for:
+            answer = replace(answer, waiting_for="未呈现的指定原件")
+        person_refs = collected["actors"]
+        cited_people = {person for people in collected.get("participants", {}).values() for person in people}
+        cited_people.update(row[2] for row in refs.values() if row[2])
+        if answer.interaction_need and answer.interaction_need.get("object_id") not in set(person_refs) & cited_people:
+            answer = replace(answer, interaction_need=None)
+        evaluator = getattr(self._process, "reflection_result_evaluator", None)
+        executor = getattr(self._process, "reflection_executor", None)
+        proposals = []
+        if executor and evaluator and "learn" in evaluator.behavior_outlets(answer):
+            proposals = executor.behavior_proposals(request, answer, refs)
+        return {
+            "request_id": request.request_id, "subject": request.subject_id,
+            "answer": asdict(answer), "proposals": proposals, "model_tag": self._model_tag(answer),
+            "source_ids": list(scene.source_ids), "state": "waiting" if answer.open_question or answer.waiting_for else "done",
+            "coverage": {"request_id": request.request_id, "segments": counts["E"],
+                         "recalled": counts["M"], "tool_results": counts["T"],
+                         "references": {code: row[0] for code, row in refs.items()}, "missing": collected["missing"],
+                         "partial": collected.get("partial", []),
+                         "open_question": answer.open_question, "waiting_for": answer.waiting_for,
+                         "model_visible_refs": list(refs) if answer.mode in {"model", "fallback"} else []},
+        }
+
+    def publish_question(self, request, frozen, *, job_key):
+        if frozen["subject"] != request.subject_id or frozen["request_id"] != request.request_id:
+            raise ValueError("frozen answer does not match the request")
+        scene = IntrospectionScene(request=request, window=(request.entry_at, request.entry_at),
+                                   source_ids=tuple(frozen["source_ids"]))
+        return run_introspection(
+            request=request, scene=scene, answer=IntrospectionAnswer(**frozen["answer"]),
+            repository=self.repository, activity_close=self._activity_close, model_tag=frozen["model_tag"],
+            result_evaluator=getattr(self._process, "reflection_result_evaluator", None),
+            job_key=job_key, coverage=frozen["coverage"],
+        )
+
     def _answer(
         self, request: IntrospectionRequest, scene: IntrospectionScene
     ) -> IntrospectionAnswer:
@@ -268,17 +362,8 @@ class InProcessReflection(IntrospectionPort):
         ):
             return _rule_answer(request, scene)
         try:
-            answer = self._skill.run(self._model_request(request, scene))
-            interaction = answer.interaction_need
-            if interaction and interaction.get('object_id'):
-                codes = person_codes(request, scene.segments, scene.recalled)
-                actors = {code: person for person, code in codes.items()}
-                target = interaction['object_id']
-                if target in actors:
-                    answer = replace(answer, interaction_need=dict(interaction, object_id=actors[target]))
-                elif target not in codes:
-                    answer = replace(answer, interaction_need=None)
-            return answer
+            return self._model_answer(request, scene, person_codes(request, scene.segments, scene.recalled),
+                                      accept_legacy_ids=True)
         except Exception:
             logger.exception("introspection skill failed")
             return IntrospectionAnswer(
@@ -286,6 +371,18 @@ class InProcessReflection(IntrospectionPort):
                 degraded=True,
                 mode="fallback",
             )
+
+    def _model_answer(self, request, scene, codes, *, accept_legacy_ids=False):
+        answer = self._skill.run(self._model_request(request, scene))
+        interaction = answer.interaction_need
+        if interaction and interaction.get("object_id"):
+            actors = {code: person for person, code in codes.items()}
+            target = interaction["object_id"]
+            if target in actors:
+                answer = replace(answer, interaction_need=dict(interaction, object_id=actors[target]))
+            elif not accept_legacy_ids or target not in codes:
+                answer = replace(answer, interaction_need=None)
+        return answer
 
     def _model_request(
         self, request: IntrospectionRequest, scene: IntrospectionScene

@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from jshi.core.param_overlay import override_snapshot
 from jshi.experienceledger import InProcessExperienceLedger
 from jshi.identity import IdentityProfile, IdentityRepository
@@ -132,6 +134,164 @@ def _history_types(repository, subject_id="stone"):
 
 def _subject_history(repository, subject_id="stone"):
     return repository.list_history(subject_id, HistoryKind.SUBJECT, limit=500)
+
+
+def test_unmarked_exchange_reaches_six_questions_and_reopens_once(tmp_path):
+    model = IntrospectionModel(payload=dict(SIX_ANSWERS, open_question="需要看下一次实际回应"))
+    with override_snapshot({"INNER_ACTIVITY_MODE": 2}):
+        process, repository = runtime(tmp_path, model)
+        ledger = process.activity_ledger
+        first = ledger.append_external("stone", actor_object_id="OBJ-USER", text_raw="我遇到分歧时会先问对方怎么想。")
+        ledger.append_subject_reply("stone", text_raw="你刚才先问了我的理由。")
+        request = process.introspect_idle("stone")
+        assert first.segment_id in request.evidence["segment_ids"]
+        run, = process.drain_introspection("stone")
+        assert run.request.request_id == request.request_id
+        assert process.introspect_idle("stone") is None
+        assert process.drain_introspection("stone") == ()
+        other = ledger.append_external("stone", actor_object_id="someone-else", text_raw="我也先开口了。")
+        with pytest.raises(ValueError, match="对象"):
+            process.revisit_introspection("stone", request.request_id, other.segment_id)
+        second = ledger.append_external("stone", actor_object_id="OBJ-USER", text_raw="这次我直接提出意见了。")
+        process.revisit_introspection("stone", run.cognitive_content_id, second.segment_id)
+        process.revisit_introspection("stone", request.request_id, second.segment_id)
+        revised, = process.drain_introspection("stone", limit=3)
+        assert {first.segment_id, second.segment_id} <= set(revised.scene_source_ids)
+        assert model.purposes == ["introspection", "introspection"]
+        assert _history_types(repository).count("introspection_done") == 2
+
+
+def test_shadow_and_empty_discovery_have_independent_coverage(tmp_path):
+    from jshi.reflection.discovery import DiscoveryBatch, RuleDiscoveryAssistant
+
+    class Skip:
+        def discover(self, context):
+            return DiscoveryBatch(coverage=({"seen": [row.segment_id for row in context.segments]},))
+
+    process, repository = runtime(tmp_path)
+    executor = process.reflection_executor
+    inner = executor.inner
+    process.activity_ledger.append_external("stone", actor_object_id="OBJ-USER", text_raw="平常会提前一天约定时间。")
+    with override_snapshot({"INNER_ACTIVITY_MODE": 1}):
+        assert inner.scan("stone", shadow=True)
+        assert not inner.questions.has_pending("stone")
+        assert inner.questions.cursor("stone", "ledger", shadow=True) > 0
+        assert inner.questions.cursor("stone", "ledger") == 0
+    with override_snapshot({"INNER_ACTIVITY_MODE": 2}):
+        inner.assistant = Skip()
+        assert process.introspect_idle("stone") is None
+        assert inner.questions.cursor("stone", "ledger") > 0
+        assert process.drain_introspection("stone") == ()
+        inner.assistant = RuleDiscoveryAssistant()
+        process.activity_ledger.append_external("stone", actor_object_id="OBJ-USER", text_raw="今天临时约了一次。")
+        for _ in range(4):
+            executor.tick("stone", force=True)
+            if "introspection_done" in _history_types(repository):
+                break
+        assert _history_types(repository).count("introspection_done") == 1
+
+
+def test_inner_six_replays_after_history_written_without_duplicate_call(tmp_path, monkeypatch):
+    model = IntrospectionModel()
+    with override_snapshot({"INNER_ACTIVITY_MODE": 2}):
+        process, repository = runtime(tmp_path, model)
+        process.activity_ledger.append_external("stone", actor_object_id="OBJ-USER", text_raw="我每次都把顺序写下来。")
+        process.introspect_idle("stone")
+        inner = process.reflection_executor.inner
+        complete = inner.questions.complete
+        def interrupted(*args, **kwargs):
+            raise RuntimeError("interrupted after subject history")
+        monkeypatch.setattr(inner.questions, "complete", interrupted)
+        assert process.drain_introspection("stone") == ()
+        assert _history_types(repository).count("introspection_done") == 1
+        monkeypatch.setattr(inner.questions, "complete", complete)
+        assert len(process.drain_introspection("stone")) == 1
+        assert process.drain_introspection("stone") == ()
+        assert model.purposes == ["introspection"]
+        assert _history_types(repository).count("introspection_done") == 1
+
+
+def test_late_tool_result_and_activity_close_share_one_owner(tmp_path):
+    with override_snapshot({"INNER_ACTIVITY_MODE": 2}):
+        process, repository = runtime(tmp_path)
+        activity = Activity(subject_id="stone", kind=ActivityKind.INTERNAL, trigger="天气")
+        repository.add_activity(activity)
+        def close():
+            process._maybe_introspect_after_activity("stone", activity,
+                SimpleNamespace(reason="查天气", mode="respond"), "", SimpleNamespace(object_id="OBJ-USER"))
+        hang = process.hang_store.create(subject_id="stone", object_id="OBJ-USER", need="查天气",
+            template="", field_ref={"activity_id": activity.id}, request_id="late")
+        close()
+        process.hang_store.append_feedback(hang.task_id, (ToolFeedback(kind=FeedbackKind.RESULT,
+            result=ToolResult(status=ToolStatus.FAILED, ideal=False, ideal_note="超时", summary="没查成")),))
+        close()
+        inner = process.reflection_executor.inner
+        inner.scan_signals("stone")
+        inner.scan("stone")
+        runs = process.drain_introspection("stone", limit=3)
+        assert len(runs) == 1 and runs[0].request.evidence["tool_facts"]
+        assert not process.reflection.queue.pending()
+        assert _history_types(repository).count("introspection_done") == 1
+
+
+def test_revised_cognition_enters_discovery_without_another_conversation(tmp_path):
+    with override_snapshot({"INNER_ACTIVITY_MODE": 2}):
+        process, repository = runtime(tmp_path)
+        cognition = CognitiveContent(subject_id="stone", activity_id="a", kind=CognitiveKind.INFERENCE,
+            content="我猜他不高兴。", epistemic_status=EpistemicStatus.PROVISIONAL,
+            evidence_kind=EvidenceKind.COGNITIVE_REASONING)
+        repository.add_cognitive_content(cognition)
+        process.transition_cognition(cognition.id, EpistemicStatus.REVISED, "他解释是因为没睡好。")
+        question, = process.reflection_executor.inner.scan_signals("stone")
+        assert question.entry_ref == f"cognition:{cognition.id}"
+        assert question.object_id is None
+        run, = process.drain_introspection("stone")
+        assert run.scene_source_ids and run.request.request_id == question.request_id
+
+
+def test_conversation_interrupts_six_and_resumes_with_same_visible_scene(tmp_path):
+    active = False
+    calls = []
+
+    class Interrupted(IntrospectionModel):
+        def generate(self, request):
+            nonlocal active
+            calls.append(request.input_text)
+            active = len(calls) == 1
+            return super().generate(request)
+
+    with override_snapshot({"INNER_ACTIVITY_MODE": 2}):
+        process, repository = runtime(tmp_path, Interrupted())
+        process.activity_ledger.append_external("stone", actor_object_id="OBJ-USER", text_raw="先对照两个人的原话。")
+        process.introspect_idle("stone")
+        executor = process.reflection_executor
+        assert not executor.tick("stone", force=True, busy=lambda: active)
+        assert "introspection_done" not in _history_types(repository)
+        assert executor.inner.questions.has_pending("stone")
+        active = False
+        process.activity_ledger.append_external("stone", actor_object_id="OBJ-USER", text_raw="这是后来才说的旁话。")
+        runs = process.drain_introspection()
+        assert len(runs) == 1 and len(calls) == 2 and calls[0] == calls[1]
+        assert _history_types(repository).count("introspection_done") == 1
+
+
+def test_cli_attaches_real_segment_using_manual_reflect_content_id(tmp_path, monkeypatch, capsys):
+    from jshi.app import cli
+    import sys
+
+    with override_snapshot({"INNER_ACTIVITY_MODE": 2}):
+        process, repository = runtime(tmp_path)
+        ledger = process.activity_ledger
+        ledger.append_external("stone", actor_object_id="OBJ-USER", text_raw="平时我会先问清缘由。")
+        result = process.reflect("stone", "我有没有听清他的理由？")
+        second = ledger.append_external("stone", actor_object_id="OBJ-USER", text_raw="第二次我先用了自己的解释。")
+        monkeypatch.setattr(cli, "_runtime", lambda *a, **kw: (process, None, repository))
+        monkeypatch.setattr(sys, "argv", ["jshi", "--data-dir", str(tmp_path), "introspect-followup", "stone",
+                                          result.id, second.segment_id])
+        cli.main()
+        assert "已关联原段" in capsys.readouterr().out
+        revised, = process.drain_introspection("stone")
+        assert second.segment_id in revised.scene_source_ids
 
 
 # ----------------------------------------------------------------------
