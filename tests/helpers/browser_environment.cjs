@@ -1,5 +1,9 @@
 // Browser facilities used by the page, shared by microphone/player UI mocks.
 module.exports=function prepare(context){
+ // Page polling should be available without keeping the Node test process alive.
+ const interval=context.setInterval??setInterval;
+ context.setInterval=(...args)=>{const id=interval(...args);id?.unref?.();return id;};
+ context.clearInterval??=clearInterval;
  function element(node){
   node.dataset??={};
   node.addEventListener??=function(name,fn){(this.listeners??={})[name]=fn;};

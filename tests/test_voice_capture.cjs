@@ -19,3 +19,16 @@ assert.equal(capture('left'),8192);
 assert.equal(capture('right'),-8192);
 assert.equal(capture('mix'),0);
 console.log('Voice capture: 16 kHz PCM and stereo channel selection passed');
+
+// The mobile entry requests 20 ms blocks even on a 44.1 kHz hardware input.
+{
+  const blocks=[];
+  const env=vm.createContext({sampleRate:44100, AudioWorkletProcessor:class {
+    constructor(){this.port={postMessage:m=>blocks.push(m)};}
+  }, registerProcessor:(_,cls)=>{env.Capture=cls;}, ArrayBuffer, DataView, Math});
+  vm.runInContext(code,env);
+  const processor=new env.Capture({processorOptions:{frameMs:20}});
+  processor.process([[new Float32Array(44100).fill(.25)]]);
+  assert.equal(blocks.length,50);
+  assert.ok(blocks.every(b=>b.pcm.byteLength===640 && b.level===.25));
+}

@@ -53,3 +53,6 @@ tests/idiot/reports/*
 !tests/idiot/reports/archive/**
 /rems_quality
 tests/cc.mermaid
+
+# Device TLS keys and local trust anchors
+**/phone-tls/

@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#142922"><meta name="apple-mobile-web-app-capable" content="yes">
+<title>匠石 · 手机设备</title>
+<style>
+:root {
+  color-scheme: light;
+  --ink: #172923;
+  --muted: #435e53;
+  --green: #145e43;
+  --line: #c4d2c9;
+  --paper: #f3f6f2;
+  font: 100%/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+main {
+  max-width: 36rem;
+  margin: auto;
+  padding: max(1.25rem,env(safe-area-inset-top)) 1.2rem max(2rem,env(safe-area-inset-bottom));
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+h1 {
+  font-size: 1.25rem;
+  letter-spacing: .03em;
+  margin: 0;
+}
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 2.15rem;
+  height: 2.15rem;
+  margin-right: .6rem;
+  color: white;
+  background: var(--ink);
+  border-radius: .55rem;
+}
+h2 {
+  font-size: 1.15rem;
+  margin: 0;
+}
+p {
+  margin: .5rem 0;
+}
+button,select,input {
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: .7rem;
+  min-height: 2.85rem;
+  background: white;
+  color: inherit;
+  padding: .55rem .85rem;
+}
+button {
+  cursor: pointer;
+  font-weight: 580;
+}
+button:disabled {
+  opacity: .5;
+  cursor: default;
+}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible {
+  outline: 3px solid #32865f;
+  outline-offset: 3px;
+}
+.primary {
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+.connection {
+  border-radius: 1.25rem;
+  background: #173c31;
+  color: #f2fbf4;
+  padding: 1.35rem;
+}
+.connection h2 {
+  font-size: 1.7rem;
+}
+.connection p {
+  color: #d0e6d6;
+  min-height: 1.55em;
+}
+.connection button {
+  background: #dbf5df;
+  border: 0;
+  color: #16392d;
+}
+.line,.controls {
+  display: flex;
+  gap: .6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.line {
+  justify-content: space-between;
+}
+.controls {
+  margin-top: .8rem;
+}
+.controls>* {
+  flex: 1 1 auto;
+}
+.surface,details {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  margin-top: 1rem;
+  padding: 1rem;
+}
+summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+.muted,small {
+  color: var(--muted);
+}
+small {
+  font-size: .875rem;
+}
+label {
+  display: block;
+  margin: .75rem 0;
+}
+.settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .75rem;
+}
+select {
+  display: block;
+  width: 100%;
+  margin-top: .25rem;
+}
+meter {
+  width: 5rem;
+}
+.stage {
+  position: relative;
+  margin: .75rem 0;
+  border-radius: .65rem;
+  overflow: hidden;
+}
+.stage video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.stage canvas {
+  position: relative;
+  margin: 0;
+  border-radius: 0;
+}
+canvas {
+  background: #13201b;
+  display: block;
+  max-width: 100%;
+  width: 100%;
+  height: auto;
+  border-radius: .65rem;
+  margin: .75rem 0;
+  touch-action: none;
+}
+#camEmpty {
+  border-radius: .65rem;
+  text-align: center;
+  background: #edf2ed;
+  color: var(--muted);
+  padding: 1.75rem .8rem;
+}
+#notice {
+  color: #79391e;
+  overflow-wrap: anywhere;
+}
+#pair input {
+  max-width: 10rem;
+  letter-spacing: .13em;
+}
+button[aria-pressed=true] {
+  border-color: var(--green);
+  background: #deeee3;
+  color: var(--green);
+}
+[hidden] {
+  display: none!important;
+}
+
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><span class="mark" aria-hidden="true">匠</span>匠石 · 手机设备</h1>
+    <small id="network">未连接</small>
+  </header>
+  <section class="connection">
+    <h2 id="state" role="status">连接主机</h2>
+    <p id="detail">正在检查配对状态…</p>
+    <form id="pair" hidden>
+      <label for="code">主机配对码</label>
+      <div class="controls">
+        <input id="code" required pattern="[0-9]{8}" maxlength="8" inputmode="numeric" autocomplete="one-time-code">
+        <button>配对</button>
+      </div>
+    </form>
+    <button id="connect" hidden>连接匠石</button>
+  </section>
+  <p id="notice" role="alert"></p>
+  <section class="surface">
+    <div class="line">
+      <h2>声音</h2>
+      <meter aria-label="麦克风音量" id="level" min="0" max=".25" value="0"></meter>
+    </div>
+    <div class="controls">
+      <button id="mute" disabled aria-pressed="false">麦克风静音</button>
+      <button id="stopReply" disabled>停止播报</button>
+    </div>
+  </section>
+  <section class="surface">
+    <div class="line"><h2>摄像头</h2><small id="camState">已关闭</small></div>
+    <p id="camEmpty">开启后可预览并设置遮蔽</p>
+    <div class="stage" id="stage" hidden>
+      <video id="sensor" muted playsinline autoplay disablepictureinpicture aria-hidden="true"></video>
+      <canvas id="preview" width="640" height="360" aria-label="手机将发送的画面"></canvas>
+    </div>
+    <div class="controls">
+      <button id="camera" disabled>打开摄像头</button>
+      <button id="switchLens" disabled>切换镜头</button>
+    </div>
+    <div id="frameTools" hidden>
+      <p id="camHint" class="muted"></p>
+      <div class="controls">
+        <button id="mask" aria-pressed="false">画遮蔽区</button>
+        <button id="undo" disabled>撤销遮蔽</button>
+        <button class="primary" id="sendFrame" disabled>开始传画面</button>
+      </div>
+    </div>
+  </section>
+  <details>
+    <summary>画面设置</summary>
+    <div class="settings">
+      <label>发送分辨率
+        <select id="resolution">
+          <option value="640">长边 640 px</option>
+          <option value="1280" selected>长边 1280 px</option>
+          <option value="1920">长边 1920 px</option>
+        </select>
+      </label>
+      <label>采样间隔
+        <select id="interval">
+          <option value="0.5">0.5 秒</option>
+          <option value="1">1 秒</option>
+          <option value="2" selected>2 秒</option>
+          <option value="5">5 秒</option>
+          <option value="10">10 秒</option>
+        </select>
+      </label>
+    </div>
+    <small id="limits"></small>
+  </details>
+</main>
+<script src="/phone_playback.js"></script>
+<script src="/phone_camera.js"></script>
+<script src="/phone.js"></script>
+</body>
+</html>

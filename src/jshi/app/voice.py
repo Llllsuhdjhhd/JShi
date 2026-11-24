@@ -3141,7 +3141,7 @@ class VoiceConversation:
                     self.entry_scheduler.notify(current)
                     queued_count = 0
             except Exception as exc:
-                await self.emit("notice", text=f"语音轮次失败：{type(exc).__name__}：{exc}")
+                await self.emit("notice", device_notice=True, text=f"语音轮次失败：{type(exc).__name__}：{exc}")
             finally:
                 for _ in range(queued_count if queued_count is not None else len(batch)):
                     self.queue.task_done()
@@ -3321,7 +3321,7 @@ class VoiceConversation:
                         self.input_records[u.input_id]["ready_at"] = ready_at
                 self.enqueue_turn(envelope)
             except Exception as exc:
-                await self.emit("notice", text=f"语音轮次失败：{type(exc).__name__}：{exc}")
+                await self.emit("notice", device_notice=True, text=f"语音轮次失败：{type(exc).__name__}：{exc}")
             finally:
                 self.judging = False
                 if not self.judge_pending:
@@ -4054,7 +4054,7 @@ class VoiceConversation:
                     "（播放器交付失败）" + json.dumps(self.delivery.snapshot(), ensure_ascii=False)
                     + "；partial_text未确认整句播完，pending_text尚未播放。")
             await self.emit("stop", reply_id=d.reply_id)
-            await self.emit("notice", text=f"语音合成失败，文字回应已保留：{exc}")
+            await self.emit("notice", device_notice=True, text=f"语音合成失败，文字回应已保留：{exc}")
             await self._next_plan()
 
     async def acknowledge(self, payload: dict) -> None:
@@ -4219,7 +4219,7 @@ class VoiceConversation:
             await asyncio.gather(*self.sample_jobs, return_exceptions=True)
 
 
-def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=None, local_tts=None, online_speakers=None, *, speaker_models=None, trial_root=None, personal_speakers=None):
+def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=None, local_tts=None, online_speakers=None, *, speaker_models=None, trial_root=None, personal_speakers=None, phone_listener=None):
     from aiohttp import web, ClientSession, ClientTimeout, WSMsgType
 
     visual = getattr(process, 'vision', None)
@@ -5013,10 +5013,10 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             model_status_sink = None
             registry_busy = False
 
-    async def connection(request):
+    async def connection(request, *, device_send=None, device_id=None):
         nonlocal busy, cleanup_stage, active_conversation
         origin = request.headers.get("Origin", "")
-        if origin != f"http://{request.host}":
+        if origin != f"{request.scheme}://{request.host}":
             raise web.HTTPForbidden(text="voice connection requires same origin")
         if busy or registry_busy:
             raise web.HTTPConflict(text="已有一个语音会话，请先结束它。")
@@ -5068,6 +5068,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         audio = SessionAudio(archive=recent_audio)
         try:
             await ws.prepare(request)
+            if device_send:
+                from .phone_device import PHONE_SOCKETS, PHONE_CONTROLS
+                request.app[PHONE_SOCKETS].add(ws)
             async with ClientSession(timeout=ClientTimeout(total=None, sock_connect=15, sock_read=60)) as http:
                 cloud = VolcVoice(replace(config, asr_backend=backend), http)
                 speakers = use_local.speakers if use_local else (online_speakers or (local.speakers if local else None))
@@ -5096,7 +5099,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     (use_local.refiner.transcribe_source if backend == 'qwen' else cloud.transcribe_source) if config.separation_backend == 'pyannote' else None,
                     timeout_s=config.separation_timeout_s,
                     transcribe_many=use_local.refiner.transcribe_sources if backend == 'qwen' and config.separation_backend == 'pyannote' else None)
-                conversation = VoiceConversation(process, subject_id, local_tts if tts_backend == 'local' else cloud, ws.send_json, jev=jev,
+                send_event = (lambda event: device_send(ws, event)) if device_send else ws.send_json
+                conversation = VoiceConversation(process, subject_id, local_tts if tts_backend == 'local' else cloud,
+                    send_event, jev=jev,
                     timeout_s=config.jev_timeout_s, local_speakers=speakers, input_pause_s=config.input_pause_s, sample_source=audio,
                     candidate_timeout_s=config.candidate_timeout_s, input_max_batch_s=config.input_max_batch_s,
                     input_batch_chars=config.input_batch_chars,
@@ -5105,6 +5110,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     utterance_material=config.utterance_material,
                     session_id=request.query.get("session") or None)
                 active_conversation = conversation
+                if device_send:
+                    conversation.record('capture_device', {'source': 'phone', 'device_id': device_id,
+                        'session_id': conversation.session_id, 'capture_id': audio.capture_id})
                 if use_local is not None:
                     use_local.reset_session()
                     conversation.speech_active = getattr(getattr(use_local, 'detector', None), 'speech_active', lambda: False)
@@ -5112,7 +5120,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     from jshi.voice.local_input import LocalAudioPump
                     async def local_error(exc):
                         if not ws.closed:
-                            await conversation.emit('notice', text=f'本地识别失败：{exc}')
+                            await conversation.emit('notice', device_notice=True, text=f'本地识别失败：{exc}')
                             await ws.close()
                     local_pump = LocalAudioPump(use_local, local_executor, conversation.accept, local_error,
                         accept_batch=conversation.accept_batch, on_timings=conversation.note_asr_timings,
@@ -5308,7 +5316,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         logging.getLogger(__name__).exception("Voice ASR receive failed")
                         conversation.record('voice_asr_failure', {'error': str(exc),
                             'error_type': type(exc).__name__, 'close_code': getattr(asr, 'close_code', None)})
-                        await conversation.emit("notice", text=f"语音识别失败：{exc}")
+                        await conversation.emit("notice", device_notice=True, text=f"语音识别失败：{exc}")
                         if conversation.decisions.config.get('speech_hold'):
                             await conversation.apply_schedule_effect(conversation.entry_scheduler.schedule.asr_failed())
                     finally:
@@ -5367,6 +5375,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     elif message.type == WSMsgType.TEXT:
                         payload = message.json()
                         kind = payload.get("type")
+                        if device_send and kind not in PHONE_CONTROLS:
+                            continue
                         if kind == 'audio_clock':
                             row = {'at_ms': round(time()*1000), 'session_id': conversation.session_id,
                                    'page_lag_ms': payload.get('page_lag_ms'), 'context_lag_ms': payload.get('context_lag_ms'),
@@ -5544,6 +5554,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             try:
                 await cleanup()
             finally:
+                if device_send and ws.prepared:
+                    request.app[PHONE_SOCKETS].discard(ws)
                 active_conversation = None
                 busy = False
                 cleanup_stage = ""
@@ -5598,9 +5610,14 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             return active_conversation.local_speakers
         return online_speakers or (local.speakers if local else None)
     install_personal_routes(app, personal_speakers, process.profiles, personal_features)
+    submit_frame = None
     if getattr(process, 'vision', None):
         from jshi.vision.web import install_vision
-        install_vision(app, process, subject_id, deliver_environment, voice_active=lambda: active_conversation is not None)
+        submit_frame = install_vision(app, process, subject_id, deliver_environment, voice_active=lambda: active_conversation is not None)
+    if phone_listener is not None:
+        from .phone_device import install_listener
+        install_listener(app, phone_listener, connection, submit_frame, visual.config if visual else None,
+                         voice_busy=lambda: busy or registry_busy)
     return app
 
 
@@ -5611,6 +5628,8 @@ def run_voice(process, identities, args) -> None:
         from aiohttp import web
     except ImportError:
         raise SystemExit('语音入口需要安装：python -m pip install -e ".[voice]"')
+    from .phone_device import PhoneListener
+    phone_listener = PhoneListener.from_args(args)
     config = VoiceConfig.from_env(asr=args.asr, tts=args.tts)
     from jshi.core.skillconfig import SkillConfigStore, build_model_port
     from jshi.app.cli import _skills_config_path
@@ -5653,7 +5672,7 @@ def run_voice(process, identities, args) -> None:
         prepare()
     print(f"语音入口：http://127.0.0.1:{args.port}（选择 LARK A2，输出为电脑默认扬声器）")
     web.run_app(create_app(process, subject_id, config, jev, local, local_tts, online_speakers,
-        speaker_models=models, trial_root=args.data_dir/'voice_trials'/'current'), host="127.0.0.1", port=args.port)
+        speaker_models=models, trial_root=args.data_dir/'voice_trials'/'current', phone_listener=phone_listener), host="127.0.0.1", port=args.port)
 
 
 def enroll_voice(process, args) -> None:

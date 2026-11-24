@@ -31,9 +31,12 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
 
     async def submit(request):
         same_origin(request)
-        if not voice_active():
+        return await accept_frame(request, source=request.headers.get('X-Visual-Source', 'browser')[:80],
+                                  still_active=voice_active)
+
+    async def accept_frame(request, *, source, still_active, max_age=None):
+        if not still_active():
             raise web.HTTPConflict(text='视觉模式需要先开启语音，请在交谈页面选择视觉模式')
-        source = request.headers.get('X-Visual-Source', 'browser')[:80]
         if not source:
             raise web.HTTPBadRequest(text='缺少画面来源')
         if time() - last_sample.get(source, 0) < vision.config.sample_seconds:
@@ -50,6 +53,10 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
             data = await request.read()
             if len(data) > vision.config.max_image_bytes:
                 raise ValueError('图片过大')
+            if not still_active():
+                raise web.HTTPConflict(text='采集会话已结束')
+            if max_age is not None and time() - captured > max_age + min(uncertainty, 1):
+                raise web.HTTPRequestTimeout(text='跳过过期的手机画面')
             await asyncio.to_thread(vision.submit, subject_id, data, captured, source,
                 clock={'source_time':source_time,'clock_offset':offset,'clock_uncertainty':uncertainty})
             last_sample[source] = time()
@@ -142,3 +149,4 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
     app.router.add_post('/api/vision/interpret', interpret)
     app.router.add_post('/api/vision/associate-face', associate_face)
     app.router.add_post('/api/vision/compare', compare)
+    return accept_frame

@@ -354,6 +354,11 @@ def _parser() -> argparse.ArgumentParser:
     voice = commands.add_parser("voice", help="浏览器语音对话：麦克风输入、电脑扬声器输出")
     voice.add_argument("subject_id", nargs="?", default=None)
     voice.add_argument("--port", type=int, default=8765)
+    for device_command in (voice, visual):
+        device_command.add_argument('--phone', metavar='LAN_IP', help='启用独立的局域网 HTTPS 手机设备入口')
+        device_command.add_argument('--phone-port', type=int, default=8766)
+        device_command.add_argument('--phone-cert', type=Path, help='手机信任的服务证书 PEM')
+        device_command.add_argument('--phone-key', type=Path, help='服务证书私钥 PEM')
     voice.add_argument("--asr", choices=tuple(ASR_BACKENDS), default=None)
     voice.add_argument("--tts", choices=["online", "local"], default=None)
 
@@ -702,7 +707,7 @@ def _main() -> None:
         return
     if args.command in {'voice', 'vision'}:
         args.subject_id = _interactive_subject_id(args.data_dir, args.subject_id)
-    process, identities, subjects = _runtime(args.data_dir, enable_vision=args.command == 'vision')
+    process, identities, subjects = _runtime(args.data_dir, enable_vision=args.command == 'vision' or bool(getattr(args, 'phone', None)))
     if args.command == 'vision':
         from jshi.app.voice import run_voice
         run_voice(process, identities, args)
