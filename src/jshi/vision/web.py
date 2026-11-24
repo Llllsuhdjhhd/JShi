@@ -1,7 +1,7 @@
 """Independent frame producer; completed observations join the shared input entry."""
 import asyncio
 from pathlib import Path
-from time import time
+from time import monotonic, time
 
 
 def install_vision(app, process, subject_id, deliver, *, captures):
@@ -33,7 +33,9 @@ def install_vision(app, process, subject_id, deliver, *, captures):
         return web.json_response({'environment':environment,
             'people':[{'object_id':p.object_id,'label':p.label} for p in people],
             'face_enabled':vision.config.face_enabled, 'portrait_enabled':vision.config.portrait_enabled,
-            'sample_seconds':vision.config.sample_seconds, 'model':vision.config.model,
+            'sample_seconds':vision.config.sample_seconds, 'model':vision.model_name,
+            'refresh_strategy':'adaptive' if vision.local_model and vision.config.refresh_strategy=='auto' else 'change',
+            'detector':vision.config.detector,
             'errors':errors, 'server_time':time(),
             'voice_active':capture is not None, 'capture':capture}, headers={'Cache-Control':'no-store'})
 
@@ -54,7 +56,10 @@ def install_vision(app, process, subject_id, deliver, *, captures):
         if session is not last_session:
             last_sample.clear()
             last_session = session
-        if time() - last_sample.get(source, 0) < vision.config.sample_seconds:
+        started = monotonic()
+        interval = vision.config.sample_seconds
+        # Browser intervals have delivery jitter, including the upload itself.
+        if started - last_sample.get(source, float('-inf')) < interval - min(.1, .05 * interval):
             raise web.HTTPTooManyRequests(text='采样过于频繁')
         try:
             from jshi.core.media import map_source_time
@@ -76,7 +81,7 @@ def install_vision(app, process, subject_id, deliver, *, captures):
                 clock={'capture_id':session.capture_id, 'source_time':source_time,'clock_offset':offset,'clock_uncertainty':uncertainty})
             if session is not captures.active or not session.accepting:
                 raise web.HTTPConflict(text='采集会话已结束')
-            last_sample[source] = time()
+            last_sample[source] = started
         except (ValueError, RuntimeError) as exc:
             raise web.HTTPBadRequest(text=str(exc))
         return web.json_response({'accepted':True}, status=202)

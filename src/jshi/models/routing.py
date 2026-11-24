@@ -59,18 +59,24 @@ class ProviderModel:
         return ProviderModel(self.service, self.name, self._lowest_effort(), self.max_tokens,
                              timeout=self.timeout, route=self.route)
 
-    def _log(self, started, response, *, purpose, stream, usage=None, error=None, error_phase=None):
+    def _log(self, started, response, *, purpose, stream, usage=None, timings=None, error=None, error_phase=None, first_text_ms=None):
         from .call_log import record, usage_fields
         transport = getattr(response, 'transport', None) or {}
+        stage_times = {}
+        if self.service['protocol'] == 'mlx' and isinstance(timings, dict):
+            for metric, field in (('prompt_ms', 'prompt_ms'), ('predicted_ms', 'decode_ms')):
+                value = timings.get(metric)
+                if isinstance(value, (int, float)) and 0 <= value < float('inf'):
+                    stage_times[field] = round(value, 1)
         record({'route': self.route, 'purpose': purpose, 'service': self.service.get('label', ''),
                 'model': self.name, 'effort': self.effort, 'stream': stream, 'status': 'error' if error else 'ok',
                 **({'error_type': error} if error else {}),
                 **({'error_phase': error_phase} if error_phase else {}),
-                'timeout_s': self.timeout,
+                'timeout_s': self.timeout, **({'first_text_ms':first_text_ms} if first_text_ms is not None else {}),
                 'reused': transport.get('reused'), 'connect_ms': transport.get('connect_ms'),
                 'headers_ms': transport.get('headers_ms'), 'idle_s': transport.get('idle_s'),
                 'stale_retry': transport.get('stale_retry'),
-                'total_ms': round((monotonic() - started) * 1000, 1), **usage_fields(usage)})
+                'total_ms': round((monotonic() - started) * 1000, 1), **usage_fields(usage), **stage_times})
 
     def _timeout(self, phase):
         return ProviderTimeout(self.timeout, self.service['label']+' · '+self.name, phase)
@@ -115,11 +121,16 @@ class ProviderModel:
             headers = {'x-goog-api-key':service['api_key']}
         else:
             body = {'model':self.name,'messages':messages,'stream':stream}
-            if stream and 'deepseek.com' in (urlsplit(service['endpoint']).hostname or ''):
+            if stream and (service['protocol'] == 'mlx' or 'deepseek.com' in (urlsplit(service['endpoint']).hostname or '')):
                 body['stream_options'] = {'include_usage': True}
             if response_format:
                 body['response_format'] = {'type': response_format}
-            if service.get('thinking_style')=='qwen':
+            if service['protocol'] == 'mlx':
+                body['enable_thinking'] = False
+                if self.route == 'vision' and response_format == 'json_object':
+                    from jshi.vision.model import observation_format
+                    body['response_format'] = observation_format()
+            elif service.get('thinking_style')=='qwen':
                 body['enable_thinking']=self.effort not in {'off','minimal'}
                 if body['enable_thinking']:
                     body['thinking_budget']=512 if self.effort=='low' else 8192
@@ -129,7 +140,7 @@ class ProviderModel:
             if max_tokens or self.max_tokens: body['max_tokens'] = max_tokens or self.max_tokens
             endpoint = service['endpoint'].rstrip('/')
             if not endpoint.endswith('/chat/completions'): endpoint += '/chat/completions'
-            headers = {'Authorization':'Bearer '+service['api_key']}
+            headers = {} if service['protocol'] == 'mlx' else {'Authorization':'Bearer '+service['api_key']}
         return Request(endpoint, data=json.dumps(body).encode('utf8'), headers={**headers,'Content-Type':'application/json',
             'User-Agent':'JShi/1.0 (+Python HTTP client)', 'Accept':'text/event-stream' if stream else 'application/json'})
 
@@ -184,7 +195,7 @@ class ProviderModel:
                 raise self._timeout(phase) from exc
             raise
         self._log(started, response, purpose=purpose, stream=False,
-                  usage=result.get('usageMetadata') or result.get('usage'))
+                  usage=result.get('usageMetadata') or result.get('usage'), timings=result.get('timings'))
         text = self._text(result)
         if not text: raise RuntimeError('模型未返回正文，可能被拦截或输出被截断')
         if not response_format and not text.lstrip().startswith(('{', '[')):
@@ -226,6 +237,8 @@ class ProviderModel:
         options = ({'response_format': 'json_object',
                     'max_tokens': self.max_tokens or (8192 if request.purpose.startswith('voice_jev') else None)}
                    if deepseek_json_output(request, self.name) and self.service['protocol'] != 'gemini' else {})
+        timings = None
+        first_text_ms = None
         started, response, usage, error = monotonic(), None, None, None
         try:
             with self._open(self._payload(self._messages(request),stream=True, **options)) as response:
@@ -235,17 +248,21 @@ class ProviderModel:
                     data = line[5:].strip()
                     if data=='[DONE]': break
                     event = json.loads(data)
+                    timings = event.get('timings') or timings
                     usage = event.get('usageMetadata') or event.get('usage') or usage
                     if self.service['protocol']=='gemini': text = self._text(event)
                     else: text = (event.get('choices') or [{}])[0].get('delta',{}).get('content','')
-                    if text: yield text
+                    if text:
+                        if first_text_ms is None:
+                            first_text_ms = round((monotonic()-started)*1000, 1)
+                        yield text
         except BaseException as exc:
             error = 'cancelled' if isinstance(exc, GeneratorExit) else type(exc).__name__
             if isinstance(exc, TimeoutError):
                 raise self._timeout('response_body' if response is not None else 'connection_or_headers') from exc
             raise
         finally:
-            self._log(started, response, purpose=request.purpose, stream=True, usage=usage, error=error,
+            self._log(started, response, purpose=request.purpose, stream=True, usage=usage, timings=timings, error=error, first_text_ms=first_text_ms,
                       error_phase=('response_body' if response is not None else 'connection_or_headers')
                       if error and error != 'cancelled' else None)
 

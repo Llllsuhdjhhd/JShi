@@ -270,7 +270,7 @@ def _parser() -> argparse.ArgumentParser:
     visual = commands.add_parser('vision', help='独立环境观察与文字交谈入口')
     visual.add_argument('subject_id')
     visual.add_argument('--asr', choices=tuple(ASR_BACKENDS), default='local')
-    visual.add_argument('--tts', choices=['local','online'], default='online')
+    visual.add_argument('--tts', choices=['local','online','mlx'], default='online')
     visual.add_argument('--port', type=int, default=8765)
 
     create = commands.add_parser("create", help="创建一个基础匠石")
@@ -360,7 +360,7 @@ def _parser() -> argparse.ArgumentParser:
         device_command.add_argument('--phone-cert', type=Path, help='手机信任的服务证书 PEM')
         device_command.add_argument('--phone-key', type=Path, help='服务证书私钥 PEM')
     voice.add_argument("--asr", choices=tuple(ASR_BACKENDS), default=None)
-    voice.add_argument("--tts", choices=["online", "local"], default=None)
+    voice.add_argument("--tts", choices=["online", "local", "mlx"], default=None)
 
     enroll = commands.add_parser("voice-enroll", help="将已注册对象与在线声纹关联")
     enroll.add_argument("object_id")

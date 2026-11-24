@@ -704,6 +704,66 @@ def test_split_front_cannot_use_another_persons_cached_context():
     assert not result.model_error and result.route=='main' and not result.direct_reply
 
 
+@pytest.mark.parametrize('takes_turn', [True, False])
+def test_listener_takes_turn_mid_answer_or_keeps_listening(process, takes_turn):
+    import asyncio
+    from jshi.app.voice import VoiceConversation
+    from jshi.models import ResponseItem
+    from jshi.voice.contracts import Transcript
+
+    first = entry(route='wait' if takes_turn else 'background',
+                  control='redirect' if takes_turn else 'keep',
+                  utterance_complete='incomplete' if takes_turn else 'complete',
+                  items=[{'i': 1, 'person': 'unknown', 'certainty': 'unknown', 'why': '按原话判断指向'}])
+    model = Model([first])
+
+    async def scenario():
+        messages = []
+        async def send(message):
+            messages.append(message)
+        c = VoiceConversation(process, 'stone', FakeCloud(), send,
+                              jev=VoiceJEV(model, mode='split', fallback_models=[]))
+        try:
+            c.jev_interaction_origin = {'text': '请匠石回答我的问题'}
+            k = (c.epoch, 1)
+            c.reply_input_ids[k] = ['question']
+            c.input_records['question'] = {'transcript': Transcript('这个问题怎么看？', 'A', 1, 2, True)}
+            await c._start_plan((ResponseItem('verbal', '第一句。第二句。', ('lux-id',)),), 'lux-id', c.epoch, k)
+            d = c.delivery.current
+            await c.acknowledge({'reply_id': d.reply_id, 'segment': 0, 'phase': 'started'})
+            text = '刚才说好用英文，而且我还想补充' if takes_turn else '嗯，你接着说。'
+            await c.accept(Transcript(text, 'A', 3, 5, True, input_id='new-input'))
+            await asyncio.wait_for(c.queue.join(), 4)
+            request = next(r for r in model.requests if r.purpose == 'voice_jev_entry')
+            state = json.loads(request.input_text.split('【当前状态】\n')[1].split('\n\n', 1)[0])
+            expression = state['expression_under_review']
+            assert expression['targets'] == ['lux'] and expression['trigger'] == '这个问题怎么看？'
+            assert 'lux-id' not in request.input_text
+            assert any(m['type'] == 'stop' and m['reply_id'] == d.reply_id for m in messages) == takes_turn
+            assert d.state == ('stopped' if takes_turn else 'playing')
+            assert ('new-input' in c.jev_pending_inputs) == takes_turn
+            assert not process.cognition.requests
+        finally:
+            await c.close()
+    asyncio.run(scenario())
+
+
+def test_obsolete_or_idle_input_cannot_yield_a_live_turn():
+    first = entry(route='wait', control='redirect', utterance_complete='incomplete')
+    for state in ({'state': 'completed'}, {'state': 'playing', 'expression_under_review': {'before_playback': ['I1']}}):
+        controls = []
+        result, _ = run('split', first, delivery=state, on_entry=lambda r: controls.append(r.control))
+        assert result.model_error and not controls
+
+
+def test_overlong_unused_fast_reply_does_not_block_playback_control():
+    controls = []
+    first = entry(front=preparation(route='self_reply', reply='x' * 199))
+    result, _ = run('split', first, delivery={'state': 'playing'}, on_entry=lambda r: controls.append(r.control))
+    assert controls == ['redirect'] and result.route == 'main' and not result.direct_reply
+    assert result.stage_records[0]['front_deferred'] == 'active_playback'
+
+
 @pytest.mark.parametrize('first_front', [None, 'omitted'])
 def test_split_preparation_can_acknowledge_without_direct_reply(first_front):
     first = entry(**({'front': None} if first_front is None else {}))

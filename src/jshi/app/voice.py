@@ -779,6 +779,8 @@ class VoiceConversation:
                 self._capture_jev_inputs(current, items)
                 await self._publish_attribution(current, items, record)
                 self._update_jev_continuation(current, record)
+                if control == 'redirect' and record.get('route') == 'wait':
+                    return
                 if (control == 'stop' and not record.get('silent_operation')) or (control == 'keep' and record.get('route') not in {'main', 'self_reply'}):
                     return
                 if not record.get('judged') and not record.get('fallback_to_main'):
@@ -863,6 +865,7 @@ class VoiceConversation:
             self.preparation.cancel()
         self.epoch += 1
         rid = self.delivery.stop(reason)
+        self.pending_voice = False
         if self.tts_task and not self.tts_task.done():
             self.tts_task.cancel()
         self.pending_plans.clear()
@@ -900,7 +903,6 @@ class VoiceConversation:
                 for _ in range(group['queued']):
                     self.queue.task_done()
             self._refresh_input_idle()
-            self.pending_voice = False
             while not self.turn_queue.empty():
                 discarded, _ = self.turn_queue.get_nowait()
                 self._finish_wakeup(discarded.input_id, False)
@@ -2457,7 +2459,7 @@ class VoiceConversation:
         decision, record, items = await self._judge_once(utterances, speaker, overlap, envelope)
         causes = set(record.get('stale_causes') or ())
         own_stop = record.get('control_applied') and record.get('applied_epoch') == self.epoch
-        if (causes and causes <= {'generation', 'epoch'} and ('epoch' not in causes or own_stop)
+        if (causes and causes <= {'generation', 'epoch', 'playback'} and ('epoch' not in causes or own_stop)
                 and not self.closed):
             self.record('voice_jev_stale_retry', {'input_ids': record.get('input_ids', []),
                 'causes': sorted(causes), 'first_activity_id': record.get('prompt_activity_id', '')})
@@ -2515,6 +2517,10 @@ class VoiceConversation:
         from jshi.subject.cognition_runtime import runtime_for
         if runtime_for(self.process, self.subject_id).state != "idle" and state == "completed":
             state = "thinking"
+        playing = self.delivery.current if state in {'playing', 'paused', 'queued'} else None
+        targets = [self.assign_code(oid, '') for oid in playing.segment_targets()
+                   if oid and oid not in {self.scene_id, self.identities.unassigned.object_id}
+                   and not oid.startswith('scene:')] if playing else []
         delivery = {"state": state, "spoken": spoken[-1200:],
                     "pending": (snapshot or {}).get("pending_text", "")[:200], "names_for_jiangshi": names,
                     "attention": self.attention.hint(speaker, overlap=overlap),
@@ -2545,11 +2551,26 @@ class VoiceConversation:
         # needs the specific expression it is deciding whether to stop.
         # Restore only a bounded live snapshot, explicitly not external proof.
         if delivery['state'] in {'thinking', 'playing', 'paused', 'queued'}:
-            delivery['expression_under_review'] = {
+            expression = delivery['expression_under_review'] = {
                 'basis': '匠石自身当前表达，仅供判断是否继续；不证明外部接纳，不是已播事实',
                 'partial': str((snapshot or {}).get('partial_text') or '')[:300],
-                'pending': str((snapshot or {}).get('pending_text') or '')[:300],
-                'trigger': str((self.active_turn or {}).get('input') or '')[:200]}
+                'pending': str((snapshot or {}).get('pending_text') or '')[:300]}
+            if playing:
+                if targets:
+                    expression['targets'] = targets
+                source_ids = self.reply_input_ids.get(self.reply_epochs.get(playing.reply_id), ())
+                trigger = '\n'.join(t.text for iid in source_ids
+                                    if (t := self.input_records.get(iid, {}).get('transcript')))
+                if playing.started_at_ms is not None:
+                    earlier = [f'I{i}' for i, u in enumerate(utterances, 1)
+                               if (end := self.input_records.get(u.input_id, {}).get('asr_timing', {})
+                                   .get('audio_end_received_at_ms')) is not None and end < playing.started_at_ms]
+                    if earlier:
+                        expression['before_playback'] = earlier
+            else:
+                trigger = (self.active_turn or {}).get('input') or ''
+            if trigger:
+                expression['trigger'] = trigger[:200]
         delivery['answer_handling'] = self._answer_handling_context()
         from jshi.voice.wait_ack import model_key
         delivery['waiting'] = self.wait_ack_timing.guidance(model_key(self.process),
@@ -2658,6 +2679,8 @@ class VoiceConversation:
             return True
 
         own_inputs = {u.input_id for u in utterances}
+        reviewed_reply = (snapshot or {}).get('reply_id') if state in {'playing', 'paused', 'queued'} else None
+        playback_changed = False
 
         def is_current():
             return ((entry_job is None or entry_job.valid) and same_sources() and not validity['expired'] and not self.closed
@@ -2666,13 +2689,16 @@ class VoiceConversation:
                     and self._shared_scene_revision() == shared_revision)
 
         async def apply_entry(result):
-            nonlocal entry_result
+            nonlocal entry_result, playback_changed
             if entry_job is not None and not await entry_job.permit():
                 return False
             if not is_current():
                 return False
             entry_result = result
             if result.control in {'stop', 'redirect'}:
+                if reviewed_reply and not self.delivery.accepts(reviewed_reply):
+                    playback_changed = True
+                    return False
                 await self.stop('semantic_' + result.control)
                 validity['epoch'] = self.epoch
                 entry_result = replace(result, control_applied=True, applied_epoch=self.epoch)
@@ -2723,6 +2749,7 @@ class VoiceConversation:
         stale_causes = [cause for cause, failed in (
             ('source', not same_sources()), ('closed', self.closed),
             ('entry_job', entry_job is not None and not entry_job.valid),
+            ('playback', playback_changed),
             ('epoch', not self._epoch_current(validity['epoch'], own_inputs)),
             ('generation', self.jev_scene_store.state['generation'] != validity['generation'])) if failed]
         if set(stale_causes) - {'entry_job'}:
@@ -3264,6 +3291,8 @@ class VoiceConversation:
                                          interaction=record.get('interaction'))
                 if jev_calls:
                     self._update_jev_continuation(current, jev_calls[-1])
+                    if control == 'redirect' and record.get('route') == 'wait':
+                        continue
                 if control == 'stop' and not record.get('silent_operation'):
                     self.jev_pending_inputs.clear()
                     continue
@@ -3408,6 +3437,8 @@ class VoiceConversation:
                         epoch = self.epoch
                     self._capture_jev_inputs(current, items)
                     self._update_jev_continuation(current, record)
+                    if record.get('control') == 'redirect' and record.get('route') == 'wait':
+                        continue
                     if record.get('control') == 'stop' and not record.get('silent_operation'):
                         continue
                     if record.get('control') == 'keep' and record.get('route') not in {'main', 'self_reply'}:
@@ -3495,7 +3526,8 @@ class VoiceConversation:
                         parts=(InputPart('text', text), *envelope.parts[1:]))
                 if envelope.jev_calls and not envelope.visual_snapshot_id:
                     call = envelope.jev_calls[-1]
-                    envelope = replace(envelope, visual_snapshot_id=call.get('visual_snapshot_id', ''))
+                    envelope = replace(envelope, visual_snapshot_id=call.get('visual_snapshot_id', ''),
+                                       visual_context_fixed='visual_snapshot_id' in call)
                     images = tuple(InputPart(**p) for p in call.get('input_parts', ()) if p['kind'] == 'image')
                     envelope = replace(envelope, parts=tuple(p for p in envelope.parts if p.kind != 'image') + images)
                 self.entry_scheduler.schedule.set_task('cognition', 'running')
@@ -3992,10 +4024,14 @@ class VoiceConversation:
                         turn_key=list(turn_key),
                         generated_at_ms=self.voice_timings.get(turn_key, (None, {}))[1].get('reply_ready_at_ms'),
                         items=reply_items)
-        await self.publish_pipeline(self.reply_input_ids.get(turn_key, ()))
-        self.record("voice_delivery", self.delivery.snapshot())
-        self.attention.engage(t for item in items for t in item.target_ids)
+        if self.closed or self.output_disconnected or not self.delivery.accepts(d.reply_id):
+            return
+        # The player now knows the validated plan and its reply ID. Start TTS
+        # while publishing timing data instead of waiting for diagnostic I/O.
         self.tts_task = asyncio.create_task(self._synthesize(d))
+        self.attention.engage(t for item in items for t in item.target_ids)
+        self.record("voice_delivery", self.delivery.snapshot())
+        await self.publish_pipeline(self.reply_input_ids.get(turn_key, ()))
 
     async def _next_plan(self):
         if self.entry_scheduler.schedule.blocks_start():
@@ -4679,7 +4715,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                       'ranking': [{'object_id': o, 'label': label(o), 'score': round(s, 3)} for s, o in ranking[:3]]}
         return {**result, 'summary': await asyncio.to_thread(trials.summary, speakers)}
 
+    default_tts = 'local' if local_tts else ('mlx' if config.tts_backend == 'mlx' else 'online')
+
     async def status(request):
+        from importlib.util import find_spec
+        from jshi.voice.mlx import audio_ready
+        mlx_ready = await audio_ready()
         from jshi.voice.segmentation import segment_settings
         memory_backend = getattr(process.memory, '_backend', process.memory)
         memory_info = getattr(memory_backend, 'runtime_info', None)
@@ -4690,9 +4731,10 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             'text_jev_writing': text_jev_task is not None and not text_jev_task.done(),
             'text_jev_error': text_jev_error,
             'asr_backends': {name: asdict(spec) for name, spec in ASR_BACKENDS.items()},
-            'tts': '本地固定音色' if local_tts else ('火山在线播报 · ' + config.template.speaker),
-            'tts_backend': 'local' if local_tts else 'online',
-            'tts_backends': {'local': local_tts is not None, 'online': bool(config.api_key)},
+            'tts': '本机 MLX Vivian' if config.tts_backend == 'mlx' else '本地固定音色' if local_tts else ('火山在线播报 · ' + config.template.speaker),
+            'tts_backend': default_tts,
+            'tts_backends': {'local': local_tts is not None, 'online': bool(config.api_key), 'mlx': mlx_ready},
+            'mlx_available': mlx_ready and find_spec('webrtcvad') is not None,
             'speech_policies': {'segment':config.segment_strategy,
                 'silence_ms':segment_settings(config).silence_ms,
                 'max_window_ms':round(config.max_window_s*1000), 'turn':config.turn_strategy,
@@ -5035,14 +5077,16 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         backend = request.query.get("asr", getattr(local, 'backend', 'local') if local is not None else config.asr_backend)
         if backend not in ASR_BACKENDS:
             raise web.HTTPBadRequest(text="未知语音识别后端")
-        tts_backend = request.query.get('tts') or ('local' if local_tts else 'online')
-        if tts_backend not in {'local', 'online'}:
+        tts_backend = request.query.get('tts') or default_tts
+        if tts_backend not in {'local', 'online', 'mlx'}:
             raise web.HTTPBadRequest(text='未知语音播报后端')
         if request.query.get('tts') == 'local' and local_tts is None:
             raise web.HTTPBadRequest(text='本地播报尚未加载')
         if request.query.get('tts') == 'online' and not config.api_key:
             raise web.HTTPBadRequest(text='火山播报缺少语音密钥')
         use_local = local if local is not None and backend == getattr(local, 'backend', 'local') else None
+        if backend == 'mlx' and (config.separation_backend != 'off' or config.identity_mode == 'voiceprint'):
+            raise web.HTTPBadRequest(text='本机 MLX 识别使用匿名输入，请关闭音源分离并使用 diarization 模式')
         if backend in {'local', 'qwen'} and use_local is None:
             raise web.HTTPBadRequest(text=f"识别未加载，请用 --asr {backend} 启动")
         if backend == "online" and not config.api_key:
@@ -5087,8 +5131,14 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 start_visual = asyncio.create_task(asyncio.to_thread(visual.store.set_capture, subject_id, capture.capture_id))
                 await asyncio.shield(start_visual)
             async with ClientSession(timeout=ClientTimeout(total=None, sock_connect=15, sock_read=60)) as http:
+                if 'mlx' in {backend, tts_backend}:
+                    from jshi.voice.mlx import audio_ready
+                    if not await audio_ready():
+                        raise ValueError('请先运行 tools/start_mlx_audio.sh 启动本机 MLX 语音服务')
                 cloud = VolcVoice(replace(config, asr_backend=backend), http)
                 speakers = use_local.speakers if use_local else (online_speakers or (local.speakers if local else None))
+                if backend == 'mlx':
+                    speakers = None
                 selected_model = request.query.get('speaker_model', '')
                 if selected_model:
                     if not speaker_models or selected_model not in speaker_models:
@@ -5115,8 +5165,11 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     timeout_s=config.separation_timeout_s,
                     transcribe_many=use_local.refiner.transcribe_sources if backend == 'qwen' and config.separation_backend == 'pyannote' else None)
                 send_event = (lambda event: device_send(ws, event)) if device_send else ws.send_json
-                conversation = VoiceConversation(process, subject_id, local_tts if tts_backend == 'local' else cloud,
-                    send_event, jev=jev,
+                speech = local_tts if tts_backend == 'local' else cloud
+                if tts_backend == 'mlx':
+                    from jshi.voice.mlx import MlxTTS
+                    speech = MlxTTS(config, http)
+                conversation = VoiceConversation(process, subject_id, speech, send_event, jev=jev,
                     timeout_s=config.jev_timeout_s, local_speakers=speakers, input_pause_s=config.input_pause_s, sample_source=audio,
                     candidate_timeout_s=config.candidate_timeout_s, input_max_batch_s=config.input_max_batch_s,
                     input_batch_chars=config.input_batch_chars,
@@ -5296,13 +5349,14 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                                             {'start_ms': part.start_ms, 'end_ms': part.end_ms,
                                              'track': part.track_id, 'uncertain': part.identity_uncertain}
                                             for part in aligned]})
-                                elif speakers is not None and not transcript.replaces:
+                                elif backend != 'mlx' and speakers is not None and not transcript.replaces:
                                     transcript, identity_pending = await bounded_online_match(audio, transcript, speakers,
                                         local_executor, identity_pending, config.candidate_timeout_s)
                                     aligned = (transcript,)
                                 if transcript.final:
                                     from jshi.voice.speaker_evidence import compare_evidence
-                                    aligned = compare_evidence(transcript, aligned)
+                                    if backend != 'mlx':
+                                        aligned = compare_evidence(transcript, aligned)
                                     if recovery_intake is not None:
                                         with stage(conversation.record, 'main_reconcile_delivery',
                                                    source_start_ms=transcript.start_ms, source_end_ms=transcript.end_ms,
@@ -5343,14 +5397,14 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 from jshi.voice.diagnostics import watch_event_loop
                 loop_watch = asyncio.create_task(watch_event_loop(conversation.record))
                 capture.accepting = True
-                await conversation.emit("ready", stream=capture.token, capture_id=capture.capture_id, session_id=conversation.session_id, identity_mode="local" if use_local else config.identity_mode,
+                await conversation.emit("ready", stream=capture.token, capture_id=capture.capture_id, session_id=conversation.session_id, identity_mode="local" if use_local or backend == "mlx" else config.identity_mode,
                     continuous_speaker_analysis=('disabled' if config.continuous_analysis == 'off' else
                         ('shadow' if config.continuous_analysis == 'shadow' else 'enabled') if audio_timeline else 'unavailable'),
                     independent_transcription='enabled' if recovery_intake else
                         'disabled' if config.continuous_analysis != 'active' else 'unavailable',
                     acoustic_turn='enabled' if online_turn else 'unavailable' if online_turn_error else 'disabled',
                     acoustic_turn_error=online_turn_error,
-                    speaker_split='enabled' if cloud_alignment else 'unavailable' if backend == 'bailian' else 'provider',
+                    speaker_split='enabled' if cloud_alignment else 'unavailable' if backend == 'bailian' else 'unavailable' if backend == 'mlx' else 'provider',
                     speaker_split_error=speaker_split_error,
                     voiceprint_available=speakers is not None,
                     voiceprint_count=len(getattr(speakers, 'known', {})) if speakers else 0,
@@ -5361,7 +5415,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     comparison_available=trial is not None,
                     names=[p.label for p in process.profiles.list() if p.status != 'rejected' and p.source != 'voice_scene'][:100],
                     asr=describe_asr(backend, config, use_local),
-                    tts="本地固定音色" if tts_backend == 'local' else ("火山双向流式合成" if config.tts_transport == 'websocket' else "在线 SSE 合成"))
+                    tts="本机 MLX Vivian" if tts_backend == "mlx" else "本地固定音色" if tts_backend == 'local' else ("火山双向流式合成" if config.tts_transport == 'websocket' else "在线 SSE 合成"))
                 intake_lag_reported = False
                 async for message in ws:
                     if message.type == WSMsgType.BINARY:
@@ -5435,9 +5489,10 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                                 await conversation.apply_schedule_effect(effect)
                             else:
                                 token = schedule.note_short_end()
-                                task = asyncio.create_task(conversation._confirm_transient(token, schedule.current_id))
-                                conversation.background_tasks.add(task)
-                                task.add_done_callback(conversation.background_tasks.discard)
+                                if token is not None:
+                                    task = asyncio.create_task(conversation._confirm_transient(token, schedule.current_id))
+                                    conversation.background_tasks.add(task)
+                                    task.add_done_callback(conversation.background_tasks.discard)
                         elif kind == "noise":
                             await conversation.noise()
                         elif kind == "stop":
@@ -5523,7 +5578,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                                 await asr.finish()
                                 if asr.wait_for_final:
                                     try:
-                                        await asyncio.wait_for(asyncio.shield(receiver), timeout=3)
+                                        await asyncio.wait_for(asyncio.shield(receiver), timeout=60 if backend == 'mlx' else 3)
                                     except asyncio.TimeoutError:
                                         pass
                             break

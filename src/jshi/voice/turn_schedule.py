@@ -230,8 +230,8 @@ class TurnSchedule:
 
     def note_short_end(self, matter_id=None):
         matter = self._matter(matter_id)
-        if matter is None:
-            return 0
+        if matter is None or not matter.reasons:
+            return None
         matter.transient_token += 1
         return matter.transient_token
 
@@ -248,7 +248,7 @@ class TurnSchedule:
 
     def note_sustained_end(self, matter_id=None):
         matter = self._matter(matter_id)
-        if matter is None:
+        if matter is None or not any(r.kind == 'pause' for r in matter.reasons.values()):
             return Effect('none')
         matter.asr_pending = True
         matter.transient_token += 1

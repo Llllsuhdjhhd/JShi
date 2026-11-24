@@ -10,7 +10,8 @@ def test_voice_model_status_and_unavailable_tts_choice(process):
         app = create_app(process, 'stone', VoiceConfig('', asr_backend='local', tts_backend='local'), local_tts=FakeCloud())
         async with TestClient(TestServer(app)) as client:
             result = await (await client.get('/status')).json()
-            assert result['tts_backends'] == {'local':True, 'online':False}
+            assert result['tts_backends']['local'] and not result['tts_backends']['online']
+            assert isinstance(result['tts_backends']['mlx'], bool)
             assert result['tts_backend'] == 'local'
             assert 'bailian' in result['asr_backends']
             origin = str(client.make_url('/')).rstrip('/')

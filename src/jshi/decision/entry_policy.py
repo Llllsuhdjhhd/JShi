@@ -29,7 +29,7 @@ def entry_action(result, refs, thresholds):
     elif address == 'other' and effect == 'keep' and expression == 'complete':
         if result.choice('address', thresholds['background']) == 'other':
             route = 'background'
-    elif address == 'direct' and expression == 'incomplete' and effect == 'keep':
+    elif address == 'direct' and expression == 'incomplete' and effect in {'keep', 'redirect'}:
         if result.choice('expression', thresholds['wait']) == 'incomplete':
             route = 'wait'
     elif address == 'direct' and expression == 'complete' and effect in {'keep', 'redirect'}:

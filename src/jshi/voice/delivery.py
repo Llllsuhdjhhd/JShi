@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from threading import RLock
+from time import time
 from uuid import uuid4
 import re
 
@@ -50,6 +51,13 @@ class Delivery:
     generated: bool = False
     reason: str = ""
     targets: tuple[tuple[str, ...], ...] = ()
+    started_at_ms: float | None = None
+
+    def segment_targets(self) -> tuple[str, ...]:
+        segment = self.current if self.current is not None else len(self.completed)
+        if segment >= len(self.texts):
+            return ()
+        return self.targets[segment] if self.targets else (self.object_id,)
 
     def snapshot(self) -> dict:
         return {"reply_id": self.reply_id, "object_id": self.object_id,
@@ -115,6 +123,8 @@ class DeliveryTracker:
                 return False
             d = self.current
             if phase == "started":
+                if d.started_at_ms is None:
+                    d.started_at_ms = time() * 1000
                 d.current = segment
                 if d.state != "paused":
                     d.state = "playing"

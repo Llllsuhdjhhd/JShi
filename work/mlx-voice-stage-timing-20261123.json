@@ -1,0 +1,3720 @@
+{
+  "input": {
+    "file": "mlx-voice-latency-20261122.wav",
+    "pcm_sha256": "3f938596d2433583fefa05dd088111379ff73b3024ea7cbabd0c4a36afe76b7e",
+    "text": "你好，可以怎么称呼你？",
+    "duration_s": 2.16,
+    "format": "16 kHz 单声道 PCM16，Vivian 合成的同一段录音"
+  },
+  "method": "同一份录音按 20ms 帧送入真实本机 WebSocket；每组重新启动本机 ASR、聊天和合成服务，先预热四个提示词前缀、TTS 先合成一次，ASR 第一轮首次加载。每轮新建隔离主体、进程内记忆。before 在临时测试进程中使用原整句 WAV 和原播报调度，after 使用当前流式 PCM。动态回答照常完整生成。录音开始后 2.160 s 为计时零点，统一采用毫秒。客户端收包与服务端函数入口分别打点，MLX 服务用同机日志的预填与生成时间，并以三个 token 计数逐请求交叉匹配。预填按起止日志墙钟时长计，内含缓存恢复等开销。邻接点的差是区间内所有工作经过的时间。个别毫秒以下边界有记录精度误差。写场与播报并行；后台写场开始事件可能稍晚于实际任务开始。未测扬声器。",
+  "stage_columns": [
+    "阶段",
+    "开始_ms",
+    "结束_ms",
+    "耗时_ms"
+  ],
+  "before": {
+    "trials": [
+      {
+        "text": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好。我是匠石。"
+        },
+        "routing": [
+          {
+            "route": "background",
+            "interaction": "none",
+            "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+            "mode": "split"
+          }
+        ],
+        "speech_stages_ms": [
+          [
+            "端点判定、尾静音及送入 ASR",
+            0,
+            521.42,
+            521.42
+          ],
+          [
+            "本机 ASR 转写",
+            521.42,
+            1178.66,
+            657.24
+          ],
+          [
+            "定稿文字到达客户端",
+            1178.66,
+            1181.88,
+            3.21
+          ],
+          [
+            "收集本句、人物候选及排队进入接话判断",
+            1181.88,
+            1188.87,
+            7.0
+          ],
+          [
+            "接话判断准备现场材料和模型请求",
+            1188.87,
+            1192.73,
+            3.86
+          ],
+          [
+            "接话请求发出到服务开始预填",
+            1192.73,
+            1206.78,
+            14.05
+          ],
+          [
+            "接话输入预填和缓存处理",
+            1206.78,
+            2054.78,
+            848.0
+          ],
+          [
+            "接话预填结束到首个生成 token",
+            2054.78,
+            2063.78,
+            9.0
+          ],
+          [
+            "接话逐 token 生成完整判断",
+            2063.78,
+            4987.78,
+            2924.0
+          ],
+          [
+            "接话模型收尾、回传和路由复核",
+            4987.78,
+            5012.24,
+            24.46
+          ],
+          [
+            "入口保留为背景，到现场主动主认知开始",
+            5012.24,
+            5347.62,
+            335.38
+          ],
+          [
+            "主认知启动、对象和输入事实落位",
+            5347.62,
+            5387.04,
+            39.42
+          ],
+          [
+            "读取活跃区",
+            5387.04,
+            5387.14,
+            0.1
+          ],
+          [
+            "组装本轮材料、记忆及工具上下文",
+            5387.14,
+            5395.35,
+            8.21
+          ],
+          [
+            "创建本次认知活动",
+            5395.35,
+            5396.8,
+            1.45
+          ],
+          [
+            "构造并发起主认知模型请求",
+            5396.8,
+            5400.18,
+            3.38
+          ],
+          [
+            "主认知请求发出到服务开始预填",
+            5400.18,
+            5593.78,
+            193.6
+          ],
+          [
+            "主认知输入预填和缓存处理",
+            5593.78,
+            6053.78,
+            460.0
+          ],
+          [
+            "主认知预填结束到首个生成 token",
+            6053.78,
+            6061.78,
+            8.0
+          ],
+          [
+            "主认知逐 token 生成完整输出",
+            6061.78,
+            10978.78,
+            4917.0
+          ],
+          [
+            "主认知模型收尾及完整结果回传",
+            10978.78,
+            11021.86,
+            43.08
+          ],
+          [
+            "解析、现场更新和回应对象复核",
+            11021.86,
+            11024.55,
+            2.69
+          ],
+          [
+            "回复计划及播报许可检查、启动首句合成",
+            11024.55,
+            11025.86,
+            1.32
+          ],
+          [
+            "首句开始合成到首个 PCM 块",
+            11025.86,
+            11321.91,
+            296.04
+          ],
+          [
+            "PCM 封包到客户端首包",
+            11321.91,
+            11322.33,
+            0.43
+          ],
+          [
+            "首包到首句音频收齐",
+            11322.33,
+            11322.39,
+            0.05
+          ],
+          [
+            "首句收齐到全部回答音频收齐",
+            11322.39,
+            11741.81,
+            419.42
+          ]
+        ],
+        "write_stages_ms": [
+          [
+            "写场准备输入",
+            11031.23,
+            11032.07,
+            0.85
+          ],
+          [
+            "写场请求发出到服务开始预填",
+            11032.07,
+            11036.78,
+            4.71
+          ],
+          [
+            "写场输入预填和缓存处理",
+            11036.78,
+            11637.78,
+            601.0
+          ],
+          [
+            "写场预填结束到首个生成 token",
+            11637.78,
+            11646.78,
+            9.0
+          ],
+          [
+            "写场逐 token 生成",
+            11646.78,
+            13988.78,
+            2342.0
+          ],
+          [
+            "写场模型收尾、回传、落盘及完成通知",
+            13988.78,
+            14013.86,
+            25.07
+          ]
+        ],
+        "milestones_ms": {
+          "transcript": 1181.876,
+          "first_reply": 11026.218,
+          "tts_start": 11025.865,
+          "first_audio": 11322.334,
+          "first_sentence_complete": 11322.387,
+          "all_audio": 11741.809,
+          "foreground_done": 11031.343,
+          "write_start_event": 11031.345,
+          "write_done": 14013.856,
+          "all_done": 14013.856
+        },
+        "model_calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "total_ms": 3818.5,
+            "prompt_tokens": 6015,
+            "cache_hit_tokens": 4608,
+            "completion_tokens": 316,
+            "prompt_ms": 627.7,
+            "decode_ms": 2933.5
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "total_ms": 5621.5,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2048,
+            "completion_tokens": 529,
+            "prompt_ms": 373.2,
+            "decode_ms": 4926.7
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "total_ms": 2980.2,
+            "prompt_tokens": 1074,
+            "cache_hit_tokens": 0,
+            "completion_tokens": 314,
+            "prompt_ms": 526.4,
+            "decode_ms": 2349.8
+          }
+        ],
+        "syntheses_ms": [
+          {
+            "text": "你好。",
+            "start": 11025.865,
+            "first_pcm": 11321.907,
+            "end": 11322.147
+          },
+          {
+            "text": "我是匠石。",
+            "start": 11322.165,
+            "first_pcm": 11741.132,
+            "end": 11741.416
+          }
+        ],
+        "received_segments_ms": {
+          "0": {
+            "text": "你好。",
+            "start": 11322.334,
+            "samples": 13440,
+            "end": 11322.387
+          },
+          "1": {
+            "text": "我是匠石。",
+            "start": 11741.712,
+            "samples": 28800,
+            "end": 11741.808
+          }
+        },
+        "activity": [
+          {
+            "subject_id": "stone",
+            "activity_id": "e5986eb5-31df-49cd-8209-613e2de0fa4f",
+            "started_at": "2026-11-23T03:03:05.780579+00:00",
+            "total_ms": 5649.8,
+            "steps": [
+              [
+                "①落位",
+                6.7
+              ],
+              [
+                "②活跃区",
+                0.1
+              ],
+              [
+                "③组装",
+                8.2
+              ],
+              [
+                "④建活动",
+                1.5
+              ],
+              [
+                "⑤认知",
+                5627.1
+              ],
+              [
+                "06标记",
+                2.2
+              ],
+              [
+                "⑥行动",
+                0.5
+              ],
+              [
+                "⑦收尾",
+                2.8
+              ],
+              [
+                "30投递",
+                0.1
+              ],
+              [
+                "连续性检查",
+                0.0
+              ],
+              [
+                "300自省入队",
+                0.7
+              ]
+            ],
+            "substeps": [
+              [
+                "①对象解析",
+                0.0
+              ],
+              [
+                "①输入事实",
+                1.5
+              ],
+              [
+                "①相识来源",
+                4.8
+              ],
+              [
+                "①视觉关联",
+                0.0
+              ],
+              [
+                "①活动账本",
+                0.0
+              ],
+              [
+                "③工具清理",
+                1.2
+              ],
+              [
+                "③召回策略与缺口",
+                0.3
+              ],
+              [
+                "③工具相关",
+                1.2
+              ],
+              [
+                "③装载源",
+                4.5
+              ],
+              [
+                "③组装收尾",
+                0.0
+              ],
+              [
+                "③输入与视觉整理",
+                0.9
+              ]
+            ]
+          }
+        ],
+        "detailed_spans_ms": [
+          {
+            "stage": "input_accepted"
+          },
+          {
+            "stage": "input_audio_archive",
+            "started_at_ms": 1181.679,
+            "finished_at_ms": 1182.485,
+            "elapsed_ms": 0.807,
+            "status": "completed"
+          },
+          {
+            "stage": "input_queue_put",
+            "started_at_ms": 1182.537,
+            "finished_at_ms": 1182.543,
+            "elapsed_ms": 0.006,
+            "status": "completed"
+          },
+          {
+            "stage": "speaker_audio_prepare",
+            "started_at_ms": 1182.82,
+            "finished_at_ms": 1182.84,
+            "elapsed_ms": 0.02,
+            "status": "completed"
+          },
+          {
+            "stage": "input_worker_started"
+          },
+          {
+            "stage": "resolve_speaker",
+            "started_at_ms": 1182.987,
+            "finished_at_ms": 1182.998,
+            "elapsed_ms": 0.011,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 1183.127,
+            "finished_at_ms": 1183.133,
+            "elapsed_ms": 0.007,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 1182.703,
+            "finished_at_ms": 1184.011,
+            "elapsed_ms": 1.309,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 1184.213,
+            "finished_at_ms": 1184.811,
+            "elapsed_ms": 0.598,
+            "status": "completed"
+          },
+          {
+            "stage": "voice_candidates",
+            "started_at_ms": 1184.955,
+            "finished_at_ms": 1184.96,
+            "elapsed_ms": 0.005,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 1185.461,
+            "finished_at_ms": 1185.852,
+            "elapsed_ms": 0.392,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 1185.941,
+            "finished_at_ms": 1186.433,
+            "elapsed_ms": 0.493,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 1184.943,
+            "finished_at_ms": 1186.573,
+            "elapsed_ms": 1.63,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 1187.434,
+            "finished_at_ms": 1187.81,
+            "elapsed_ms": 0.376,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_input_queued"
+          },
+          {
+            "stage": "jev_input_dequeued"
+          },
+          {
+            "stage": "jev_known_names",
+            "started_at_ms": 1189.443,
+            "finished_at_ms": 1189.617,
+            "elapsed_ms": 0.174,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_acquaintance",
+            "started_at_ms": 1189.652,
+            "finished_at_ms": 1189.653,
+            "elapsed_ms": 0.002,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 1189.94,
+            "finished_at_ms": 1190.16,
+            "elapsed_ms": 0.221,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_task_context",
+            "started_at_ms": 1190.196,
+            "finished_at_ms": 1190.427,
+            "elapsed_ms": 0.231,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_material_prepare",
+            "started_at_ms": 1188.892,
+            "finished_at_ms": 1190.46,
+            "elapsed_ms": 1.567
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 5012.504,
+            "finished_at_ms": 5013.175,
+            "elapsed_ms": 0.672,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 5014.119,
+            "finished_at_ms": 5014.146,
+            "elapsed_ms": 0.028,
+            "status": "completed"
+          },
+          {
+            "stage": "main_reply_cache",
+            "started_at_ms": 11030.457,
+            "finished_at_ms": 11030.751,
+            "elapsed_ms": 0.295,
+            "status": "completed"
+          },
+          {
+            "stage": "main_debug_persist",
+            "started_at_ms": 11030.857,
+            "finished_at_ms": 11030.914,
+            "elapsed_ms": 0.058,
+            "status": "completed"
+          }
+        ],
+        "engine_spans_ms": [
+          [
+            "ASR",
+            521.422,
+            1178.663
+          ],
+          [
+            "http.voice_jev",
+            1192.733,
+            5011.449
+          ],
+          [
+            "JEV",
+            1188.873,
+            5012.245
+          ],
+          [
+            "assemble",
+            5388.32,
+            5394.31
+          ],
+          [
+            "http.cognition",
+            5400.18,
+            11021.864
+          ],
+          [
+            "review",
+            11024.281,
+            11024.55
+          ],
+          [
+            "delivery",
+            11025.188,
+            11025.503
+          ],
+          [
+            "main",
+            5347.623,
+            11030.947
+          ],
+          [
+            "http.write_zone",
+            11032.071,
+            14012.369
+          ]
+        ],
+        "run": 1
+      },
+      {
+        "text": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好！我是匠石。很高兴认识你。"
+        },
+        "routing": [
+          {
+            "route": "background",
+            "interaction": "none",
+            "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+            "mode": "split"
+          }
+        ],
+        "speech_stages_ms": [
+          [
+            "端点判定、尾静音及送入 ASR",
+            0,
+            521.36,
+            521.36
+          ],
+          [
+            "本机 ASR 转写",
+            521.36,
+            668.49,
+            147.13
+          ],
+          [
+            "定稿文字到达客户端",
+            668.49,
+            669.07,
+            0.59
+          ],
+          [
+            "收集本句、人物候选及排队进入接话判断",
+            669.07,
+            674.79,
+            5.72
+          ],
+          [
+            "接话判断准备现场材料和模型请求",
+            674.79,
+            677.43,
+            2.64
+          ],
+          [
+            "接话请求发出到服务开始预填",
+            677.43,
+            685.09,
+            7.66
+          ],
+          [
+            "接话输入预填和缓存处理",
+            685.09,
+            1492.09,
+            807.0
+          ],
+          [
+            "接话预填结束到首个生成 token",
+            1492.09,
+            1501.09,
+            9.0
+          ],
+          [
+            "接话逐 token 生成完整判断",
+            1501.09,
+            4024.09,
+            2523.0
+          ],
+          [
+            "接话模型收尾、回传和路由复核",
+            4024.09,
+            4048.96,
+            24.86
+          ],
+          [
+            "入口保留为背景，到现场主动主认知开始",
+            4048.96,
+            4347.01,
+            298.05
+          ],
+          [
+            "主认知启动、对象和输入事实落位",
+            4347.01,
+            4382.08,
+            35.07
+          ],
+          [
+            "读取活跃区",
+            4382.08,
+            4382.17,
+            0.09
+          ],
+          [
+            "组装本轮材料、记忆及工具上下文",
+            4382.17,
+            4390.19,
+            8.01
+          ],
+          [
+            "创建本次认知活动",
+            4390.19,
+            4392.29,
+            2.11
+          ],
+          [
+            "构造并发起主认知模型请求",
+            4392.29,
+            4395.26,
+            2.97
+          ],
+          [
+            "主认知请求发出到服务开始预填",
+            4395.26,
+            4554.09,
+            158.83
+          ],
+          [
+            "主认知输入预填和缓存处理",
+            4554.09,
+            4945.09,
+            391.0
+          ],
+          [
+            "主认知预填结束到首个生成 token",
+            4945.09,
+            4953.09,
+            8.0
+          ],
+          [
+            "主认知逐 token 生成完整输出",
+            4953.09,
+            10233.09,
+            5280.0
+          ],
+          [
+            "主认知模型收尾及完整结果回传",
+            10233.09,
+            10276.11,
+            43.02
+          ],
+          [
+            "解析、现场更新和回应对象复核",
+            10276.11,
+            10278.5,
+            2.39
+          ],
+          [
+            "回复计划及播报许可检查、启动首句合成",
+            10278.5,
+            10279.37,
+            0.87
+          ],
+          [
+            "首句开始合成到首个 PCM 块",
+            10279.37,
+            10557.1,
+            277.73
+          ],
+          [
+            "PCM 封包到客户端首包",
+            10557.1,
+            10557.52,
+            0.42
+          ],
+          [
+            "首包到首句音频收齐",
+            10557.52,
+            10557.57,
+            0.05
+          ],
+          [
+            "首句收齐到全部回答音频收齐",
+            10557.57,
+            11256.1,
+            698.54
+          ]
+        ],
+        "write_stages_ms": [
+          [
+            "写场准备输入",
+            10285.31,
+            10286.15,
+            0.84
+          ],
+          [
+            "写场请求发出到服务开始预填",
+            10286.15,
+            10290.09,
+            3.95
+          ],
+          [
+            "写场输入预填和缓存处理",
+            10290.09,
+            10841.09,
+            551.0
+          ],
+          [
+            "写场预填结束到首个生成 token",
+            10841.09,
+            10857.09,
+            16.0
+          ],
+          [
+            "写场逐 token 生成",
+            10857.09,
+            12622.09,
+            1765.0
+          ],
+          [
+            "写场模型收尾、回传、落盘及完成通知",
+            12622.09,
+            12646.94,
+            24.85
+          ]
+        ],
+        "milestones_ms": {
+          "transcript": 669.07,
+          "first_reply": 10279.67,
+          "tts_start": 10279.368,
+          "first_audio": 10557.519,
+          "first_sentence_complete": 10557.565,
+          "all_audio": 11256.103,
+          "foreground_done": 10285.395,
+          "write_start_event": 10285.397,
+          "write_done": 12646.941,
+          "all_done": 12646.941
+        },
+        "model_calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "total_ms": 3370.7,
+            "prompt_tokens": 5948,
+            "cache_hit_tokens": 5120,
+            "completion_tokens": 274,
+            "prompt_ms": 441.5,
+            "decode_ms": 2532.8
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "total_ms": 5880.7,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2387,
+            "completion_tokens": 565,
+            "prompt_ms": 305.9,
+            "decode_ms": 5288.6
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "total_ms": 2359.5,
+            "prompt_tokens": 1073,
+            "cache_hit_tokens": 512,
+            "completion_tokens": 189,
+            "prompt_ms": 433.2,
+            "decode_ms": 1774.6
+          }
+        ],
+        "syntheses_ms": [
+          {
+            "text": "你好！",
+            "start": 10279.368,
+            "first_pcm": 10557.1,
+            "end": 10557.349
+          },
+          {
+            "text": "我是匠石。",
+            "start": 10557.365,
+            "first_pcm": 10858.556,
+            "end": 10858.765
+          },
+          {
+            "text": "很高兴认识你。",
+            "start": 10858.781,
+            "first_pcm": 11255.594,
+            "end": 11255.847
+          }
+        ],
+        "received_segments_ms": {
+          "0": {
+            "text": "你好！",
+            "start": 10557.519,
+            "samples": 13440,
+            "end": 10557.565
+          },
+          "1": {
+            "text": "我是匠石。",
+            "start": 10858.932,
+            "samples": 21120,
+            "end": 10858.997
+          },
+          "2": {
+            "text": "很高兴认识你。",
+            "start": 11256.0,
+            "samples": 32640,
+            "end": 11256.101
+          }
+        },
+        "activity": [
+          {
+            "subject_id": "stone",
+            "activity_id": "756cdf33-6729-46e8-8d34-c0a26ae8478d",
+            "started_at": "2026-11-23T03:03:20.978187+00:00",
+            "total_ms": 5906.2,
+            "steps": [
+              [
+                "①落位",
+                3.8
+              ],
+              [
+                "②活跃区",
+                0.1
+              ],
+              [
+                "③组装",
+                8.0
+              ],
+              [
+                "④建活动",
+                2.1
+              ],
+              [
+                "⑤认知",
+                5885.7
+              ],
+              [
+                "06标记",
+                2.3
+              ],
+              [
+                "⑥行动",
+                0.3
+              ],
+              [
+                "⑦收尾",
+                0.9
+              ],
+              [
+                "30投递",
+                0.0
+              ],
+              [
+                "连续性检查",
+                0.0
+              ],
+              [
+                "300自省入队",
+                2.9
+              ]
+            ],
+            "substeps": [
+              [
+                "①对象解析",
+                0.0
+              ],
+              [
+                "①输入事实",
+                1.1
+              ],
+              [
+                "①相识来源",
+                2.2
+              ],
+              [
+                "①视觉关联",
+                0.0
+              ],
+              [
+                "①活动账本",
+                0.0
+              ],
+              [
+                "③工具清理",
+                1.5
+              ],
+              [
+                "③召回策略与缺口",
+                0.4
+              ],
+              [
+                "③工具相关",
+                1.2
+              ],
+              [
+                "③装载源",
+                4.7
+              ],
+              [
+                "③组装收尾",
+                0.0
+              ],
+              [
+                "③输入与视觉整理",
+                0.1
+              ]
+            ]
+          }
+        ],
+        "detailed_spans_ms": [
+          {
+            "stage": "input_accepted"
+          },
+          {
+            "stage": "input_audio_archive",
+            "started_at_ms": 668.927,
+            "finished_at_ms": 669.696,
+            "elapsed_ms": 0.769,
+            "status": "completed"
+          },
+          {
+            "stage": "input_queue_put",
+            "started_at_ms": 669.747,
+            "finished_at_ms": 669.75,
+            "elapsed_ms": 0.005,
+            "status": "completed"
+          },
+          {
+            "stage": "speaker_audio_prepare",
+            "started_at_ms": 669.918,
+            "finished_at_ms": 669.94,
+            "elapsed_ms": 0.022,
+            "status": "completed"
+          },
+          {
+            "stage": "input_worker_started"
+          },
+          {
+            "stage": "resolve_speaker",
+            "started_at_ms": 670.162,
+            "finished_at_ms": 670.171,
+            "elapsed_ms": 0.011,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 670.291,
+            "finished_at_ms": 670.299,
+            "elapsed_ms": 0.009,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 669.885,
+            "finished_at_ms": 671.132,
+            "elapsed_ms": 1.248,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 671.07,
+            "finished_at_ms": 671.735,
+            "elapsed_ms": 0.665,
+            "status": "completed"
+          },
+          {
+            "stage": "voice_candidates",
+            "started_at_ms": 671.812,
+            "finished_at_ms": 671.818,
+            "elapsed_ms": 0.005,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 672.125,
+            "finished_at_ms": 672.479,
+            "elapsed_ms": 0.355,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 672.57,
+            "finished_at_ms": 673.0,
+            "elapsed_ms": 0.431,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 671.8,
+            "finished_at_ms": 673.084,
+            "elapsed_ms": 1.286,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 673.824,
+            "finished_at_ms": 674.132,
+            "elapsed_ms": 0.307,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_input_queued"
+          },
+          {
+            "stage": "jev_input_dequeued"
+          },
+          {
+            "stage": "jev_known_names",
+            "started_at_ms": 675.862,
+            "finished_at_ms": 676.001,
+            "elapsed_ms": 0.141,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_acquaintance",
+            "started_at_ms": 676.035,
+            "finished_at_ms": 676.038,
+            "elapsed_ms": 0.002,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 676.362,
+            "finished_at_ms": 676.385,
+            "elapsed_ms": 0.024,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_task_context",
+            "started_at_ms": 676.446,
+            "finished_at_ms": 676.677,
+            "elapsed_ms": 0.232,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_material_prepare",
+            "started_at_ms": 674.808,
+            "finished_at_ms": 676.708,
+            "elapsed_ms": 1.899
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 4049.204,
+            "finished_at_ms": 4049.81,
+            "elapsed_ms": 0.608,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 4050.466,
+            "finished_at_ms": 4050.487,
+            "elapsed_ms": 0.022,
+            "status": "completed"
+          },
+          {
+            "stage": "main_reply_cache",
+            "started_at_ms": 10284.782,
+            "finished_at_ms": 10284.8,
+            "elapsed_ms": 0.018,
+            "status": "completed"
+          },
+          {
+            "stage": "main_debug_persist",
+            "started_at_ms": 10284.904,
+            "finished_at_ms": 10284.979,
+            "elapsed_ms": 0.077,
+            "status": "completed"
+          }
+        ],
+        "engine_spans_ms": [
+          [
+            "ASR",
+            521.359,
+            668.485
+          ],
+          [
+            "http.voice_jev",
+            677.43,
+            4048.269
+          ],
+          [
+            "JEV",
+            674.792,
+            4048.957
+          ],
+          [
+            "assemble",
+            4383.678,
+            4389.955
+          ],
+          [
+            "http.cognition",
+            4395.263,
+            10276.114
+          ],
+          [
+            "review",
+            10278.349,
+            10278.499
+          ],
+          [
+            "delivery",
+            10279.09,
+            10279.355
+          ],
+          [
+            "main",
+            4347.01,
+            10285.039
+          ],
+          [
+            "http.write_zone",
+            10286.148,
+            12645.755
+          ]
+        ],
+        "run": 2
+      },
+      {
+        "text": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好！我是匠石。你可以直接叫我匠石。请问有什么我可以帮你的吗？"
+        },
+        "routing": [
+          {
+            "route": "background",
+            "interaction": "none",
+            "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+            "mode": "split"
+          }
+        ],
+        "speech_stages_ms": [
+          [
+            "端点判定、尾静音及送入 ASR",
+            0,
+            520.7,
+            520.7
+          ],
+          [
+            "本机 ASR 转写",
+            520.7,
+            688.93,
+            168.22
+          ],
+          [
+            "定稿文字到达客户端",
+            688.93,
+            689.5,
+            0.58
+          ],
+          [
+            "收集本句、人物候选及排队进入接话判断",
+            689.5,
+            695.89,
+            6.38
+          ],
+          [
+            "接话判断准备现场材料和模型请求",
+            695.89,
+            698.02,
+            2.14
+          ],
+          [
+            "接话请求发出到服务开始预填",
+            698.02,
+            705.86,
+            7.84
+          ],
+          [
+            "接话输入预填和缓存处理",
+            705.86,
+            1089.86,
+            384.0
+          ],
+          [
+            "接话预填结束到首个生成 token",
+            1089.86,
+            1100.86,
+            11.0
+          ],
+          [
+            "接话逐 token 生成完整判断",
+            1100.86,
+            3820.86,
+            2720.0
+          ],
+          [
+            "接话模型收尾、回传和路由复核",
+            3820.86,
+            3845.47,
+            24.61
+          ],
+          [
+            "入口保留为背景，到现场主动主认知开始",
+            3845.47,
+            4347.32,
+            501.85
+          ],
+          [
+            "主认知启动、对象和输入事实落位",
+            4347.32,
+            4382.72,
+            35.39
+          ],
+          [
+            "读取活跃区",
+            4382.72,
+            4382.78,
+            0.06
+          ],
+          [
+            "组装本轮材料、记忆及工具上下文",
+            4382.78,
+            4390.16,
+            7.38
+          ],
+          [
+            "创建本次认知活动",
+            4390.16,
+            4393.23,
+            3.08
+          ],
+          [
+            "构造并发起主认知模型请求",
+            4393.23,
+            4396.21,
+            2.97
+          ],
+          [
+            "主认知请求发出到服务开始预填",
+            4396.21,
+            4555.86,
+            159.66
+          ],
+          [
+            "主认知输入预填和缓存处理",
+            4555.86,
+            4843.86,
+            288.0
+          ],
+          [
+            "主认知预填结束到首个生成 token",
+            4843.86,
+            4852.86,
+            9.0
+          ],
+          [
+            "主认知逐 token 生成完整输出",
+            4852.86,
+            9705.86,
+            4853.0
+          ],
+          [
+            "主认知模型收尾及完整结果回传",
+            9705.86,
+            9748.34,
+            42.48
+          ],
+          [
+            "解析、现场更新和回应对象复核",
+            9748.34,
+            9750.9,
+            2.55
+          ],
+          [
+            "回复计划及播报许可检查、启动首句合成",
+            9750.9,
+            9751.92,
+            1.03
+          ],
+          [
+            "首句开始合成到首个 PCM 块",
+            9751.92,
+            10077.19,
+            325.27
+          ],
+          [
+            "PCM 封包到客户端首包",
+            10077.19,
+            10077.72,
+            0.53
+          ],
+          [
+            "首包到首句音频收齐",
+            10077.72,
+            10077.79,
+            0.07
+          ],
+          [
+            "首句收齐到全部回答音频收齐",
+            10077.79,
+            12124.8,
+            2047.01
+          ]
+        ],
+        "write_stages_ms": [
+          [
+            "写场准备输入",
+            9758.85,
+            9759.84,
+            0.99
+          ],
+          [
+            "写场请求发出到服务开始预填",
+            9759.84,
+            9762.86,
+            3.02
+          ],
+          [
+            "写场输入预填和缓存处理",
+            9762.86,
+            10242.86,
+            480.0
+          ],
+          [
+            "写场预填结束到首个生成 token",
+            10242.86,
+            10254.86,
+            12.0
+          ],
+          [
+            "写场逐 token 生成",
+            10254.86,
+            11652.86,
+            1398.0
+          ],
+          [
+            "写场模型收尾、回传、落盘及完成通知",
+            11652.86,
+            11685.53,
+            32.67
+          ]
+        ],
+        "milestones_ms": {
+          "transcript": 689.504,
+          "first_reply": 9752.253,
+          "tts_start": 9751.923,
+          "first_audio": 10077.723,
+          "first_sentence_complete": 10077.791,
+          "all_audio": 12124.799,
+          "foreground_done": 9759.405,
+          "write_start_event": 9759.407,
+          "write_done": 11685.534,
+          "all_done": 12124.799
+        },
+        "model_calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "total_ms": 3146.6,
+            "prompt_tokens": 5948,
+            "cache_hit_tokens": 5947,
+            "completion_tokens": 274,
+            "prompt_ms": 16.5,
+            "decode_ms": 2729.7
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "total_ms": 5352.0,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2537,
+            "completion_tokens": 520,
+            "prompt_ms": 199.1,
+            "decode_ms": 4862.3
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "total_ms": 1924.1,
+            "prompt_tokens": 1055,
+            "cache_hit_tokens": 768,
+            "completion_tokens": 123,
+            "prompt_ms": 369.1,
+            "decode_ms": 1409.9
+          }
+        ],
+        "syntheses_ms": [
+          {
+            "text": "你好！",
+            "start": 9751.923,
+            "first_pcm": 10077.195,
+            "end": 10077.512
+          },
+          {
+            "text": "我是匠石。",
+            "start": 10077.528,
+            "first_pcm": 10380.142,
+            "end": 10380.388
+          },
+          {
+            "text": "你可以直接叫我匠石。",
+            "start": 10380.404,
+            "first_pcm": 11430.741,
+            "end": 11431.527
+          },
+          {
+            "text": "请问有什么我可以帮你的吗？",
+            "start": 11431.544,
+            "first_pcm": 12123.863,
+            "end": 12124.416
+          }
+        ],
+        "received_segments_ms": {
+          "0": {
+            "text": "你好！",
+            "start": 10077.723,
+            "samples": 19200,
+            "end": 10077.791
+          },
+          "1": {
+            "text": "我是匠石。",
+            "start": 10380.566,
+            "samples": 24960,
+            "end": 10380.648
+          },
+          "2": {
+            "text": "你可以直接叫我匠石。",
+            "start": 11431.784,
+            "samples": 90240,
+            "end": 11432.079
+          },
+          "3": {
+            "text": "请问有什么我可以帮你的吗？",
+            "start": 12124.607,
+            "samples": 65280,
+            "end": 12124.797
+          }
+        },
+        "activity": [
+          {
+            "subject_id": "stone",
+            "activity_id": "5dfd0aa0-c23e-4639-b4a0-308db7cc103f",
+            "started_at": "2026-11-23T03:03:35.812098+00:00",
+            "total_ms": 5379.1,
+            "steps": [
+              [
+                "①落位",
+                3.8
+              ],
+              [
+                "②活跃区",
+                0.1
+              ],
+              [
+                "③组装",
+                7.4
+              ],
+              [
+                "④建活动",
+                3.1
+              ],
+              [
+                "⑤认知",
+                5357.1
+              ],
+              [
+                "06标记",
+                3.7
+              ],
+              [
+                "⑥行动",
+                1.7
+              ],
+              [
+                "⑦收尾",
+                1.5
+              ],
+              [
+                "30投递",
+                0.0
+              ],
+              [
+                "连续性检查",
+                0.0
+              ],
+              [
+                "300自省入队",
+                0.7
+              ]
+            ],
+            "substeps": [
+              [
+                "①对象解析",
+                0.0
+              ],
+              [
+                "①输入事实",
+                1.2
+              ],
+              [
+                "①相识来源",
+                2.2
+              ],
+              [
+                "①视觉关联",
+                0.0
+              ],
+              [
+                "①活动账本",
+                0.0
+              ],
+              [
+                "③工具清理",
+                1.1
+              ],
+              [
+                "③召回策略与缺口",
+                0.3
+              ],
+              [
+                "③工具相关",
+                1.0
+              ],
+              [
+                "③装载源",
+                4.7
+              ],
+              [
+                "③组装收尾",
+                0.0
+              ],
+              [
+                "③输入与视觉整理",
+                0.1
+              ]
+            ]
+          }
+        ],
+        "detailed_spans_ms": [
+          {
+            "stage": "input_accepted"
+          },
+          {
+            "stage": "input_audio_archive",
+            "started_at_ms": 689.388,
+            "finished_at_ms": 690.147,
+            "elapsed_ms": 0.76,
+            "status": "completed"
+          },
+          {
+            "stage": "input_queue_put",
+            "started_at_ms": 690.197,
+            "finished_at_ms": 690.201,
+            "elapsed_ms": 0.005,
+            "status": "completed"
+          },
+          {
+            "stage": "speaker_audio_prepare",
+            "started_at_ms": 690.479,
+            "finished_at_ms": 690.511,
+            "elapsed_ms": 0.032,
+            "status": "completed"
+          },
+          {
+            "stage": "input_worker_started"
+          },
+          {
+            "stage": "resolve_speaker",
+            "started_at_ms": 690.635,
+            "finished_at_ms": 690.645,
+            "elapsed_ms": 0.01,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 690.797,
+            "finished_at_ms": 690.807,
+            "elapsed_ms": 0.011,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 690.365,
+            "finished_at_ms": 691.432,
+            "elapsed_ms": 1.068,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 691.63,
+            "finished_at_ms": 692.267,
+            "elapsed_ms": 0.638,
+            "status": "completed"
+          },
+          {
+            "stage": "voice_candidates",
+            "started_at_ms": 692.359,
+            "finished_at_ms": 692.363,
+            "elapsed_ms": 0.005,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 692.801,
+            "finished_at_ms": 693.203,
+            "elapsed_ms": 0.403,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 693.314,
+            "finished_at_ms": 693.819,
+            "elapsed_ms": 0.506,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 692.343,
+            "finished_at_ms": 693.919,
+            "elapsed_ms": 1.576,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 694.752,
+            "finished_at_ms": 695.144,
+            "elapsed_ms": 0.393,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_input_queued"
+          },
+          {
+            "stage": "jev_input_dequeued"
+          },
+          {
+            "stage": "jev_known_names",
+            "started_at_ms": 696.209,
+            "finished_at_ms": 696.316,
+            "elapsed_ms": 0.108,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_acquaintance",
+            "started_at_ms": 696.343,
+            "finished_at_ms": 696.345,
+            "elapsed_ms": 0.002,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 696.54,
+            "finished_at_ms": 696.565,
+            "elapsed_ms": 0.025,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_task_context",
+            "started_at_ms": 696.627,
+            "finished_at_ms": 696.862,
+            "elapsed_ms": 0.235,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_material_prepare",
+            "started_at_ms": 695.903,
+            "finished_at_ms": 696.888,
+            "elapsed_ms": 0.985
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 3845.72,
+            "finished_at_ms": 3846.343,
+            "elapsed_ms": 0.623,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 3847.187,
+            "finished_at_ms": 3847.207,
+            "elapsed_ms": 0.021,
+            "status": "completed"
+          },
+          {
+            "stage": "main_reply_cache",
+            "started_at_ms": 9758.337,
+            "finished_at_ms": 9758.356,
+            "elapsed_ms": 0.019,
+            "status": "completed"
+          },
+          {
+            "stage": "main_debug_persist",
+            "started_at_ms": 9758.468,
+            "finished_at_ms": 9758.532,
+            "elapsed_ms": 0.064,
+            "status": "completed"
+          }
+        ],
+        "engine_spans_ms": [
+          [
+            "ASR",
+            520.704,
+            688.928
+          ],
+          [
+            "http.voice_jev",
+            698.022,
+            3844.934
+          ],
+          [
+            "JEV",
+            695.887,
+            3845.468
+          ],
+          [
+            "assemble",
+            4383.863,
+            4389.929
+          ],
+          [
+            "http.cognition",
+            4396.206,
+            9748.342
+          ],
+          [
+            "review",
+            9750.712,
+            9750.896
+          ],
+          [
+            "delivery",
+            9751.61,
+            9751.91
+          ],
+          [
+            "main",
+            4347.322,
+            9758.6
+          ],
+          [
+            "http.write_zone",
+            9759.843,
+            11684.07
+          ]
+        ],
+        "run": 3
+      }
+    ],
+    "rounds_without_audio": [],
+    "medians": {
+      "speech_stages_ms": {
+        "端点判定、尾静音及送入 ASR": 521.36,
+        "本机 ASR 转写": 168.22,
+        "定稿文字到达客户端": 0.59,
+        "收集本句、人物候选及排队进入接话判断": 6.38,
+        "接话判断准备现场材料和模型请求": 2.64,
+        "接话请求发出到服务开始预填": 7.84,
+        "接话输入预填和缓存处理": 807.0,
+        "接话预填结束到首个生成 token": 9.0,
+        "接话逐 token 生成完整判断": 2720.0,
+        "接话模型收尾、回传和路由复核": 24.61,
+        "入口保留为背景，到现场主动主认知开始": 335.38,
+        "主认知启动、对象和输入事实落位": 35.39,
+        "读取活跃区": 0.09,
+        "组装本轮材料、记忆及工具上下文": 8.01,
+        "创建本次认知活动": 2.11,
+        "构造并发起主认知模型请求": 2.97,
+        "主认知请求发出到服务开始预填": 159.66,
+        "主认知输入预填和缓存处理": 391.0,
+        "主认知预填结束到首个生成 token": 8.0,
+        "主认知逐 token 生成完整输出": 4917.0,
+        "主认知模型收尾及完整结果回传": 43.02,
+        "解析、现场更新和回应对象复核": 2.55,
+        "回复计划及播报许可检查、启动首句合成": 1.03,
+        "首句开始合成到首个 PCM 块": 296.04,
+        "PCM 封包到客户端首包": 0.43,
+        "首包到首句音频收齐": 0.05,
+        "首句收齐到全部回答音频收齐": 698.54
+      },
+      "write_stages_ms": {
+        "写场准备输入": 0.85,
+        "写场请求发出到服务开始预填": 3.95,
+        "写场输入预填和缓存处理": 551.0,
+        "写场预填结束到首个生成 token": 12.0,
+        "写场逐 token 生成": 1765.0,
+        "写场模型收尾、回传、落盘及完成通知": 25.07
+      },
+      "milestones_ms": {
+        "transcript": 689.5,
+        "first_reply": 10279.67,
+        "tts_start": 10279.37,
+        "first_audio": 10557.52,
+        "first_sentence_complete": 10557.57,
+        "all_audio": 11741.81,
+        "foreground_done": 10285.4,
+        "write_start_event": 10285.4,
+        "write_done": 12646.94,
+        "all_done": 12646.94
+      }
+    }
+  },
+  "after": {
+    "trials": [
+      {
+        "text": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好，我是匠石。"
+        },
+        "routing": [
+          {
+            "route": "background",
+            "interaction": "none",
+            "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+            "mode": "split"
+          }
+        ],
+        "speech_stages_ms": [
+          [
+            "端点判定、尾静音及送入 ASR",
+            0,
+            521.32,
+            521.32
+          ],
+          [
+            "本机 ASR 转写",
+            521.32,
+            1191.41,
+            670.09
+          ],
+          [
+            "定稿文字到达客户端",
+            1191.41,
+            1194.58,
+            3.17
+          ],
+          [
+            "收集本句、人物候选及排队进入接话判断",
+            1194.58,
+            1201.69,
+            7.11
+          ],
+          [
+            "接话判断准备现场材料和模型请求",
+            1201.69,
+            1205.81,
+            4.12
+          ],
+          [
+            "接话请求发出到服务开始预填",
+            1205.81,
+            1220.2,
+            14.38
+          ],
+          [
+            "接话输入预填和缓存处理",
+            1220.2,
+            2073.2,
+            853.0
+          ],
+          [
+            "接话预填结束到首个生成 token",
+            2073.2,
+            2082.2,
+            9.0
+          ],
+          [
+            "接话逐 token 生成完整判断",
+            2082.2,
+            4993.2,
+            2911.0
+          ],
+          [
+            "接话模型收尾、回传和路由复核",
+            4993.2,
+            5018.03,
+            24.84
+          ],
+          [
+            "入口保留为背景，到现场主动主认知开始",
+            5018.03,
+            5348.96,
+            330.93
+          ],
+          [
+            "主认知启动、对象和输入事实落位",
+            5348.96,
+            5387.94,
+            38.98
+          ],
+          [
+            "读取活跃区",
+            5387.94,
+            5388.03,
+            0.09
+          ],
+          [
+            "组装本轮材料、记忆及工具上下文",
+            5388.03,
+            5396.15,
+            8.11
+          ],
+          [
+            "创建本次认知活动",
+            5396.15,
+            5397.86,
+            1.72
+          ],
+          [
+            "构造并发起主认知模型请求",
+            5397.86,
+            5402.04,
+            4.17
+          ],
+          [
+            "主认知请求发出到服务开始预填",
+            5402.04,
+            5597.2,
+            195.16
+          ],
+          [
+            "主认知输入预填和缓存处理",
+            5597.2,
+            6053.2,
+            456.0
+          ],
+          [
+            "主认知预填结束到首个生成 token",
+            6053.2,
+            6061.2,
+            8.0
+          ],
+          [
+            "主认知逐 token 生成完整输出",
+            6061.2,
+            10546.2,
+            4485.0
+          ],
+          [
+            "主认知模型收尾及完整结果回传",
+            10546.2,
+            10586.95,
+            40.75
+          ],
+          [
+            "解析、现场更新和回应对象复核",
+            10586.95,
+            10589.52,
+            2.58
+          ],
+          [
+            "回复计划及播报许可检查、启动首句合成",
+            10589.52,
+            10591.87,
+            2.35
+          ],
+          [
+            "首句开始合成到首个 PCM 块",
+            10591.87,
+            10714.24,
+            122.37
+          ],
+          [
+            "PCM 封包到客户端首包",
+            10714.24,
+            10714.53,
+            0.29
+          ],
+          [
+            "首包到首句音频收齐",
+            10714.53,
+            11213.6,
+            499.07
+          ],
+          [
+            "首句收齐到全部回答音频收齐",
+            11213.6,
+            11213.61,
+            0.01
+          ]
+        ],
+        "write_stages_ms": [
+          [
+            "写场准备输入",
+            10596.02,
+            10596.87,
+            0.85
+          ],
+          [
+            "写场请求发出到服务开始预填",
+            10596.87,
+            10601.2,
+            4.32
+          ],
+          [
+            "写场输入预填和缓存处理",
+            10601.2,
+            11174.2,
+            573.0
+          ],
+          [
+            "写场预填结束到首个生成 token",
+            11174.2,
+            11184.2,
+            10.0
+          ],
+          [
+            "写场逐 token 生成",
+            11184.2,
+            11941.2,
+            757.0
+          ],
+          [
+            "写场模型收尾、回传、落盘及完成通知",
+            11941.2,
+            11965.49,
+            24.29
+          ]
+        ],
+        "milestones_ms": {
+          "transcript": 1194.58,
+          "first_reply": 10592.115,
+          "tts_start": 10591.874,
+          "first_audio": 10714.533,
+          "first_sentence_complete": 11213.602,
+          "all_audio": 11213.608,
+          "foreground_done": 10596.084,
+          "write_start_event": 10596.087,
+          "write_done": 11965.485,
+          "all_done": 11965.485
+        },
+        "model_calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "total_ms": 3811.3,
+            "prompt_tokens": 6015,
+            "cache_hit_tokens": 4608,
+            "completion_tokens": 316,
+            "prompt_ms": 613.5,
+            "decode_ms": 2920.3
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "total_ms": 5184.7,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2048,
+            "completion_tokens": 486,
+            "prompt_ms": 370.1,
+            "decode_ms": 4493.9
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "total_ms": 1367.0,
+            "prompt_tokens": 1042,
+            "cache_hit_tokens": 0,
+            "completion_tokens": 103,
+            "prompt_ms": 498.6,
+            "decode_ms": 764.5
+          }
+        ],
+        "syntheses_ms": [
+          {
+            "text": "你好，我是匠石。",
+            "start": 10591.874,
+            "first_pcm": 10714.241,
+            "end": 11213.409
+          }
+        ],
+        "received_segments_ms": {
+          "0": {
+            "text": "你好，我是匠石。",
+            "start": 10714.533,
+            "samples": 44160,
+            "end": 11213.602
+          }
+        },
+        "activity": [
+          {
+            "subject_id": "stone",
+            "activity_id": "5bbbb001-122f-497d-abf9-392a1058c843",
+            "started_at": "2026-11-23T03:02:12.851569+00:00",
+            "total_ms": 5214.2,
+            "steps": [
+              [
+                "①落位",
+                7.2
+              ],
+              [
+                "②活跃区",
+                0.1
+              ],
+              [
+                "③组装",
+                8.1
+              ],
+              [
+                "④建活动",
+                1.7
+              ],
+              [
+                "⑤认知",
+                5191.0
+              ],
+              [
+                "06标记",
+                2.1
+              ],
+              [
+                "⑥行动",
+                1.8
+              ],
+              [
+                "⑦收尾",
+                1.3
+              ],
+              [
+                "30投递",
+                0.1
+              ],
+              [
+                "连续性检查",
+                0.0
+              ],
+              [
+                "300自省入队",
+                0.8
+              ]
+            ],
+            "substeps": [
+              [
+                "①对象解析",
+                0.0
+              ],
+              [
+                "①输入事实",
+                1.8
+              ],
+              [
+                "①相识来源",
+                5.0
+              ],
+              [
+                "①视觉关联",
+                0.0
+              ],
+              [
+                "①活动账本",
+                0.0
+              ],
+              [
+                "③工具清理",
+                1.1
+              ],
+              [
+                "③召回策略与缺口",
+                0.3
+              ],
+              [
+                "③工具相关",
+                1.1
+              ],
+              [
+                "③装载源",
+                4.5
+              ],
+              [
+                "③组装收尾",
+                0.0
+              ],
+              [
+                "③输入与视觉整理",
+                1.0
+              ]
+            ]
+          }
+        ],
+        "detailed_spans_ms": [
+          {
+            "stage": "input_accepted"
+          },
+          {
+            "stage": "input_audio_archive",
+            "started_at_ms": 1194.406,
+            "finished_at_ms": 1195.096,
+            "elapsed_ms": 0.691,
+            "status": "completed"
+          },
+          {
+            "stage": "input_queue_put",
+            "started_at_ms": 1195.137,
+            "finished_at_ms": 1195.143,
+            "elapsed_ms": 0.006,
+            "status": "completed"
+          },
+          {
+            "stage": "speaker_audio_prepare",
+            "started_at_ms": 1195.447,
+            "finished_at_ms": 1195.469,
+            "elapsed_ms": 0.024,
+            "status": "completed"
+          },
+          {
+            "stage": "input_worker_started"
+          },
+          {
+            "stage": "resolve_speaker",
+            "started_at_ms": 1195.707,
+            "finished_at_ms": 1195.717,
+            "elapsed_ms": 0.011,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 1195.832,
+            "finished_at_ms": 1195.841,
+            "elapsed_ms": 0.01,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 1195.301,
+            "finished_at_ms": 1196.746,
+            "elapsed_ms": 1.445,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 1196.856,
+            "finished_at_ms": 1197.508,
+            "elapsed_ms": 0.652,
+            "status": "completed"
+          },
+          {
+            "stage": "voice_candidates",
+            "started_at_ms": 1197.594,
+            "finished_at_ms": 1197.6,
+            "elapsed_ms": 0.006,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 1198.198,
+            "finished_at_ms": 1198.604,
+            "elapsed_ms": 0.405,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 1198.7,
+            "finished_at_ms": 1199.135,
+            "elapsed_ms": 0.436,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 1197.579,
+            "finished_at_ms": 1199.283,
+            "elapsed_ms": 1.706,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 1200.084,
+            "finished_at_ms": 1200.57,
+            "elapsed_ms": 0.486,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_input_queued"
+          },
+          {
+            "stage": "jev_input_dequeued"
+          },
+          {
+            "stage": "jev_known_names",
+            "started_at_ms": 1202.332,
+            "finished_at_ms": 1202.506,
+            "elapsed_ms": 0.175,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_acquaintance",
+            "started_at_ms": 1202.542,
+            "finished_at_ms": 1202.543,
+            "elapsed_ms": 0.002,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 1202.854,
+            "finished_at_ms": 1203.256,
+            "elapsed_ms": 0.403,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_task_context",
+            "started_at_ms": 1203.29,
+            "finished_at_ms": 1203.537,
+            "elapsed_ms": 0.248,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_material_prepare",
+            "started_at_ms": 1201.708,
+            "finished_at_ms": 1203.572,
+            "elapsed_ms": 1.863
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 5018.268,
+            "finished_at_ms": 5018.916,
+            "elapsed_ms": 0.649,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 5019.808,
+            "finished_at_ms": 5019.837,
+            "elapsed_ms": 0.03,
+            "status": "completed"
+          },
+          {
+            "stage": "main_reply_cache",
+            "started_at_ms": 10595.176,
+            "finished_at_ms": 10595.478,
+            "elapsed_ms": 0.303,
+            "status": "completed"
+          },
+          {
+            "stage": "main_debug_persist",
+            "started_at_ms": 10595.578,
+            "finished_at_ms": 10595.668,
+            "elapsed_ms": 0.093,
+            "status": "completed"
+          }
+        ],
+        "engine_spans_ms": [
+          [
+            "ASR",
+            521.317,
+            1191.408
+          ],
+          [
+            "http.voice_jev",
+            1205.812,
+            5017.247
+          ],
+          [
+            "JEV",
+            1201.69,
+            5018.032
+          ],
+          [
+            "assemble",
+            5389.116,
+            5395.05
+          ],
+          [
+            "http.cognition",
+            5402.037,
+            10586.946
+          ],
+          [
+            "review",
+            10589.271,
+            10589.521
+          ],
+          [
+            "delivery",
+            10590.146,
+            10590.481
+          ],
+          [
+            "main",
+            5348.958,
+            10595.751
+          ],
+          [
+            "http.write_zone",
+            10596.871,
+            11963.953
+          ]
+        ],
+        "run": 1
+      },
+      {
+        "text": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "我是匠石。"
+        },
+        "routing": [
+          {
+            "route": "background",
+            "interaction": "none",
+            "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+            "mode": "split"
+          }
+        ],
+        "speech_stages_ms": [
+          [
+            "端点判定、尾静音及送入 ASR",
+            0,
+            520.79,
+            520.79
+          ],
+          [
+            "本机 ASR 转写",
+            520.79,
+            690.38,
+            169.58
+          ],
+          [
+            "定稿文字到达客户端",
+            690.38,
+            691.01,
+            0.63
+          ],
+          [
+            "收集本句、人物候选及排队进入接话判断",
+            691.01,
+            697.48,
+            6.46
+          ],
+          [
+            "接话判断准备现场材料和模型请求",
+            697.48,
+            700.45,
+            2.97
+          ],
+          [
+            "接话请求发出到服务开始预填",
+            700.45,
+            708.23,
+            7.79
+          ],
+          [
+            "接话输入预填和缓存处理",
+            708.23,
+            1519.23,
+            811.0
+          ],
+          [
+            "接话预填结束到首个生成 token",
+            1519.23,
+            1528.23,
+            9.0
+          ],
+          [
+            "接话逐 token 生成完整判断",
+            1528.23,
+            4068.23,
+            2540.0
+          ],
+          [
+            "接话模型收尾、回传和路由复核",
+            4068.23,
+            4093.89,
+            25.66
+          ],
+          [
+            "入口保留为背景，到现场主动主认知开始",
+            4093.89,
+            4347.86,
+            253.97
+          ],
+          [
+            "主认知启动、对象和输入事实落位",
+            4347.86,
+            4384.16,
+            36.3
+          ],
+          [
+            "读取活跃区",
+            4384.16,
+            4384.27,
+            0.1
+          ],
+          [
+            "组装本轮材料、记忆及工具上下文",
+            4384.27,
+            4391.11,
+            6.84
+          ],
+          [
+            "创建本次认知活动",
+            4391.11,
+            4394.4,
+            3.3
+          ],
+          [
+            "构造并发起主认知模型请求",
+            4394.4,
+            4397.19,
+            2.79
+          ],
+          [
+            "主认知请求发出到服务开始预填",
+            4397.19,
+            4560.23,
+            163.04
+          ],
+          [
+            "主认知输入预填和缓存处理",
+            4560.23,
+            4968.23,
+            408.0
+          ],
+          [
+            "主认知预填结束到首个生成 token",
+            4968.23,
+            4976.23,
+            8.0
+          ],
+          [
+            "主认知逐 token 生成完整输出",
+            4976.23,
+            8480.23,
+            3504.0
+          ],
+          [
+            "主认知模型收尾及完整结果回传",
+            8480.23,
+            8524.05,
+            43.81
+          ],
+          [
+            "解析、现场更新和回应对象复核",
+            8524.05,
+            8526.36,
+            2.31
+          ],
+          [
+            "回复计划及播报许可检查、启动首句合成",
+            8526.36,
+            8527.29,
+            0.93
+          ],
+          [
+            "首句开始合成到首个 PCM 块",
+            8527.29,
+            8631.31,
+            104.02
+          ],
+          [
+            "PCM 封包到客户端首包",
+            8631.31,
+            8631.56,
+            0.25
+          ],
+          [
+            "首包到首句音频收齐",
+            8631.56,
+            8931.86,
+            300.3
+          ],
+          [
+            "首句收齐到全部回答音频收齐",
+            8931.86,
+            8931.86,
+            0.0
+          ]
+        ],
+        "write_stages_ms": [
+          [
+            "写场准备输入",
+            8532.76,
+            8533.51,
+            0.75
+          ],
+          [
+            "写场请求发出到服务开始预填",
+            8533.51,
+            8537.23,
+            3.72
+          ],
+          [
+            "写场输入预填和缓存处理",
+            8537.23,
+            8967.23,
+            430.0
+          ],
+          [
+            "写场预填结束到首个生成 token",
+            8967.23,
+            8976.23,
+            9.0
+          ],
+          [
+            "写场逐 token 生成",
+            8976.23,
+            10874.23,
+            1898.0
+          ],
+          [
+            "写场模型收尾、回传、落盘及完成通知",
+            10874.23,
+            10899.86,
+            25.62
+          ]
+        ],
+        "milestones_ms": {
+          "transcript": 691.012,
+          "first_reply": 8527.572,
+          "tts_start": 8527.29,
+          "first_audio": 8631.56,
+          "first_sentence_complete": 8931.86,
+          "all_audio": 8931.863,
+          "foreground_done": 8532.86,
+          "write_start_event": 8532.862,
+          "write_done": 10899.858,
+          "all_done": 10899.858
+        },
+        "model_calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "total_ms": 3392.6,
+            "prompt_tokens": 5948,
+            "cache_hit_tokens": 5120,
+            "completion_tokens": 274,
+            "prompt_ms": 450.1,
+            "decode_ms": 2550.0
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "total_ms": 4126.7,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2387,
+            "completion_tokens": 378,
+            "prompt_ms": 317.3,
+            "decode_ms": 3513.4
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "total_ms": 2365.1,
+            "prompt_tokens": 1010,
+            "cache_hit_tokens": 512,
+            "completion_tokens": 213,
+            "prompt_ms": 318.6,
+            "decode_ms": 1906.9
+          }
+        ],
+        "syntheses_ms": [
+          {
+            "text": "我是匠石。",
+            "start": 8527.29,
+            "first_pcm": 8631.306,
+            "end": 8931.721
+          }
+        ],
+        "received_segments_ms": {
+          "0": {
+            "text": "我是匠石。",
+            "start": 8631.56,
+            "samples": 24960,
+            "end": 8931.86
+          }
+        },
+        "activity": [
+          {
+            "subject_id": "stone",
+            "activity_id": "82c4aabf-3b60-4713-9a36-1306aa0e6664",
+            "started_at": "2026-11-23T03:02:26.002060+00:00",
+            "total_ms": 4151.7,
+            "steps": [
+              [
+                "①落位",
+                3.9
+              ],
+              [
+                "②活跃区",
+                0.1
+              ],
+              [
+                "③组装",
+                6.8
+              ],
+              [
+                "④建活动",
+                3.3
+              ],
+              [
+                "⑤认知",
+                4131.4
+              ],
+              [
+                "06标记",
+                3.7
+              ],
+              [
+                "⑥行动",
+                0.5
+              ],
+              [
+                "⑦收尾",
+                1.0
+              ],
+              [
+                "30投递",
+                0.0
+              ],
+              [
+                "连续性检查",
+                0.0
+              ],
+              [
+                "300自省入队",
+                1.0
+              ]
+            ],
+            "substeps": [
+              [
+                "①对象解析",
+                0.0
+              ],
+              [
+                "①输入事实",
+                1.0
+              ],
+              [
+                "①相识来源",
+                2.5
+              ],
+              [
+                "①视觉关联",
+                0.0
+              ],
+              [
+                "①活动账本",
+                0.0
+              ],
+              [
+                "③工具清理",
+                1.0
+              ],
+              [
+                "③召回策略与缺口",
+                0.3
+              ],
+              [
+                "③工具相关",
+                1.2
+              ],
+              [
+                "③装载源",
+                4.1
+              ],
+              [
+                "③组装收尾",
+                0.0
+              ],
+              [
+                "③输入与视觉整理",
+                0.1
+              ]
+            ]
+          }
+        ],
+        "detailed_spans_ms": [
+          {
+            "stage": "input_accepted"
+          },
+          {
+            "stage": "input_audio_archive",
+            "started_at_ms": 690.924,
+            "finished_at_ms": 691.715,
+            "elapsed_ms": 0.792,
+            "status": "completed"
+          },
+          {
+            "stage": "input_queue_put",
+            "started_at_ms": 691.777,
+            "finished_at_ms": 691.782,
+            "elapsed_ms": 0.006,
+            "status": "completed"
+          },
+          {
+            "stage": "speaker_audio_prepare",
+            "started_at_ms": 692.038,
+            "finished_at_ms": 692.06,
+            "elapsed_ms": 0.022,
+            "status": "completed"
+          },
+          {
+            "stage": "input_worker_started"
+          },
+          {
+            "stage": "resolve_speaker",
+            "started_at_ms": 692.205,
+            "finished_at_ms": 692.219,
+            "elapsed_ms": 0.014,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 692.294,
+            "finished_at_ms": 692.3,
+            "elapsed_ms": 0.007,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 691.958,
+            "finished_at_ms": 693.136,
+            "elapsed_ms": 1.179,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 693.247,
+            "finished_at_ms": 693.873,
+            "elapsed_ms": 0.626,
+            "status": "completed"
+          },
+          {
+            "stage": "voice_candidates",
+            "started_at_ms": 693.964,
+            "finished_at_ms": 693.971,
+            "elapsed_ms": 0.007,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 694.327,
+            "finished_at_ms": 694.757,
+            "elapsed_ms": 0.43,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 694.849,
+            "finished_at_ms": 695.347,
+            "elapsed_ms": 0.498,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 693.949,
+            "finished_at_ms": 695.535,
+            "elapsed_ms": 1.586,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 696.344,
+            "finished_at_ms": 696.744,
+            "elapsed_ms": 0.401,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_input_queued"
+          },
+          {
+            "stage": "jev_input_dequeued"
+          },
+          {
+            "stage": "jev_known_names",
+            "started_at_ms": 698.572,
+            "finished_at_ms": 698.698,
+            "elapsed_ms": 0.126,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_acquaintance",
+            "started_at_ms": 698.727,
+            "finished_at_ms": 698.729,
+            "elapsed_ms": 0.002,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 698.942,
+            "finished_at_ms": 698.966,
+            "elapsed_ms": 0.025,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_task_context",
+            "started_at_ms": 699.095,
+            "finished_at_ms": 699.422,
+            "elapsed_ms": 0.328,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_material_prepare",
+            "started_at_ms": 697.491,
+            "finished_at_ms": 699.455,
+            "elapsed_ms": 1.964
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 4094.16,
+            "finished_at_ms": 4094.815,
+            "elapsed_ms": 0.656,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 4095.741,
+            "finished_at_ms": 4095.773,
+            "elapsed_ms": 0.033,
+            "status": "completed"
+          },
+          {
+            "stage": "main_reply_cache",
+            "started_at_ms": 8532.227,
+            "finished_at_ms": 8532.243,
+            "elapsed_ms": 0.017,
+            "status": "completed"
+          },
+          {
+            "stage": "main_debug_persist",
+            "started_at_ms": 8532.345,
+            "finished_at_ms": 8532.408,
+            "elapsed_ms": 0.063,
+            "status": "completed"
+          }
+        ],
+        "engine_spans_ms": [
+          [
+            "ASR",
+            520.794,
+            690.377
+          ],
+          [
+            "http.voice_jev",
+            700.446,
+            4093.197
+          ],
+          [
+            "JEV",
+            697.475,
+            4093.89
+          ],
+          [
+            "assemble",
+            4385.308,
+            4390.882
+          ],
+          [
+            "http.cognition",
+            4397.189,
+            8524.047
+          ],
+          [
+            "review",
+            8526.178,
+            8526.356
+          ],
+          [
+            "delivery",
+            8526.959,
+            8527.256
+          ],
+          [
+            "main",
+            4347.858,
+            8532.485
+          ],
+          [
+            "http.write_zone",
+            8533.514,
+            10898.672
+          ]
+        ],
+        "run": 2
+      },
+      {
+        "text": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好。我是匠石。"
+        },
+        "routing": [
+          {
+            "route": "background",
+            "interaction": "none",
+            "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+            "mode": "split"
+          }
+        ],
+        "speech_stages_ms": [
+          [
+            "端点判定、尾静音及送入 ASR",
+            0,
+            521.44,
+            521.44
+          ],
+          [
+            "本机 ASR 转写",
+            521.44,
+            694.04,
+            172.59
+          ],
+          [
+            "定稿文字到达客户端",
+            694.04,
+            694.59,
+            0.55
+          ],
+          [
+            "收集本句、人物候选及排队进入接话判断",
+            694.59,
+            700.88,
+            6.29
+          ],
+          [
+            "接话判断准备现场材料和模型请求",
+            700.88,
+            702.98,
+            2.1
+          ],
+          [
+            "接话请求发出到服务开始预填",
+            702.98,
+            712.41,
+            9.44
+          ],
+          [
+            "接话输入预填和缓存处理",
+            712.41,
+            1089.41,
+            377.0
+          ],
+          [
+            "接话预填结束到首个生成 token",
+            1089.41,
+            1099.41,
+            10.0
+          ],
+          [
+            "接话逐 token 生成完整判断",
+            1099.41,
+            3835.41,
+            2736.0
+          ],
+          [
+            "接话模型收尾、回传和路由复核",
+            3835.41,
+            3859.19,
+            23.78
+          ],
+          [
+            "入口保留为背景，到现场主动主认知开始",
+            3859.19,
+            4347.01,
+            487.82
+          ],
+          [
+            "主认知启动、对象和输入事实落位",
+            4347.01,
+            4386.56,
+            39.55
+          ],
+          [
+            "读取活跃区",
+            4386.56,
+            4386.69,
+            0.13
+          ],
+          [
+            "组装本轮材料、记忆及工具上下文",
+            4386.69,
+            4394.62,
+            7.94
+          ],
+          [
+            "创建本次认知活动",
+            4394.62,
+            4397.69,
+            3.07
+          ],
+          [
+            "构造并发起主认知模型请求",
+            4397.69,
+            4400.69,
+            3.0
+          ],
+          [
+            "主认知请求发出到服务开始预填",
+            4400.69,
+            4560.41,
+            159.72
+          ],
+          [
+            "主认知输入预填和缓存处理",
+            4560.41,
+            4847.41,
+            287.0
+          ],
+          [
+            "主认知预填结束到首个生成 token",
+            4847.41,
+            4855.41,
+            8.0
+          ],
+          [
+            "主认知逐 token 生成完整输出",
+            4855.41,
+            9596.41,
+            4741.0
+          ],
+          [
+            "主认知模型收尾及完整结果回传",
+            9596.41,
+            9638.76,
+            42.35
+          ],
+          [
+            "解析、现场更新和回应对象复核",
+            9638.76,
+            9641.31,
+            2.55
+          ],
+          [
+            "回复计划及播报许可检查、启动首句合成",
+            9641.31,
+            9642.29,
+            0.98
+          ],
+          [
+            "首句开始合成到首个 PCM 块",
+            9642.29,
+            9748.74,
+            106.46
+          ],
+          [
+            "PCM 封包到客户端首包",
+            9748.74,
+            9749.0,
+            0.25
+          ],
+          [
+            "首包到首句音频收齐",
+            9749.0,
+            9926.69,
+            177.69
+          ],
+          [
+            "首句收齐到全部回答音频收齐",
+            9926.69,
+            10259.72,
+            333.03
+          ]
+        ],
+        "write_stages_ms": [
+          [
+            "写场准备输入",
+            9647.72,
+            9648.52,
+            0.8
+          ],
+          [
+            "写场请求发出到服务开始预填",
+            9648.52,
+            9651.41,
+            2.89
+          ],
+          [
+            "写场输入预填和缓存处理",
+            9651.41,
+            10209.41,
+            558.0
+          ],
+          [
+            "写场预填结束到首个生成 token",
+            10209.41,
+            10221.41,
+            12.0
+          ],
+          [
+            "写场逐 token 生成",
+            10221.41,
+            10627.41,
+            406.0
+          ],
+          [
+            "写场模型收尾、回传、落盘及完成通知",
+            10627.41,
+            10652.22,
+            24.81
+          ]
+        ],
+        "milestones_ms": {
+          "transcript": 694.59,
+          "first_reply": 9643.281,
+          "tts_start": 9642.286,
+          "first_audio": 9748.998,
+          "first_sentence_complete": 9926.688,
+          "all_audio": 10259.722,
+          "foreground_done": 9647.786,
+          "write_start_event": 9647.789,
+          "write_done": 10652.222,
+          "all_done": 10652.222
+        },
+        "model_calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "total_ms": 3155.4,
+            "prompt_tokens": 5948,
+            "cache_hit_tokens": 5947,
+            "completion_tokens": 274,
+            "prompt_ms": 19.4,
+            "decode_ms": 2746.0
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "total_ms": 5237.9,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2537,
+            "completion_tokens": 509,
+            "prompt_ms": 201.6,
+            "decode_ms": 4750.2
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "total_ms": 1002.4,
+            "prompt_tokens": 1056,
+            "cache_hit_tokens": 512,
+            "completion_tokens": 44,
+            "prompt_ms": 445.7,
+            "decode_ms": 415.4
+          }
+        ],
+        "syntheses_ms": [
+          {
+            "text": "你好。",
+            "start": 9642.286,
+            "first_pcm": 9748.743,
+            "end": 9926.488
+          },
+          {
+            "text": "我是匠石。",
+            "start": 9926.527,
+            "first_pcm": 10050.206,
+            "end": 10259.543
+          }
+        ],
+        "received_segments_ms": {
+          "0": {
+            "text": "你好。",
+            "start": 9748.998,
+            "samples": 15360,
+            "end": 9926.688
+          },
+          "1": {
+            "text": "我是匠石。",
+            "start": 10050.387,
+            "samples": 28800,
+            "end": 10259.718
+          }
+        },
+        "activity": [
+          {
+            "subject_id": "stone",
+            "activity_id": "29fc4670-b76a-4769-9528-43a180188336",
+            "started_at": "2026-11-23T03:02:39.090168+00:00",
+            "total_ms": 5264.4,
+            "steps": [
+              [
+                "①落位",
+                4.0
+              ],
+              [
+                "②活跃区",
+                0.1
+              ],
+              [
+                "③组装",
+                7.9
+              ],
+              [
+                "④建活动",
+                3.1
+              ],
+              [
+                "⑤认知",
+                5243.1
+              ],
+              [
+                "06标记",
+                3.8
+              ],
+              [
+                "⑥行动",
+                0.6
+              ],
+              [
+                "⑦收尾",
+                0.8
+              ],
+              [
+                "30投递",
+                0.0
+              ],
+              [
+                "连续性检查",
+                0.0
+              ],
+              [
+                "300自省入队",
+                0.9
+              ]
+            ],
+            "substeps": [
+              [
+                "①对象解析",
+                0.0
+              ],
+              [
+                "①输入事实",
+                1.2
+              ],
+              [
+                "①相识来源",
+                2.2
+              ],
+              [
+                "①视觉关联",
+                0.0
+              ],
+              [
+                "①活动账本",
+                0.0
+              ],
+              [
+                "③工具清理",
+                1.5
+              ],
+              [
+                "③召回策略与缺口",
+                0.3
+              ],
+              [
+                "③工具相关",
+                1.0
+              ],
+              [
+                "③装载源",
+                4.9
+              ],
+              [
+                "③组装收尾",
+                0.0
+              ],
+              [
+                "③输入与视觉整理",
+                0.1
+              ]
+            ]
+          }
+        ],
+        "detailed_spans_ms": [
+          {
+            "stage": "input_accepted"
+          },
+          {
+            "stage": "input_audio_archive",
+            "started_at_ms": 694.502,
+            "finished_at_ms": 695.323,
+            "elapsed_ms": 0.822,
+            "status": "completed"
+          },
+          {
+            "stage": "input_queue_put",
+            "started_at_ms": 695.424,
+            "finished_at_ms": 695.428,
+            "elapsed_ms": 0.005,
+            "status": "completed"
+          },
+          {
+            "stage": "speaker_audio_prepare",
+            "started_at_ms": 695.768,
+            "finished_at_ms": 695.792,
+            "elapsed_ms": 0.025,
+            "status": "completed"
+          },
+          {
+            "stage": "input_worker_started"
+          },
+          {
+            "stage": "resolve_speaker",
+            "started_at_ms": 695.984,
+            "finished_at_ms": 695.995,
+            "elapsed_ms": 0.012,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 696.1,
+            "finished_at_ms": 696.108,
+            "elapsed_ms": 0.008,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 695.685,
+            "finished_at_ms": 697.116,
+            "elapsed_ms": 1.432,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 696.789,
+            "finished_at_ms": 697.593,
+            "elapsed_ms": 0.805,
+            "status": "completed"
+          },
+          {
+            "stage": "voice_candidates",
+            "started_at_ms": 697.703,
+            "finished_at_ms": 697.707,
+            "elapsed_ms": 0.005,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 698.001,
+            "finished_at_ms": 698.368,
+            "elapsed_ms": 0.367,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 698.441,
+            "finished_at_ms": 698.9,
+            "elapsed_ms": 0.459,
+            "status": "completed"
+          },
+          {
+            "stage": "personal_identity",
+            "started_at_ms": 697.691,
+            "finished_at_ms": 699.008,
+            "elapsed_ms": 1.317,
+            "status": "completed"
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 699.691,
+            "finished_at_ms": 700.091,
+            "elapsed_ms": 0.401,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_input_queued"
+          },
+          {
+            "stage": "jev_input_dequeued"
+          },
+          {
+            "stage": "jev_known_names",
+            "started_at_ms": 701.165,
+            "finished_at_ms": 701.28,
+            "elapsed_ms": 0.116,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_acquaintance",
+            "started_at_ms": 701.31,
+            "finished_at_ms": 701.311,
+            "elapsed_ms": 0.002,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 701.56,
+            "finished_at_ms": 701.581,
+            "elapsed_ms": 0.021,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_task_context",
+            "started_at_ms": 701.62,
+            "finished_at_ms": 701.874,
+            "elapsed_ms": 0.255,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_material_prepare",
+            "started_at_ms": 700.897,
+            "finished_at_ms": 701.901,
+            "elapsed_ms": 1.003
+          },
+          {
+            "stage": "input_archive_update",
+            "started_at_ms": 3859.423,
+            "finished_at_ms": 3860.093,
+            "elapsed_ms": 0.67,
+            "status": "completed"
+          },
+          {
+            "stage": "jev_people_material",
+            "started_at_ms": 3860.884,
+            "finished_at_ms": 3860.911,
+            "elapsed_ms": 0.028,
+            "status": "completed"
+          },
+          {
+            "stage": "main_reply_cache",
+            "started_at_ms": 9647.285,
+            "finished_at_ms": 9647.297,
+            "elapsed_ms": 0.013,
+            "status": "completed"
+          },
+          {
+            "stage": "main_debug_persist",
+            "started_at_ms": 9647.394,
+            "finished_at_ms": 9647.446,
+            "elapsed_ms": 0.053,
+            "status": "completed"
+          }
+        ],
+        "engine_spans_ms": [
+          [
+            "ASR",
+            521.443,
+            694.037
+          ],
+          [
+            "http.voice_jev",
+            702.978,
+            3858.589
+          ],
+          [
+            "JEV",
+            700.881,
+            3859.19
+          ],
+          [
+            "assemble",
+            4388.157,
+            4394.397
+          ],
+          [
+            "http.cognition",
+            4400.691,
+            9638.761
+          ],
+          [
+            "review",
+            9641.125,
+            9641.309
+          ],
+          [
+            "delivery",
+            9641.951,
+            9642.268
+          ],
+          [
+            "main",
+            4347.007,
+            9647.486
+          ],
+          [
+            "http.write_zone",
+            9648.52,
+            10651.038
+          ]
+        ],
+        "run": 3
+      }
+    ],
+    "rounds_without_audio": [],
+    "medians": {
+      "speech_stages_ms": {
+        "端点判定、尾静音及送入 ASR": 521.32,
+        "本机 ASR 转写": 172.59,
+        "定稿文字到达客户端": 0.63,
+        "收集本句、人物候选及排队进入接话判断": 6.46,
+        "接话判断准备现场材料和模型请求": 2.97,
+        "接话请求发出到服务开始预填": 9.44,
+        "接话输入预填和缓存处理": 811.0,
+        "接话预填结束到首个生成 token": 9.0,
+        "接话逐 token 生成完整判断": 2736.0,
+        "接话模型收尾、回传和路由复核": 24.84,
+        "入口保留为背景，到现场主动主认知开始": 330.93,
+        "主认知启动、对象和输入事实落位": 38.98,
+        "读取活跃区": 0.1,
+        "组装本轮材料、记忆及工具上下文": 7.94,
+        "创建本次认知活动": 3.07,
+        "构造并发起主认知模型请求": 3.0,
+        "主认知请求发出到服务开始预填": 163.04,
+        "主认知输入预填和缓存处理": 408.0,
+        "主认知预填结束到首个生成 token": 8.0,
+        "主认知逐 token 生成完整输出": 4485.0,
+        "主认知模型收尾及完整结果回传": 42.35,
+        "解析、现场更新和回应对象复核": 2.55,
+        "回复计划及播报许可检查、启动首句合成": 0.98,
+        "首句开始合成到首个 PCM 块": 106.46,
+        "PCM 封包到客户端首包": 0.25,
+        "首包到首句音频收齐": 300.3,
+        "首句收齐到全部回答音频收齐": 0.01
+      },
+      "write_stages_ms": {
+        "写场准备输入": 0.8,
+        "写场请求发出到服务开始预填": 3.72,
+        "写场输入预填和缓存处理": 558.0,
+        "写场预填结束到首个生成 token": 10.0,
+        "写场逐 token 生成": 757.0,
+        "写场模型收尾、回传、落盘及完成通知": 24.81
+      },
+      "milestones_ms": {
+        "transcript": 694.59,
+        "first_reply": 9643.28,
+        "tts_start": 9642.29,
+        "first_audio": 9749.0,
+        "first_sentence_complete": 9926.69,
+        "all_audio": 10259.72,
+        "foreground_done": 9647.79,
+        "write_start_event": 9647.79,
+        "write_done": 10899.86,
+        "all_done": 10899.86
+      }
+    }
+  },
+  "notes": [
+    "每组统计取前三个实际产生回答音频的轮次。如另有无音频轮，其模型调用和路由单列于 rounds_without_audio。",
+    "另一次早期诊断在优化前阶段等待第二轮音频超时。该轮音频服务没有收到合成请求，未完整记录其前台事件，未据此判定静默原因。整组未纳入本次前后对照。"
+  ]
+}

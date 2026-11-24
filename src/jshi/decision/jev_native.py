@@ -23,7 +23,7 @@ def entry_questions(lines, schema):
                                    {'direct': '明确交往', 'linked': '已有具体关联但有缺口', 'other': '背景或无关联依据'})
         questions[f'e{i}'] = choice(f'I{i}意思是否足够处理。问完等别人回答不是未完，ASR定稿不等于说完；不补写半句',
                                    {'complete': '完整可处理', 'incomplete': '必须等后文', 'uncertain': '完整度不明'})
-    questions['effect'] = choice('结合外部上下文判断当前参与及表达是否仍适合：keep继续，redirect交往仍成立但替换回应，stop参与前提或表达已不应继续。区分内容纠正与交往撤回；传达纠正不等于邀请追问。不按词面选控制，旁聊不撤销有效交往。给出当前外部依据',
+    questions['effect'] = choice('结合外部上下文判断当前表达。播放中受话人向匠石纠正、补充或追问而接过话轮，选redirect让出旧回答，未说完也先听。附和、旁聊或背景声且原表达仍合适选keep。明确制止或撤回参与选stop。给出当前外部依据',
                                  {'keep': '保持', 'stop': '停止表达', 'redirect': '转向', 'uncertain': '不明'})
     questions['work'] = choice('停止表达后是否还有独立操作，如取消下载；没有停止要求选none',
                                {'none': '无', 'required': '有操作', 'uncertain': '不明'})
@@ -65,7 +65,7 @@ def decode_entry(result, lines, questions, threshold):
         if work == 'required' and not selected: raise ValueError('operation_scope')
         if route == 'background': selected, pending = [], []
     elif work != 'none': raise ValueError('operation_without_stop')
-    if effect == 'redirect' and route != 'prepare': raise ValueError('redirect_scope')
+    if effect == 'redirect' and route == 'background': raise ValueError('redirect_scope')
     interaction = 'direct' if 'direct' in relations else 'uncertain' if 'linked' in relations else 'none'
     complete = 'uncertain' if selected and pending else 'incomplete' if pending else 'complete'
     return dict(participation={'basis':'原生入口控制选择；实际证据见阶段记录',

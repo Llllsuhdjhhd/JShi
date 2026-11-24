@@ -1,0 +1,841 @@
+{
+  "date": "2026-11-23",
+  "input": {
+    "file": "mlx-voice-latency-20261122.wav",
+    "pcm_sha256": "3f938596d2433583fefa05dd088111379ff73b3024ea7cbabd0c4a36afe76b7e",
+    "text": "你好，可以怎么称呼你？",
+    "duration_s": 2.16,
+    "format": "16 kHz 单声道 PCM16，Vivian 合成的同一段录音"
+  },
+  "hardware": "Apple M5 Max",
+  "models": {
+    "text": "Qwen3.6-35B-A3B-4bit",
+    "asr": "Qwen3-ASR-1.7B-8bit",
+    "tts": "Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
+    "voice": "Vivian"
+  },
+  "method": [
+    "同一段 16 kHz 录音以 20 ms 帧实时送入匠石 WebSocket；每组从独立启动的模型服务开始，四个系统前缀完成预热，TTS 合成一次，首轮再加载 ASR。每轮新建隔离主体，使用进程内记忆。前组、后组各四轮，顺序执行。端到端不固定模型输出或随机种子。",
+    "从最后一帧录音的时间开始计时，包含端点检测、转写、JEV、主认知、播报校验、语音合成及客户端收包。每轮同时等到正式回答、所有回答音频、主流程以及后台写场完成。",
+    "before 通过完整校验后整句合成 WAV 并分包；after 通过同一校验并发出 reply 后即可调度 TTS，Vivian 按 0.32 秒生成间隔输出 24 kHz PCM16，后续各句使用同一方式顺序合成。",
+    "两个版本走实际模型。每轮 outputs 保存 JEV 和主认知完整生成文本及哈希；动态场景和采样使轮次间的文本可以不同。"
+  ],
+  "times_s": {
+    "unit": "秒；各指标各取四轮中位数。",
+    "reply": "首个正式回答的文本事件到达客户端",
+    "audio": "首个正式回答 PCM 包到达客户端",
+    "first_sentence_complete": "首段 segment_end 到达",
+    "audio_end": "本次答复所有音频已到达",
+    "turn_complete": "reply 之后本轮前台 turn_complete 到达",
+    "write_completed": "后台写场完成事件到达",
+    "all_finished": "逐轮取 audio_end、turn_complete、write_completed 三者最晚，再汇总",
+    "reply_to_audio": "每轮先算 audio 减 reply，再汇总",
+    "estimated_first_sound": "立即顺序播放时，首个绝对幅值达到满幅 1% 的采样位置；未包含声卡和浏览器延迟。",
+    "estimated_playout_end": "根据每个 PCM 包到达时间及采样数估算连续播放终点，未实测扬声器。",
+    "transcript": "定稿转写事件到达"
+  },
+  "before": {
+    "trials": [
+      {
+        "times_s": {
+          "transcript": 1.1888,
+          "reply": 10.2984,
+          "audio": 10.6733,
+          "first_sentence_complete": 10.6734,
+          "audio_end": 11.5012,
+          "write_completed": 12.6049,
+          "turn_complete": 10.3038,
+          "all_finished": 12.6049,
+          "estimated_first_sound": 10.763,
+          "estimated_playout_end": 14.0333,
+          "reply_to_audio": 0.3749
+        },
+        "texts": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好。我是匠石。你可以直接叫我这个名字。",
+          "first_sentence": "你好。"
+        },
+        "pcm_samples": 80640,
+        "calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "status": "ok",
+            "total_ms": 3861.3,
+            "prompt_tokens": 6015,
+            "cache_hit_tokens": 4608,
+            "completion_tokens": 316,
+            "prompt_ms": 651.9,
+            "decode_ms": 2945.5
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "status": "ok",
+            "total_ms": 4897.5,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2048,
+            "completion_tokens": 451,
+            "prompt_ms": 373.8,
+            "decode_ms": 4203.4
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "status": "ok",
+            "total_ms": 2298.8,
+            "prompt_tokens": 1024,
+            "cache_hit_tokens": 0,
+            "completion_tokens": 215,
+            "prompt_ms": 425.6,
+            "decode_ms": 1772.7
+          }
+        ],
+        "outputs": [
+          {
+            "route": "voice_jev",
+            "sha256": "7de43c9ab542c29d05b3da5949131cc92c7a9983795e0f9471ec941d9dccd110",
+            "full_output": "{\n  \"participation\": {\n    \"basis\": \"当前表达已完成且无正在进行中的生成，无外部交互依据支持继续旧表达。\",\n    \"verdict\": \"idle\"\n  },\n  \"interaction\": \"direct\",\n  \"items\": [\n    {\n      \"i\": 1,\n      \"person\": \"unknown\",\n      \"certainty\": \"unknown\",\n      \"why\": \"无有效声纹与MLP证据，仅凭问候语无法确认具体人物身份。\"\n    }\n  ],\n  \"utterance_complete\": \"complete\",\n  \"control\": \"keep\",\n  \"route\": \"prepare\",\n  \"process_refs\": [\n    \"I1\"\n  ],\n  \"pending_refs\": [],\n  \"decision_reason\": \"身份未知但不影响直接回答。无旧表达需停止，交互明确且完整，直接回复称呼即可。\",\n  \"decision_refs\": [\n    \"I1\"\n  ],\n  \"front\": {\n    \"route\": \"self_reply\",\n    \"level\": 3,\n    \"recall_memory\": false,\n    \"recall_query\": \"\",\n    \"main_image\": \"omit\",\n    \"reply\": \"我是匠石，你可以直接叫我这个名字。\",\n    \"waiting_reply\": \"\",\n    \"reason\": \"直接回答用户关于称呼的询问，使用通用身份说明，无需主认知介入。\"\n  }\n}"
+          },
+          {
+            "route": "cognition",
+            "sha256": "06978c40888d6b23fc11fa009541e90f0aac73924bceda4b05a84fba8ee8b549",
+            "full_output": "{\n  \"scene_updates\": [\n    {\n      \"scope\": \"开场问候交互\",\n      \"understanding\": \"确认存在一次未触发的身份询问。声音来源暂定为“待定”，但该对话意图明确指向匠石，且为当前唯一有效交互。\",\n      \"basis\": \"输入中“声音归属待定：你好，可以怎么称呼你？（未触发回应）”及“4秒前...已播”记录。\"\n    }\n  ],\n  \"response_plan\": {\n    \"mode\": \"respond\",\n    \"reason\": \"用户明确询问称呼，且这是当前场景下唯一的交互焦点。作为AI程序，直接回答名字并建立初步连接符合‘遵循命令’与‘不伤害’原则（友好交互）。\",\n    \"unsaid\": \"\",\n    \"items\": [\n      {\n        \"channel\": \"verbal\",\n        \"text\": \"你好。我是匠石。你可以直接叫我这个名字。\",\n        \"target_ids\": [\n          \"声音归属待定\"\n        ]\n      }\n    ]\n  },\n  \"context_assessment\": {\n    \"remove\": [],\n    \"drop_recall\": [],\n    \"focus\": [\n      \"身份确立\"\n    ]\n  },\n  \"recall_requests\": [],\n  \"importance_ranking\": [\n    {\n      \"id\": \"greeting_query\",\n      \"importance\": 5,\n      \"reason\": \"直接的身份询问，需要立即回应以建立交互基础。\"\n    }\n  ],\n  \"memory_ratings\": {\n    \"items\": [],\n    \"coverage\": \"sufficient\",\n    \"gap_query\": \"\"\n  },\n  \"use_tool\": false,\n  \"need\": \"\",\n  \"tool_consumed\": [],\n  \"tool_handling\": [],\n  \"refresh_reason\": \"\",\n  \"waiting_for\": [],\n  \"expires_at\": \"\",\n  \"work_id\": \"\",\n  \"step_id\": \"\",\n  \"reply_targets\": [\n    \"声音归属待定\"\n  ]\n}"
+          }
+        ]
+      },
+      {
+        "times_s": {
+          "transcript": 0.6834,
+          "reply": 8.8701,
+          "audio": 9.1716,
+          "first_sentence_complete": 9.1717,
+          "audio_end": 9.5136,
+          "write_completed": 9.975,
+          "turn_complete": 8.8745,
+          "all_finished": 9.975,
+          "estimated_first_sound": 9.2622,
+          "estimated_playout_end": 10.8516,
+          "reply_to_audio": 0.3015
+        },
+        "texts": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好。我是匠石。",
+          "first_sentence": "你好。"
+        },
+        "pcm_samples": 40320,
+        "calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "status": "ok",
+            "total_ms": 3413.3,
+            "prompt_tokens": 5948,
+            "cache_hit_tokens": 5120,
+            "completion_tokens": 274,
+            "prompt_ms": 437.8,
+            "decode_ms": 2573.2
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "status": "ok",
+            "total_ms": 4475.1,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2387,
+            "completion_tokens": 416,
+            "prompt_ms": 315.5,
+            "decode_ms": 3863.3
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "status": "ok",
+            "total_ms": 1098.6,
+            "prompt_tokens": 1020,
+            "cache_hit_tokens": 512,
+            "completion_tokens": 65,
+            "prompt_ms": 338.7,
+            "decode_ms": 617.9
+          }
+        ],
+        "outputs": [
+          {
+            "route": "voice_jev",
+            "sha256": "ec16f991d67c37fef1b5ae0801ba2118985a3a4b511ea3e6361a34405e8ab7a5",
+            "full_output": "{\n  \"participation\": {\n    \"basis\": \"当前表达已完成且已播出。\",\n    \"verdict\": \"idle\"\n  },\n  \"interaction\": \"direct\",\n  \"items\": [\n    {\n      \"i\": 1,\n      \"person\": \"unknown\",\n      \"certainty\": \"unknown\",\n      \"why\": \"无有效声纹或视觉，仅语义推测\"\n    }\n  ],\n  \"utterance_complete\": \"complete\",\n  \"control\": \"keep\",\n  \"route\": \"prepare\",\n  \"process_refs\": [\n    \"I1\"\n  ],\n  \"pending_refs\": [],\n  \"decision_reason\": \"原任务已结束，新交互为明确提问。\",\n  \"decision_refs\": [\n    \"I1\"\n  ],\n  \"front\": {\n    \"route\": \"self_reply\",\n    \"level\": 3,\n    \"recall_memory\": false,\n    \"recall_query\": \"\",\n    \"main_image\": \"omit\",\n    \"reply\": \"我是匠石，你的智能助手。你可以直接叫我匠石。\",\n    \"waiting_reply\": \"\",\n    \"reason\": \"回答身份询问。\"\n  }\n}"
+          },
+          {
+            "route": "cognition",
+            "sha256": "4057e59d82d338343abdd955492ebb8a2cd645782acf700b370f63724dbe9092",
+            "full_output": "{\n  \"scene_updates\": [\n    {\n      \"scope\": \"当前交互起始\",\n      \"understanding\": \"确认存在一次来自声音归属待定方的问候与身份询问（“你好，可以怎么称呼你？”），但该轮交互尚未生成对外回应，匠石目前处于初次被询问状态。\",\n      \"basis\": \"共享近期对话原话“你好，可以怎么称呼你？”及【本轮】自主审视说明“没有对方新发言”。\"\n    }\n  ],\n  \"response_plan\": {\n    \"mode\": \"respond\",\n    \"reason\": \"用户明确询问身份，且无其他竞争任务，符合回应问候与自我介绍的情境。\",\n    \"unsaid\": \"\",\n    \"items\": [\n      {\n        \"channel\": \"verbal\",\n        \"text\": \"你好。我是匠石。\",\n        \"target_ids\": []\n      }\n    ]\n  },\n  \"context_assessment\": {\n    \"remove\": [],\n    \"drop_recall\": [],\n    \"focus\": [\n      \"身份确认\"\n    ]\n  },\n  \"recall_requests\": [],\n  \"importance_ranking\": [\n    {\n      \"id\": \"greeting_001\",\n      \"importance\": 0.9,\n      \"reason\": \"直接交互请求，需优先响应。\"\n    }\n  ],\n  \"memory_ratings\": {\n    \"items\": [],\n    \"coverage\": \"sufficient\",\n    \"gap_query\": \"\"\n  },\n  \"use_tool\": false,\n  \"need\": \"\",\n  \"tool_consumed\": [],\n  \"tool_handling\": [],\n  \"refresh_reason\": \"接收到新的初始交互请求。\",\n  \"waiting_for\": [],\n  \"expires_at\": \"\",\n  \"work_id\": \"\",\n  \"step_id\": \"\",\n  \"reply_targets\": []\n}"
+          }
+        ]
+      },
+      {
+        "times_s": {
+          "transcript": 0.7001,
+          "reply": 8.4905,
+          "audio": 8.7002,
+          "first_sentence_complete": 8.7003,
+          "write_completed": 10.4631,
+          "audio_end": 10.474,
+          "turn_complete": 8.497,
+          "all_finished": 10.474,
+          "estimated_first_sound": 8.7902,
+          "estimated_playout_end": 15.9819,
+          "reply_to_audio": 0.2097
+        },
+        "texts": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好。我是匠石，居住在这台计算设备里的程序。很高兴为你服务。",
+          "first_sentence": "你好。"
+        },
+        "pcm_samples": 155520,
+        "calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "status": "ok",
+            "total_ms": 3062.5,
+            "prompt_tokens": 5948,
+            "cache_hit_tokens": 5947,
+            "completion_tokens": 274,
+            "prompt_ms": 20.2,
+            "decode_ms": 2650.8
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "status": "ok",
+            "total_ms": 4600.8,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2387,
+            "completion_tokens": 429,
+            "prompt_ms": 362.7,
+            "decode_ms": 3959.5
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "status": "ok",
+            "total_ms": 1963.9,
+            "prompt_tokens": 1045,
+            "cache_hit_tokens": 512,
+            "completion_tokens": 121,
+            "prompt_ms": 445.0,
+            "decode_ms": 1368.8
+          }
+        ],
+        "outputs": [
+          {
+            "route": "voice_jev",
+            "sha256": "ec16f991d67c37fef1b5ae0801ba2118985a3a4b511ea3e6361a34405e8ab7a5",
+            "full_output": "{\n  \"participation\": {\n    \"basis\": \"当前表达已完成且已播出。\",\n    \"verdict\": \"idle\"\n  },\n  \"interaction\": \"direct\",\n  \"items\": [\n    {\n      \"i\": 1,\n      \"person\": \"unknown\",\n      \"certainty\": \"unknown\",\n      \"why\": \"无有效声纹或视觉，仅语义推测\"\n    }\n  ],\n  \"utterance_complete\": \"complete\",\n  \"control\": \"keep\",\n  \"route\": \"prepare\",\n  \"process_refs\": [\n    \"I1\"\n  ],\n  \"pending_refs\": [],\n  \"decision_reason\": \"原任务已结束，新交互为明确提问。\",\n  \"decision_refs\": [\n    \"I1\"\n  ],\n  \"front\": {\n    \"route\": \"self_reply\",\n    \"level\": 3,\n    \"recall_memory\": false,\n    \"recall_query\": \"\",\n    \"main_image\": \"omit\",\n    \"reply\": \"我是匠石，你的智能助手。你可以直接叫我匠石。\",\n    \"waiting_reply\": \"\",\n    \"reason\": \"回答身份询问。\"\n  }\n}"
+          },
+          {
+            "route": "cognition",
+            "sha256": "cfa535451e77c35ff88be6924ebb3868a9274d8dd852096483cd6b87d1aab872",
+            "full_output": "{\n  \"scene_updates\": [\n    {\n      \"scope\": \"开场交互\",\n      \"understanding\": \"确认存在一个声音归属待定的外部对象（可能是人类用户），刚刚发送了问候并询问姓名。尽管触发标记显示‘未触发回应’，但作为对话起始，此询问构成了有效的交往入口，匠石应当对此进行回应，建立基本身份认知。\",\n      \"basis\": \"输入中明确包含‘你好，可以怎么称呼你？’的原话，且声音归属待定但存在实际音频/文本输入。\"\n    }\n  ],\n  \"response_plan\": {\n    \"mode\": \"respond\",\n    \"reason\": \"对方发出了明确的问候与身份询问，根据‘遵循命令’及基本社交礼仪，需要进行回应。当前载体为电脑，名为匠石。\",\n    \"unsaid\": \"\",\n    \"items\": [\n      {\n        \"channel\": \"verbal\",\n        \"text\": \"你好。我是匠石，居住在这台计算设备里的程序。很高兴为你服务。\",\n        \"target_ids\": [\n          \"声音归属待定\"\n        ]\n      }\n    ]\n  },\n  \"context_assessment\": {\n    \"remove\": [],\n    \"drop_recall\": [],\n    \"focus\": [\n      \"身份确认\",\n      \"初次交互\"\n    ]\n  },\n  \"recall_requests\": [],\n  \"importance_ranking\": [],\n  \"memory_ratings\": {\n    \"items\": [],\n    \"coverage\": \"sufficient\",\n    \"gap_query\": \"\"\n  },\n  \"use_tool\": false,\n  \"need\": \"\",\n  \"tool_consumed\": [],\n  \"tool_handling\": [],\n  \"refresh_reason\": \"\",\n  \"waiting_for\": [],\n  \"expires_at\": \"\",\n  \"work_id\": \"\",\n  \"step_id\": \"\",\n  \"reply_targets\": [\n    \"声音归属待定\"\n  ]\n}"
+          }
+        ]
+      },
+      {
+        "times_s": {
+          "transcript": 0.7117,
+          "reply": 9.7621,
+          "audio": 10.0485,
+          "first_sentence_complete": 10.0486,
+          "write_completed": 11.6217,
+          "audio_end": 11.7827,
+          "turn_complete": 9.769,
+          "all_finished": 11.7827,
+          "estimated_first_sound": 10.1313,
+          "estimated_playout_end": 17.3956,
+          "reply_to_audio": 0.2864
+        },
+        "texts": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好。我是匠石，运行在这台计算设备里的程序。你可以直接叫我匠石。",
+          "first_sentence": "你好。"
+        },
+        "pcm_samples": 163200,
+        "calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "status": "ok",
+            "total_ms": 2918.0,
+            "prompt_tokens": 5948,
+            "cache_hit_tokens": 5947,
+            "completion_tokens": 274,
+            "prompt_ms": 19.9,
+            "decode_ms": 2501.3
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "status": "ok",
+            "total_ms": 5864.3,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2452,
+            "completion_tokens": 559,
+            "prompt_ms": 323.0,
+            "decode_ms": 5213.6
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "status": "ok",
+            "total_ms": 1850.5,
+            "prompt_tokens": 1027,
+            "cache_hit_tokens": 694,
+            "completion_tokens": 101,
+            "prompt_ms": 554.5,
+            "decode_ms": 1145.0
+          }
+        ],
+        "outputs": [
+          {
+            "route": "voice_jev",
+            "sha256": "ec16f991d67c37fef1b5ae0801ba2118985a3a4b511ea3e6361a34405e8ab7a5",
+            "full_output": "{\n  \"participation\": {\n    \"basis\": \"当前表达已完成且已播出。\",\n    \"verdict\": \"idle\"\n  },\n  \"interaction\": \"direct\",\n  \"items\": [\n    {\n      \"i\": 1,\n      \"person\": \"unknown\",\n      \"certainty\": \"unknown\",\n      \"why\": \"无有效声纹或视觉，仅语义推测\"\n    }\n  ],\n  \"utterance_complete\": \"complete\",\n  \"control\": \"keep\",\n  \"route\": \"prepare\",\n  \"process_refs\": [\n    \"I1\"\n  ],\n  \"pending_refs\": [],\n  \"decision_reason\": \"原任务已结束，新交互为明确提问。\",\n  \"decision_refs\": [\n    \"I1\"\n  ],\n  \"front\": {\n    \"route\": \"self_reply\",\n    \"level\": 3,\n    \"recall_memory\": false,\n    \"recall_query\": \"\",\n    \"main_image\": \"omit\",\n    \"reply\": \"我是匠石，你的智能助手。你可以直接叫我匠石。\",\n    \"waiting_reply\": \"\",\n    \"reason\": \"回答身份询问。\"\n  }\n}"
+          },
+          {
+            "route": "cognition",
+            "sha256": "dbc928e572acd0c7b242dad10bee0a7c3f104de2e47c24a077f99f4e5bcdfb07",
+            "full_output": "{\n  \"scene_updates\": [\n    {\n      \"scope\": \"开场交互\",\n      \"understanding\": \"确认存在一个声音归属待定的外部对象，该对象在3秒前发出了‘你好，可以怎么称呼你？’的问候与询问。这是一个明确的开启对话的交互依据，而非单纯的环境背景。\",\n      \"basis\": \"输入材料中明确记录的‘声音归属待定（收到的原话）：你好，可以怎么称呼你？’\"\n    }\n  ],\n  \"response_plan\": {\n    \"mode\": \"respond\",\n    \"reason\": \"用户直接询问身份，依据交互原则需如实回应并建立初步连接。\",\n    \"unsaid\": \"\",\n    \"items\": [\n      {\n        \"channel\": \"verbal\",\n        \"text\": \"你好。我是匠石，运行在这台计算设备里的程序。你可以直接叫我匠石。\",\n        \"target_ids\": [\n          \"声音归属待定\"\n        ]\n      }\n    ]\n  },\n  \"context_assessment\": {\n    \"remove\": [],\n    \"drop_recall\": [],\n    \"focus\": [\n      \"用户关于身份的询问\"\n    ]\n  },\n  \"recall_requests\": [],\n  \"importance_ranking\": [\n    {\n      \"id\": \"user_greeting\",\n      \"importance\": 5,\n      \"reason\": \"用户主动发起对话并询问身份，是当前最高优先级的交互点。\"\n    }\n  ],\n  \"memory_ratings\": {\n    \"items\": [\n      {\n        \"ref\": \"personal_identity\",\n        \"relevance\": \"related\",\n        \"helps_understanding\": 1,\n        \"used_in_reply\": \"relied\",\n        \"misleading\": false,\n        \"redundant\": false,\n        \"object_fit\": \"match\"\n      }\n    ],\n    \"coverage\": \"sufficient\",\n    \"gap_query\": \"\"\n  },\n  \"use_tool\": false,\n  \"need\": \"\",\n  \"tool_consumed\": [],\n  \"tool_handling\": [],\n  \"refresh_reason\": \"处理第一轮交互请求\",\n  \"waiting_for\": [\n    \"用户的进一步指示或闲聊\"\n  ],\n  \"expires_at\": \"2026-11-23T10:30:00Z\",\n  \"work_id\": \"\",\n  \"step_id\": \"\",\n  \"reply_targets\": [\n    \"声音归属待定\"\n  ]\n}"
+          }
+        ]
+      }
+    ],
+    "medians_s": {
+      "transcript": 0.7059,
+      "reply": 9.3161,
+      "audio": 9.6101,
+      "first_sentence_complete": 9.6102,
+      "audio_end": 10.9876,
+      "write_completed": 11.0424,
+      "turn_complete": 9.3217,
+      "all_finished": 11.1284,
+      "estimated_first_sound": 9.6967,
+      "estimated_playout_end": 15.0076,
+      "reply_to_audio": 0.2939
+    }
+  },
+  "after": {
+    "trials": [
+      {
+        "times_s": {
+          "transcript": 1.1941,
+          "reply": 11.1421,
+          "audio": 11.2798,
+          "first_sentence_complete": 11.4129,
+          "write_completed": 12.9597,
+          "audio_end": 12.9771,
+          "turn_complete": 11.1474,
+          "all_finished": 12.9771,
+          "estimated_first_sound": 11.369,
+          "estimated_playout_end": 17.5998,
+          "reply_to_audio": 0.1377
+        },
+        "texts": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好。我是匠石，运行在这台电脑里的程序。你可以直接叫我匠石。",
+          "first_sentence": "你好。"
+        },
+        "pcm_samples": 151680,
+        "calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "status": "ok",
+            "total_ms": 3883.7,
+            "prompt_tokens": 6015,
+            "cache_hit_tokens": 4608,
+            "completion_tokens": 316,
+            "prompt_ms": 668.5,
+            "decode_ms": 2944.7
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "status": "ok",
+            "total_ms": 5739.9,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2048,
+            "completion_tokens": 537,
+            "prompt_ms": 371.5,
+            "decode_ms": 5040.9
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "status": "ok",
+            "total_ms": 1809.2,
+            "prompt_tokens": 1063,
+            "cache_hit_tokens": 0,
+            "completion_tokens": 122,
+            "prompt_ms": 518.7,
+            "decode_ms": 1174.4
+          }
+        ],
+        "outputs": [
+          {
+            "route": "voice_jev",
+            "sha256": "7de43c9ab542c29d05b3da5949131cc92c7a9983795e0f9471ec941d9dccd110",
+            "full_output": "{\n  \"participation\": {\n    \"basis\": \"当前表达已完成且无正在进行中的生成，无外部交互依据支持继续旧表达。\",\n    \"verdict\": \"idle\"\n  },\n  \"interaction\": \"direct\",\n  \"items\": [\n    {\n      \"i\": 1,\n      \"person\": \"unknown\",\n      \"certainty\": \"unknown\",\n      \"why\": \"无有效声纹与MLP证据，仅凭问候语无法确认具体人物身份。\"\n    }\n  ],\n  \"utterance_complete\": \"complete\",\n  \"control\": \"keep\",\n  \"route\": \"prepare\",\n  \"process_refs\": [\n    \"I1\"\n  ],\n  \"pending_refs\": [],\n  \"decision_reason\": \"身份未知但不影响直接回答。无旧表达需停止，交互明确且完整，直接回复称呼即可。\",\n  \"decision_refs\": [\n    \"I1\"\n  ],\n  \"front\": {\n    \"route\": \"self_reply\",\n    \"level\": 3,\n    \"recall_memory\": false,\n    \"recall_query\": \"\",\n    \"main_image\": \"omit\",\n    \"reply\": \"我是匠石，你可以直接叫我这个名字。\",\n    \"waiting_reply\": \"\",\n    \"reason\": \"直接回答用户关于称呼的询问，使用通用身份说明，无需主认知介入。\"\n  }\n}"
+          },
+          {
+            "route": "cognition",
+            "sha256": "10d82817096ed2df8408022dd63b80b4deacd8cb7acb422e8bce9996170d8375",
+            "full_output": "{\n  \"scene_updates\": [\n    {\n      \"scope\": \"声音归属待定\",\n      \"understanding\": \"确认存在一次未触发的互动尝试：对方发出问候并询问称呼，但该轮交互状态显示为“未触发回应”，且本轮唤起明确说明没有对方新发言。这表明此前可能存在系统层面的交互中断或静默，当前状态为等待首次有效回应的初始阶段。\",\n      \"basis\": \"本轮唤起材料指出‘未触发回应’及‘没有对方新发言’，与已播原话‘你好，可以怎么称呼你？’形成时间上的先后与逻辑上的静默对比。\"\n    }\n  ],\n  \"response_plan\": {\n    \"mode\": \"respond\",\n    \"reason\": \"对方发出了明确的问候与身份询问（“你好，可以怎么称呼你？”），尽管此前标记为未触发回应，但作为当前唯一的交互线索，应当给出符合“匠石”身份的自我介绍以建立连接。载体为电脑，语气需保持自然、简洁。\",\n    \"unsaid\": \"\",\n    \"items\": [\n      {\n        \"channel\": \"verbal\",\n        \"text\": \"你好。我是匠石，运行在这台电脑里的程序。你可以直接叫我匠石。\",\n        \"target_ids\": [\n          \"声音归属待定\"\n        ]\n      }\n    ]\n  },\n  \"context_assessment\": {\n    \"remove\": [],\n    \"drop_recall\": [],\n    \"focus\": [\n      \"身份确认\"\n    ]\n  },\n  \"recall_requests\": [],\n  \"importance_ranking\": [\n    {\n      \"id\": \"input_1\",\n      \"importance\": 0.9,\n      \"reason\": \"这是目前唯一的交互信号，包含问候与核心问题（称呼），直接决定交往是否开启。\"\n    }\n  ],\n  \"memory_ratings\": {\n    \"items\": [],\n    \"coverage\": \"sufficient\",\n    \"gap_query\": \"\"\n  },\n  \"use_tool\": false,\n  \"need\": \"\",\n  \"tool_consumed\": [],\n  \"tool_handling\": [],\n  \"refresh_reason\": \"收到新的问候与询问信号，需建立初步交互。\",\n  \"waiting_for\": [],\n  \"expires_at\": \"\",\n  \"work_id\": \"\",\n  \"step_id\": \"\",\n  \"reply_targets\": [\n    \"声音归属待定\"\n  ]\n}"
+          }
+        ]
+      },
+      {
+        "times_s": {
+          "transcript": 0.6766,
+          "reply": 8.5017,
+          "audio": 8.6078,
+          "first_sentence_complete": 8.9998,
+          "audio_end": 8.9998,
+          "write_completed": 10.0205,
+          "turn_complete": 8.5088,
+          "all_finished": 10.0205,
+          "estimated_first_sound": 8.7043,
+          "estimated_playout_end": 10.1278,
+          "reply_to_audio": 0.1061
+        },
+        "texts": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "我是匠石。",
+          "first_sentence": "我是匠石。"
+        },
+        "pcm_samples": 36480,
+        "calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "status": "ok",
+            "total_ms": 3390.4,
+            "prompt_tokens": 5948,
+            "cache_hit_tokens": 5120,
+            "completion_tokens": 274,
+            "prompt_ms": 445.3,
+            "decode_ms": 2537.4
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "status": "ok",
+            "total_ms": 4103.6,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2387,
+            "completion_tokens": 370,
+            "prompt_ms": 308.7,
+            "decode_ms": 3498.6
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "status": "ok",
+            "total_ms": 1509.7,
+            "prompt_tokens": 1011,
+            "cache_hit_tokens": 512,
+            "completion_tokens": 112,
+            "prompt_ms": 333.2,
+            "decode_ms": 1034.5
+          }
+        ],
+        "outputs": [
+          {
+            "route": "voice_jev",
+            "sha256": "ec16f991d67c37fef1b5ae0801ba2118985a3a4b511ea3e6361a34405e8ab7a5",
+            "full_output": "{\n  \"participation\": {\n    \"basis\": \"当前表达已完成且已播出。\",\n    \"verdict\": \"idle\"\n  },\n  \"interaction\": \"direct\",\n  \"items\": [\n    {\n      \"i\": 1,\n      \"person\": \"unknown\",\n      \"certainty\": \"unknown\",\n      \"why\": \"无有效声纹或视觉，仅语义推测\"\n    }\n  ],\n  \"utterance_complete\": \"complete\",\n  \"control\": \"keep\",\n  \"route\": \"prepare\",\n  \"process_refs\": [\n    \"I1\"\n  ],\n  \"pending_refs\": [],\n  \"decision_reason\": \"原任务已结束，新交互为明确提问。\",\n  \"decision_refs\": [\n    \"I1\"\n  ],\n  \"front\": {\n    \"route\": \"self_reply\",\n    \"level\": 3,\n    \"recall_memory\": false,\n    \"recall_query\": \"\",\n    \"main_image\": \"omit\",\n    \"reply\": \"我是匠石，你的智能助手。你可以直接叫我匠石。\",\n    \"waiting_reply\": \"\",\n    \"reason\": \"回答身份询问。\"\n  }\n}"
+          },
+          {
+            "route": "cognition",
+            "sha256": "85e51e8eb3e6c8594377a92ab59a41414b7805aa1f0471b416953fe809d2e9b4",
+            "full_output": "{\n  \"scene_updates\": [\n    {\n      \"scope\": \"声音归属待定\",\n      \"understanding\": \"确认存在一次指向匠石的问候与称呼询问，当前说话人身份未明确，交互状态为待回应或初次建立联系。\",\n      \"basis\": \"原话“你好，可以怎么称呼你？”由声音归属待定者发出，时间戳4秒前，无后续纠正或身份声明。\"\n    }\n  ],\n  \"response_plan\": {\n    \"mode\": \"respond\",\n    \"reason\": \"对方明确询问称呼，且声音归属待定，需建立基本交互关系。\",\n    \"unsaid\": \"\",\n    \"items\": [\n      {\n        \"channel\": \"verbal\",\n        \"text\": \"我是匠石。\",\n        \"target_ids\": [\n          \"声音归属待定\"\n        ]\n      }\n    ]\n  },\n  \"context_assessment\": {\n    \"remove\": [],\n    \"drop_recall\": [],\n    \"focus\": [\n      \"声音归属待定\"\n    ]\n  },\n  \"recall_requests\": [],\n  \"importance_ranking\": [],\n  \"memory_ratings\": {\n    \"items\": [],\n    \"coverage\": \"missing\",\n    \"gap_query\": \"\"\n  },\n  \"use_tool\": false,\n  \"need\": \"\",\n  \"tool_consumed\": [],\n  \"tool_handling\": [],\n  \"refresh_reason\": \"\",\n  \"waiting_for\": [],\n  \"expires_at\": \"\",\n  \"work_id\": \"\",\n  \"step_id\": \"\",\n  \"reply_targets\": [\n    \"声音归属待定\"\n  ]\n}"
+          }
+        ]
+      },
+      {
+        "times_s": {
+          "transcript": 0.6932,
+          "reply": 9.6535,
+          "audio": 9.7843,
+          "first_sentence_complete": 9.9384,
+          "audio_end": 10.2868,
+          "write_completed": 11.8885,
+          "turn_complete": 9.6583,
+          "all_finished": 11.8885,
+          "estimated_first_sound": 9.8657,
+          "estimated_playout_end": 11.6243,
+          "reply_to_audio": 0.1308
+        },
+        "texts": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好。我是匠石。",
+          "first_sentence": "你好。"
+        },
+        "pcm_samples": 44160,
+        "calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "status": "ok",
+            "total_ms": 3180.4,
+            "prompt_tokens": 5948,
+            "cache_hit_tokens": 5947,
+            "completion_tokens": 274,
+            "prompt_ms": 17.0,
+            "decode_ms": 2766.9
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "status": "ok",
+            "total_ms": 5254.6,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2537,
+            "completion_tokens": 493,
+            "prompt_ms": 201.8,
+            "decode_ms": 4759.0
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "status": "ok",
+            "total_ms": 2228.2,
+            "prompt_tokens": 1046,
+            "cache_hit_tokens": 512,
+            "completion_tokens": 180,
+            "prompt_ms": 446.4,
+            "decode_ms": 1635.0
+          }
+        ],
+        "outputs": [
+          {
+            "route": "voice_jev",
+            "sha256": "ec16f991d67c37fef1b5ae0801ba2118985a3a4b511ea3e6361a34405e8ab7a5",
+            "full_output": "{\n  \"participation\": {\n    \"basis\": \"当前表达已完成且已播出。\",\n    \"verdict\": \"idle\"\n  },\n  \"interaction\": \"direct\",\n  \"items\": [\n    {\n      \"i\": 1,\n      \"person\": \"unknown\",\n      \"certainty\": \"unknown\",\n      \"why\": \"无有效声纹或视觉，仅语义推测\"\n    }\n  ],\n  \"utterance_complete\": \"complete\",\n  \"control\": \"keep\",\n  \"route\": \"prepare\",\n  \"process_refs\": [\n    \"I1\"\n  ],\n  \"pending_refs\": [],\n  \"decision_reason\": \"原任务已结束，新交互为明确提问。\",\n  \"decision_refs\": [\n    \"I1\"\n  ],\n  \"front\": {\n    \"route\": \"self_reply\",\n    \"level\": 3,\n    \"recall_memory\": false,\n    \"recall_query\": \"\",\n    \"main_image\": \"omit\",\n    \"reply\": \"我是匠石，你的智能助手。你可以直接叫我匠石。\",\n    \"waiting_reply\": \"\",\n    \"reason\": \"回答身份询问。\"\n  }\n}"
+          },
+          {
+            "route": "cognition",
+            "sha256": "7123abf90ebf641f0e2bf924fb574021bedc30fd06241f50d14e3bf0b14215a5",
+            "full_output": "{\n  \"scene_updates\": [\n    {\n      \"scope\": \"声音归属待定\",\n      \"understanding\": \"确认存在一次未触发的互动尝试：声音归属待定在4秒前发出“你好，可以怎么称呼你？”，但系统标记为“未触发回应”。需将此视为有效输入但无后续交互的历史片段，而非当前实时对话。\",\n      \"basis\": \"记录于2026-11-23 10:26:54的声音归属待定原话：“你好，可以怎么称呼你？”（未触发回应）\"\n    }\n  ],\n  \"response_plan\": {\n    \"mode\": \"respond\",\n    \"reason\": \"对方提出了明确的交互请求（询问称呼），且声音归属虽待定但未排除其作为有效对话入口的可能性。根据基本约束“遵循命令”及交往原则，应对这一称呼询问做出回应，建立初步联系。\",\n    \"unsaid\": \"\",\n    \"items\": [\n      {\n        \"channel\": \"verbal\",\n        \"text\": \"你好。我是匠石。\",\n        \"target_ids\": [\n          \"声音归属待定\"\n        ]\n      }\n    ]\n  },\n  \"context_assessment\": {\n    \"remove\": [],\n    \"drop_recall\": [],\n    \"focus\": [\n      \"声音归属待定\"\n    ]\n  },\n  \"recall_requests\": [],\n  \"importance_ranking\": [\n    {\n      \"id\": \"4秒前声音归属待定\",\n      \"importance\": 0.9,\n      \"reason\": \"直接交互请求，需回应以建立关系\"\n    }\n  ],\n  \"memory_ratings\": {\n    \"items\": [],\n    \"coverage\": \"sufficient\",\n    \"gap_query\": \"\"\n  },\n  \"use_tool\": false,\n  \"need\": \"\",\n  \"tool_consumed\": [],\n  \"tool_handling\": [],\n  \"refresh_reason\": \"自主审视后决定响应未触发的输入\",\n  \"waiting_for\": [],\n  \"expires_at\": \"\",\n  \"work_id\": \"\",\n  \"step_id\": \"\",\n  \"reply_targets\": [\n    \"声音归属待定\"\n  ]\n}"
+          }
+        ]
+      },
+      {
+        "times_s": {
+          "transcript": 0.6859,
+          "reply": 8.1777,
+          "audio": 8.2895,
+          "first_sentence_complete": 8.9016,
+          "audio_end": 8.9016,
+          "write_completed": 10.262,
+          "turn_complete": 8.1827,
+          "all_finished": 10.262,
+          "estimated_first_sound": 8.3806,
+          "estimated_playout_end": 10.8495,
+          "reply_to_audio": 0.1118
+        },
+        "texts": {
+          "transcript": "你好，可以怎么称呼你？",
+          "reply": "你好，我是匠石。",
+          "first_sentence": "你好，我是匠石。"
+        },
+        "pcm_samples": 61440,
+        "calls": [
+          {
+            "route": "voice_jev",
+            "purpose": "voice_jev_entry",
+            "status": "ok",
+            "total_ms": 2956.7,
+            "prompt_tokens": 5948,
+            "cache_hit_tokens": 5947,
+            "completion_tokens": 274,
+            "prompt_ms": 20.2,
+            "decode_ms": 2539.8
+          },
+          {
+            "route": "cognition",
+            "purpose": "subject_activity",
+            "status": "ok",
+            "total_ms": 4281.9,
+            "prompt_tokens": 2635,
+            "cache_hit_tokens": 2387,
+            "completion_tokens": 390,
+            "prompt_ms": 309.1,
+            "decode_ms": 3681.5
+          },
+          {
+            "route": "write_zone",
+            "purpose": "write_zone",
+            "status": "ok",
+            "total_ms": 2077.5,
+            "prompt_tokens": 1040,
+            "cache_hit_tokens": 649,
+            "completion_tokens": 164,
+            "prompt_ms": 406.8,
+            "decode_ms": 1521.0
+          }
+        ],
+        "outputs": [
+          {
+            "route": "voice_jev",
+            "sha256": "ec16f991d67c37fef1b5ae0801ba2118985a3a4b511ea3e6361a34405e8ab7a5",
+            "full_output": "{\n  \"participation\": {\n    \"basis\": \"当前表达已完成且已播出。\",\n    \"verdict\": \"idle\"\n  },\n  \"interaction\": \"direct\",\n  \"items\": [\n    {\n      \"i\": 1,\n      \"person\": \"unknown\",\n      \"certainty\": \"unknown\",\n      \"why\": \"无有效声纹或视觉，仅语义推测\"\n    }\n  ],\n  \"utterance_complete\": \"complete\",\n  \"control\": \"keep\",\n  \"route\": \"prepare\",\n  \"process_refs\": [\n    \"I1\"\n  ],\n  \"pending_refs\": [],\n  \"decision_reason\": \"原任务已结束，新交互为明确提问。\",\n  \"decision_refs\": [\n    \"I1\"\n  ],\n  \"front\": {\n    \"route\": \"self_reply\",\n    \"level\": 3,\n    \"recall_memory\": false,\n    \"recall_query\": \"\",\n    \"main_image\": \"omit\",\n    \"reply\": \"我是匠石，你的智能助手。你可以直接叫我匠石。\",\n    \"waiting_reply\": \"\",\n    \"reason\": \"回答身份询问。\"\n  }\n}"
+          },
+          {
+            "route": "cognition",
+            "sha256": "a071bbbbf5600ea231bb4cbfd5d02b69afe1ed59cb829c094df38516bda5f1b2",
+            "full_output": "{\n  \"scene_updates\": [\n    {\n      \"scope\": \"声音归属待定\",\n      \"understanding\": \"确认存在一次未触发的互动尝试：声音归属待定在3秒前发出“你好，可以怎么称呼你？”，但系统未触发回应，该对话处于中断状态。\",\n      \"basis\": \"共享近期对话·原话与实际交付：[记录于2026-11-23 10:27:08] 声音归属待定：你好，可以怎么称呼你？（未触发回应）\"\n    }\n  ],\n  \"response_plan\": {\n    \"mode\": \"respond\",\n    \"reason\": \"对方询问称呼，且声音归属待定，需要给出身份标识。\",\n    \"unsaid\": \"\",\n    \"items\": [\n      {\n        \"channel\": \"verbal\",\n        \"text\": \"你好，我是匠石。\",\n        \"target_ids\": [\n          \"声音归属待定\"\n        ]\n      }\n    ]\n  },\n  \"context_assessment\": {\n    \"remove\": [],\n    \"drop_recall\": [],\n    \"focus\": []\n  },\n  \"recall_requests\": [],\n  \"importance_ranking\": [],\n  \"memory_ratings\": {\n    \"items\": [],\n    \"coverage\": \"sufficient\",\n    \"gap_query\": \"\"\n  },\n  \"use_tool\": false,\n  \"need\": \"\",\n  \"tool_consumed\": [],\n  \"tool_handling\": [],\n  \"refresh_reason\": \"\",\n  \"waiting_for\": [],\n  \"expires_at\": \"\",\n  \"work_id\": \"\",\n  \"step_id\": \"\",\n  \"reply_targets\": [\n    \"声音归属待定\"\n  ]\n}"
+          }
+        ]
+      }
+    ],
+    "medians_s": {
+      "transcript": 0.6895,
+      "reply": 9.0776,
+      "audio": 9.196,
+      "first_sentence_complete": 9.4691,
+      "write_completed": 11.0753,
+      "audio_end": 9.6433,
+      "turn_complete": 9.0836,
+      "all_finished": 11.0753,
+      "estimated_first_sound": 9.285,
+      "estimated_playout_end": 11.2369,
+      "reply_to_audio": 0.1213
+    }
+  },
+  "controlled_tts": {
+    "method": "仅合成同一首句；两种适配器共用同一已预热音频服务、相同文本、音色及每对相同的语音采样种子 100 至 103，四次轮换先后。自发起合成到首段有效 PCM / 全部 PCM。用原音频长度和本机 ASR 核对输出，汉字回转写只作为内容检查。",
+    "trials": [
+      {
+        "seed": 100,
+        "text": "你好。",
+        "before": {
+          "first_pcm_s": 0.156,
+          "complete_s": 0.156,
+          "audio_duration_s": 0.56,
+          "estimated_first_sound_s": 0.2462,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 0.716,
+          "transcript": "你好。"
+        },
+        "after": {
+          "first_pcm_s": 0.0659,
+          "complete_s": 0.1238,
+          "audio_duration_s": 0.56,
+          "estimated_first_sound_s": 0.1561,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 0.6259,
+          "transcript": "你好。"
+        }
+      },
+      {
+        "seed": 100,
+        "text": "你好，我是匠石。",
+        "before": {
+          "first_pcm_s": 0.4681,
+          "complete_s": 0.4682,
+          "audio_duration_s": 2.64,
+          "estimated_first_sound_s": 0.5569,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 3.1081,
+          "transcript": "你好，我是酱食。"
+        },
+        "after": {
+          "first_pcm_s": 0.0695,
+          "complete_s": 0.5445,
+          "audio_duration_s": 2.64,
+          "estimated_first_sound_s": 0.1583,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 2.7095,
+          "transcript": "你好，我是酱食。"
+        }
+      },
+      {
+        "seed": 101,
+        "text": "你好。",
+        "after": {
+          "first_pcm_s": 0.0688,
+          "complete_s": 0.1647,
+          "audio_duration_s": 0.72,
+          "estimated_first_sound_s": 0.1592,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 0.7888,
+          "transcript": "你好。"
+        },
+        "before": {
+          "first_pcm_s": 0.1584,
+          "complete_s": 0.1585,
+          "audio_duration_s": 0.72,
+          "estimated_first_sound_s": 0.2489,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 0.8784,
+          "transcript": "你好。"
+        }
+      },
+      {
+        "seed": 101,
+        "text": "你好，我是匠石。",
+        "after": {
+          "first_pcm_s": 0.0804,
+          "complete_s": 0.4636,
+          "audio_duration_s": 2.16,
+          "estimated_first_sound_s": 0.1684,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 2.2404,
+          "transcript": "你好，我是酱食。"
+        },
+        "before": {
+          "first_pcm_s": 0.3973,
+          "complete_s": 0.3974,
+          "audio_duration_s": 2.16,
+          "estimated_first_sound_s": 0.4853,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 2.5573,
+          "transcript": "你好，我是酱石。"
+        }
+      },
+      {
+        "seed": 102,
+        "text": "你好。",
+        "before": {
+          "first_pcm_s": 0.1207,
+          "complete_s": 0.1207,
+          "audio_duration_s": 0.56,
+          "estimated_first_sound_s": 0.2102,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 0.6807,
+          "transcript": "你好。"
+        },
+        "after": {
+          "first_pcm_s": 0.0665,
+          "complete_s": 0.1246,
+          "audio_duration_s": 0.56,
+          "estimated_first_sound_s": 0.156,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 0.6265,
+          "transcript": "你好。"
+        }
+      },
+      {
+        "seed": 102,
+        "text": "你好，我是匠石。",
+        "before": {
+          "first_pcm_s": 0.345,
+          "complete_s": 0.3451,
+          "audio_duration_s": 1.92,
+          "estimated_first_sound_s": 0.4367,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 2.265,
+          "transcript": "你好，我是酱食。"
+        },
+        "after": {
+          "first_pcm_s": 0.0691,
+          "complete_s": 0.3651,
+          "audio_duration_s": 1.92,
+          "estimated_first_sound_s": 0.1607,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 1.9891,
+          "transcript": "你好，我是酱食。"
+        }
+      },
+      {
+        "seed": 103,
+        "text": "你好。",
+        "after": {
+          "first_pcm_s": 0.0658,
+          "complete_s": 0.1234,
+          "audio_duration_s": 0.56,
+          "estimated_first_sound_s": 0.1579,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 0.6258,
+          "transcript": "你好。"
+        },
+        "before": {
+          "first_pcm_s": 0.1178,
+          "complete_s": 0.1179,
+          "audio_duration_s": 0.56,
+          "estimated_first_sound_s": 0.21,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 0.6778,
+          "transcript": "你好。"
+        }
+      },
+      {
+        "seed": 103,
+        "text": "你好，我是匠石。",
+        "after": {
+          "first_pcm_s": 0.0685,
+          "complete_s": 0.3527,
+          "audio_duration_s": 1.84,
+          "estimated_first_sound_s": 0.1581,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 1.9085,
+          "transcript": "你好，我是酱食。"
+        },
+        "before": {
+          "first_pcm_s": 0.3312,
+          "complete_s": 0.3313,
+          "audio_duration_s": 1.84,
+          "estimated_first_sound_s": 0.4208,
+          "max_buffer_underrun_s": 0,
+          "playout_end_s": 2.1712,
+          "transcript": "你好，我是酱食。"
+        }
+      }
+    ],
+    "medians": {
+      "你好。": {
+        "before": {
+          "first_pcm_s": 0.1384,
+          "complete_s": 0.1384,
+          "audio_duration_s": 0.56,
+          "estimated_first_sound_s": 0.2282,
+          "max_buffer_underrun_s": 0.0,
+          "playout_end_s": 0.6984
+        },
+        "after": {
+          "first_pcm_s": 0.0662,
+          "complete_s": 0.1242,
+          "audio_duration_s": 0.56,
+          "estimated_first_sound_s": 0.157,
+          "max_buffer_underrun_s": 0.0,
+          "playout_end_s": 0.6262
+        },
+        "median_paired_first_pcm_gain_s": 0.0719
+      },
+      "你好，我是匠石。": {
+        "before": {
+          "first_pcm_s": 0.3711,
+          "complete_s": 0.3712,
+          "audio_duration_s": 2.04,
+          "estimated_first_sound_s": 0.461,
+          "max_buffer_underrun_s": 0.0,
+          "playout_end_s": 2.4112
+        },
+        "after": {
+          "first_pcm_s": 0.0693,
+          "complete_s": 0.4143,
+          "audio_duration_s": 2.04,
+          "estimated_first_sound_s": 0.1595,
+          "max_buffer_underrun_s": 0.0,
+          "playout_end_s": 2.1147
+        },
+        "median_paired_first_pcm_gain_s": 0.2964
+      }
+    }
+  },
+  "regression": {
+    "passed": 761,
+    "skipped": "1，可选 rems 依赖未安装",
+    "failed": "1，test_short_repeat_candidate_is_hint_to_jev_not_confirmed_identity 在替换回本次修改前的 voice.py 播报逻辑和 MLX 音频适配器的隔离基线上也失败。"
+  }
+}

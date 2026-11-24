@@ -46,7 +46,7 @@ def test_visual_snapshot_wait_keeps_voice_event_loop_responsive(process):
         entered.set()
         assert release.wait(3)
         return None
-    process.vision = SimpleNamespace(store=SimpleNamespace(latest_sample=delayed))
+    process.vision = SimpleNamespace(store=SimpleNamespace(latest_completed=delayed))
     async def run():
         async def send(message): pass
         c = VoiceConversation(process, 'stone', FakeCloud(), send)

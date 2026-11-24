@@ -220,9 +220,9 @@
     <p id="debug-title">尚未读取</p><pre id="debug-content"></pre>
   </details>
   <details class="panel"><summary><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1m-7 8v3m-4 0h8"/></svg>麦克风与声音检查</summary>
-    <label>语音识别 <select id="asr"><option value="">服务默认</option><option value="online">火山在线 · 多人时间线</option><option value="bailian">百炼 Qwen-Audio 3.1 · 流式识别</option><option value="deepgram">Deepgram · 多人时间线</option><option value="local">本地 CPU 识别</option><option value="qwen">本地 Qwen3-ASR · WSL GPU</option></select></label>
+    <label>语音识别 <select id="asr"><option value="">服务默认</option><option value="online">火山在线 · 多人时间线</option><option value="bailian">百炼 Qwen-Audio 3.1 · 流式识别</option><option value="deepgram">Deepgram · 多人时间线</option><option value="local">本地 CPU 识别</option><option value="mlx">本机 MLX · Qwen3-ASR</option><option value="qwen">本地 Qwen3-ASR · WSL GPU</option></select></label>
     <p class="tip">在线识别会上传音频；声纹登记与匹配在本地进行。</p>
-    <label>语音播报 <select id="tts-backend"><option value="">服务默认</option><option value="online">火山在线播报</option><option value="local">本地固定音色</option></select></label>
+    <label>语音播报 <select id="tts-backend"><option value="">服务默认</option><option value="online">火山在线播报</option><option value="mlx">本机 MLX · Qwen3-TTS Vivian</option><option value="local">本地固定音色</option></select></label>
     <label for="device">麦克风</label><select id="device"><option value="">系统默认麦克风</option></select>
     <button class="secondary" id="devices">刷新设备</button>
     <label>输入电平 <meter id="level" min="0" max="0.15" value="0"></meter></label>
@@ -234,6 +234,11 @@
   </aside></div><div id="data-pane" hidden><iframe id="data-frame" title="保存数据与调试工作台"></iframe></div></section></div></main><dialog id="media-view"><button id="close-media" type="button" class="secondary">关闭</button><video id="media-video" muted playsinline hidden></video><img id="media-large" alt="查看聊天图片"><p id="media-caption"></p></dialog>
 <script>
 const $ = id => document.getElementById(id);
+const launchParams = new URLSearchParams(location.search);
+for (const [param, id] of [['asr','asr'], ['tts','tts-backend'], ['speaker','speaker-model']]) {
+  const control = $(id), value = launchParams.get(param);
+  if (value && Array.from(control.options).some(option => option.value === value)) control.value = value;
+}
 async function refreshPersonLinks(){
  const host=$('person-links-list');
  try{

@@ -1,5 +1,7 @@
 // Browser facilities used by the page, shared by microphone/player UI mocks.
 module.exports=function prepare(context){
+ context.URLSearchParams??=URLSearchParams;
+ context.location??={host:'localhost',search:''};
  // Page polling should be available without keeping the Node test process alive.
  const interval=context.setInterval??setInterval;
  context.setInterval=(...args)=>{const id=interval(...args);id?.unref?.();return id;};

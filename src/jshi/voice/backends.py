@@ -10,6 +10,7 @@ class ASRBackend:
 
 
 ASR_BACKENDS = {
+    'mlx': ASRBackend('本机 MLX Qwen3-ASR · 流式预览与定稿', 'local_stream', 'anonymous'),
     'bailian': ASRBackend('百炼 Qwen-Audio 3.1 流式识别', 'cloud_stream', 'local_identity'),
     'online': ASRBackend('火山流式 + 整句复核 + 多人时间线', 'cloud_stream', 'provider'),
     'local': ASRBackend('本地 CPU 识别', 'local', 'windows'),

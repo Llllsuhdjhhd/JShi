@@ -1,0 +1,2938 @@
+{
+  "date": "2026-11-23",
+  "input": {
+    "file": "mlx-voice-latency-20261122.wav",
+    "pcm_sha256": "3f938596d2433583fefa05dd088111379ff73b3024ea7cbabd0c4a36afe76b7e",
+    "text": "你好，可以怎么称呼你？",
+    "duration_s": 2.16,
+    "format": "16 kHz 单声道 PCM16，Vivian 合成的同一段录音"
+  },
+  "configuration": {
+    "hardware": "Apple M5 Max",
+    "brain_cloud": "deepseek-v4-flash",
+    "brain_local": "mlx-community/Qwen3.6-35B-A3B-4bit",
+    "cloud_audio": "火山流式 ASR 和双向 WebSocket TTS（zh_female_vv_uranus_bigtts）",
+    "local_audio": "Qwen3-ASR-1.7B-8bit 和 Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit（Vivian）",
+    "groups": {
+      "云端": [
+        "DeepSeek",
+        "火山"
+      ],
+      "本地": [
+        "MLX",
+        "MLX"
+      ],
+      "外脑本地声音": [
+        "DeepSeek",
+        "MLX"
+      ],
+      "本地脑火山声音": [
+        "MLX",
+        "火山"
+      ]
+    }
+  },
+  "method": [
+    "同一段 16 kHz 的录音每 20 ms 实时送入匠石语音 WebSocket，之后继续送静音帧，保持麦克风连接。每轮创建独立主体，使用进程内记忆，不载入个人资料和对话历史。",
+    "固定 split 接话、关闭模型思考、单一模型路由，无候补。沿用原提示词、输出规则和播报许可。声音使用迁入的配置，统一 300 ms 端点，另测全本地 500 ms。检查选择的文字模型覆盖接话、主认知和写场。",
+    "本地服务启动并预热四个系统前缀，用同一段输入预热本地 ASR 和 TTS。四种组合交错运行三轮，每轮建立新的语音会话。云端时间包括网络，未统一服务端缓存。",
+    "events_ms、spans_ms、tts 等以录音末尾为零点，负数表示录音仍在送入。reply 是通过校验的正式回复，first_audio 是客户端收到第一包正式回复音频，未测扬声器起声。turn_total_ms 为音频收齐、前台完成、写场完成三个时刻的最大值。",
+    "JEV、主认知和写场的调用耗时按实际路由分别汇总。同一轮可有两次接话和多次认知请求。每项中位数独立计算；并行部分不相加。输出 token 包括结构化内容。",
+    "调试时发现回放客户端提前结束静音帧会触发火山上游断开。表内统一采用持续送帧后重新采集的轮次。",
+    "500 ms 第 2 轮有前台完成和写场完成事件，没有正式回复和音频。回放器等到 50 秒观察上限；整轮按已有的前台与写场两者最晚时刻计，首包统计只包含有播报的两轮。"
+  ],
+  "summary": {
+    "云端": {
+      "rounds": 3,
+      "turns_finished": 3,
+      "spoken_answers": 3,
+      "median": {
+        "final_transcript_ms": 332.7,
+        "jev_calls": 2,
+        "jev_model_total_ms": 4212.8,
+        "jev_first_begin_ms": -1080.0,
+        "jev_last_end_ms": 3155.3,
+        "main_begin_ms": 3197.2,
+        "cognition_calls": 1,
+        "cognition_model_ms": 1340.5,
+        "approved_reply_ms": 4589.3,
+        "first_sentence_tts_ms": 409.0,
+        "first_audio_ms": 4998.4,
+        "audio_end_ms": 5662.1,
+        "foreground_done_ms": 4595.3,
+        "write_model_ms": 1371.6,
+        "write_end_ms": 6155.7,
+        "turn_total_ms": 6155.7
+      },
+      "first_audio_range_ms": [
+        4732.6,
+        7879.4
+      ]
+    },
+    "外脑本地声音": {
+      "rounds": 3,
+      "turns_finished": 3,
+      "spoken_answers": 3,
+      "median": {
+        "final_transcript_ms": 439.8,
+        "jev_calls": 2,
+        "jev_model_total_ms": 3666.6,
+        "jev_first_begin_ms": -1107.2,
+        "jev_last_end_ms": 2578.8,
+        "main_begin_ms": 2845.5,
+        "cognition_calls": 1,
+        "cognition_model_ms": 1375.4,
+        "approved_reply_ms": 4275.5,
+        "first_sentence_tts_ms": 131.0,
+        "first_audio_ms": 4403.6,
+        "audio_end_ms": 5125.1,
+        "foreground_done_ms": 4280.3,
+        "write_model_ms": 2132.0,
+        "write_end_ms": 6417.7,
+        "turn_total_ms": 6417.7
+      },
+      "first_audio_range_ms": [
+        4375.8,
+        4620.8
+      ]
+    },
+    "本地脑火山声音": {
+      "rounds": 3,
+      "turns_finished": 3,
+      "spoken_answers": 3,
+      "median": {
+        "final_transcript_ms": 337.7,
+        "jev_calls": 2,
+        "jev_model_total_ms": 7410.6,
+        "jev_first_begin_ms": -1076.9,
+        "jev_last_end_ms": 6346.8,
+        "main_begin_ms": 6690.6,
+        "cognition_calls": 1,
+        "cognition_model_ms": 5179.3,
+        "approved_reply_ms": 11918.3,
+        "first_sentence_tts_ms": 628.0,
+        "first_audio_ms": 12506.6,
+        "audio_end_ms": 13621.6,
+        "foreground_done_ms": 11921.9,
+        "write_model_ms": 1819.0,
+        "write_end_ms": 13743.4,
+        "turn_total_ms": 13743.4
+      },
+      "first_audio_range_ms": [
+        11645.6,
+        12676.9
+      ]
+    },
+    "本地": {
+      "rounds": 3,
+      "turns_finished": 3,
+      "spoken_answers": 3,
+      "median": {
+        "final_transcript_ms": 451.4,
+        "jev_calls": 2,
+        "jev_model_total_ms": 8413.9,
+        "jev_first_begin_ms": -1073.8,
+        "jev_last_end_ms": 7359.1,
+        "main_begin_ms": 7856.7,
+        "cognition_calls": 1,
+        "cognition_model_ms": 5017.7,
+        "approved_reply_ms": 12929.2,
+        "first_sentence_tts_ms": 121.5,
+        "first_audio_ms": 13068.8,
+        "audio_end_ms": 13601.9,
+        "foreground_done_ms": 12933.4,
+        "write_model_ms": 1760.9,
+        "write_end_ms": 14696.3,
+        "turn_total_ms": 14696.3
+      },
+      "first_audio_range_ms": [
+        12261.1,
+        14232.4
+      ]
+    },
+    "本地500": {
+      "rounds": 3,
+      "turns_finished": 3,
+      "spoken_answers": 2,
+      "median": {
+        "final_transcript_ms": 701.8,
+        "jev_calls": 1,
+        "jev_model_total_ms": 3240.4,
+        "jev_first_begin_ms": 708.3,
+        "jev_last_end_ms": 3952.4,
+        "main_begin_ms": 4351.3,
+        "cognition_calls": 1,
+        "cognition_model_ms": 4203.4,
+        "approved_reply_ms": 8712.15,
+        "first_sentence_tts_ms": 102.25,
+        "first_audio_ms": 8814.35,
+        "audio_end_ms": 9339.75,
+        "foreground_done_ms": 8610.2,
+        "write_model_ms": 2032.8,
+        "write_end_ms": 10645.0,
+        "turn_total_ms": 10645.0
+      },
+      "first_audio_range_ms": [
+        8635.7,
+        8993.0
+      ]
+    }
+  },
+  "trials": [
+    {
+      "group": "云端",
+      "repeat": 1,
+      "events_ms": {
+        "transcript": 314.6,
+        "phase.input.collect": -1088.8,
+        "phase.input.prepare": -1076.2,
+        "phase.input.jev": -1074.3,
+        "phase.input.judged": 864.2,
+        "thinking": 3184.1,
+        "phase.main.resolve": 3220.8,
+        "phase.main.assemble": 3226.8,
+        "phase.main.cognition": 3238.8,
+        "phase.main.action": 4587.3,
+        "reply": 4589.3,
+        "turn_complete": 4595.3,
+        "write_started": 4595.3,
+        "first_audio": 4998.4,
+        "audio_end": 5501.4,
+        "write_completed": 6155.7
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1932.6,
+          "completion_tokens": 203,
+          "prompt_tokens": 6241,
+          "cache_hit_tokens": 6016
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1975.4,
+          "completion_tokens": 210,
+          "prompt_tokens": 6352,
+          "cache_hit_tokens": 5504
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 1340.5,
+          "completion_tokens": 87,
+          "prompt_tokens": 2711,
+          "cache_hit_tokens": 2304
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 1556.9,
+          "completion_tokens": 107,
+          "prompt_tokens": 935,
+          "cache_hit_tokens": 384
+        }
+      ],
+      "spans_ms": [
+        [
+          "voice_jev",
+          -1072.1,
+          861.5
+        ],
+        [
+          "JEV",
+          -1080.0,
+          864.1
+        ],
+        [
+          "voice_jev",
+          878.7,
+          2854.4
+        ],
+        [
+          "JEV",
+          872.2,
+          2856.2
+        ],
+        [
+          "cognition",
+          3241.8,
+          4582.8
+        ],
+        [
+          "main",
+          3183.6,
+          4594.8
+        ],
+        [
+          "write_zone",
+          4596.0,
+          6153.2
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好。",
+          "start_ms": 4589.0,
+          "first_pcm_ms": 4998.0,
+          "end_ms": 5013.5
+        },
+        {
+          "text": "我叫匠石。",
+          "start_ms": 5013.5,
+          "first_pcm_ms": 5386.9,
+          "end_ms": 5501.0
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "enabled",
+        "speaker_split": "enabled",
+        "continuous_speaker_analysis": "enabled",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1092.7
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 314.6
+        }
+      ],
+      "reply": "你好。我叫匠石。",
+      "replies": [
+        {
+          "text": "你好。我叫匠石。",
+          "ms": 4589.3
+        }
+      ],
+      "first_sentence": "你好。",
+      "reply_audio_s": 1.883,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 314.6,
+        "jev_calls": 2,
+        "jev_model_total_ms": 3908.0,
+        "jev_first_begin_ms": -1080.0,
+        "jev_last_end_ms": 2856.2,
+        "main_begin_ms": 3183.6,
+        "cognition_calls": 1,
+        "cognition_model_ms": 1340.5,
+        "approved_reply_ms": 4589.3,
+        "first_sentence_tts_ms": 409.0,
+        "first_audio_ms": 4998.4,
+        "audio_end_ms": 5501.4,
+        "foreground_done_ms": 4595.3,
+        "write_model_ms": 1556.9,
+        "write_end_ms": 6155.7,
+        "turn_total_ms": 6155.7
+      }
+    },
+    {
+      "group": "本地",
+      "repeat": 1,
+      "events_ms": {
+        "transcript": 417.0,
+        "phase.input.collect": -1118.6,
+        "phase.input.prepare": -1113.2,
+        "phase.input.jev": -1112.1,
+        "phase.input.judged": 2416.3,
+        "thinking": 6351.1,
+        "phase.main.resolve": 6381.7,
+        "phase.main.assemble": 6385.8,
+        "phase.main.cognition": 6397.4,
+        "phase.main.action": 12138.6,
+        "reply": 12139.6,
+        "turn_complete": 12145.8,
+        "write_started": 12145.8,
+        "first_audio": 12261.1,
+        "audio_end": 12805.4,
+        "write_completed": 14457.5
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3527.2,
+          "prompt_ms": 617.2,
+          "decode_ms": 2629.7,
+          "completion_tokens": 278,
+          "prompt_tokens": 5943,
+          "cache_hit_tokens": 4608
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3683.3,
+          "prompt_ms": 636.8,
+          "decode_ms": 2917.8,
+          "completion_tokens": 310,
+          "prompt_tokens": 6023,
+          "cache_hit_tokens": 4655
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 5735.4,
+          "prompt_ms": 411.1,
+          "decode_ms": 5019.5,
+          "completion_tokens": 526,
+          "prompt_tokens": 2682,
+          "cache_hit_tokens": 2048
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 2309.8,
+          "prompt_ms": 530.0,
+          "decode_ms": 1669.6,
+          "completion_tokens": 221,
+          "prompt_tokens": 1079,
+          "cache_hit_tokens": 0
+        }
+      ],
+      "spans_ms": [
+        [
+          "asr",
+          -1237.3,
+          -1121.2
+        ],
+        [
+          "asr",
+          322.3,
+          416.3
+        ],
+        [
+          "voice_jev",
+          -1111.9,
+          2415.4
+        ],
+        [
+          "JEV",
+          -1114.0,
+          2416.2
+        ],
+        [
+          "voice_jev",
+          2421.9,
+          6105.2
+        ],
+        [
+          "JEV",
+          2419.6,
+          6105.9
+        ],
+        [
+          "cognition",
+          6400.3,
+          12135.8
+        ],
+        [
+          "main",
+          6350.4,
+          12145.4
+        ],
+        [
+          "write_zone",
+          12146.5,
+          14456.4
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好。",
+          "start_ms": 12139.3,
+          "first_pcm_ms": 12260.8,
+          "end_ms": 12429.8
+        },
+        {
+          "text": "我是匠石。",
+          "start_ms": 12429.8,
+          "first_pcm_ms": 12586.8,
+          "end_ms": 12805.2
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "disabled",
+        "speaker_split": "unavailable",
+        "continuous_speaker_analysis": "unavailable",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1120.5
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 417.0
+        }
+      ],
+      "reply": "你好。我是匠石。",
+      "replies": [
+        {
+          "text": "你好。我是匠石。",
+          "ms": 12139.6
+        }
+      ],
+      "first_sentence": "你好。",
+      "reply_audio_s": 1.84,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 417.0,
+        "jev_calls": 2,
+        "jev_model_total_ms": 7210.5,
+        "jev_first_begin_ms": -1114.0,
+        "jev_last_end_ms": 6105.9,
+        "main_begin_ms": 6350.4,
+        "cognition_calls": 1,
+        "cognition_model_ms": 5735.4,
+        "approved_reply_ms": 12139.6,
+        "first_sentence_tts_ms": 121.5,
+        "first_audio_ms": 12261.1,
+        "audio_end_ms": 12805.4,
+        "foreground_done_ms": 12145.8,
+        "write_model_ms": 2309.8,
+        "write_end_ms": 14457.5,
+        "turn_total_ms": 14457.5
+      }
+    },
+    {
+      "group": "外脑本地声音",
+      "repeat": 1,
+      "events_ms": {
+        "transcript": 439.8,
+        "phase.input.collect": -1111.9,
+        "phase.input.prepare": -1106.5,
+        "phase.input.jev": -1105.5,
+        "phase.input.judged": 784.9,
+        "thinking": 2844.5,
+        "phase.main.resolve": 2872.3,
+        "phase.main.assemble": 2876.1,
+        "phase.main.cognition": 2887.2,
+        "phase.main.action": 4488.7,
+        "reply": 4489.9,
+        "turn_complete": 4496.2,
+        "write_started": 4496.2,
+        "first_audio": 4620.8,
+        "audio_end": 5125.1,
+        "write_completed": 6750.6
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1886.8,
+          "completion_tokens": 221,
+          "prompt_tokens": 6103,
+          "cache_hit_tokens": 5888
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1779.8,
+          "completion_tokens": 220,
+          "prompt_tokens": 6185,
+          "cache_hit_tokens": 5504
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 1594.6,
+          "completion_tokens": 71,
+          "prompt_tokens": 2703,
+          "cache_hit_tokens": 2304
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 2248.8,
+          "completion_tokens": 116,
+          "prompt_tokens": 928,
+          "cache_hit_tokens": 384
+        }
+      ],
+      "spans_ms": [
+        [
+          "asr",
+          -1239.2,
+          -1114.6
+        ],
+        [
+          "asr",
+          321.0,
+          439.2
+        ],
+        [
+          "voice_jev",
+          -1105.3,
+          782.6
+        ],
+        [
+          "JEV",
+          -1107.2,
+          784.8
+        ],
+        [
+          "voice_jev",
+          796.0,
+          2576.1
+        ],
+        [
+          "JEV",
+          791.5,
+          2578.8
+        ],
+        [
+          "cognition",
+          2890.4,
+          4485.2
+        ],
+        [
+          "main",
+          2844.1,
+          4495.7
+        ],
+        [
+          "write_zone",
+          4497.2,
+          6746.2
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好，我叫匠石。",
+          "start_ms": 4489.5,
+          "first_pcm_ms": 4620.5,
+          "end_ms": 4950.9
+        },
+        {
+          "text": "你呢？",
+          "start_ms": 4950.9,
+          "first_pcm_ms": 5020.1,
+          "end_ms": 5125.0
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "disabled",
+        "speaker_split": "unavailable",
+        "continuous_speaker_analysis": "unavailable",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1114.0
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 439.8
+        }
+      ],
+      "reply": "你好，我叫匠石。你呢？",
+      "replies": [
+        {
+          "text": "你好，我叫匠石。你呢？",
+          "ms": 4489.9
+        }
+      ],
+      "first_sentence": "你好，我叫匠石。",
+      "reply_audio_s": 2.88,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 439.8,
+        "jev_calls": 2,
+        "jev_model_total_ms": 3666.6,
+        "jev_first_begin_ms": -1107.2,
+        "jev_last_end_ms": 2578.8,
+        "main_begin_ms": 2844.1,
+        "cognition_calls": 1,
+        "cognition_model_ms": 1594.6,
+        "approved_reply_ms": 4489.9,
+        "first_sentence_tts_ms": 131.0,
+        "first_audio_ms": 4620.8,
+        "audio_end_ms": 5125.1,
+        "foreground_done_ms": 4496.2,
+        "write_model_ms": 2248.8,
+        "write_end_ms": 6750.6,
+        "turn_total_ms": 6750.6
+      }
+    },
+    {
+      "group": "本地脑火山声音",
+      "repeat": 1,
+      "events_ms": {
+        "transcript": 337.7,
+        "phase.input.collect": -1087.0,
+        "phase.input.prepare": -1075.3,
+        "phase.input.jev": -1073.7,
+        "phase.input.judged": 2972.5,
+        "thinking": 6690.8,
+        "phase.main.resolve": 6726.3,
+        "phase.main.assemble": 6727.6,
+        "phase.main.cognition": 6733.7,
+        "phase.main.action": 11917.5,
+        "reply": 11918.3,
+        "turn_complete": 11921.9,
+        "write_started": 11921.9,
+        "first_audio": 12506.6,
+        "audio_end": 13621.6,
+        "write_completed": 13743.4
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 4044.9,
+          "prompt_ms": 679.4,
+          "decode_ms": 2985.4,
+          "completion_tokens": 313,
+          "prompt_tokens": 6065,
+          "cache_hit_tokens": 4655
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3680.6,
+          "prompt_ms": 703.6,
+          "decode_ms": 2850.7,
+          "completion_tokens": 302,
+          "prompt_tokens": 6176,
+          "cache_hit_tokens": 4784
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 5179.3,
+          "prompt_ms": 314.9,
+          "decode_ms": 4571.0,
+          "completion_tokens": 479,
+          "prompt_tokens": 2690,
+          "cache_hit_tokens": 2387
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 1819.0,
+          "prompt_ms": 387.1,
+          "decode_ms": 1311.2,
+          "completion_tokens": 144,
+          "prompt_tokens": 1118,
+          "cache_hit_tokens": 512
+        }
+      ],
+      "spans_ms": [
+        [
+          "voice_jev",
+          -1073.4,
+          2971.7
+        ],
+        [
+          "JEV",
+          -1076.9,
+          2972.5
+        ],
+        [
+          "voice_jev",
+          2978.0,
+          6658.8
+        ],
+        [
+          "JEV",
+          2975.7,
+          6659.5
+        ],
+        [
+          "cognition",
+          6735.2,
+          11914.7
+        ],
+        [
+          "main",
+          6690.6,
+          11921.6
+        ],
+        [
+          "write_zone",
+          11922.7,
+          13741.9
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好！",
+          "start_ms": 11918.2,
+          "first_pcm_ms": 12506.4,
+          "end_ms": 12550.1
+        },
+        {
+          "text": "我是匠石。",
+          "start_ms": 12550.2,
+          "first_pcm_ms": 12939.5,
+          "end_ms": 13051.0
+        },
+        {
+          "text": "你可以直接叫我匠石。",
+          "start_ms": 13051.0,
+          "first_pcm_ms": 13446.4,
+          "end_ms": 13621.4
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "enabled",
+        "speaker_split": "enabled",
+        "continuous_speaker_analysis": "enabled",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1090.8
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 337.7
+        }
+      ],
+      "reply": "你好！我是匠石。你可以直接叫我匠石。",
+      "replies": [
+        {
+          "text": "你好！我是匠石。你可以直接叫我匠石。",
+          "ms": 11918.3
+        }
+      ],
+      "first_sentence": "你好！",
+      "reply_audio_s": 3.704,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 337.7,
+        "jev_calls": 2,
+        "jev_model_total_ms": 7725.5,
+        "jev_first_begin_ms": -1076.9,
+        "jev_last_end_ms": 6659.5,
+        "main_begin_ms": 6690.6,
+        "cognition_calls": 1,
+        "cognition_model_ms": 5179.3,
+        "approved_reply_ms": 11918.3,
+        "first_sentence_tts_ms": 588.2,
+        "first_audio_ms": 12506.6,
+        "audio_end_ms": 13621.6,
+        "foreground_done_ms": 11921.9,
+        "write_model_ms": 1819.0,
+        "write_end_ms": 13743.4,
+        "turn_total_ms": 13743.4
+      }
+    },
+    {
+      "group": "本地脑火山声音",
+      "repeat": 2,
+      "events_ms": {
+        "transcript": 373.1,
+        "phase.input.collect": -1085.8,
+        "phase.input.prepare": -1075.6,
+        "phase.input.jev": -1073.3,
+        "phase.input.judged": 2212.1,
+        "thinking": 6159.1,
+        "phase.main.resolve": 6188.7,
+        "phase.main.assemble": 6192.2,
+        "phase.main.cognition": 6203.6,
+        "phase.main.action": 10970.3,
+        "reply": 10971.1,
+        "turn_complete": 10975.1,
+        "write_started": 10975.1,
+        "first_audio": 11645.6,
+        "audio_end": 12161.6,
+        "write_completed": 12995.1
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3284.8,
+          "prompt_ms": 20.1,
+          "decode_ms": 3127.3,
+          "completion_tokens": 313,
+          "prompt_tokens": 6065,
+          "cache_hit_tokens": 6064
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3503.1,
+          "prompt_ms": 635.6,
+          "decode_ms": 2737.8,
+          "completion_tokens": 290,
+          "prompt_tokens": 6176,
+          "cache_hit_tokens": 5120
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 4760.4,
+          "prompt_ms": 352.4,
+          "decode_ms": 4091.3,
+          "completion_tokens": 431,
+          "prompt_tokens": 2690,
+          "cache_hit_tokens": 2407
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 2018.0,
+          "prompt_ms": 273.0,
+          "decode_ms": 1630.0,
+          "completion_tokens": 178,
+          "prompt_tokens": 1108,
+          "cache_hit_tokens": 694
+        }
+      ],
+      "spans_ms": [
+        [
+          "voice_jev",
+          -1073.6,
+          2211.4
+        ],
+        [
+          "JEV",
+          -1077.2,
+          2212.0
+        ],
+        [
+          "voice_jev",
+          2218.1,
+          5721.4
+        ],
+        [
+          "JEV",
+          2214.9,
+          5722.1
+        ],
+        [
+          "cognition",
+          6206.4,
+          10967.0
+        ],
+        [
+          "main",
+          6158.4,
+          10974.7
+        ],
+        [
+          "write_zone",
+          10975.8,
+          12993.9
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好。",
+          "start_ms": 10971.0,
+          "first_pcm_ms": 11645.4,
+          "end_ms": 11676.5
+        },
+        {
+          "text": "我是匠石。",
+          "start_ms": 11676.5,
+          "first_pcm_ms": 12065.6,
+          "end_ms": 12161.5
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "enabled",
+        "speaker_split": "enabled",
+        "continuous_speaker_analysis": "enabled",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1089.2
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 373.1
+        }
+      ],
+      "reply": "你好。我是匠石。",
+      "replies": [
+        {
+          "text": "你好。我是匠石。",
+          "ms": 10971.1
+        }
+      ],
+      "first_sentence": "你好。",
+      "reply_audio_s": 1.872,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 373.1,
+        "jev_calls": 2,
+        "jev_model_total_ms": 6787.9,
+        "jev_first_begin_ms": -1077.2,
+        "jev_last_end_ms": 5722.1,
+        "main_begin_ms": 6158.4,
+        "cognition_calls": 1,
+        "cognition_model_ms": 4760.4,
+        "approved_reply_ms": 10971.1,
+        "first_sentence_tts_ms": 674.4,
+        "first_audio_ms": 11645.6,
+        "audio_end_ms": 12161.6,
+        "foreground_done_ms": 10975.1,
+        "write_model_ms": 2018.0,
+        "write_end_ms": 12995.1,
+        "turn_total_ms": 12995.1
+      }
+    },
+    {
+      "group": "外脑本地声音",
+      "repeat": 2,
+      "events_ms": {
+        "transcript": 438.1,
+        "phase.input.collect": -1140.3,
+        "phase.input.prepare": -1134.6,
+        "phase.input.jev": -1133.6,
+        "phase.input.judged": 611.1,
+        "thinking": 2846.1,
+        "phase.main.resolve": 2876.0,
+        "phase.main.assemble": 2878.7,
+        "phase.main.cognition": 2888.0,
+        "phase.main.action": 4242.3,
+        "reply": 4243.5,
+        "turn_complete": 4249.8,
+        "write_started": 4249.8,
+        "first_audio": 4403.6,
+        "audio_end": 4822.7,
+        "write_completed": 5190.4
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1742.7,
+          "completion_tokens": 198,
+          "prompt_tokens": 6103,
+          "cache_hit_tokens": 5888
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1922.8,
+          "completion_tokens": 200,
+          "prompt_tokens": 6185,
+          "cache_hit_tokens": 6016
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 1347.6,
+          "completion_tokens": 102,
+          "prompt_tokens": 2703,
+          "cache_hit_tokens": 2432
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 935.3,
+          "completion_tokens": 73,
+          "prompt_tokens": 927,
+          "cache_hit_tokens": 640
+        }
+      ],
+      "spans_ms": [
+        [
+          "asr",
+          -1237.3,
+          -1143.1
+        ],
+        [
+          "asr",
+          321.9,
+          437.4
+        ],
+        [
+          "voice_jev",
+          -1133.4,
+          609.6
+        ],
+        [
+          "JEV",
+          -1135.3,
+          611.0
+        ],
+        [
+          "voice_jev",
+          619.5,
+          2543.1
+        ],
+        [
+          "JEV",
+          616.0,
+          2545.4
+        ],
+        [
+          "cognition",
+          2891.1,
+          4239.0
+        ],
+        [
+          "main",
+          2845.5,
+          4249.3
+        ],
+        [
+          "write_zone",
+          4250.7,
+          5186.4
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好。",
+          "start_ms": 4243.1,
+          "first_pcm_ms": 4403.4,
+          "end_ms": 4493.4
+        },
+        {
+          "text": "我叫匠石。",
+          "start_ms": 4493.4,
+          "first_pcm_ms": 4561.8,
+          "end_ms": 4822.5
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "disabled",
+        "speaker_split": "unavailable",
+        "continuous_speaker_analysis": "unavailable",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1142.4
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 438.1
+        }
+      ],
+      "reply": "你好。我叫匠石。",
+      "replies": [
+        {
+          "text": "你好。我叫匠石。",
+          "ms": 4243.5
+        }
+      ],
+      "first_sentence": "你好。",
+      "reply_audio_s": 2.4,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 438.1,
+        "jev_calls": 2,
+        "jev_model_total_ms": 3665.5,
+        "jev_first_begin_ms": -1135.3,
+        "jev_last_end_ms": 2545.4,
+        "main_begin_ms": 2845.5,
+        "cognition_calls": 1,
+        "cognition_model_ms": 1347.6,
+        "approved_reply_ms": 4243.5,
+        "first_sentence_tts_ms": 160.3,
+        "first_audio_ms": 4403.6,
+        "audio_end_ms": 4822.7,
+        "foreground_done_ms": 4249.8,
+        "write_model_ms": 935.3,
+        "write_end_ms": 5190.4,
+        "turn_total_ms": 5190.4
+      }
+    },
+    {
+      "group": "本地",
+      "repeat": 2,
+      "events_ms": {
+        "transcript": 459.8,
+        "phase.input.collect": -1067.9,
+        "phase.input.prepare": -1062.7,
+        "phase.input.jev": -1061.7,
+        "phase.input.judged": 3711.7,
+        "thinking": 7857.2,
+        "phase.main.resolve": 7891.4,
+        "phase.main.assemble": 7894.9,
+        "phase.main.cognition": 7904.2,
+        "phase.main.action": 12928.2,
+        "reply": 12929.2,
+        "turn_complete": 12933.4,
+        "write_started": 12933.4,
+        "first_audio": 13068.8,
+        "audio_end": 13601.9,
+        "write_completed": 14696.3
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 4772.3,
+          "prompt_ms": 2321.2,
+          "decode_ms": 2356.8,
+          "completion_tokens": 301,
+          "prompt_tokens": 5943,
+          "cache_hit_tokens": 0
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3641.6,
+          "prompt_ms": 594.2,
+          "decode_ms": 2919.2,
+          "completion_tokens": 310,
+          "prompt_tokens": 6023,
+          "cache_hit_tokens": 4784
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 5017.7,
+          "prompt_ms": 272.2,
+          "decode_ms": 4437.1,
+          "completion_tokens": 462,
+          "prompt_tokens": 2682,
+          "cache_hit_tokens": 2407
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 1760.9,
+          "prompt_ms": 625.5,
+          "decode_ms": 1022.0,
+          "completion_tokens": 135,
+          "prompt_tokens": 1071,
+          "cache_hit_tokens": 0
+        }
+      ],
+      "spans_ms": [
+        [
+          "asr",
+          -1237.6,
+          -1070.1
+        ],
+        [
+          "asr",
+          322.3,
+          459.2
+        ],
+        [
+          "voice_jev",
+          -1061.5,
+          3710.9
+        ],
+        [
+          "JEV",
+          -1063.4,
+          3711.6
+        ],
+        [
+          "voice_jev",
+          3716.7,
+          7358.4
+        ],
+        [
+          "JEV",
+          3714.3,
+          7359.1
+        ],
+        [
+          "cognition",
+          7907.0,
+          12924.8
+        ],
+        [
+          "main",
+          7856.7,
+          12932.8
+        ],
+        [
+          "write_zone",
+          12934.2,
+          14695.2
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好。",
+          "start_ms": 12928.9,
+          "first_pcm_ms": 13068.6,
+          "end_ms": 13233.7
+        },
+        {
+          "text": "我是匠石。",
+          "start_ms": 13233.7,
+          "first_pcm_ms": 13342.5,
+          "end_ms": 13601.8
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "disabled",
+        "speaker_split": "unavailable",
+        "continuous_speaker_analysis": "unavailable",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1069.6
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 459.8
+        }
+      ],
+      "reply": "你好。我是匠石。",
+      "replies": [
+        {
+          "text": "你好。我是匠石。",
+          "ms": 12929.2
+        }
+      ],
+      "first_sentence": "你好。",
+      "reply_audio_s": 1.76,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 459.8,
+        "jev_calls": 2,
+        "jev_model_total_ms": 8413.9,
+        "jev_first_begin_ms": -1063.4,
+        "jev_last_end_ms": 7359.1,
+        "main_begin_ms": 7856.7,
+        "cognition_calls": 1,
+        "cognition_model_ms": 5017.7,
+        "approved_reply_ms": 12929.2,
+        "first_sentence_tts_ms": 139.7,
+        "first_audio_ms": 13068.8,
+        "audio_end_ms": 13601.9,
+        "foreground_done_ms": 12933.4,
+        "write_model_ms": 1760.9,
+        "write_end_ms": 14696.3,
+        "turn_total_ms": 14696.3
+      }
+    },
+    {
+      "group": "云端",
+      "repeat": 2,
+      "events_ms": {
+        "transcript": 332.7,
+        "phase.input.collect": -1123.5,
+        "phase.input.prepare": -1113.5,
+        "phase.input.jev": -1112.0,
+        "phase.input.judged": 1708.3,
+        "thinking": 5719.7,
+        "phase.main.resolve": 5754.0,
+        "phase.main.assemble": 5757.0,
+        "phase.main.cognition": 5766.8,
+        "phase.main.action": 7226.7,
+        "reply": 7227.7,
+        "turn_complete": 7232.4,
+        "write_started": 7232.4,
+        "first_audio": 7879.4,
+        "write_completed": 8335.9,
+        "audio_end": 8539.7
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 2817.0,
+          "completion_tokens": 230,
+          "prompt_tokens": 6241,
+          "cache_hit_tokens": 6016
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1773.5,
+          "completion_tokens": 246,
+          "prompt_tokens": 6341,
+          "cache_hit_tokens": 5504
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1770.6,
+          "completion_tokens": 218,
+          "prompt_tokens": 6341,
+          "cache_hit_tokens": 6144
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 1453.0,
+          "completion_tokens": 128,
+          "prompt_tokens": 2711,
+          "cache_hit_tokens": 2304
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 1101.1,
+          "completion_tokens": 106,
+          "prompt_tokens": 941,
+          "cache_hit_tokens": 384
+        }
+      ],
+      "spans_ms": [
+        [
+          "voice_jev",
+          -1111.7,
+          1705.9
+        ],
+        [
+          "JEV",
+          -1114.9,
+          1708.2
+        ],
+        [
+          "voice_jev",
+          1721.1,
+          3495.0
+        ],
+        [
+          "voice_jev",
+          3497.0,
+          5267.9
+        ],
+        [
+          "JEV",
+          1715.4,
+          5269.9
+        ],
+        [
+          "cognition",
+          5769.8,
+          7223.0
+        ],
+        [
+          "main",
+          5719.0,
+          7231.9
+        ],
+        [
+          "write_zone",
+          7233.3,
+          8334.5
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好，我叫匠石。",
+          "start_ms": 7227.6,
+          "first_pcm_ms": 7878.9,
+          "end_ms": 8095.1
+        },
+        {
+          "text": "你怎么称呼？",
+          "start_ms": 8095.2,
+          "first_pcm_ms": 8491.0,
+          "end_ms": 8539.2
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "uncertain",
+          "mode": "split",
+          "reason": "JEV1_1未能判断",
+          "model_error": "ValueError: JEV输出枚举无效",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [
+        "入口判断输出格式不符合约定；本轮不开口，原话与诊断记录已保留。"
+      ],
+      "ready": {
+        "acoustic_turn": "enabled",
+        "speaker_split": "enabled",
+        "continuous_speaker_analysis": "enabled",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1126.9
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 332.7
+        }
+      ],
+      "reply": "你好，我叫匠石。你怎么称呼？",
+      "replies": [
+        {
+          "text": "你好，我叫匠石。你怎么称呼？",
+          "ms": 7227.7
+        }
+      ],
+      "first_sentence": "你好，我叫匠石。",
+      "reply_audio_s": 2.956,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 332.7,
+        "jev_calls": 3,
+        "jev_model_total_ms": 6361.1,
+        "jev_first_begin_ms": -1114.9,
+        "jev_last_end_ms": 5269.9,
+        "main_begin_ms": 5719.0,
+        "cognition_calls": 1,
+        "cognition_model_ms": 1453.0,
+        "approved_reply_ms": 7227.7,
+        "first_sentence_tts_ms": 651.3,
+        "first_audio_ms": 7879.4,
+        "audio_end_ms": 8539.7,
+        "foreground_done_ms": 7232.4,
+        "write_model_ms": 1101.1,
+        "write_end_ms": 8335.9,
+        "turn_total_ms": 8539.7
+      }
+    },
+    {
+      "group": "本地",
+      "repeat": 3,
+      "events_ms": {
+        "transcript": 451.4,
+        "phase.input.collect": -1078.6,
+        "phase.input.prepare": -1073.0,
+        "phase.input.jev": -1072.1,
+        "phase.input.judged": 2346.3,
+        "thinking": 9351.3,
+        "phase.main.resolve": 9381.6,
+        "phase.main.assemble": 9385.2,
+        "phase.main.cognition": 9393.2,
+        "phase.main.action": 14117.7,
+        "reply": 14118.6,
+        "turn_complete": 14125.0,
+        "write_started": 14125.0,
+        "first_audio": 14232.4,
+        "audio_end": 14673.8,
+        "write_completed": 15805.5
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3417.4,
+          "prompt_ms": 18.5,
+          "decode_ms": 2994.2,
+          "completion_tokens": 301,
+          "prompt_tokens": 5943,
+          "cache_hit_tokens": 5942
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3579.9,
+          "prompt_ms": 494.5,
+          "decode_ms": 2959.1,
+          "completion_tokens": 310,
+          "prompt_tokens": 6023,
+          "cache_hit_tokens": 5120
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3253.1,
+          "prompt_ms": 19.1,
+          "decode_ms": 3099.7,
+          "completion_tokens": 310,
+          "prompt_tokens": 6023,
+          "cache_hit_tokens": 6022
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 4718.8,
+          "prompt_ms": 380.4,
+          "decode_ms": 4023.6,
+          "completion_tokens": 422,
+          "prompt_tokens": 2683,
+          "cache_hit_tokens": 2407
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 1678.3,
+          "prompt_ms": 439.0,
+          "decode_ms": 1086.9,
+          "completion_tokens": 118,
+          "prompt_tokens": 1058,
+          "cache_hit_tokens": 649
+        }
+      ],
+      "spans_ms": [
+        [
+          "asr",
+          -1238.8,
+          -1081.2
+        ],
+        [
+          "asr",
+          322.3,
+          450.8
+        ],
+        [
+          "voice_jev",
+          -1071.9,
+          2345.7
+        ],
+        [
+          "JEV",
+          -1073.8,
+          2346.3
+        ],
+        [
+          "voice_jev",
+          2351.4,
+          5931.4
+        ],
+        [
+          "voice_jev",
+          5932.2,
+          9185.4
+        ],
+        [
+          "JEV",
+          2349.3,
+          9185.9
+        ],
+        [
+          "cognition",
+          9395.6,
+          14114.6
+        ],
+        [
+          "main",
+          9351.0,
+          14124.6
+        ],
+        [
+          "write_zone",
+          14125.9,
+          15804.3
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好。",
+          "start_ms": 14118.3,
+          "first_pcm_ms": 14232.1,
+          "end_ms": 14375.3
+        },
+        {
+          "text": "我是匠石。",
+          "start_ms": 14375.4,
+          "first_pcm_ms": 14511.3,
+          "end_ms": 14673.7
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "uncertain",
+          "mode": "split",
+          "reason": "JEV1_1未能判断",
+          "model_error": "SkillError: non-JSON skill output: '{\\n  \"participation\": {\\n    \"basis\": \"当前表达已完成且已播出。新输入I1为独立新的询问。\",\\n    \"verdict\": \"continue\"\\n  },\\n  \"interaction\": \"direct'",
+          "timed_out": false
+        }
+      ],
+      "warnings": [
+        "入口判断JSON解析失败；本轮不开口，原话与诊断记录已保留。"
+      ],
+      "ready": {
+        "acoustic_turn": "disabled",
+        "speaker_split": "unavailable",
+        "continuous_speaker_analysis": "unavailable",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1080.6
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 451.4
+        }
+      ],
+      "reply": "你好。我是匠石。",
+      "replies": [
+        {
+          "text": "你好。我是匠石。",
+          "ms": 14118.6
+        }
+      ],
+      "first_sentence": "你好。",
+      "reply_audio_s": 1.6,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 451.4,
+        "jev_calls": 3,
+        "jev_model_total_ms": 10250.4,
+        "jev_first_begin_ms": -1073.8,
+        "jev_last_end_ms": 9185.9,
+        "main_begin_ms": 9351.0,
+        "cognition_calls": 1,
+        "cognition_model_ms": 4718.8,
+        "approved_reply_ms": 14118.6,
+        "first_sentence_tts_ms": 113.8,
+        "first_audio_ms": 14232.4,
+        "audio_end_ms": 14673.8,
+        "foreground_done_ms": 14125.0,
+        "write_model_ms": 1678.3,
+        "write_end_ms": 15805.5,
+        "turn_total_ms": 15805.5
+      }
+    },
+    {
+      "group": "本地脑火山声音",
+      "repeat": 3,
+      "events_ms": {
+        "transcript": 306.4,
+        "phase.input.collect": -1083.0,
+        "phase.input.prepare": -1072.7,
+        "phase.input.jev": -1071.1,
+        "phase.input.judged": 2344.3,
+        "thinking": 6711.5,
+        "phase.main.resolve": 6747.2,
+        "phase.main.assemble": 6750.4,
+        "phase.main.cognition": 6759.1,
+        "phase.main.action": 12047.8,
+        "reply": 12048.7,
+        "turn_complete": 12054.5,
+        "write_started": 12054.5,
+        "first_audio": 12676.9,
+        "write_completed": 13761.4,
+        "audio_end": 14218.4
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3414.2,
+          "prompt_ms": 535.2,
+          "decode_ms": 2735.7,
+          "completion_tokens": 290,
+          "prompt_tokens": 6065,
+          "cache_hit_tokens": 4784
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3996.4,
+          "prompt_ms": 698.9,
+          "decode_ms": 3165.7,
+          "completion_tokens": 330,
+          "prompt_tokens": 6176,
+          "cache_hit_tokens": 4784
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 5282.4,
+          "prompt_ms": 263.1,
+          "decode_ms": 4695.4,
+          "completion_tokens": 484,
+          "prompt_tokens": 2690,
+          "cache_hit_tokens": 2452
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 1704.6,
+          "prompt_ms": 281.7,
+          "decode_ms": 1306.0,
+          "completion_tokens": 140,
+          "prompt_tokens": 1105,
+          "cache_hit_tokens": 694
+        }
+      ],
+      "spans_ms": [
+        [
+          "voice_jev",
+          -1070.8,
+          2343.6
+        ],
+        [
+          "JEV",
+          -1074.3,
+          2344.3
+        ],
+        [
+          "voice_jev",
+          2349.5,
+          6346.0
+        ],
+        [
+          "JEV",
+          2347.2,
+          6346.8
+        ],
+        [
+          "cognition",
+          6761.9,
+          12044.5
+        ],
+        [
+          "main",
+          6710.8,
+          12054.1
+        ],
+        [
+          "write_zone",
+          12055.3,
+          13760.0
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好。",
+          "start_ms": 12048.6,
+          "first_pcm_ms": 12676.6,
+          "end_ms": 12706.0
+        },
+        {
+          "text": "我是匠石，是一段运行在计算设备里的程序。",
+          "start_ms": 12706.1,
+          "first_pcm_ms": 13068.1,
+          "end_ms": 13660.2
+        },
+        {
+          "text": "很高兴与你交流。",
+          "start_ms": 13660.2,
+          "first_pcm_ms": 14070.0,
+          "end_ms": 14218.0
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "enabled",
+        "speaker_split": "enabled",
+        "continuous_speaker_analysis": "enabled",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1086.8
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 306.4
+        }
+      ],
+      "reply": "你好。我是匠石，是一段运行在计算设备里的程序。很高兴与你交流。",
+      "replies": [
+        {
+          "text": "你好。我是匠石，是一段运行在计算设备里的程序。很高兴与你交流。",
+          "ms": 12048.7
+        }
+      ],
+      "first_sentence": "你好。",
+      "reply_audio_s": 6.294,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 306.4,
+        "jev_calls": 2,
+        "jev_model_total_ms": 7410.6,
+        "jev_first_begin_ms": -1074.3,
+        "jev_last_end_ms": 6346.8,
+        "main_begin_ms": 6710.8,
+        "cognition_calls": 1,
+        "cognition_model_ms": 5282.4,
+        "approved_reply_ms": 12048.7,
+        "first_sentence_tts_ms": 628.0,
+        "first_audio_ms": 12676.9,
+        "audio_end_ms": 14218.4,
+        "foreground_done_ms": 12054.5,
+        "write_model_ms": 1704.6,
+        "write_end_ms": 13761.4,
+        "turn_total_ms": 14218.4
+      }
+    },
+    {
+      "group": "云端",
+      "repeat": 3,
+      "events_ms": {
+        "transcript": 344.4,
+        "phase.input.collect": -1081.1,
+        "phase.input.prepare": -1074.7,
+        "phase.input.jev": -1073.5,
+        "phase.input.judged": 1430.2,
+        "thinking": 3197.8,
+        "phase.main.resolve": 3231.1,
+        "phase.main.assemble": 3234.3,
+        "phase.main.cognition": 3243.9,
+        "phase.main.action": 4324.2,
+        "reply": 4325.2,
+        "turn_complete": 4331.3,
+        "write_started": 4331.3,
+        "first_audio": 4732.6,
+        "audio_end": 5662.1,
+        "write_completed": 5708.1
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 2501.1,
+          "completion_tokens": 209,
+          "prompt_tokens": 6241,
+          "cache_hit_tokens": 6016
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1711.7,
+          "completion_tokens": 234,
+          "prompt_tokens": 6352,
+          "cache_hit_tokens": 5504
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 1056.3,
+          "completion_tokens": 96,
+          "prompt_tokens": 2711,
+          "cache_hit_tokens": 2304
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 1371.6,
+          "completion_tokens": 99,
+          "prompt_tokens": 941,
+          "cache_hit_tokens": 384
+        }
+      ],
+      "spans_ms": [
+        [
+          "voice_jev",
+          -1072.9,
+          1428.6
+        ],
+        [
+          "JEV",
+          -1075.8,
+          1430.1
+        ],
+        [
+          "voice_jev",
+          1440.8,
+          3152.9
+        ],
+        [
+          "JEV",
+          1436.3,
+          3155.3
+        ],
+        [
+          "cognition",
+          3246.5,
+          4303.2
+        ],
+        [
+          "main",
+          3197.2,
+          4330.9
+        ],
+        [
+          "write_zone",
+          4332.1,
+          5704.2
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好，我叫匠石。",
+          "start_ms": 4325.0,
+          "first_pcm_ms": 4731.8,
+          "end_ms": 5149.8
+        },
+        {
+          "text": "你怎么称呼？",
+          "start_ms": 5149.9,
+          "first_pcm_ms": 5560.2,
+          "end_ms": 5661.7
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "enabled",
+        "speaker_split": "enabled",
+        "continuous_speaker_analysis": "enabled",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1084.6
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 344.4
+        }
+      ],
+      "reply": "你好，我叫匠石。你怎么称呼？",
+      "replies": [
+        {
+          "text": "你好，我叫匠石。你怎么称呼？",
+          "ms": 4325.2
+        }
+      ],
+      "first_sentence": "你好，我叫匠石。",
+      "reply_audio_s": 3.121,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 344.4,
+        "jev_calls": 2,
+        "jev_model_total_ms": 4212.8,
+        "jev_first_begin_ms": -1075.8,
+        "jev_last_end_ms": 3155.3,
+        "main_begin_ms": 3197.2,
+        "cognition_calls": 1,
+        "cognition_model_ms": 1056.3,
+        "approved_reply_ms": 4325.2,
+        "first_sentence_tts_ms": 406.8,
+        "first_audio_ms": 4732.6,
+        "audio_end_ms": 5662.1,
+        "foreground_done_ms": 4331.3,
+        "write_model_ms": 1371.6,
+        "write_end_ms": 5708.1,
+        "turn_total_ms": 5708.1
+      }
+    },
+    {
+      "group": "外脑本地声音",
+      "repeat": 3,
+      "events_ms": {
+        "transcript": 484.3,
+        "phase.input.collect": -1067.1,
+        "phase.input.prepare": -1061.8,
+        "phase.input.jev": -1060.8,
+        "phase.input.judged": 850.2,
+        "thinking": 2846.6,
+        "phase.main.resolve": 2877.6,
+        "phase.main.assemble": 2881.3,
+        "phase.main.cognition": 2891.3,
+        "phase.main.action": 4273.9,
+        "reply": 4275.5,
+        "turn_complete": 4280.3,
+        "write_started": 4280.3,
+        "first_audio": 4375.8,
+        "audio_end": 5416.4,
+        "write_completed": 6417.7
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1907.5,
+          "completion_tokens": 192,
+          "prompt_tokens": 6103,
+          "cache_hit_tokens": 5888
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 1772.0,
+          "completion_tokens": 272,
+          "prompt_tokens": 6185,
+          "cache_hit_tokens": 6016
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 1375.4,
+          "completion_tokens": 76,
+          "prompt_tokens": 2703,
+          "cache_hit_tokens": 2304
+        },
+        {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 2132.0,
+          "completion_tokens": 99,
+          "prompt_tokens": 934,
+          "cache_hit_tokens": 512
+        }
+      ],
+      "spans_ms": [
+        [
+          "asr",
+          -1239.0,
+          -1069.6
+        ],
+        [
+          "asr",
+          321.4,
+          483.7
+        ],
+        [
+          "voice_jev",
+          -1060.6,
+          847.5
+        ],
+        [
+          "JEV",
+          -1062.5,
+          850.0
+        ],
+        [
+          "voice_jev",
+          863.5,
+          2635.8
+        ],
+        [
+          "JEV",
+          856.8,
+          2637.6
+        ],
+        [
+          "cognition",
+          2894.1,
+          4269.8
+        ],
+        [
+          "main",
+          2846.0,
+          4279.8
+        ],
+        [
+          "write_zone",
+          4281.5,
+          6413.8
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好。",
+          "start_ms": 4274.8,
+          "first_pcm_ms": 4375.6,
+          "end_ms": 4464.9
+        },
+        {
+          "text": "我叫匠石。",
+          "start_ms": 4464.9,
+          "first_pcm_ms": 4532.1,
+          "end_ms": 4734.3
+        },
+        {
+          "text": "你希望怎么称呼我，或者想聊点什么？",
+          "start_ms": 4734.4,
+          "first_pcm_ms": 4803.4,
+          "end_ms": 5416.2
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        },
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "disabled",
+        "speaker_split": "unavailable",
+        "continuous_speaker_analysis": "unavailable",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好。",
+          "ms": -1069.0
+        },
+        {
+          "text": "可以怎么称呼你？",
+          "ms": 484.3
+        }
+      ],
+      "reply": "你好。我叫匠石。你希望怎么称呼我，或者想聊点什么？",
+      "replies": [
+        {
+          "text": "你好。我叫匠石。你希望怎么称呼我，或者想聊点什么？",
+          "ms": 4275.5
+        }
+      ],
+      "first_sentence": "你好。",
+      "reply_audio_s": 5.76,
+      "end_window_ms": 300,
+      "metrics": {
+        "final_transcript_ms": 484.3,
+        "jev_calls": 2,
+        "jev_model_total_ms": 3679.5,
+        "jev_first_begin_ms": -1062.5,
+        "jev_last_end_ms": 2637.6,
+        "main_begin_ms": 2846.0,
+        "cognition_calls": 1,
+        "cognition_model_ms": 1375.4,
+        "approved_reply_ms": 4275.5,
+        "first_sentence_tts_ms": 100.8,
+        "first_audio_ms": 4375.8,
+        "audio_end_ms": 5416.4,
+        "foreground_done_ms": 4280.3,
+        "write_model_ms": 2132.0,
+        "write_end_ms": 6417.7,
+        "turn_total_ms": 6417.7
+      }
+    },
+    {
+      "group": "本地",
+      "repeat": 1,
+      "events_ms": {
+        "transcript": 656.6,
+        "phase.input.collect": 658.3,
+        "phase.input.prepare": 664.1,
+        "phase.input.jev": 665.2,
+        "phase.input.judged": 4135.6,
+        "thinking": 4352.0,
+        "phase.main.resolve": 4387.8,
+        "phase.main.assemble": 4391.2,
+        "phase.main.cognition": 4402.3,
+        "phase.main.action": 8895.8,
+        "reply": 8896.9,
+        "turn_complete": 8900.8,
+        "write_started": 8900.8,
+        "first_audio": 8993.0,
+        "audio_end": 9438.5,
+        "write_completed": 11112.0
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3469.4,
+          "prompt_ms": 583.6,
+          "decode_ms": 2562.4,
+          "completion_tokens": 278,
+          "prompt_tokens": 5948,
+          "cache_hit_tokens": 4784
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 4487.8,
+          "prompt_ms": 997.7,
+          "decode_ms": 3214.7,
+          "completion_tokens": 429,
+          "prompt_tokens": 2635,
+          "cache_hit_tokens": 0
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 2209.1,
+          "prompt_ms": 542.6,
+          "decode_ms": 1555.2,
+          "completion_tokens": 208,
+          "prompt_tokens": 1033,
+          "cache_hit_tokens": 0
+        }
+      ],
+      "spans_ms": [
+        [
+          "asr",
+          522.0,
+          655.3
+        ],
+        [
+          "voice_jev",
+          665.3,
+          4134.9
+        ],
+        [
+          "JEV",
+          663.2,
+          4135.5
+        ],
+        [
+          "cognition",
+          4405.1,
+          8893.0
+        ],
+        [
+          "main",
+          4351.3,
+          8900.4
+        ],
+        [
+          "write_zone",
+          8901.8,
+          11110.9
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好，我是匠石。",
+          "start_ms": 8896.6,
+          "first_pcm_ms": 8992.7,
+          "end_ms": 9438.3
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "disabled",
+        "speaker_split": "unavailable",
+        "continuous_speaker_analysis": "unavailable",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好，可以怎么称呼你？",
+          "ms": 656.6
+        }
+      ],
+      "reply": "你好，我是匠石。",
+      "replies": [
+        {
+          "text": "你好，我是匠石。",
+          "ms": 8896.9
+        }
+      ],
+      "first_sentence": "你好，我是匠石。",
+      "reply_audio_s": 1.6,
+      "end_window_ms": 500,
+      "metrics": {
+        "final_transcript_ms": 656.6,
+        "jev_calls": 1,
+        "jev_model_total_ms": 3469.4,
+        "jev_first_begin_ms": 663.2,
+        "jev_last_end_ms": 4135.5,
+        "main_begin_ms": 4351.3,
+        "cognition_calls": 1,
+        "cognition_model_ms": 4487.8,
+        "approved_reply_ms": 8896.9,
+        "first_sentence_tts_ms": 96.1,
+        "first_audio_ms": 8993.0,
+        "audio_end_ms": 9438.5,
+        "foreground_done_ms": 8900.8,
+        "write_model_ms": 2209.1,
+        "write_end_ms": 11112.0,
+        "turn_total_ms": 11112.0
+      }
+    },
+    {
+      "group": "本地",
+      "repeat": 2,
+      "events_ms": {
+        "transcript": 701.8,
+        "phase.input.collect": 703.6,
+        "phase.input.prepare": 708.9,
+        "phase.input.jev": 709.9,
+        "phase.input.judged": 3933.1,
+        "thinking": 4346.7,
+        "phase.main.resolve": 4381.8,
+        "phase.main.assemble": 4386.3,
+        "phase.main.cognition": 4397.6,
+        "phase.main.action": 8606.1,
+        "turn_complete": 8610.2,
+        "write_started": 8610.2,
+        "write_completed": 10645.0
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3222.1,
+          "prompt_ms": 17.8,
+          "decode_ms": 2787.7,
+          "completion_tokens": 278,
+          "prompt_tokens": 5948,
+          "cache_hit_tokens": 5947
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 4203.4,
+          "prompt_ms": 319.2,
+          "decode_ms": 3566.6,
+          "completion_tokens": 384,
+          "prompt_tokens": 2635,
+          "cache_hit_tokens": 2407
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 2032.8,
+          "prompt_ms": 294.1,
+          "decode_ms": 1626.1,
+          "completion_tokens": 181,
+          "prompt_tokens": 1007,
+          "cache_hit_tokens": 649
+        }
+      ],
+      "spans_ms": [
+        [
+          "asr",
+          520.9,
+          701.1
+        ],
+        [
+          "voice_jev",
+          710.1,
+          3932.4
+        ],
+        [
+          "JEV",
+          708.3,
+          3933.0
+        ],
+        [
+          "cognition",
+          4400.0,
+          8603.5
+        ],
+        [
+          "main",
+          4345.9,
+          8609.8
+        ],
+        [
+          "write_zone",
+          8610.8,
+          10643.6
+        ]
+      ],
+      "tts": [],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "disabled",
+        "speaker_split": "unavailable",
+        "continuous_speaker_analysis": "unavailable",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好，可以怎么称呼你？",
+          "ms": 701.8
+        }
+      ],
+      "reply_audio_s": 0,
+      "error": "TimeoutError ",
+      "end_window_ms": 500,
+      "metrics": {
+        "final_transcript_ms": 701.8,
+        "jev_calls": 1,
+        "jev_model_total_ms": 3222.1,
+        "jev_first_begin_ms": 708.3,
+        "jev_last_end_ms": 3933.0,
+        "main_begin_ms": 4345.9,
+        "cognition_calls": 1,
+        "cognition_model_ms": 4203.4,
+        "approved_reply_ms": null,
+        "first_sentence_tts_ms": null,
+        "first_audio_ms": null,
+        "audio_end_ms": null,
+        "foreground_done_ms": 8610.2,
+        "write_model_ms": 2032.8,
+        "write_end_ms": 10645.0,
+        "turn_total_ms": 10645.0
+      }
+    },
+    {
+      "group": "本地",
+      "repeat": 3,
+      "events_ms": {
+        "transcript": 702.7,
+        "phase.input.collect": 704.5,
+        "phase.input.prepare": 710.0,
+        "phase.input.jev": 711.0,
+        "phase.input.judged": 3952.5,
+        "thinking": 4353.3,
+        "phase.main.resolve": 4388.8,
+        "phase.main.assemble": 4392.1,
+        "phase.main.cognition": 4403.4,
+        "phase.main.action": 8526.4,
+        "reply": 8527.4,
+        "turn_complete": 8533.0,
+        "write_started": 8533.0,
+        "first_audio": 8635.7,
+        "audio_end": 9241.0,
+        "write_completed": 9379.7
+      },
+      "calls": [
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "voice_jev_entry",
+          "route": "voice_jev",
+          "total_ms": 3240.4,
+          "prompt_ms": 15.3,
+          "decode_ms": 2829.7,
+          "completion_tokens": 278,
+          "prompt_tokens": 5948,
+          "cache_hit_tokens": 5947
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "subject_activity",
+          "route": "cognition",
+          "total_ms": 4117.5,
+          "prompt_ms": 243.9,
+          "decode_ms": 3557.2,
+          "completion_tokens": 381,
+          "prompt_tokens": 2635,
+          "cache_hit_tokens": 2407
+        },
+        {
+          "status": "ok",
+          "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "purpose": "write_zone",
+          "route": "write_zone",
+          "total_ms": 844.7,
+          "prompt_ms": 219.7,
+          "decode_ms": 474.4,
+          "completion_tokens": 44,
+          "prompt_tokens": 1004,
+          "cache_hit_tokens": 649
+        }
+      ],
+      "spans_ms": [
+        [
+          "asr",
+          522.4,
+          701.9
+        ],
+        [
+          "voice_jev",
+          711.2,
+          3951.8
+        ],
+        [
+          "JEV",
+          709.3,
+          3952.4
+        ],
+        [
+          "cognition",
+          4406.2,
+          8523.9
+        ],
+        [
+          "main",
+          4352.7,
+          8532.6
+        ],
+        [
+          "write_zone",
+          8533.8,
+          9378.6
+        ]
+      ],
+      "tts": [
+        {
+          "text": "你好。",
+          "start_ms": 8527.1,
+          "first_pcm_ms": 8635.5,
+          "end_ms": 8841.2
+        },
+        {
+          "text": "我是匠石。",
+          "start_ms": 8841.2,
+          "first_pcm_ms": 8922.2,
+          "end_ms": 9240.7
+        }
+      ],
+      "routes": [
+        {
+          "route": "background",
+          "interaction": "none",
+          "mode": "split",
+          "reason": "缺少与匠石交往的具体依据，保留原话为背景",
+          "model_error": "",
+          "timed_out": false
+        }
+      ],
+      "warnings": [],
+      "ready": {
+        "acoustic_turn": "disabled",
+        "speaker_split": "unavailable",
+        "continuous_speaker_analysis": "unavailable",
+        "acoustic_turn_error": "",
+        "speaker_split_error": ""
+      },
+      "transcripts": [
+        {
+          "text": "你好，可以怎么称呼你？",
+          "ms": 702.7
+        }
+      ],
+      "reply": "你好。我是匠石。",
+      "replies": [
+        {
+          "text": "你好。我是匠石。",
+          "ms": 8527.4
+        }
+      ],
+      "first_sentence": "你好。",
+      "reply_audio_s": 2.32,
+      "end_window_ms": 500,
+      "metrics": {
+        "final_transcript_ms": 702.7,
+        "jev_calls": 1,
+        "jev_model_total_ms": 3240.4,
+        "jev_first_begin_ms": 709.3,
+        "jev_last_end_ms": 3952.4,
+        "main_begin_ms": 4352.7,
+        "cognition_calls": 1,
+        "cognition_model_ms": 4117.5,
+        "approved_reply_ms": 8527.4,
+        "first_sentence_tts_ms": 108.4,
+        "first_audio_ms": 8635.7,
+        "audio_end_ms": 9241.0,
+        "foreground_done_ms": 8533.0,
+        "write_model_ms": 844.7,
+        "write_end_ms": 9379.7,
+        "turn_total_ms": 9379.7
+      }
+    }
+  ]
+}

@@ -154,6 +154,9 @@ class StreamingASRSession:
 
 
 async def open_stream(config, http, cloud) -> StreamingRecognitionSession:
+    if config.asr_backend == 'mlx':
+        from .mlx import MlxASR
+        return MlxASR(config, http)
     if config.asr_backend == 'bailian':
         from .bailian import open_bailian
         return await open_bailian(config, http)

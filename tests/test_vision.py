@@ -26,7 +26,7 @@ def image(color='red'):
 
 @pytest.fixture
 def store(tmp_path):
-    return VisionStore(tmp_path/'vision', VisionConfig())
+    return VisionStore(tmp_path/'vision', VisionConfig(model='deepseek-flash', endpoint='https://example.test/v1'))
 
 
 @pytest.fixture
@@ -278,7 +278,7 @@ def test_image_adapter_sends_real_image_parts():
     assert model.describe(b'jpeg') == '两个人在桌旁。'
     block = payloads[0]['messages'][0]['content'][1]
     assert block['type']=='image_url' and block['image_url']['url'].startswith('data:image/jpeg;base64,')
-    assert payloads[0]['thinking'] == {'type': 'disabled'}
+    assert payloads[0]['enable_thinking'] is False
 
 
 def test_image_adapter_rejects_empty_or_truncated_descriptions():
@@ -591,6 +591,15 @@ def test_cloud_description_merges_with_newer_local_positions(store):
     assert cloud['frame']==local_frame and cloud['description_frame']==cloud_frame
     assert cloud['detections']==local['detections']
     assert cloud['described_at']<cloud['captured']
+    completed = store.latest_completed('stone')
+    assert completed['frame'] == completed['description_frame'] == cloud_frame
+    assert completed['description'] == cloud['description'] and not completed['detections']
+    # Reopen an old database with only the composite display record.
+    with store.db() as c:
+        c.execute('delete from completed_current')
+        c.execute('delete from snapshots where id=?', (completed['id'],))
+    recovered = VisionStore(store.root, store.config).latest_completed('stone')
+    assert recovered['frame'] == cloud_frame and recovered['description'] == cloud['description']
 
 
 def test_full_photo_budget_preserves_text_association(store):
@@ -692,11 +701,11 @@ def test_blank_visual_key_falls_back_to_provider_key(monkeypatch):
     assert VisionConfig.from_env().api_key == 'test-only-key'
 
 
-def test_pack_freezes_latest_photo_before_cloud_understanding(store):
+def test_pack_freezes_latest_completed_photo_and_matching_description(store):
     from jshi.core.inputpack import pack_input, packet
     from jshi.core.envelope import InputEnvelope, InputPart, SpeakerEvidence
     first=snapshot(store,at=time()-20)
-    new=store.add_frame('stone',image('blue'),time())
+    store.add_frame('stone',image('blue'),time())
     service=VisionService(store,store.config,Model(),Detector())
     try:
         for source in ['web_text','voice','video','photo']:
@@ -704,15 +713,134 @@ def test_pack_freezes_latest_photo_before_cloud_understanding(store):
             packed=pack_input(raw,service,'stone')
             data=packet(packed,service,'stone')
             assert packed.text==raw.text
-            assert data['environment']['frame']==new
-            assert data['environment']['description_frame']==first['frame']
-            assert data['environment']['described_at']<data['environment']['captured']
-            assert any(p.reference==new for p in packed.parts)
+            assert data['environment']['frame']==data['environment']['description_frame']==first['frame']
+            assert data['environment']['described_at']==data['environment']['captured']
+            assert any(p.reference==first['frame'] for p in packed.parts)
             store.add_frame('stone',image('green'),time())
             assert pack_input(packed,service,'stone')==packed
-            # Reset the newest sample for the next source without pretending a cloud update occurred.
-            new=store.add_frame('stone',image('blue'),time())
     finally: service.close()
+
+
+def test_local_refresh_paces_stable_frames_and_coalesces_changes_while_voice_reads(store, monkeypatch):
+    from threading import Event
+    from jshi.core.envelope import InputEnvelope, InputPart, SpeakerEvidence
+    from jshi.core.inputpack import pack_input, packet
+    from jshi.vision.config import MLX_ENDPOINT, MLX_MODEL
+
+    now = [100.]
+    monkeypatch.setattr('jshi.vision.service.monotonic', lambda: now[0])
+    cfg = replace(store.config, endpoint=MLX_ENDPOINT, model=MLX_MODEL, max_calls_per_hour=1)
+    detector = Detector()
+    calls, updates = [], []
+    entered, release, changed_done = Event(), Event(), Event()
+
+    class SlowModel:
+        def describe(self, data):
+            with Image.open(BytesIO(data)) as photo:
+                calls.append(photo.getpixel((10, 10)))
+            if len(calls) == 1:
+                now[0] += 3.
+            elif len(calls) == 2:
+                entered.set()
+                assert release.wait(5)
+            return f'观察 {len(calls)}'
+
+    service = VisionService(store, cfg, SlowModel(), detector)
+    def updated(result):
+        updates.append(result)
+        changed_done.set()
+    service.on_update = updated
+    raw = InputEnvelope('test','voice',(InputPart('text','我说完了'),),SpeakerEvidence('p'))
+    base = time() - 20
+    def sample(color, offset, changed=False):
+        detector.changed = changed
+        service.submit('stone', image(color), base + offset)
+        service.executor.submit(lambda: None).result(timeout=3)
+    try:
+        empty = pack_input(raw, service, 'stone')
+        first = service.process('stone', image('white'), base)
+        assert first['reason'] == 'initial' and pack_input(empty, service, 'stone') == empty
+        now[0] = 104.4
+        sample('white', 1)
+        assert len(calls) == 1
+        now[0] = 104.5
+        sample('white', 2)
+        assert entered.wait(2)
+        sample('red', 3, True)
+        sample('blue', 4, True)
+        sample('lime', 5)
+        frozen = pack_input(raw, service, 'stone')
+        assert packet(frozen, service, 'stone')['environment']['id'] == first['id']
+        assert service.online_pending is not None and len(calls) == 2
+        release.set()
+        # Only scene changes are dispatched as new conversational events.
+        assert changed_done.wait(3)
+        current = store.latest_completed('stone')
+        assert len(calls) == 3 and calls[-1][1] > 240
+        assert [r['reason'] for r in updates] == ['scene_change']
+        assert current['captured'] == base + 5 and current['description'] == '观察 3'
+        assert current['frame'] == current['description_frame']
+        assert pack_input(frozen, service, 'stone') == frozen
+        with store.db() as c:
+            assert c.execute('select count(*) from calls').fetchone()[0] == 0
+    finally:
+        release.set()
+        service.close()
+
+
+def test_newest_capture_survives_late_upload_and_busy_model_worker(store):
+    from threading import Event
+    from jshi.vision.config import MLX_ENDPOINT, MLX_MODEL
+
+    detecting, resume_detection = Event(), Event()
+    worker_busy, resume_model, published = Event(), Event(), Event()
+    detected, interpreted = [], []
+
+    def color(data):
+        with Image.open(BytesIO(data)) as frame:
+            channels = frame.getpixel((10, 10))
+            return ('red', 'green', 'blue')[channels.index(max(channels))]
+
+    class HeldDetector:
+        def detect(self, data):
+            detected.append(color(data))
+            detecting.set()
+            assert resume_detection.wait(4)
+            return [], True
+
+    class RecordingModel:
+        def describe(self, data):
+            interpreted.append(color(data))
+            return '已完成'
+
+    cfg = replace(store.config, endpoint=MLX_ENDPOINT, model=MLX_MODEL)
+    service = VisionService(store, cfg, RecordingModel(), HeldDetector())
+    service.on_update = lambda result: published.set()
+
+    def occupy_model_worker():
+        worker_busy.set()
+        assert resume_model.wait(4)
+
+    base = time() - 10
+    try:
+        service.model_executor.submit(occupy_model_worker)
+        assert worker_busy.wait(2)
+        service.submit('stone', image('red'), base)
+        assert detecting.wait(2)
+        service.submit('stone', image('lime'), base + 3)
+        service.submit('stone', image('blue'), base + 2)  # An older upload arrives last.
+        resume_detection.set()
+        service.executor.submit(lambda: None).result(timeout=2)
+        resume_model.set()
+        assert published.wait(2)
+        service.model_executor.submit(lambda: None).result(timeout=2)
+        assert detected == ['red', 'green']
+        assert interpreted == ['green']
+        assert store.latest_completed('stone')['captured'] == base + 3
+    finally:
+        resume_detection.set()
+        resume_model.set()
+        service.close()
 
 
 def test_optional_image_reaches_shared_jev_as_image_block(store):
@@ -963,4 +1091,47 @@ def test_capture_handoff_discards_delayed_processing_and_keeps_history(store):
         store.set_capture('stone', '')
         assert store.publish('stone', back, '断开后的结果') is None
     finally:
+        service.close()
+
+
+@pytest.mark.parametrize('local_model', [True, False], ids=['local-mlx', 'cloud'])
+def test_late_inference_never_enters_next_capture(store, local_model):
+    from threading import Event
+    from jshi.vision.config import MLX_ENDPOINT, MLX_MODEL
+
+    entered, release = Event(), Event()
+    class SlowFirst:
+        def __init__(self):
+            self.calls = 0
+
+        def describe(self, data):
+            self.calls += 1
+            if self.calls == 1:
+                entered.set()
+                assert release.wait(4)
+                return '旧设备'
+            return '新设备'
+
+    config = replace(store.config, endpoint=MLX_ENDPOINT, model=MLX_MODEL) if local_model else store.config
+    service = VisionService(store, config, SlowFirst(), Detector())
+    updates = []
+    service.on_update = updates.append
+    stamp = time()
+    try:
+        store.set_capture('stone', 'one')
+        service.submit('stone', image(), stamp, 'camera', clock={'capture_id':'one'})
+        assert entered.wait(2)
+        store.set_capture('stone', 'two')
+        # The same source reconnects with an earlier source timestamp.
+        service.submit('stone', image('blue'), stamp-1, 'camera', clock={'capture_id':'two'})
+        service.executor.submit(lambda: None).result(timeout=2)
+        assert store.latest_completed('stone') is None
+        release.set()
+        service.model_executor.submit(lambda: None).result(timeout=2)
+        # The first task can enqueue the second while the executor sentinel is waiting.
+        service.model_executor.submit(lambda: None).result(timeout=2)
+        assert store.latest_completed('stone')['description'] == '新设备'
+        assert [item['description'] for item in updates] == ['新设备']
+    finally:
+        release.set()
         service.close()

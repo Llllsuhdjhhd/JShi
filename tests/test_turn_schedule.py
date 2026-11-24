@@ -93,6 +93,14 @@ def test_sustained_end_waits_for_recognition():
     assert schedule.confirm_transient(schedule.current().transient_token).kind == 'none'
 
 
+def test_sound_end_without_a_playback_hold_does_not_delay_ready_answers():
+    schedule = TurnSchedule()
+    schedule.open_matter()
+    assert schedule.sustained_voice().kind == 'ignored'
+    assert schedule.note_sustained_end().kind == 'none'
+    assert schedule.note_short_end() is None and not schedule.blocks_start()
+
+
 def test_sustained_sound_without_text_releases_after_wait_limit():
     schedule = TurnSchedule(speech_hold=True)
     schedule.open_matter()

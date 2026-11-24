@@ -1,18 +1,23 @@
 from dataclasses import dataclass
 import os
 
+MLX_MODEL = 'mlx-community/Qwen3.6-35B-A3B-4bit'
+MLX_ENDPOINT = 'http://127.0.0.1:18765/v1'
+
 
 @dataclass(frozen=True)
 class VisionConfig:
     enabled: bool = False
-    endpoint: str = "https://api.deepseek.com/chat/completions"
+    endpoint: str = MLX_ENDPOINT
     api_key: str = ""
-    model: str = "deepseek-flash"
+    model: str = MLX_MODEL
     detector: str = "change"
     jev_images: bool = False
     cognition_images: bool = False  # Enable only for a main model accepting image input.
     weights: str = "yolo11n.pt"
-    sample_seconds: float = 2
+    sample_seconds: float = 2.0
+    refresh_strategy: str = 'auto'
+    local_refresh_seconds: float = 2.0
     archive_seconds: float = 10
     cooldown_seconds: float = 15
     refresh_seconds: float = 300
@@ -35,9 +40,11 @@ class VisionConfig:
     cloud_enabled: bool = True
 
     def __post_init__(self):
+        if self.refresh_strategy not in {'auto', 'change'}:
+            raise ValueError('vision refresh strategy must be auto or change')
         if self.detector not in {"change", "yolo"}:
             raise ValueError("vision detector must be change or yolo")
-        for name in ("sample_seconds", "archive_seconds", "cooldown_seconds", "refresh_seconds",
+        for name in ("sample_seconds", "local_refresh_seconds", "archive_seconds", "cooldown_seconds", "refresh_seconds",
                      "rolling_bytes", "memory_bytes", "retention_seconds", "max_image_bytes", "timeout_seconds", "max_calls_per_hour", "portrait_limit", "face_min_size", "face_identity_limit"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"vision {name} must be positive")
@@ -55,7 +62,14 @@ class VisionConfig:
                 values[name] = raw.lower() in {"1", "true", "yes", "on"} if isinstance(base, bool) else type(base)(raw)
         if not values.get("api_key"):
             values["api_key"] = os.getenv("JSHI_API_DEEPSEEK_API_KEY", "")
-        endpoint = os.getenv("JSHI_API_DEEPSEEK_ENDPOINT", "")
-        if endpoint and "endpoint" not in values:
-            values["endpoint"] = endpoint
+        # Preserve explicitly configured cloud deployments and their legacy defaults.
+        if values.get('model', MLX_MODEL) != MLX_MODEL:
+            values.setdefault('endpoint', os.getenv('JSHI_API_DEEPSEEK_ENDPOINT') or 'https://api.deepseek.com/chat/completions')
+        elif 'endpoint' in values and 'model' not in values and not cls(endpoint=values['endpoint']).local_mlx:
+            values['model'] = 'deepseek-flash'
         return cls(**values)
+
+    @property
+    def local_mlx(self):
+        from urllib.parse import urlsplit
+        return self.model == MLX_MODEL and urlsplit(self.endpoint).hostname in {'127.0.0.1', 'localhost', '::1'}

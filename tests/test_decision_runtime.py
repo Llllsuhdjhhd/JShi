@@ -281,7 +281,7 @@ def test_shadow_never_blocks_old_call(tmp_path):
 def test_real_voice_collision_rejudges_combined_input_once(process):
     from threading import Event
     from tests.test_voice import FakeCloud, Model as MainModel
-    from tests.test_jev_split_modes import Model, entry, preparation
+    from tests.test_jev_split_modes import Model, entry, main_preparation
     from jshi.voice.jev import VoiceJEV
     from jshi.voice.contracts import Transcript
     from jshi.app.voice import VoiceConversation
@@ -292,7 +292,7 @@ def test_real_voice_collision_rejudges_combined_input_once(process):
         return entry(items=[{'i':1,'person':'unknown','certainty':'unknown','why':'声音未知'}])
     second=entry(items=[{'i':i,'person':'unknown','certainty':'unknown','why':'声音未知'} for i in (1,2)],
                  process_refs=['I1','I2'],decision_refs=['I1','I2'])
-    model=Model([first,second,preparation()])
+    model=Model([first,second,main_preparation()])
     process.cognition=MainModel()
     async def scenario():
         async def send(message):pass

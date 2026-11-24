@@ -1,0 +1,194 @@
+{
+  "date": "2026-11-22",
+  "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+  "method": "相同 Vivian 合成音频转为 16 kHz 单声道，以每 20 ms 一帧发送到匠石语音 WebSocket。每次使用新的隔离主体、进程内记忆和真实 MLX 模型，使用分步 JEV。聊天和语音服务在三次测试中保持运行。计时到客户端收包。",
+  "startup_s": {
+    "server_and_model_ready": 3.72,
+    "wood_prefill": 1.92,
+    "smith_short_prefill": 1.14,
+    "initiative_prefill": 1,
+    "split_jev_prefill": 1.63
+  },
+  "voice_trials": [
+    {
+      "input_audio_s": 1.84,
+      "transcript": "你好，可以怎么称呼你？",
+      "reply": "你好！我是匠石。",
+      "from_input_start_s": {
+        "transcript": 2.744,
+        "reply": 11.584,
+        "audio": 12.041,
+        "audio_end": 12.318
+      },
+      "from_input_end_to_first_audio_s": 10.201,
+      "model_calls": [
+        {
+          "route": "voice_jev",
+          "purpose": "voice_jev_entry",
+          "total_ms": 3467.6,
+          "prompt_tokens": 5948,
+          "cache_hit_tokens": 4608,
+          "completion_tokens": 274
+        },
+        {
+          "route": "cognition",
+          "purpose": "subject_activity",
+          "total_ms": 5008.0,
+          "prompt_tokens": 2635,
+          "cache_hit_tokens": 2048,
+          "completion_tokens": 471
+        },
+        {
+          "route": "write_zone",
+          "purpose": "write_zone",
+          "total_ms": 956.7,
+          "prompt_tokens": 1022,
+          "cache_hit_tokens": 0,
+          "completion_tokens": 54
+        }
+      ]
+    },
+    {
+      "input_audio_s": 1.84,
+      "transcript": "你好，可以怎么称呼你？",
+      "reply": "你好！我是匠石，很高兴认识你。请问怎么称呼你？",
+      "from_input_start_s": {
+        "transcript": 2.64,
+        "reply": 11.819,
+        "audio": 12.144,
+        "audio_end": 13.41
+      },
+      "from_input_end_to_first_audio_s": 10.304,
+      "model_calls": [
+        {
+          "route": "voice_jev",
+          "purpose": "voice_jev_entry",
+          "total_ms": 2943.6,
+          "prompt_tokens": 5948,
+          "cache_hit_tokens": 5947,
+          "completion_tokens": 274
+        },
+        {
+          "route": "cognition",
+          "purpose": "subject_activity",
+          "total_ms": 5749.5,
+          "prompt_tokens": 2635,
+          "cache_hit_tokens": 2387,
+          "completion_tokens": 550
+        },
+        {
+          "route": "write_zone",
+          "purpose": "write_zone",
+          "total_ms": 2671.8,
+          "prompt_tokens": 1058,
+          "cache_hit_tokens": 512,
+          "completion_tokens": 209
+        }
+      ]
+    },
+    {
+      "input_audio_s": 1.84,
+      "transcript": "你好，可以怎么称呼你？",
+      "reply": "我是匠石。",
+      "from_input_start_s": {
+        "transcript": 2.648,
+        "reply": 10.619,
+        "audio": 11.006,
+        "audio_end": 11.006
+      },
+      "from_input_end_to_first_audio_s": 9.166,
+      "model_calls": [
+        {
+          "route": "voice_jev",
+          "purpose": "voice_jev_entry",
+          "total_ms": 3121.1,
+          "prompt_tokens": 5948,
+          "cache_hit_tokens": 5947,
+          "completion_tokens": 274
+        },
+        {
+          "route": "cognition",
+          "purpose": "subject_activity",
+          "total_ms": 4544.4,
+          "prompt_tokens": 2635,
+          "cache_hit_tokens": 2452,
+          "completion_tokens": 426
+        },
+        {
+          "route": "write_zone",
+          "purpose": "write_zone",
+          "total_ms": 1050.4,
+          "prompt_tokens": 1020,
+          "cache_hit_tokens": 694,
+          "completion_tokens": 69
+        }
+      ]
+    }
+  ],
+  "median_from_input_end_to_first_audio_s": 10.201,
+  "streaming_cognition_comparison": {
+    "note": "早期单独主认知测试，开启 APC 后运行。以空缓存与木头模板预热后的首轮相同请求对比。后续两轮只改变用户问题。输出长度受采样影响。",
+    "trials": [
+      {
+        "series_initial_state": "empty",
+        "question": "你好，请介绍一下自己。",
+        "prompt_tokens": 5429,
+        "cache_hit_tokens": 0,
+        "completion_tokens": 292,
+        "first_text_ms": 1779.3,
+        "total_ms": 4042.1
+      },
+      {
+        "series_initial_state": "empty",
+        "question": "你好，可以怎么称呼你？",
+        "prompt_tokens": 5430,
+        "cache_hit_tokens": 5120,
+        "completion_tokens": 49,
+        "first_text_ms": 569.9,
+        "total_ms": 1012.4
+      },
+      {
+        "series_initial_state": "empty",
+        "question": "你能陪我去公园散步吗？",
+        "prompt_tokens": 5430,
+        "cache_hit_tokens": 5120,
+        "completion_tokens": 292,
+        "first_text_ms": 465.0,
+        "total_ms": 3305.8
+      },
+      {
+        "series_initial_state": "preloaded",
+        "question": "你好，请介绍一下自己。",
+        "prompt_tokens": 5429,
+        "cache_hit_tokens": 5120,
+        "completion_tokens": 102,
+        "first_text_ms": 749.5,
+        "total_ms": 1695.2
+      },
+      {
+        "series_initial_state": "preloaded",
+        "question": "你好，可以怎么称呼你？",
+        "prompt_tokens": 5430,
+        "cache_hit_tokens": 5356,
+        "completion_tokens": 107,
+        "first_text_ms": 432.2,
+        "total_ms": 1407.7
+      },
+      {
+        "series_initial_state": "preloaded",
+        "question": "你能陪我去公园散步吗？",
+        "prompt_tokens": 5430,
+        "cache_hit_tokens": 5356,
+        "completion_tokens": 305,
+        "first_text_ms": 340.5,
+        "total_ms": 3334.5
+      }
+    ]
+  },
+  "vision_example": {
+    "input": "白底图，左侧红色矩形，右侧蓝色圆形。",
+    "observed": "左侧红色实心方形，右侧蓝色实心圆形，未见人物。",
+    "change_degree": "unknown",
+    "seconds": 1.35
+  }
+}

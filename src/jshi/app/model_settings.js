@@ -55,24 +55,25 @@
   const values=()=>{const i=select.value.indexOf('|');return i<0?null:{service:select.value.slice(0,i),model:select.value.slice(i+1)};};
   function update(changed=false){
    const value=values(),s=value?state.services[value.service]:null;
-   key.value='';key.disabled=!s;key.placeholder=s?.has_key?'已配置，留空保留；更换时填写新Key':'粘贴所选服务的API Key';
+   keyLabel.style.display=value?.service==='mlx'?'none':'';advanced.hidden=value?.service==='mlx';
+   key.value='';key.disabled=!s||value?.service==='mlx';key.placeholder=s?.has_key?'已配置，留空保留；更换时填写新Key':'粘贴所选服务的API Key';
    endpoint.value=s?.endpoint||'';endpoint.disabled=!s;
-   fillEfforts(effort,value?.service,value?.model,effort.value);
+   fillEfforts(effort,value?.service,value?.model,value?.service==='mlx'?'off':effort.value);
    effort.disabled=!s;
-   hint.textContent=value?.service==='qwen'?'填百炼北京地域的API Key。地址已预填；业务空间专用地址在高级设置修改。轻量思考预算512 token。':s?.has_key?'密钥已保存，不用重复填写。':s?'填写所选服务的密钥，地址已预填。':'保留启动配置，无需填写密钥。';
+   hint.textContent=value?.service==='mlx'?'先运行 tools/start_mlx_chat.sh 加载模型。服务仅监听本机，自动复用提示词前缀。':value?.service==='qwen'?'填百炼北京地域的API Key。地址已预填；业务空间专用地址在高级设置修改。轻量思考预算512 token。':s?.has_key?'密钥已保存，不用重复填写。':s?'填写所选服务的密钥，地址已预填。':'保留启动配置，无需填写密钥。';
   }
   update();
   const credentials=el('details'),credentialSummary=el('summary');
-  const connectionLabel=()=>{const value=values();return value&&state.services[value.service]?.has_key?'连接设置 · 已配置':'连接设置 · 配置密钥';};
+  const connectionLabel=()=>{const value=values();if(value?.service==='mlx')return '本机 MLX · 启动说明';return value&&state.services[value.service]?.has_key?'连接设置 · 已配置':'连接设置 · 配置密钥';};
   credentialSummary.textContent=connectionLabel();credentials.append(credentialSummary,keyLabel,hint,advanced);conversation.append(credentials);
   select.onchange=()=>{update(true);credentialSummary.textContent=connectionLabel();};
   const save=el('button','保存默认设置');save.onclick=async()=>{
    save.disabled=true;
    try{
     const value=values();
-    if(value&&!state.services[value.service].has_key&&!key.value.trim())throw Error('请先在API Key栏粘贴密钥');
+    if(value&&value.service!=='mlx'&&!state.services[value.service].has_key&&!key.value.trim())throw Error('请先在API Key栏粘贴密钥');
     const data={name:'all',jev_mode:jevMode.value,profile:{effort:effort.value,effort_explicit:true,choices:value?[value]:[]}};
-    if(value)data.services={[value.service]:{endpoint:endpoint.value.trim(),api_key:key.value.trim()}};
+    if(value&&value.service!=='mlx')data.services={[value.service]:{endpoint:endpoint.value.trim(),api_key:key.value.trim()}};
     state=await request(data);render();status.textContent='默认模型已保存，后续理解与回复使用 '+(state.global_profile?.choices?.[0]?.model||row.current)+'；声音模型分别选择。';
    }catch(e){status.textContent=e.message;}finally{save.disabled=false;}
   };const saveRow=el('div');saveRow.className='model-save-row';saveRow.append(save);conversation.append(saveRow);
@@ -96,7 +97,7 @@
     const base=state.global_profile?.choices?.[0];let selected=model.value?{service:model.value.split('|')[0],model:model.value.slice(model.value.indexOf('|')+1)}:base;
     if(thought.value&&!selected)throw Error('请先选择默认模型，再单独设置思考程度');
     const custom=Boolean(model.value||thought.value);
-    state=await request({name,profile:custom?{choices:[selected],effort:thought.value||state.global_profile?.effort||'low',effort_explicit:true}:{choices:[]}});
+    state=await request({name,profile:custom?{choices:[selected],effort:selected?.service==='mlx'?'off':thought.value||state.global_profile?.effort||'low',effort_explicit:true}:{choices:[]}});
     render();status.textContent=row.label+'已保存';
    }catch(e){status.textContent=e.message;}finally{button.disabled=false;}};
    section.append(model,thought,button,actual);overrides.append(section);
@@ -105,19 +106,19 @@
   if(asrLabel||speakerLabel){
    const recognition=el('section');recognition.className='model-card';recognition.append(el('h3','语音转文字'),el('p','把听到的声音转成文字。模型不同，断句和分人能力也不同。'));
    if(asrLabel)recognition.append(asrLabel);
-   const availability={online:'online_available',bailian:'bailian_available',deepgram:'deepgram_available',local:'local_available',qwen:'qwen_available'};
+   const availability={mlx:'mlx_available',online:'online_available',bailian:'bailian_available',deepgram:'deepgram_available',local:'local_available',qwen:'qwen_available'};
    for(const option of asr?.options||[]){option.disabled=Boolean(option.value&&voiceState&&voiceState[availability[option.value]]===false);}
    const rtip=el('p',voiceState?'服务默认：'+(voiceState.asr_backends?.[voiceState.asr]?.label||voiceState.asr):'模型选择用于下次语音会话。');rtip.className='tip';recognition.append(rtip);
    if(asr?.options[0]&&voiceState)asr.options[0].textContent='默认（'+(voiceState.asr_backends?.[voiceState.asr]?.label||voiceState.asr)+'）';
    if(speaker?.options[0]&&voiceState?.speaker_model_default)speaker.options[0].textContent='默认（'+voiceState.speaker_model_default+'）';
    if(tts?.options[0]&&voiceState?.tts)tts.options[0].textContent='默认（'+voiceState.tts+'）';
    const capabilities=el('p');capabilities.className='tip';recognition.append(capabilities);
-   const describe=()=>{const value=asr?.value||voiceState?.asr;capabilities.textContent=value==='bailian'?'阿里只负责文字识别；换人边界由本地声音分段校验，分不清时标为不确定。':value==='online'?'火山字词时间与本地分段共同判断换人；声纹单独认人。':value==='deepgram'?'使用服务端人物时间线，并结合本地声纹判断人物。':'使用本地声音处理与转写；未加载的选项不可选择。';};if(asr)asr.onchange=describe;describe();form.append(recognition);
+   const describe=()=>{const value=asr?.value||voiceState?.asr;capabilities.textContent=value==='mlx'?'先运行 tools/start_mlx_audio.sh。边说边预览，停顿确认后提交定稿，人物身份待定。':value==='bailian'?'阿里只负责文字识别；换人边界由本地声音分段校验，分不清时标为不确定。':value==='online'?'火山字词时间与本地分段共同判断换人；声纹单独认人。':value==='deepgram'?'使用服务端人物时间线，并结合本地声纹判断人物。':'使用本地声音处理与转写；未加载的选项不可选择。';};if(asr)asr.onchange=describe;describe();form.append(recognition);
    const identity=el('section');identity.className='model-card';identity.append(el('h3','识别谁在说话'),el('p','本地声纹用于认人，与上面的转文字模型分开选择。'));
    if(speakerLabel)identity.append(speakerLabel);
    const ihint=el('p','CAM++ 与 ERes2NetV2 使用各自的登记样本；换模型后需重新开始语音。');ihint.className='tip';identity.append(ihint);form.append(identity);
    const speech=el('section');speech.className='model-card';speech.append(el('h3','语音播报'),el('p',voiceState?.tts||'沿用服务启动时的播报配置。'));if(ttsLabel)speech.append(ttsLabel);for(const option of tts?.options||[])option.disabled=Boolean(option.value&&voiceState?.tts_backends&&voiceState.tts_backends[option.value]===false);
-   speech.append(el('p','播报与识别独立，不会随转文字模型一起切换。'));form.append(speech);
+   speech.append(el('p','本机 MLX 播报使用 Vivian 音色，需先运行 tools/start_mlx_audio.sh。'));form.append(speech);
   }
   const decision=state.decision;
   if(decision){
