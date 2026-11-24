@@ -22,6 +22,14 @@ class YoloDetector:
         from ultralytics import YOLO
         self.model = YOLO(weights)
         self.previous = None
+        self.raw_classes = ()
+        # ByteTrack can withhold a new track until the next sample. Capture
+        # the detector's class counts before its tracker filters this result.
+        self.model.add_callback('on_predict_postprocess_end', self._record_classes)
+
+    def _record_classes(self, predictor):
+        boxes = predictor.results[0].boxes
+        self.raw_classes = tuple(sorted(boxes.cls[boxes.conf >= .5].int().tolist()))
 
     def detect(self, data):
         from PIL import Image
@@ -35,7 +43,8 @@ class YoloDetector:
                 "confidence": round(float(box.conf[0]), 3),
                 "track": int(box.id[0]) if box.id is not None else None})
         # Object-class counts and rough position changes are signals, not scene descriptions.
-        signature = sorted((d['class'], d['track'] or 0, *(round(v * 5) for v in d['box'])) for d in detections)
+        tracks = sorted((d['class'], d['track'] or 0, *(round(v * 5) for v in d['box'])) for d in detections)
+        signature = (self.raw_classes, tracks)
         changed = self.previous is not None and signature != self.previous
         self.previous = signature
         return detections, changed

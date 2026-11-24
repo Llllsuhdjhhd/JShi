@@ -1,0 +1,770 @@
+{
+  "date": "2026-11-23",
+  "input": {
+    "file": "mlx-voice-latency-20261122.wav",
+    "pcm_sha256": "3f938596d2433583fefa05dd088111379ff73b3024ea7cbabd0c4a36afe76b7e",
+    "text": "你好，可以怎么称呼你？",
+    "duration_s": 2.16,
+    "format": "16 kHz 单声道 PCM16，Vivian 合成的同一段录音"
+  },
+  "method": [
+    "旧版 MLX、流式适配后的 MLX 与火山 ASR 各三轮，轮换测试顺序。复制改动前的本地解码器跑旧版。各轮均从匠石语音 WebSocket 输入相同的 20 毫秒 PCM 帧，随后持续送静音。300 毫秒尾静音，使用从迁移资料恢复的声音配置与火山分段模型。",
+    "使用新建测试主体及进程内记忆，模型服务已预热。三组共用 DeepSeek V4 Flash、split JEV、关闭思考、完整输出以及本地 Vivian 播报。时间以录音末尾为 0，负数表示仍在输入。",
+    "transcripts 每行依次为是否定稿、文字、音频内开始和结束毫秒、客户端收到事件的相对毫秒。完整预览匹配文字时忽略末尾问号。首句为客户端收到的第一个正式回答音频包，整轮取前台处理、写场及最后音频收齐三者最晚。",
+    "报告采用修正回放器的子进程启动方式后收集的最终一组交错实测。"
+  ],
+  "medians": {
+    "原本地": {
+      "last_segment_first_preview_ms": null,
+      "last_segment_full_preview_ms": null,
+      "last_segment_final_ms": 439.1,
+      "jev_call_count": 2,
+      "first_reply_audio_ms": 3593.0,
+      "turn_total_ms": 4463.9
+    },
+    "新本地": {
+      "last_segment_first_preview_ms": 62.6,
+      "last_segment_full_preview_ms": 62.6,
+      "last_segment_final_ms": 323.0,
+      "jev_call_count": 2,
+      "first_reply_audio_ms": 4082.2,
+      "turn_total_ms": 6505.9
+    },
+    "火山": {
+      "last_segment_first_preview_ms": -527.1,
+      "last_segment_full_preview_ms": 142.1,
+      "last_segment_final_ms": 323.9,
+      "jev_call_count": 2,
+      "first_reply_audio_ms": 3981.3,
+      "turn_total_ms": 5259.0
+    }
+  },
+  "trials": [
+    {
+      "group": "新本地",
+      "repeat": 1,
+      "transcripts": [
+        [
+          false,
+          "你好。",
+          0,
+          640,
+          -1362.7
+        ],
+        [
+          true,
+          "你好。",
+          0,
+          640,
+          -1235.7
+        ],
+        [
+          false,
+          "可以怎么称呼你？",
+          940,
+          2120,
+          81.4
+        ],
+        [
+          false,
+          "可以怎么称呼你？",
+          940,
+          2200,
+          173.1
+        ],
+        [
+          true,
+          "可以怎么称呼你？",
+          940,
+          2200,
+          324.0
+        ]
+      ],
+      "events": {
+        "turn_complete": 4304.3,
+        "audio": 4385.3,
+        "audio_end": 4687.8,
+        "write_completed": 6005.1
+      },
+      "warnings": [],
+      "reply": "你好。叫我匠石就行。",
+      "calls": [
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1788.1
+        },
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 2032.4
+        },
+        {
+          "route": "cognition",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1395.4
+        },
+        {
+          "route": "write_zone",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1694.7
+        }
+      ],
+      "metrics": {
+        "last_segment_first_preview_ms": 81.4,
+        "last_segment_full_preview_ms": 81.4,
+        "last_segment_final_ms": 324.0,
+        "jev_call_count": 2,
+        "first_reply_audio_ms": 4385.3,
+        "turn_total_ms": 6005.1
+      }
+    },
+    {
+      "group": "火山",
+      "repeat": 1,
+      "transcripts": [
+        [
+          false,
+          "你好",
+          0,
+          500,
+          -1501.3
+        ],
+        [
+          false,
+          "你好",
+          0,
+          820,
+          -1246.6
+        ],
+        [
+          true,
+          "你好。",
+          180,
+          260,
+          -1093.8
+        ],
+        [
+          false,
+          "可以",
+          982,
+          1482,
+          -528.8
+        ],
+        [
+          false,
+          "可以怎么称呼",
+          982,
+          1802,
+          -113.7
+        ],
+        [
+          false,
+          "可以怎么称呼你",
+          982,
+          2121,
+          136.5
+        ],
+        [
+          true,
+          "可以怎么称呼你？",
+          982,
+          2372,
+          323.9
+        ]
+      ],
+      "events": {
+        "turn_complete": 3882.5,
+        "audio": 3964.6,
+        "audio_end": 4251.4,
+        "write_completed": 5199.6
+      },
+      "warnings": [],
+      "reply": "你好，我叫匠石。",
+      "calls": [
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1675.9
+        },
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1854.2
+        },
+        {
+          "route": "cognition",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1133.5
+        },
+        {
+          "route": "write_zone",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1314.8
+        }
+      ],
+      "metrics": {
+        "last_segment_first_preview_ms": -528.8,
+        "last_segment_full_preview_ms": 136.5,
+        "last_segment_final_ms": 323.9,
+        "jev_call_count": 2,
+        "first_reply_audio_ms": 3964.6,
+        "turn_total_ms": 5199.6
+      }
+    },
+    {
+      "group": "原本地",
+      "repeat": 1,
+      "transcripts": [
+        [
+          true,
+          "你好。",
+          0,
+          640,
+          -1130.9
+        ],
+        [
+          true,
+          "可以怎么称呼你？",
+          940,
+          2200,
+          410.8
+        ]
+      ],
+      "events": {
+        "turn_complete": 3509.5,
+        "audio": 3593.0,
+        "audio_end": 4030.0,
+        "write_completed": 4463.9
+      },
+      "warnings": [],
+      "reply": "你好，我叫匠石。你怎么称呼？",
+      "calls": [
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1728.9
+        },
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1564.4
+        },
+        {
+          "route": "cognition",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1103.6
+        },
+        {
+          "route": "write_zone",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 949.8
+        }
+      ],
+      "metrics": {
+        "last_segment_first_preview_ms": null,
+        "last_segment_full_preview_ms": null,
+        "last_segment_final_ms": 410.8,
+        "jev_call_count": 2,
+        "first_reply_audio_ms": 3593.0,
+        "turn_total_ms": 4463.9
+      }
+    },
+    {
+      "group": "火山",
+      "repeat": 2,
+      "transcripts": [
+        [
+          false,
+          "你好",
+          0,
+          500,
+          -1507.9
+        ],
+        [
+          false,
+          "你好",
+          0,
+          820,
+          -1208.2
+        ],
+        [
+          true,
+          "你好。",
+          180,
+          260,
+          -1114.7
+        ],
+        [
+          false,
+          "可以",
+          982,
+          1482,
+          -507.4
+        ],
+        [
+          false,
+          "可以怎么称呼",
+          982,
+          1802,
+          -188.6
+        ],
+        [
+          false,
+          "可以怎么称呼你",
+          982,
+          2121,
+          171.5
+        ],
+        [
+          true,
+          "可以怎么称呼你？",
+          982,
+          2372,
+          341.0
+        ]
+      ],
+      "events": {
+        "turn_complete": 4139.9,
+        "audio": 4221.8,
+        "audio_end": 4549.9,
+        "write_completed": 6017.9
+      },
+      "warnings": [],
+      "reply": "你好，我叫匠石。",
+      "calls": [
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1567.3
+        },
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1743.5
+        },
+        {
+          "route": "cognition",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1546.7
+        },
+        {
+          "route": "write_zone",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1871.8
+        }
+      ],
+      "metrics": {
+        "last_segment_first_preview_ms": -507.4,
+        "last_segment_full_preview_ms": 171.5,
+        "last_segment_final_ms": 341.0,
+        "jev_call_count": 2,
+        "first_reply_audio_ms": 4221.8,
+        "turn_total_ms": 6017.9
+      }
+    },
+    {
+      "group": "原本地",
+      "repeat": 2,
+      "transcripts": [
+        [
+          true,
+          "你好。",
+          0,
+          640,
+          -1130.5
+        ],
+        [
+          true,
+          "可以怎么称呼你？",
+          940,
+          2200,
+          439.1
+        ]
+      ],
+      "events": {
+        "turn_complete": 1810.0,
+        "audio": 1890.0,
+        "audio_end": 2383.1,
+        "write_completed": 3227.8
+      },
+      "warnings": [],
+      "reply": "你好。有什么需要我做的吗？",
+      "calls": [
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1385.7
+        },
+        {
+          "route": "cognition",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1415.1
+        },
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1980.1
+        },
+        {
+          "route": "write_zone",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1412.8
+        }
+      ],
+      "metrics": {
+        "last_segment_first_preview_ms": null,
+        "last_segment_full_preview_ms": null,
+        "last_segment_final_ms": 439.1,
+        "jev_call_count": 2,
+        "first_reply_audio_ms": 1890.0,
+        "turn_total_ms": 3227.8
+      }
+    },
+    {
+      "group": "新本地",
+      "repeat": 2,
+      "transcripts": [
+        [
+          false,
+          "你好。",
+          0,
+          640,
+          -1357.5
+        ],
+        [
+          true,
+          "你好。",
+          0,
+          640,
+          -1237.5
+        ],
+        [
+          false,
+          "可以怎么称呼你？",
+          940,
+          2120,
+          59.3
+        ],
+        [
+          false,
+          "可以怎么称呼你？",
+          940,
+          2200,
+          175.3
+        ],
+        [
+          true,
+          "可以怎么称呼你？",
+          940,
+          2200,
+          323.0
+        ]
+      ],
+      "events": {
+        "turn_complete": 4000.6,
+        "audio": 4082.2,
+        "audio_end": 4856.2,
+        "write_completed": 6695.1
+      },
+      "warnings": [],
+      "reply": "你好。我叫匠石，工匠的匠，石头的石。",
+      "calls": [
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1635.3
+        },
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1438.2
+        },
+        {
+          "route": "cognition",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1598.0
+        },
+        {
+          "route": "write_zone",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 2689.6
+        }
+      ],
+      "metrics": {
+        "last_segment_first_preview_ms": 59.3,
+        "last_segment_full_preview_ms": 59.3,
+        "last_segment_final_ms": 323.0,
+        "jev_call_count": 2,
+        "first_reply_audio_ms": 4082.2,
+        "turn_total_ms": 6695.1
+      }
+    },
+    {
+      "group": "原本地",
+      "repeat": 3,
+      "transcripts": [
+        [
+          true,
+          "你好。",
+          0,
+          640,
+          -1140.4
+        ],
+        [
+          true,
+          "可以怎么称呼你？",
+          940,
+          2200,
+          450.5
+        ]
+      ],
+      "events": {
+        "turn_complete": 4177.8,
+        "audio": 4259.8,
+        "audio_end": 5140.0,
+        "write_completed": 5651.6
+      },
+      "warnings": [],
+      "reply": "你好。我叫匠石，工匠的匠，石头的石。你怎么称呼？",
+      "calls": [
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1730.2
+        },
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1507.3
+        },
+        {
+          "route": "cognition",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1772.2
+        },
+        {
+          "route": "write_zone",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1469.2
+        }
+      ],
+      "metrics": {
+        "last_segment_first_preview_ms": null,
+        "last_segment_full_preview_ms": null,
+        "last_segment_final_ms": 450.5,
+        "jev_call_count": 2,
+        "first_reply_audio_ms": 4259.8,
+        "turn_total_ms": 5651.6
+      }
+    },
+    {
+      "group": "新本地",
+      "repeat": 3,
+      "transcripts": [
+        [
+          false,
+          "你好。",
+          0,
+          640,
+          -1364.0
+        ],
+        [
+          true,
+          "你好。",
+          0,
+          640,
+          -1237.5
+        ],
+        [
+          false,
+          "可以怎么称呼你？",
+          940,
+          2120,
+          62.6
+        ],
+        [
+          false,
+          "可以怎么称呼你？",
+          940,
+          2200,
+          181.4
+        ],
+        [
+          true,
+          "可以怎么称呼你？",
+          940,
+          2200,
+          322.3
+        ]
+      ],
+      "events": {
+        "turn_complete": 3894.2,
+        "audio": 3974.1,
+        "audio_end": 4246.3,
+        "write_completed": 6505.9
+      },
+      "warnings": [],
+      "reply": "你好。我叫匠石。",
+      "calls": [
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1432.2
+        },
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1517.2
+        },
+        {
+          "route": "cognition",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1488.3
+        },
+        {
+          "route": "write_zone",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 2607.6
+        }
+      ],
+      "metrics": {
+        "last_segment_first_preview_ms": 62.6,
+        "last_segment_full_preview_ms": 62.6,
+        "last_segment_final_ms": 322.3,
+        "jev_call_count": 2,
+        "first_reply_audio_ms": 3974.1,
+        "turn_total_ms": 6505.9
+      }
+    },
+    {
+      "group": "火山",
+      "repeat": 3,
+      "transcripts": [
+        [
+          false,
+          "你好",
+          0,
+          500,
+          -1462.6
+        ],
+        [
+          false,
+          "你好",
+          0,
+          820,
+          -1208.4
+        ],
+        [
+          true,
+          "你好。",
+          180,
+          260,
+          -1100.0
+        ],
+        [
+          false,
+          "可以",
+          982,
+          1482,
+          -527.1
+        ],
+        [
+          false,
+          "可以怎么称呼",
+          982,
+          1802,
+          -216.3
+        ],
+        [
+          false,
+          "可以怎么称呼你",
+          982,
+          2121,
+          142.1
+        ],
+        [
+          true,
+          "可以怎么称呼你？",
+          982,
+          2372,
+          318.2
+        ]
+      ],
+      "events": {
+        "turn_complete": 3898.0,
+        "audio": 3981.3,
+        "audio_end": 4429.0,
+        "write_completed": 5259.0
+      },
+      "warnings": [],
+      "reply": "你好，我叫匠石。",
+      "calls": [
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1410.9
+        },
+        {
+          "route": "voice_jev",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1721.2
+        },
+        {
+          "route": "cognition",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1635.6
+        },
+        {
+          "route": "write_zone",
+          "model": "deepseek-v4-flash",
+          "status": "ok",
+          "total_ms": 1356.7
+        }
+      ],
+      "metrics": {
+        "last_segment_first_preview_ms": -527.1,
+        "last_segment_full_preview_ms": 142.1,
+        "last_segment_final_ms": 318.2,
+        "jev_call_count": 2,
+        "first_reply_audio_ms": 3981.3,
+        "turn_total_ms": 5259.0
+      }
+    }
+  ]
+}

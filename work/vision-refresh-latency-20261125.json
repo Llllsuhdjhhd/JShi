@@ -1,0 +1,178 @@
+{
+  "at": "2026-11-25T07:22+08:00",
+  "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+  "processor": "Apple M5 Max",
+  "purpose": "本机已加载模型，普通现场观察 observe()，完整返回和校验。含客户端请求往返，单张计时排除 YOLO、图片预处理和存库。重复样图可能命中缓存。",
+  "image_dimensions": {
+    "几何图": [
+      640,
+      480
+    ],
+    "街景公交": [
+      810,
+      1080
+    ],
+    "双人照片": [
+      1280,
+      720
+    ]
+  },
+  "single": [
+    {
+      "image": "几何图",
+      "ms": 2734,
+      "characters": 115
+    },
+    {
+      "image": "街景公交",
+      "ms": 2039,
+      "characters": 297
+    },
+    {
+      "image": "双人照片",
+      "ms": 2100,
+      "characters": 221
+    },
+    {
+      "image": "双人照片",
+      "ms": 1858,
+      "characters": 221
+    },
+    {
+      "image": "街景公交",
+      "ms": 2037,
+      "characters": 297
+    },
+    {
+      "image": "几何图",
+      "ms": 1061,
+      "characters": 115
+    },
+    {
+      "image": "街景公交",
+      "ms": 2038,
+      "characters": 297
+    },
+    {
+      "image": "几何图",
+      "ms": 1063,
+      "characters": 115
+    },
+    {
+      "image": "双人照片",
+      "ms": 1908,
+      "characters": 221
+    }
+  ],
+  "pairs": [
+    {
+      "mode": "serial",
+      "observations": [
+        {
+          "image": "街景公交",
+          "ms": 2100,
+          "characters": 297
+        },
+        {
+          "image": "双人照片",
+          "ms": 1960,
+          "characters": 221
+        }
+      ],
+      "wall_ms": 4060
+    },
+    {
+      "mode": "concurrent",
+      "observations": [
+        {
+          "image": "街景公交",
+          "ms": 3051,
+          "characters": 400
+        },
+        {
+          "image": "双人照片",
+          "ms": 2360,
+          "characters": 243
+        }
+      ],
+      "wall_ms": 3051
+    },
+    {
+      "mode": "concurrent",
+      "observations": [
+        {
+          "image": "双人照片",
+          "ms": 2223,
+          "characters": 243
+        },
+        {
+          "image": "街景公交",
+          "ms": 2855,
+          "characters": 400
+        }
+      ],
+      "wall_ms": 2856
+    },
+    {
+      "mode": "serial",
+      "observations": [
+        {
+          "image": "双人照片",
+          "ms": 1909,
+          "characters": 221
+        },
+        {
+          "image": "街景公交",
+          "ms": 2070,
+          "characters": 297
+        }
+      ],
+      "wall_ms": 3979
+    }
+  ],
+  "single_summary_ms": {
+    "几何图": {
+      "median": 1063,
+      "min": 1061,
+      "max": 2734
+    },
+    "街景公交": {
+      "median": 2038,
+      "min": 2037,
+      "max": 2039
+    },
+    "双人照片": {
+      "median": 1908,
+      "min": 1858,
+      "max": 2100
+    }
+  },
+  "latest_frame_test": {
+    "scenario": "独立数据目录，通过 submit 连续送帧，使用已加载的真实 YOLO 与本机千问。绕过页面 2 秒限频以制造拥堵。",
+    "frames": {
+      "初始": "红色矩形",
+      "A": "公交车",
+      "B": "双人照片",
+      "C": "绿色矩形",
+      "D": "蓝色矩形"
+    },
+    "waiting_after_each_arrival": [
+      "B",
+      "C",
+      "D"
+    ],
+    "model_calls": [
+      "初始",
+      "A",
+      "D"
+    ],
+    "completed": [
+      "初始",
+      "A",
+      "D"
+    ],
+    "voice_snapshot_during_A": "初始",
+    "voice_snapshot_read_ms": 0.14
+  },
+  "concurrency_note": "同样两张照片进行两轮顺序互换的串行和并发测试。输出长度见逐次记录，服务使用既有缓存配置。并发测试独立于生产自动刷新策略。"
+}

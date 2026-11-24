@@ -71,3 +71,51 @@ def test_cancelled_synthesis_discards_inflight_audio_and_later_phrases():
         finally:
             release.set()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('cancel_after_first', [False, True])
+def test_mlx_first_audio_precedes_end_and_keeps_pcm_aligned(cancel_after_first):
+    from jshi.voice.mlx import MlxTTS
+
+    async def run():
+        resume = asyncio.Event()
+        closed = asyncio.Event()
+
+        class Response:
+            content_type = 'audio/pcm'
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                closed.set()
+
+            def raise_for_status(self):
+                pass
+
+            @property
+            def content(self):
+                return self
+
+            async def iter_chunked(self, size):
+                yield b'\x01'
+                yield b'\x02\x03'
+                await resume.wait()
+                yield b'\x04'
+
+        def post(url, *, json):
+            assert json['stream'] and json['response_format'] == 'pcm'
+            assert json['input'] == '你好。'
+            return Response()
+
+        stream = MlxTTS(VoiceConfig(''), SimpleNamespace(post=post)).synthesize('你好。')
+        try:
+            assert await asyncio.wait_for(anext(stream), 1) == b'\x01\x02'
+            if not cancel_after_first:
+                resume.set()
+                assert [chunk async for chunk in stream] == [b'\x03\x04']
+        finally:
+            await stream.aclose()
+        assert closed.is_set()
+
+    asyncio.run(run())

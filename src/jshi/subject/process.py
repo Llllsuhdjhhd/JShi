@@ -875,8 +875,10 @@ class SubjectProcess:
             clock.sub("①相识来源")
         observed_environment = visual_snapshot
         if self.vision and observed_environment is None:
-            observed_environment = (self.vision.store.snapshot(envelope.visual_snapshot_id, subject_id)
-                if envelope and envelope.visual_snapshot_id else self.vision.store.latest_sample(subject_id))
+            if envelope and envelope.visual_snapshot_id:
+                observed_environment = self.vision.store.snapshot(envelope.visual_snapshot_id, subject_id)
+            elif not (envelope and envelope.visual_context_fixed):
+                observed_environment = self.vision.store.latest_completed(subject_id)
         if observed_environment and self.vision:
             retained = self.vision.store.bind(subject_id, fact.id, observed_environment['id'])
             if not retained and observed_environment.get('change_degree') in ('medium', 'high'):

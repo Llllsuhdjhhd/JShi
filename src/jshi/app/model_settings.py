@@ -12,10 +12,11 @@ from urllib.parse import urlsplit
 from jshi.core.skillconfig import SkillConfigStore
 from jshi.models.base import ModelResponse
 from jshi.models.routing import ProviderModel, RoutedModel
+from jshi.vision.config import MLX_ENDPOINT, MLX_MODEL
 
 LABELS = {'cognition':'主认知／回应','voice_jev':'JEV入口判断','write_zone':'后台写场',
           'introspection':'自省','vision':'视觉理解','tool_plan':'工具规划','tool_wrap':'工具结果整理','memory':'记忆整理与人物经验'}
-MODELS = {'deepseek':['deepseek-v4-flash','deepseek-v4-pro'],
+MODELS = {'openai':['gpt-4','gpt-4o'], 'mlx':[MLX_MODEL], 'deepseek':['deepseek-v4-flash','deepseek-v4-pro'],
           'qwen':['qwen3.5-flash','qwen3.5-flash-2026-02-23'],
           # Hot path prefers gemini-3-flash-preview (empirically ~1s); flash-lite is slow/fallback only.
           'gemini':['gemini-3-flash-preview','gemini-3.6-flash','gemini-3.8-flash','gemini-3.5-flash','gemini-3.1-flash-lite'],
@@ -40,6 +41,8 @@ PREWARM_INTERVAL_S = 5.0
 
 
 def effort_options(service, model):
+    if service == 'mlx':
+        return {'off':'关闭思考'}
     if service == 'deepseek':
         return {'off':'不思考', 'low':'低（low）', 'high':'高（high）', 'max':'最高（max）'}
     if service == 'qwen':
@@ -82,6 +85,7 @@ class ModelSettings:
             self.routes['introspection'] = RoutedModel(reflection.model)
             reflection.model = self.routes['introspection']
         visual = getattr(process,'vision',None)
+        self.vision_timeout = getattr(getattr(visual, 'config', None), 'timeout_seconds', 45)
         if visual and hasattr(visual.model,'transport'):
             original = visual.model.transport
             class OriginalVision:
@@ -91,14 +95,22 @@ class ModelSettings:
                     if response_format:
                         payload['response_format'] = {'type': response_format}
                     result=original(payload)
-                    return ModelResponse(text=result['choices'][0]['message']['content'],model=self.name)
-            route=RoutedModel(OriginalVision())
+                    choice = result['choices'][0]
+                    return ModelResponse(text=choice['message']['content'],model=self.name,
+                                         metadata={'finish_reason': choice.get('finish_reason')})
+            initial = OriginalVision()
+            if getattr(visual.config, 'local_mlx', False):
+                initial = ProviderModel({'protocol':'mlx','label':'本机 MLX','endpoint':visual.config.endpoint},
+                                        MLX_MODEL, 'off', timeout=visual.config.timeout_seconds, route='vision')
+            route=RoutedModel(initial)
+            visual.model.route = route
             self.routes['vision']=route
             def send(payload):
                 options = ({'response_format': payload['response_format']['type']}
                            if payload.get('response_format') else {})
                 result=route.chat(payload['messages'],payload.get('max_tokens'), **options)
-                return {'choices':[{'message':{'content':result.text}}]}
+                return {'model':result.model, 'choices':[{'message':{'content':result.text},
+                                                         'finish_reason':result.metadata.get('finish_reason')}]}
             visual.model.transport=send
         # Memory services share this provider object; route its complete method
         # so existing JSON parsing and all retained service references stay intact.
@@ -138,7 +150,10 @@ class ModelSettings:
         for name, route in self.routes.items():
             route.on_status = lambda event, name=name: on_status(dict(event, purpose=LABELS[name])) if on_status else None
             route.on_paid = lambda model, name=name: on_paid(LABELS[name],model) if on_paid else None
-        self.services = {'deepseek':{'label':'DeepSeek','paid':True,'protocol':'chat','thinking_supported':True,
+        self.services = {'openai':{'label':'OpenAI GPT','paid':True,'protocol':'chat',
+            'endpoint':'https://api.openai.com/v1','api_key':os.getenv('OPENAI_API_KEY','')},
+          'mlx':{'label':'本机 MLX', 'protocol':'mlx', 'endpoint':MLX_ENDPOINT},
+          'deepseek':{'label':'DeepSeek','paid':True,'protocol':'chat','thinking_supported':True,
             'endpoint':os.getenv('JSHI_API_DEEPSEEK_ENDPOINT') or os.getenv('JSHI_MODEL_ENDPOINT',''),
             'api_key':os.getenv('JSHI_API_DEEPSEEK_API_KEY') or os.getenv('JSHI_MODEL_API_KEY','')},
           'gemini':{'label':'Gemini网关','protocol':'gemini','endpoint':'','api_key':''},
@@ -151,6 +166,8 @@ class ModelSettings:
           'openrouter':{'label':'OpenRouter免费','protocol':'chat','endpoint':'https://openrouter.ai/api/v1','api_key':''}}
         self.profiles = {}
         self.global_profile = None
+        default_local_vision = ('vision' in self.routes and getattr(visual.config, 'local_mlx', False)
+                                and visual.config.endpoint == MLX_ENDPOINT)
         if self.path.exists():
             saved=json.loads(self.path.read_text(encoding='utf8'))
             self.jev_mode = saved.get('jev_mode', self.jev_mode)
@@ -162,7 +179,8 @@ class ModelSettings:
             self.profiles=saved.get('profiles',{})
             self.global_profile=saved.get('global_profile')
             if self.global_profile:
-                self.profiles={**{name:self.global_profile for name in self.routes}, **self.profiles}
+                self.profiles={**{name:self.global_profile for name in self.routes
+                                  if name != 'vision' or not default_local_vision}, **self.profiles}
             for name,profile in self.profiles.items():
                 if name in self.routes: self.routes[name].replace(self._chain(profile,self.services,name))
 
@@ -173,6 +191,8 @@ class ModelSettings:
                     continue
                 self.profiles[name]=self.global_profile
                 self.routes[name].replace(self._chain(self.global_profile,self.services,name))
+        if default_local_vision and 'vision' not in self.profiles:
+            self.profiles['vision'] = {'choices':[{'service':'mlx','model':MLX_MODEL}], 'effort':'off'}
 
     def public(self):
         with self.lock:
@@ -202,13 +222,14 @@ class ModelSettings:
         for index,choice in enumerate(choices):
             service=services.get(choice.get('service'))
             model=str(choice.get('model','')).strip()
-            if not service or not service.get('api_key') or not service.get('endpoint'): raise ValueError('请先配置服务地址和密钥')
+            if choice.get('service') == 'mlx' and model != MLX_MODEL: raise ValueError('未知本机模型')
+            if not service or (choice['service'] != 'mlx' and not service.get('api_key')) or not service.get('endpoint'): raise ValueError('请先配置服务地址和密钥')
             if not model or len(model)>160 or not re.fullmatch(r'[\w@/.:+\-]+',model): raise ValueError('模型名称无效')
             if choice['service']=='deepseek' and index!=len(choices)-1: raise ValueError('付费DeepSeek必须排在最后')
             if choice['service']=='openrouter' and not model.endswith(':free'): raise ValueError('OpenRouter备用只允许选择:free模型')
             if service['protocol']=='gemini' and model.startswith('gemini-3') and (effort=='off' or model=='gemini-3.8-flash' and effort=='minimal'):
                 raise ValueError('所选Gemini不支持该思考强度，请选轻量或充分')
-            selected=effort
+            selected='off' if choice['service']=='mlx' else effort
             if profile.get('effort_explicit') and effort not in effort_options(choice['service'],model):
                 raise ValueError('所选模型不支持此思考档位，请重新选择；支持：'+ '、'.join(effort_options(choice['service'],model).values()))
             if choice['service']=='deepseek' and effort=='minimal':
@@ -221,7 +242,9 @@ class ModelSettings:
             # Existing slow fallback budgets still apply; background planning and
             # writes also need time to finish before their result can be read.
             hot = purpose in {None, 'cognition', 'voice_jev', 'vision'}
-            if not hot:
+            if purpose == 'vision' and choice['service'] == 'mlx':
+                timeout = self.vision_timeout
+            elif not hot:
                 timeout = 45.0
             elif index > 0 and model in SLOW_FALLBACK_MODELS:
                 timeout = DEGRADED_TIMEOUT_S
@@ -244,7 +267,7 @@ class ModelSettings:
                 route = self.routes.get(name)
                 model = route.chain[0] if route else None
                 endpoint = getattr(model, 'service', {}).get('endpoint', '')
-                if endpoint:
+                if endpoint and getattr(model, 'service', {}).get('protocol') != 'mlx':
                     # Routes sharing a host may call at the same time; each needs its own connection.
                     host = urlsplit(endpoint).netloc
                     first, _, count = urls.get(host, (name, endpoint, 0))
@@ -266,6 +289,8 @@ class ModelSettings:
             services={k:dict(v) for k,v in self.services.items()}
             for name,raw in data.get('services',{}).items():
                 if name not in MODELS: raise ValueError('未知服务')
+                if name == 'mlx':
+                    raise ValueError('本机 MLX 使用固定回环地址，无需配置密钥')
                 base=services.get(name,{'label':{'gemini':'Gemini网关','openrouter':'OpenRouter免费','cloudflare':'Cloudflare Workers AI'}.get(name,name),
                     'protocol':'gemini' if name=='gemini' else 'chat','thinking_supported':name=='deepseek'})
                 endpoint=str(raw.get('endpoint',base.get('endpoint',''))).strip()

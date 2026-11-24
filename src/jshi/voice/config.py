@@ -107,7 +107,7 @@ class VoiceConfig:
         if self.asr_backend == 'bailian' and self.identity_mode == 'voiceprint':
             raise ValueError('百炼识别使用本地人物识别，请设置diarization；云端voiceprint仅用于火山')
         if self.asr_backend not in ASR_BACKENDS:
-            raise ValueError("voice ASR backend must be online, local, deepgram, bailian or qwen")
+            raise ValueError("voice ASR backend must be online, local, deepgram, bailian, qwen or mlx")
         if not 1 <= self.qwen_asr_batch_size <= 32 or not 1 <= self.qwen_asr_timeout_s <= 300:
             raise ValueError('Qwen ASR批次大小须为1–32，超时须为1–300秒')
         if self.asr_backend == 'qwen' and self.identity_mode == 'voiceprint':
@@ -116,8 +116,8 @@ class VoiceConfig:
             raise ValueError('Deepgram model and language must be nonempty')
         if self.asr_backend == 'deepgram' and self.identity_mode == 'voiceprint':
             raise ValueError('Deepgram使用说话人分段；不支持火山云端voiceprint模式，请设置diarization')
-        if self.tts_backend not in {"online", "local"}:
-            raise ValueError("voice TTS backend must be online or local")
+        if self.tts_backend not in {"online", "local", "mlx"}:
+            raise ValueError("voice TTS backend must be online, local or mlx")
         if self.identity_mode not in {"diarization", "voiceprint"}:
             raise ValueError("voice identity mode must be diarization or voiceprint")
         if self.identity_mode == "voiceprint" and not self.voiceprint_group:

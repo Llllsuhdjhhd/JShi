@@ -206,6 +206,9 @@ def format_turn_input(label: str, text: str, *, stimulus: str = STIMULUS_SPEECH)
 
 def build_system(request: ModelRequest) -> str:
     from jshi.simplified import LANGUAGE_RULE
+    language = LANGUAGE_RULE
+    if request.purpose in {'subject_activity', 'voice_jev', 'voice_jev_entry', 'voice_jev_prepare', 'voice_jev_reply'}:
+        language += '\n' + REPLY_LANGUAGE_RULE
     capability = ''
     if request.purpose == 'subject_activity' or request.purpose.startswith('voice_jev'):
         capability = '\n\n【当前部署的身份与能力】\n' + DEPLOYMENT_CAPABILITIES
@@ -213,8 +216,14 @@ def build_system(request: ModelRequest) -> str:
         capability += '\n\n' + RESULT_EVIDENCE_RULE
     # The minute-level time changes every turn; keeping it last lets the fixed rules hit the prefix cache.
     now_label = _now_label(request.now) if _is_cognition(request) else ''
-    return (_build_system(request) + capability + '\n\n【文字规范】\n' + LANGUAGE_RULE
+    return (_build_system(request) + capability + '\n\n【文字规范】\n' + language
             + ('\n\n' + now_label if now_label else ''))
+
+
+REPLY_LANGUAGE_RULE = (
+    '对外回答和过渡语沿用当前交谈对象明确约定的回应语言。对方换语言提问或更换话题，本身不撤回约定；'
+    '按原话区分本次翻译和持续交谈，直到约定结束或对方另有要求。'
+)
 
 
 DEPLOYMENT_CAPABILITIES = (

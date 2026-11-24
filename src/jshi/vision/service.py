@@ -1,13 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
-from time import time
+from time import monotonic, time
 
 from .local import ChangeDetector, YoloDetector
 from .model import VisionModel
 
 
 class VisionService:
-    """Separate sampling and cloud workers, each with one pending frame."""
+    """Sample independently of inference. Each worker keeps at most one pending frame."""
     def __init__(self, store, config, model=None, detector=None, modules=()):
         self.store, self.config = store, config
         self.model = model or VisionModel(config)
@@ -31,7 +31,35 @@ class VisionService:
         self.dirty = {}
         self.online_future = None
         self.online_pending = None
+        self.local_timing = {}
         self.completed_actions = set()
+
+    @property
+    def local_model(self):
+        route = getattr(self.model, 'route', None)
+        if route is None:
+            return self.config.local_mlx
+        # A chain with a cloud fallback keeps the cloud budget and cadence.
+        return all(getattr(model, 'service', {}).get('protocol') == 'mlx' for model in route.chain)
+
+    @property
+    def model_name(self):
+        return getattr(getattr(self.model, 'route', None), 'name', self.config.model)
+
+    def _local_reason(self, key, changed):
+        with self.lock:
+            timing = self.local_timing.get(key)
+            if timing is None and self.online_future is None:
+                return 'initial'
+            if changed:
+                return 'scene_change'
+            if self.online_pending is not None:
+                return self.online_pending[4]
+            if self.online_future is not None:
+                return None
+            started, elapsed = timing
+            interval = max(self.config.local_refresh_seconds, 1.5 * elapsed)
+            return 'periodic_refresh' if monotonic() >= started + interval else None
 
     def submit(self, subject, data, captured, source='visual', *, clock=None):
         if len(data) > self.config.max_image_bytes:
@@ -39,6 +67,8 @@ class VisionService:
         with self.lock:
             if self.closed:
                 raise RuntimeError('vision closed')
+            if self.pending and self.pending[0] == subject and captured <= self.pending[2]:
+                return
             self.pending = (subject, data, captured, source, clock)
             if self.future is None or self.future.done():
                 self.future = self.executor.submit(self._drain)
@@ -62,6 +92,12 @@ class VisionService:
         normalized = self.store.prepare_image(data)
         # Detector state must not cross subjects or physical input sources.
         key = (subject, source)
+        local = self.local_model
+        adaptive = local and self.config.cloud_enabled and self.config.refresh_strategy == 'auto'
+        last_sample = self.previous.get(('capture',subject))
+        if adaptive and last_sample and captured <= last_sample[0]:
+            return None
+        self.previous[('capture',subject)] = (captured, source)
         if self.detector is None or self.previous.get('_detector_key') != key:
             if self.detector is None or '_detector_key' in self.previous:
                 self.detector = YoloDetector(self.config.weights) if self.config.detector == 'yolo' else ChangeDetector()
@@ -69,15 +105,21 @@ class VisionService:
         detections, changed = self.detector.detect(normalized)
         current = self.store.latest(subject)
         source_changed = current and current.get('envelope', {}).get('source') != source
+        if adaptive and last_sample:
+            source_changed = source != last_sample[1]
         if changed or source_changed:
             with self.lock:
                 self.dirty[key] = captured
         refresh_due = time()-self.last_online.get(key, 0) >= self.config.cooldown_seconds and (
             not current or key in self.dirty)
         extra_modules = bool(self.modules.modules)
+        if adaptive:
+            refresh_due = self._local_reason(key, changed or source_changed)
+            if not refresh_due and not extra_modules:
+                return None
         from hashlib import sha256
         image_signature = sha256(normalized).hexdigest()
-        if (not current and not extra_modules and not changed
+        if (not adaptive and not current and not extra_modules and not changed
                 and self.previous.get(('image',key)) == image_signature
                 and time()-self.last_online.get(key,0) < self.config.cooldown_seconds):
             # While the first cloud observation is pending, identical frames add
@@ -125,6 +167,10 @@ class VisionService:
         online = time() - self.last_online.get(key, 0) >= self.config.cooldown_seconds and (
             not current or key in self.dirty or time() - self.last_online.get(key, 0) >= self.config.refresh_seconds)
         online = online and self.config.cloud_enabled
+        reason = 'initial' if not current else 'change_or_refresh'
+        if adaptive:
+            reason = self._local_reason(key, changed or source_changed)
+            online = bool(reason)
         archive = (changed or source_changed or not current) and time() - self.last_archive.get(key, 0) >= self.config.archive_seconds
         if not online and not archive and not changed:
             self.store.discard_frame(subject, frame)
@@ -136,18 +182,15 @@ class VisionService:
         if online:
             self.last_online[key] = time()  # Also limits repeated API failures.
             if background:
-                self._schedule_online(subject, frame, detections, key)
+                self._schedule_online(subject, frame, detections, key, reason)
                 self.store.cleanup()
                 return None
-            if not self.store.claim_call(subject):
+            if not local and not self.store.claim_call(subject):
                 self.store.cleanup()
                 self.store.error(subject, '视觉模型达到每小时调用上限，保留已有环境信息')
                 return None
-            description, degree, change_reason = self._observe(subject, frame, current)
-            result = self.store.publish(subject, frame, description, detections, 'initial' if not current else 'change_or_refresh', self.config.model,
-                                        change_degree=degree, change_reason=change_reason)
-            self._clear_dirty(key, captured)
-        elif (current and changed) or (not current and not self.config.cloud_enabled):
+            result = self._observe_and_publish(subject, frame, detections, key, reason)
+        elif not adaptive and ((current and changed) or (not current and not self.config.cloud_enabled)):
             result = self.store.publish(subject, frame, current['description'] if current else '仅有本地视觉检测，尚未完成语义观察。', detections, 'local_detection', 'local',
                                         described_at=current['described_at'] if current else 0, change_degree='low' if current else 'unknown', change_reason='本地检测更新，环境描述未更新')
         else:
@@ -169,30 +212,41 @@ class VisionService:
         # Older/custom providers may supply text only: no inferred retention grade.
         return self.model.describe(self.store.image(frame, subject)), 'unknown', ''
 
-    def _schedule_online(self, subject, frame, detections, key):
+    def _observe_and_publish(self, subject, frame, detections, key, reason):
+        started = monotonic()
+        try:
+            description, degree, change_reason = self._observe(subject, frame, None)
+        finally:
+            if self.local_model:
+                with self.lock:
+                    self.local_timing[key] = (started, monotonic() - started)
+        model = getattr(getattr(self.model, 'response', None), 'model', self.model_name)
+        result = self.store.publish(subject, frame, description, detections, reason, model,
+                                    change_degree=degree, change_reason=change_reason)
+        self._clear_dirty(key, self.store.frame(frame, subject)['captured'])
+        return result
+
+    def _schedule_online(self, subject, frame, detections, key, reason):
         with self.lock:
             if self.closed:
                 return
             self.store.protect(frame)
-            item = (subject, frame, detections, key)
-            if self.online_future is not None and not self.online_future.done():
-                if self.online_pending:
-                    self.store.protect(self.online_pending[1], False)
-                self.online_pending = item
-            else:
-                self.online_future = self.model_executor.submit(self._online_one, item)
+            if self.online_pending:
+                self.store.protect(self.online_pending[1], False)
+            self.online_pending = (subject, frame, detections, key, reason)
+            if self.online_future is None or self.online_future.done():
+                self.online_future = self.model_executor.submit(self._online_one)
 
-    def _online_one(self, item):
-        subject, frame, detections, key = item
+    def _online_one(self):
+        # Keep the pending image replaceable until the model worker actually starts.
+        with self.lock:
+            subject, frame, detections, key, reason = self.online_pending
+            self.online_pending = None
         try:
-            if not self.store.claim_call(subject):
+            if not self.local_model and not self.store.claim_call(subject):
                 raise RuntimeError('视觉模型达到每小时调用上限')
-            current = self.store.latest(subject)
-            description, degree, change_reason = self._observe(subject, frame, current)
-            result = self.store.publish(subject, frame, description, detections, 'initial' if not current else 'change_or_refresh', self.config.model,
-                                        change_degree=degree, change_reason=change_reason)
-            self._clear_dirty(key, self.store.frame(frame, subject)['captured'])
-            if result and self.on_update:
+            result = self._observe_and_publish(subject, frame, detections, key, reason)
+            if result and self.on_update and reason != 'periodic_refresh':
                 self.on_update(result)
         except Exception as exc:
             self.store.error(subject, exc)
@@ -200,19 +254,19 @@ class VisionService:
             self.store.protect(frame, False)
             self.store.cleanup()
             with self.lock:
-                next_item, self.online_pending = self.online_pending, None
-                if next_item and not self.closed:
-                    self.online_future = self.model_executor.submit(self._online_one, next_item)
+                if self.online_pending and not self.closed:
+                    self.online_future = self.model_executor.submit(self._online_one)
                 else:
-                    if next_item:
-                        self.store.protect(next_item[1], False)
+                    if self.online_pending:
+                        self.store.protect(self.online_pending[1], False)
+                        self.online_pending = None
                     self.online_future = None
 
     def recall_image(self, subject, frame, question):
         image = self.store.image(frame, subject)
         if not self.config.cloud_enabled:
             raise RuntimeError('视觉大模型调用已关闭')
-        if not self.store.claim_call(subject):
+        if not self.local_model and not self.store.claim_call(subject):
             raise RuntimeError('视觉模型达到每小时调用上限')
         return self.model.describe(image, question=question)
 
@@ -227,7 +281,7 @@ class VisionService:
         new_image = self.store.image(current_frame, subject)
         if not hasattr(self.model, 'observe'):
             raise ValueError('视觉提供者不支持结构化比较')
-        if not self.store.claim_call(subject):
+        if not self.local_model and not self.store.claim_call(subject):
             raise RuntimeError('视觉模型达到每小时调用上限')
         return self.model.observe(new_image, previous_image=old_image,
                                   comparison_time=f'历史图在当前图前{round(new["captured"]-old["captured"])}秒。')
@@ -273,7 +327,8 @@ class VisionService:
             description = self.recall_image(subject, frame, question)
             if reason == 'recall_image':
                 description = '【历史照片重新解读，不是当前现场】\n' + description
-            result = self.store.publish(subject, frame, description, reason=reason, model=self.config.model, make_current=False)
+            model = getattr(getattr(self.model, 'response', None), 'model', self.model_name)
+            result = self.store.publish(subject, frame, description, reason=reason, model=model, make_current=False)
             if result and self.on_update:
                 self.on_update(result)
             return result

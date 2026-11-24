@@ -122,3 +122,33 @@ def test_visual_settings_bridge_keeps_format_for_original_transport(tmp_path):
     runtime.vision.model.transport({'messages': [{'role': 'user', 'content': 'JSON'}],
                                     'response_format': {'type': 'json_object'}})
     assert calls[0]['response_format'] == {'type': 'json_object'}
+
+
+@pytest.mark.parametrize('purpose', ['voice_jev_entry', 'subject_activity'])
+@pytest.mark.parametrize('stream', [False, True])
+def test_mlx_keeps_the_existing_output_contract(purpose, stream, monkeypatch):
+    from jshi.app.model_settings import MLX_MODEL
+    from jshi.skill.cognition import CognitionSkill
+
+    provider = ProviderModel({'protocol': 'mlx', 'label': 'MLX', 'endpoint': 'http://localhost/v1'}, MLX_MODEL)
+    incoming = replace(request(purpose), cognition_mode='initiative', json_output=True)
+    if purpose == 'subject_activity':
+        skill = CognitionSkill(provider)
+        system = skill.system_extra(incoming)
+        assert json.loads(system.split('JSON Schema：')[-1]) == skill.schema
+        incoming = replace(incoming, system_extra=system)
+
+    def open_response(http):
+        body = json.loads(http.data)
+        assert body['messages'] == provider._messages(incoming)
+        assert 'response_format' not in body
+        assert 'max_tokens' not in body
+        if stream:
+            return BytesIO(b'data: {"choices":[{"delta":{"content":"{}"}}]}\n\ndata: [DONE]\n')
+        return BytesIO(b'{"choices":[{"message":{"content":"{}"}}]}')
+
+    monkeypatch.setattr(provider, '_open', open_response)
+    if stream:
+        assert ''.join(provider.generate_stream(incoming)) == '{}'
+    else:
+        assert provider.generate(incoming).text == '{}'

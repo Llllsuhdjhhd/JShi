@@ -4,12 +4,12 @@ from .envelope import InputPart
 
 
 def pack_input(envelope, vision=None, subject_id='', *, observation=None):
-    if envelope.visual_snapshot_id:
+    if envelope.visual_snapshot_id or envelope.visual_context_fixed:
         return envelope
     if observation is None and vision:
-        observation = vision.store.latest_sample(subject_id)
+        observation = vision.store.latest_completed(subject_id)
     if not observation:
-        return envelope
+        return replace(envelope, visual_context_fixed=True) if vision else envelope
     parts = tuple(p for p in envelope.parts if p.kind != 'image')
     if observation['image_available']:
         parts += (InputPart('image', reference=observation['frame'], media_type='image/jpeg'),)

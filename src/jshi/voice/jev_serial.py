@@ -125,8 +125,9 @@ def entry_schema(lines, refs):
                           'items': {'type': 'array', 'items': item, 'minItems': len(lines), 'maxItems': len(lines)},
                           'utterance_complete': {'enum': ['complete', 'incomplete', 'uncertain']},
                           'control': {'enum': ['keep', 'stop', 'redirect'],
-                                      'description': '核对当前生成/待播能否继续，不是本句是否要回答。原参与被外部纠正否定选stop；本句不是提问也可stop；无关旁聊不停止有独立依据的任务。'},
-                          'route': {'enum': ['background', 'wait', 'prepare']},
+                                      'description': '旧表达的处置。当前受话人接过话轮，无论是否说完都用redirect；附和、示意继续或无关旁聊用keep；明确制止或撤回参与用stop。'},
+                          'route': {'enum': ['background', 'wait', 'prepare'],
+                                    'description': '新发言的去向。接话已完整选prepare并在process_refs列出本句I引用；接话还需后文选wait并在pending_refs列出本句I引用；旁聊或无需应答的附和选background。'},
                           'process_refs': references(current), 'pending_refs': references(current),
                           'decision_reason': {**text_schema(120, minimum=1),
                                               'description': '有生成/播放时先说明原参与的外部依据是否仍成立，再说明本句去向；不能只写本句旁聊而省略原表达能否继续。'},
@@ -359,6 +360,14 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                 if unlisted:
                     record['normalization'] = ','.join(filter(None, (record.get('normalization'), 'unlisted_person_unknown')))
             if stage in {'voice_jev', 'voice_jev_entry'}:
+                # A split fast reply cannot speak over playback. Its wording
+                # (including an overlong reply) must not veto the entry control.
+                if (mode == 'split' and stage == 'voice_jev_entry' and isinstance(data, dict)
+                        and data.get('route') == 'prepare' and isinstance(data.get('front'), dict)
+                        and data['front'].get('route') == 'self_reply'
+                        and delivery.get('state') in {'playing', 'paused', 'queued'}):
+                    data = {**data, 'front': None}
+                    record['front_deferred'] = 'active_playback'
                 if isinstance(data, dict) and data.get('control') not in ('keep', 'stop', 'redirect'):
                     # Only control may be missing/invalid. Never guess identity,
                     # references, routes or a combined preparation result.
@@ -380,6 +389,27 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                     raise ValueError('JEV缺少原表达参与依据判断，不能默认继续')
             validate(data, output)
             verdict = (data.get('participation') or {}).get('verdict')
+            if (verdict == 'continue' and data.get('interaction') == 'direct'
+                    and data.get('control') == 'redirect' and data.get('route') == 'prepare'
+                    and data.get('utterance_complete') == 'incomplete'
+                    and not data['process_refs'] and data['pending_refs']
+                    and delivery.get('state') in {'playing', 'paused'}):
+                # The listener took the floor, but selected nothing to answer.
+                data['route'] = 'wait'
+                for key in ('front', 'preparation'):
+                    if key in data:
+                        data[key] = None
+                record['participation_control'] = 'redirect_wait'
+            if (verdict == 'continue' and data.get('interaction') == 'none'
+                    and data.get('control') == 'stop' and data.get('route') == 'prepare'):
+                # Neither judgment supports stopping a valid answer or accepting
+                # a third party's instruction. A withdrawal remains independent.
+                data.update(control='keep', route='background', process_refs=[], pending_refs=[],
+                            decision_reason='程序核对：原交往仍成立，本批未向匠石交往，保留背景。')
+                for key in ('front', 'preparation'):
+                    if key in data:
+                        data[key] = None
+                record['participation_control'] = 'continue_background'
             if stage in {'voice_jev', 'voice_jev_entry'} and (verdict == 'withdraw' or
                     verdict == 'uncertain' and delivery.get('state') in {'thinking', 'playing', 'paused', 'queued'}):
                 # A semantic withdrawal cannot keep old generation/queue alive.
@@ -548,10 +578,11 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                         entry['control'] = 'redirect'
         # Playback control has its own validity boundary. A downstream routing
         # contradiction must not swallow a valid stop grounded in this batch.
-        if entry['route'] == 'prepare' and entry['control'] != 'stop' and not voice_interaction_has_basis(snapshot):
+        handoff_wait = entry['control'] == 'redirect' and entry['route'] == 'wait'
+        if (entry['route'] == 'prepare' or handoff_wait) and entry['control'] != 'stop' and not voice_interaction_has_basis(snapshot):
             stages.append({'stage': 'interaction_grounding', 'mode': mode, 'status': 'background',
                            'reason': '环境语音只有对人提问，未提供称呼、有效视觉或既有匠石交往依据'})
-            entry.update(interaction='none', route='background', control='keep', process_refs=[],
+            entry.update(interaction='none', route='background', control='keep', process_refs=[], pending_refs=[],
                          decision_reason='缺少与匠石交往的具体依据，保留原话为背景')
             preparation = None
         current_refs = {f'I{r["n"]}' for r in batch if r.get('source') != 'visual_environment'}
@@ -572,10 +603,16 @@ def decide_serial(gate, subject_id, batch, context, delivery, *, overlap=False,
                                applied_epoch=receipt if type(receipt) is int else None)
         process, pending = tuple(entry['process_refs']), tuple(entry['pending_refs'])
         route, control = entry['route'], entry['control']
+        if route == 'wait' and control == 'redirect':
+            before = snapshot['state'].get('expression_under_review', {}).get('before_playback', ())
+            if (snapshot['state'].get('state') not in {'playing', 'paused'}
+                    or entry['interaction'] != 'direct' or entry['utterance_complete'] == 'complete' or process
+                    or not ((set(pending) & current_refs & set(entry['decision_refs'])) - set(before))):
+                raise ValueError('等待接话缺少当前播放中的直接插话依据')
         if (route == 'prepare' and not process or route == 'wait' and not pending
                 or route == 'background' and process
                 or entry['utterance_complete'] == 'incomplete' and route == 'prepare'
-                or route in {'wait', 'background'} and control == 'redirect'
+                or route == 'background' and control == 'redirect'
                 or control == 'stop' and route == 'wait'
                 or entry['interaction'] == 'none' and route == 'wait'
                 or route == 'prepare' and entry['interaction'] == 'none' and control != 'stop'):

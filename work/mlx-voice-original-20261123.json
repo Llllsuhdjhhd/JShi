@@ -1,0 +1,234 @@
+{
+  "date": "2026-11-23",
+  "configuration": "恢复原接话判断与主动主认知的完整提示词和 Schema，保留 MLX 接入、系统前缀缓存和调用耗时统计。",
+  "input": {
+    "file": "mlx-voice-latency-20261122.wav",
+    "pcm_sha256": "3f938596d2433583fefa05dd088111379ff73b3024ea7cbabd0c4a36afe76b7e",
+    "text": "你好，可以怎么称呼你？",
+    "duration_s": 2.16,
+    "format": "16 kHz 单声道 PCM16，Vivian 合成的同一段录音"
+  },
+  "measurement": "同一份 Vivian 音频以 20 ms 帧实时发送到语音 WebSocket。全本机模型服务重新启动，系统前缀预热完成，TTS 先合成一次，ASR 首轮加载。逐轮新建隔离主体及进程内记忆。计时从录音末帧至客户端第一个回答音频包。",
+  "comparison": "mlx-voice-latency-20261122.json 中 before 为原方案，after 为已撤回的实验。",
+  "trials": [
+    {
+      "events": {
+        "transcript": {
+          "s": 3.35,
+          "text": "你好，可以怎么称呼你？"
+        },
+        "reply": {
+          "s": 12.877,
+          "text": "你好！我是匠石。很高兴与你交流，请问有什么我可以帮你的吗？"
+        },
+        "audio": {
+          "s": 13.201,
+          "text": "你好！"
+        },
+        "audio_end": {
+          "s": 14.593,
+          "text": ""
+        }
+      },
+      "end_to_first_audio_s": 11.041,
+      "calls": [
+        {
+          "route": "voice_jev",
+          "purpose": "voice_jev_entry",
+          "status": "ok",
+          "total_ms": 3838.2,
+          "prompt_tokens": 6015,
+          "cache_hit_tokens": 4608,
+          "completion_tokens": 316,
+          "prompt_ms": 651.0,
+          "decode_ms": 2870.8
+        },
+        {
+          "route": "cognition",
+          "purpose": "subject_activity",
+          "status": "ok",
+          "total_ms": 5317.8,
+          "prompt_tokens": 2635,
+          "cache_hit_tokens": 2048,
+          "completion_tokens": 508,
+          "prompt_ms": 367.0,
+          "decode_ms": 4630.5
+        },
+        {
+          "route": "write_zone",
+          "purpose": "write_zone",
+          "status": "ok",
+          "total_ms": 1077.8,
+          "prompt_tokens": 1051,
+          "cache_hit_tokens": 0,
+          "completion_tokens": 52,
+          "prompt_ms": 480.8,
+          "decode_ms": 493.2
+        }
+      ],
+      "transport": [
+        {
+          "route": "voice_jev",
+          "response_format": null,
+          "max_tokens": null
+        },
+        {
+          "route": "cognition",
+          "response_format": null,
+          "max_tokens": null
+        }
+      ]
+    },
+    {
+      "events": {
+        "transcript": {
+          "s": 2.894,
+          "text": "你好，可以怎么称呼你？"
+        },
+        "reply": {
+          "s": 11.127,
+          "text": "你好。我是匠石，你的计算伙伴。"
+        },
+        "audio": {
+          "s": 11.386,
+          "text": "你好。"
+        },
+        "audio_end": {
+          "s": 12.128,
+          "text": ""
+        }
+      },
+      "end_to_first_audio_s": 9.226,
+      "calls": [
+        {
+          "route": "voice_jev",
+          "purpose": "voice_jev_entry",
+          "status": "ok",
+          "total_ms": 3316.1,
+          "prompt_tokens": 5948,
+          "cache_hit_tokens": 5120,
+          "completion_tokens": 274,
+          "prompt_ms": 442.5,
+          "decode_ms": 2478.2
+        },
+        {
+          "route": "cognition",
+          "purpose": "subject_activity",
+          "status": "ok",
+          "total_ms": 4570.1,
+          "prompt_tokens": 2635,
+          "cache_hit_tokens": 2387,
+          "completion_tokens": 443,
+          "prompt_ms": 304.9,
+          "decode_ms": 3978.3
+        },
+        {
+          "route": "write_zone",
+          "purpose": "write_zone",
+          "status": "ok",
+          "total_ms": 1602.7,
+          "prompt_tokens": 1036,
+          "cache_hit_tokens": 512,
+          "completion_tokens": 108,
+          "prompt_ms": 399.9,
+          "decode_ms": 1063.7
+        }
+      ],
+      "transport": [
+        {
+          "route": "voice_jev",
+          "response_format": null,
+          "max_tokens": null
+        },
+        {
+          "route": "cognition",
+          "response_format": null,
+          "max_tokens": null
+        }
+      ]
+    },
+    {
+      "events": {
+        "transcript": {
+          "s": 2.885,
+          "text": "你好，可以怎么称呼你？"
+        },
+        "reply": {
+          "s": 10.93,
+          "text": "你好！我是匠石。很高兴认识你。"
+        },
+        "audio": {
+          "s": 11.271,
+          "text": "你好！"
+        },
+        "audio_end": {
+          "s": 11.956,
+          "text": ""
+        }
+      },
+      "end_to_first_audio_s": 9.111,
+      "calls": [
+        {
+          "route": "voice_jev",
+          "purpose": "voice_jev_entry",
+          "status": "ok",
+          "total_ms": 3003.8,
+          "prompt_tokens": 5948,
+          "cache_hit_tokens": 5947,
+          "completion_tokens": 274,
+          "prompt_ms": 19.7,
+          "decode_ms": 2594.5
+        },
+        {
+          "route": "cognition",
+          "purpose": "subject_activity",
+          "status": "ok",
+          "total_ms": 4878.1,
+          "prompt_tokens": 2635,
+          "cache_hit_tokens": 2387,
+          "completion_tokens": 477,
+          "prompt_ms": 310.2,
+          "decode_ms": 4290.1
+        },
+        {
+          "route": "write_zone",
+          "purpose": "write_zone",
+          "status": "ok",
+          "total_ms": 1479.8,
+          "prompt_tokens": 1040,
+          "cache_hit_tokens": 649,
+          "completion_tokens": 95,
+          "prompt_ms": 388.7,
+          "decode_ms": 953.0
+        }
+      ],
+      "transport": [
+        {
+          "route": "voice_jev",
+          "response_format": null,
+          "max_tokens": null
+        },
+        {
+          "route": "cognition",
+          "response_format": null,
+          "max_tokens": null
+        }
+      ]
+    }
+  ],
+  "medians": {
+    "end_to_first_audio_s": 9.226,
+    "voice_jev": {
+      "total_ms": 3316.1,
+      "decode_ms": 2594.5,
+      "prompt_ms": 442.5,
+      "completion_tokens": 274
+    },
+    "cognition": {
+      "total_ms": 4878.1,
+      "decode_ms": 4290.1,
+      "prompt_ms": 310.2,
+      "completion_tokens": 477
+    }
+  }
+}

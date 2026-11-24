@@ -21,6 +21,31 @@ def services():
             'deepseek':{'label':'D','protocol':'chat','thinking_supported':True,'paid':True,'endpoint':'https://example.test/v1','api_key':'secret'}}
 
 
+def test_vision_defaults_to_local_qwen_and_switches_strategy_with_route(tmp_path):
+    from jshi.app.model_settings import MLX_MODEL
+    from jshi.vision import VisionConfig, VisionService, VisionStore
+    from jshi.vision.model import observation_format
+
+    cfg = VisionConfig()
+    runtime = process(tmp_path)
+    vision = runtime.vision = VisionService(VisionStore(tmp_path/'vision', cfg), cfg)
+    try:
+        settings = ModelSettings(tmp_path, runtime, None)
+        row = settings.public()['rows']['vision']
+        assert vision.local_model and row['current'] == MLX_MODEL
+        assert row['effective_timeout_s'] == cfg.timeout_seconds
+        provider = settings.routes['vision'].chain[0]
+        request = provider._payload([], response_format='json_object')
+        assert json.loads(request.data)['response_format'] == observation_format()
+        assert 'Authorization' not in request.headers
+        assert 'response_format' not in json.loads(provider._payload([]).data)
+        settings.save({'name':'vision', 'services':services(), 'profile':{
+            'choices':[{'service':'deepseek','model':'deepseek-v4-flash'}]}})
+        assert not vision.local_model and vision.model_name == 'deepseek-v4-flash'
+    finally:
+        vision.close()
+
+
 def test_hot_save_persists_without_exposing_secrets(tmp_path):
     p=process(tmp_path);settings=ModelSettings(tmp_path,p,None)
     data={'services':services(),'name':'cognition','profile':{'effort':'low','choices':[{'service':'gemini','model':'gemini-3.6-flash'},{'service':'deepseek','model':'deepseek-v4-flash'}]}}
@@ -376,3 +401,20 @@ def test_tool_review_uses_background_budget_without_changing_entry(tmp_path):
     profile = {'choices': [{'service': 'deepseek', 'model': 'deepseek-v4-flash'}]}
     assert settings._chain(profile, services(), purpose='tool_wrap')[0].timeout == 45.0
     assert settings._chain(profile, services(), purpose='voice_jev')[0].timeout == 7.0
+
+
+def test_mlx_route_persists_without_credentials_and_keeps_message_roles(tmp_path):
+    from jshi.app.model_settings import MLX_MODEL
+    profile = {'choices':[{'service':'mlx','model':MLX_MODEL}], 'effort':'off', 'effort_explicit':True}
+    settings = ModelSettings(tmp_path, process(tmp_path), None)
+    settings.save({'name':'all', 'profile':profile})
+    restored = ModelSettings(tmp_path, process(tmp_path), None)
+    local = restored.routes['cognition'].chain[0]
+    messages = [{'role':'system','content':'规则'}, {'role':'user','content':'你好'}]
+    request = local._payload(messages, stream=True)
+    body = json.loads(request.data)
+    assert body['messages'] == messages
+    assert body['enable_thinking'] is False
+    assert body['stream_options']['include_usage']
+    assert not request.has_header('Authorization')
+    assert request.full_url == 'http://127.0.0.1:18765/v1/chat/completions'

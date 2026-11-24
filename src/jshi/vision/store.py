@@ -49,6 +49,7 @@ class VisionStore:
                     detections text not null, reason text not null, model text not null, described_at real not null,
                     description_frame text not null);
                 create table if not exists current(subject text primary key, snapshot text not null);
+                create table if not exists completed_current(subject text primary key, snapshot text not null);
                 create table if not exists sample_current(subject text primary key, frame text not null);
                 create table if not exists archives(frame text primary key);
                 create table if not exists bindings(subject text not null, source_id text not null,
@@ -67,6 +68,20 @@ class VisionStore:
             if 'change_degree' not in columns:
                 c.execute("alter table snapshots add column change_degree text not null default 'unknown'")
                 c.execute("alter table snapshots add column change_reason text not null default ''")
+            # Older databases sometimes display a newer detector frame alongside
+            # the last interpretation. Recover the photo that actually supplied it.
+            for row in c.execute('''select s.* from current u join snapshots s on s.id=u.snapshot
+                    join frames f on f.id=s.description_frame where s.described_at>0 and
+                    u.subject not in (select subject from completed_current)''').fetchall():
+                match = c.execute('''select id from snapshots where subject=? and frame=description_frame
+                    and frame=? and description=? and model!='local' and reason not in ('recall_image','observation_result')
+                    order by completed desc limit 1''', (row['subject'], row['description_frame'], row['description'])).fetchone()
+                sid = match[0] if match else uuid4().hex
+                if not match:
+                    c.execute('''insert into snapshots(id,subject,frame,captured,completed,description,detections,reason,model,described_at,description_frame)
+                        values(?,?,?,?,?,?,?,?,?,?,?)''', (sid,row['subject'],row['description_frame'],row['described_at'],
+                        row['completed'],row['description'],'[]','restored_observation','',row['described_at'],row['description_frame']))
+                c.execute('insert into completed_current values(?,?)', (row['subject'], sid))
 
     @contextmanager
     def db(self):
@@ -145,14 +160,21 @@ class VisionStore:
             raise ValueError('invalid environment change degree')
         sid = uuid4().hex
         with self.db() as c:
+            c.execute('begin immediate')
             f = c.execute("select captured from frames where id=? and subject=?", (frame, subject)).fetchone()
             if f is None:
                 raise KeyError("photo unavailable")
             description_frame = frame
             described_at = f[0] if described_at is None else described_at
             latest = c.execute("select s.* from current u join snapshots s on s.id=u.snapshot where u.subject=?", (subject,)).fetchone()
+            completed_sid = sid
             if make_current and latest and latest['captured'] > f[0]:
                 if model and model != 'local' and latest['described_at'] <= described_at:
+                    completed_sid = uuid4().hex
+                    c.execute('''insert into snapshots(id,subject,frame,captured,completed,description,detections,reason,model,
+                        described_at,description_frame,change_degree,change_reason) values(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                        (completed_sid,subject,frame,f[0],time(),description.strip(),json.dumps(detections, ensure_ascii=False),
+                         reason,model,described_at,description_frame,change_degree,change_reason))
                     # A fresh cloud description can accompany a newer local sample;
                     # retain both photo references and their separate observation times.
                     frame = latest['frame']
@@ -168,6 +190,8 @@ class VisionStore:
             c.execute('update snapshots set change_degree=?,change_reason=? where id=?', (change_degree, change_reason, sid))
             if make_current:
                 c.execute("insert or replace into current values(?,?)", (subject, sid))
+                if model != 'local':
+                    c.execute('insert or replace into completed_current values(?,?)', (subject, completed_sid))
         return self.snapshot(sid, subject)
 
     def snapshot(self, sid, subject):
@@ -217,6 +241,14 @@ class VisionStore:
             if current:
                 c.execute('update snapshots set change_degree=?,change_reason=? where id=?', (current['change_degree'], current['change_reason'], sid))
             return self._snapshot_row(c, c.execute('select * from snapshots where id=?', (sid,)).fetchone())
+
+    def latest_completed(self, subject):
+        """Read the last interpreted photo and its own evidence in one read transaction."""
+        with self.db() as c:
+            c.execute('begin')
+            row = c.execute('select s.* from completed_current u join snapshots s on s.id=u.snapshot where u.subject=?',
+                            (subject,)).fetchone()
+            return self._snapshot_row(c, row) if row else None
 
     def memories(self, subject, limit=30):
         with self.db() as c:

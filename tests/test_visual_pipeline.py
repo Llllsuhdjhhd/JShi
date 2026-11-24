@@ -23,7 +23,7 @@ def picture(color='red'):
 
 @pytest.fixture
 def store(tmp_path):
-    return VisionStore(tmp_path/'vision', VisionConfig())
+    return VisionStore(tmp_path/'vision', VisionConfig(model='deepseek-flash', endpoint='https://example.test/v1'))
 
 
 def test_gate_deduplicates_content_only_after_success_and_scopes_subject(store):

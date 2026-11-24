@@ -1,22 +1,40 @@
 """Dedicated multimodal API adapter; does not change text-model requests."""
 import base64
 import json
+from threading import local
 from urllib.request import Request, urlopen
+
+
+def observation_format():
+    return {'type': 'json_schema', 'json_schema': {'name': 'visual_observation', 'strict': True, 'schema': {
+        'type': 'object', 'additionalProperties': False,
+        'properties': {
+            'description': {'type': 'string'},
+            'change_degree': {'type': 'string', 'enum': ['unknown', 'none', 'low', 'medium', 'high']},
+            'change_reason': {'type': 'string'},
+        },
+        'required': ['description', 'change_degree', 'change_reason'],
+    }}}
 
 
 class VisionModel:
     def __init__(self, config, transport=None):
         self.config = config
         self.transport = transport or self._send
+        self.response = local()
 
     def _send(self, payload):
-        if not self.config.api_key:
+        if not self.config.local_mlx and not self.config.api_key:
             raise ValueError("请配置 JSHI_VISION_API_KEY 或 JSHI_API_DEEPSEEK_API_KEY")
         endpoint = self.config.endpoint.rstrip('/')
         if not endpoint.endswith('/chat/completions'):
             endpoint += '/chat/completions'
-        request = Request(endpoint, data=json.dumps(payload).encode(), headers={
-            "Authorization": "Bearer " + self.config.api_key, "Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json"}
+        if self.config.local_mlx and payload.get('response_format', {}).get('type') == 'json_object':
+            payload = {**payload, 'response_format': observation_format()}
+        if not self.config.local_mlx:
+            headers["Authorization"] = "Bearer " + self.config.api_key
+        request = Request(endpoint, data=json.dumps(payload).encode(), headers=headers)
         with urlopen(request, timeout=self.config.timeout_seconds) as response:
             return json.load(response)
 
@@ -73,11 +91,14 @@ class VisionModel:
                     '只描述当前图片，不判断前后变化；首次观察也不代表发生了变化。')
             payload['messages'][0]['content'][0]['text'] += tail
             payload['response_format'] = {'type': 'json_object'}
-        if self.config.model.startswith('deepseek'):
+        if self.config.local_mlx:
+            payload['enable_thinking'] = False
+        elif self.config.model.startswith('deepseek'):
             payload['thinking'] = {'type': 'disabled'}
         from jshi.simplified import LANGUAGE_RULE
         payload['messages'][0]['content'][0]['text'] += '\n' + LANGUAGE_RULE
         result = self.transport(payload)
+        self.response.model = result.get('model') or self.config.model
         choice = result['choices'][0]
         text = choice['message']['content']
         if not isinstance(text, str) or not text.strip():
