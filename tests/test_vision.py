@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip('PIL')
 from PIL import Image
 
+from jshi.app.capture import CaptureSources, DESKTOP
 from jshi.vision import VisionConfig, VisionStore, VisionService
 from jshi.vision.model import VisionModel
 from jshi.vision.memory import VisualMemory
@@ -26,6 +27,15 @@ def image(color='red'):
 @pytest.fixture
 def store(tmp_path):
     return VisionStore(tmp_path/'vision', VisionConfig())
+
+
+@pytest.fixture
+def desktop_capture(store):
+    captures = CaptureSources()
+    session = captures.acquire(DESKTOP, 'test-desktop')
+    store.set_capture('stone', session.capture_id)
+    session.accepting = True
+    return captures
 
 
 def snapshot(store, color='red', at=None, description='客厅里有一个人。'):
@@ -222,7 +232,7 @@ def test_failed_observation_can_retry_same_photo_and_question(store):
 
 
 @pytest.mark.parametrize('route', ['interpret', 'frame'])
-def test_visual_operations_wait_without_blocking_http_loop(store, monkeypatch, route):
+def test_visual_operations_wait_without_blocking_http_loop(store, desktop_capture, monkeypatch, route):
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
     from threading import Event
@@ -239,10 +249,10 @@ def test_visual_operations_wait_without_blocking_http_loop(store, monkeypatch, r
     async def ping(request): return web.Response(text='ready')
     async def run():
         app = web.Application()
-        install_vision(app, SimpleNamespace(vision=service), 'stone', deliver)
+        install_vision(app, SimpleNamespace(vision=service), 'stone', deliver, captures=desktop_capture)
         app.router.add_get('/ping', ping)
         async with TestClient(TestServer(app)) as client:
-            headers = {'Origin':str(client.make_url('')).rstrip('/')}
+            headers = {'Origin':str(client.make_url('')).rstrip('/'), 'X-Device-Stream':desktop_capture.active.token}
             kwargs = {'json':{'frame':'test'}} if route == 'interpret' else {'data':image()}
             pending = asyncio.create_task(client.post('/api/vision/'+route, headers=headers, **kwargs))
             try:
@@ -410,7 +420,7 @@ def test_main_uses_environment_and_keeps_raw_speech_separate(store, tmp_path):
     finally: vision.close()
 
 
-def test_visual_web_input_security_and_asynchronous_delivery(store, tmp_path):
+def test_visual_web_input_security_and_asynchronous_delivery(store, tmp_path, desktop_capture):
     from aiohttp.test_utils import TestClient, TestServer
     from aiohttp import web
     from types import SimpleNamespace
@@ -423,12 +433,12 @@ def test_visual_web_input_security_and_asynchronous_delivery(store, tmp_path):
     async def deliver(s,d): seen.append(s)
     async def run():
         app=web.Application(client_max_size=10*1024*1024)
-        install_vision(app,p,'stone',deliver)
+        install_vision(app,p,'stone',deliver,captures=desktop_capture)
         async with TestClient(TestServer(app)) as client:
             r=await client.post('/api/vision/frame',data=image())
             assert r.status==403
             origin=str(client.make_url('')).rstrip('/')
-            r=await client.post('/api/vision/frame',data=image(),headers={'Origin':origin,'X-Captured-At':str(time())})
+            r=await client.post('/api/vision/frame',data=image(),headers={'Origin':origin,'X-Captured-At':str(time()),'X-Device-Stream':desktop_capture.active.token})
             assert r.status==202
             for _ in range(100):
                 if seen: break
@@ -457,7 +467,7 @@ def test_visual_database_wait_does_not_block_http_loop(store, monkeypatch):
     async def ping(request): return web.Response(text='ready')
     async def run():
         app = web.Application()
-        install_vision(app, SimpleNamespace(vision=vision), 'stone', deliver)
+        install_vision(app, SimpleNamespace(vision=vision), 'stone', deliver, captures=CaptureSources())
         app.router.add_get('/ping', ping)
         async with TestClient(TestServer(app)) as client:
             pending = asyncio.create_task(client.get('/api/vision'))
@@ -750,7 +760,7 @@ def test_visual_capture_requires_active_voice(store):
     async def deliver(*a): pass
     async def run():
         app=web.Application()
-        install_vision(app,SimpleNamespace(vision=service),'stone',deliver,voice_active=lambda:False)
+        install_vision(app,SimpleNamespace(vision=service),'stone',deliver,captures=CaptureSources())
         async with TestClient(TestServer(app)) as c:
             origin=str(c.make_url('')).rstrip('/')
             r=await c.post('/api/vision/frame',data=image(),headers={'Origin':origin})
@@ -922,3 +932,35 @@ def test_actual_visual_request_keeps_expression_evidence_separate_from_emotion(s
     assert '脸部过小、遮挡或模糊' in content[0]['text']
     assert [p['type'] for p in content]==['text','image_url']
     assert value['change_degree']=='unknown'
+
+
+def test_capture_handoff_discards_delayed_processing_and_keeps_history(store):
+    from jshi.core.inputpack import pack_input
+    from jshi.core.envelope import InputEnvelope, InputPart, SpeakerEvidence
+
+    envelope = InputEnvelope('talk', 'voice', (InputPart('text', '看看这里'),), SpeakerEvidence('person'))
+    service = VisionService(store, store.config, Model(), Detector())
+    try:
+        store.set_capture('stone', 'old')
+        stamp = time()
+        photo = store.add_frame('stone', image(), stamp, 'desk', capture_id='old')
+        saved = store.publish('stone', photo, '电脑的画面')
+        store.set_capture('stone', 'new')
+        assert not pack_input(envelope, service, 'stone').visual_snapshot_id
+        assert service.process('stone', image(), stamp, 'desk', {'capture_id':'old'}) is None
+        assert store.publish('stone', photo, '迟到的电脑描述', model='cloud') is None
+        front = store.add_frame('stone', image('blue'), stamp, 'front', capture_id='new')
+        assert not store.latest_sample('stone')['described_at']
+        store.publish('stone', front, '前置镜头的画面')
+        back = store.add_frame('stone', image('green'), stamp+0.01, 'back', capture_id='new')
+        assert not store.frame_is_live('stone', front, 'new')
+        assert store.publish('stone', front, '迟到的前置描述', model='cloud') is None
+        live = store.latest_sample('stone')
+        assert (live['frame'], live['description_frame'], live['described_at']) == (back, back, 0)
+        assert store.frame_is_live('stone', back, 'new')
+        # The historical snapshot still names and describes the original photo.
+        assert store.snapshot(saved['id'], 'stone')['description'] == '电脑的画面'
+        store.set_capture('stone', '')
+        assert store.publish('stone', back, '断开后的结果') is None
+    finally:
+        service.close()

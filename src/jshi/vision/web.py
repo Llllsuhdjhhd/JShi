@@ -4,11 +4,13 @@ from pathlib import Path
 from time import time
 
 
-def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: True):
+def install_vision(app, process, subject_id, deliver, *, captures):
+    from jshi.app.capture import DESKTOP
     from aiohttp import web
     vision = process.vision
     queue = asyncio.Queue(maxsize=1)
     job = None
+    last_session = None
     last_sample = {}
 
     def same_origin(request):
@@ -19,26 +21,39 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
         return web.FileResponse(Path(__file__).with_name('vision_ui.html'))
 
     async def state(request):
+        owner = captures.active
         environment = await asyncio.to_thread(vision.store.latest_sample, subject_id)
         errors = await asyncio.to_thread(vision.store.errors, subject_id)
         profiles = getattr(process, 'profiles', None)
         people = await asyncio.to_thread(profiles.list) if profiles else ()
+        active = captures.active
+        if active is not owner or (active and not active.accepting):
+            environment = None
+        capture = {'kind':active.source.kind, 'id':active.capture_id} if active and active.accepting else None
         return web.json_response({'environment':environment,
             'people':[{'object_id':p.object_id,'label':p.label} for p in people],
             'face_enabled':vision.config.face_enabled, 'portrait_enabled':vision.config.portrait_enabled,
             'sample_seconds':vision.config.sample_seconds, 'model':vision.config.model,
-            'errors':errors, 'server_time':time(), 'voice_active':voice_active()}, headers={'Cache-Control':'no-store'})
+            'errors':errors, 'server_time':time(),
+            'voice_active':capture is not None, 'capture':capture}, headers={'Cache-Control':'no-store'})
 
     async def submit(request):
         same_origin(request)
-        return await accept_frame(request, source=request.headers.get('X-Visual-Source', 'browser')[:80],
-                                  still_active=voice_active)
+        session = captures.resolve(DESKTOP, request.headers.get('X-Device-Stream'))
+        if session is None:
+            raise web.HTTPConflict(text='只有当前语音连接可以发送画面')
+        source = request.headers.get('X-Visual-Source', 'browser')
+        if source not in {'browser', 'photo'}:
+            raise web.HTTPBadRequest(text='未知桌面画面来源')
+        return await accept_frame(request, source=source, session=session)
 
-    async def accept_frame(request, *, source, still_active, max_age=None):
-        if not still_active():
-            raise web.HTTPConflict(text='视觉模式需要先开启语音，请在交谈页面选择视觉模式')
-        if not source:
-            raise web.HTTPBadRequest(text='缺少画面来源')
+    async def accept_frame(request, *, source, session, max_age=None):
+        nonlocal last_session
+        if session is not captures.active or not session.accepting:
+            raise web.HTTPConflict(text='采集会话已结束')
+        if session is not last_session:
+            last_sample.clear()
+            last_session = session
         if time() - last_sample.get(source, 0) < vision.config.sample_seconds:
             raise web.HTTPTooManyRequests(text='采样过于频繁')
         try:
@@ -53,12 +68,14 @@ def install_vision(app, process, subject_id, deliver, *, voice_active=lambda: Tr
             data = await request.read()
             if len(data) > vision.config.max_image_bytes:
                 raise ValueError('图片过大')
-            if not still_active():
+            if session is not captures.active or not session.accepting:
                 raise web.HTTPConflict(text='采集会话已结束')
             if max_age is not None and time() - captured > max_age + min(uncertainty, 1):
                 raise web.HTTPRequestTimeout(text='跳过过期的手机画面')
             await asyncio.to_thread(vision.submit, subject_id, data, captured, source,
-                clock={'source_time':source_time,'clock_offset':offset,'clock_uncertainty':uncertainty})
+                clock={'capture_id':session.capture_id, 'source_time':source_time,'clock_offset':offset,'clock_uncertainty':uncertainty})
+            if session is not captures.active or not session.accepting:
+                raise web.HTTPConflict(text='采集会话已结束')
             last_sample[source] = time()
         except (ValueError, RuntimeError) as exc:
             raise web.HTTPBadRequest(text=str(exc))

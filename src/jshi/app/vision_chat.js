@@ -50,7 +50,7 @@ class JShiVisionChat {
       if(!await this.options.ensureVoice()||token!==this.epoch)return false;
       const stream=await this.options.mediaDevices.getUserMedia({video:true,audio:false});
       if(token!==this.epoch){stream.getTracks().forEach(t=>t.stop());return false;}
-      this.stream=stream;this.card=this.makeCard('正在观察',true);
+      this.stream=stream;this.latestURL='';this.card=this.makeCard('正在观察',true);
       const stop=this.element('button','','停止画面');stop.type='button';stop.onclick=()=>this.stop();
       this.card.node.children[0].appendChild(stop);
       this.card.video.srcObject=stream;this.card.video.onclick=()=>this.viewCamera();
@@ -77,16 +77,25 @@ class JShiVisionChat {
     const token=this.epoch,card=this.card,captured=Date.now()/1000,canvas=this.doc.createElement('canvas');
     canvas.width=Math.min(1280,this.card.video.videoWidth);canvas.height=canvas.width*this.card.video.videoHeight/this.card.video.videoWidth;
     canvas.getContext('2d').drawImage(this.card.video,0,0,canvas.width,canvas.height);
-    canvas.toBlob(blob=>{if(blob&&this.stream&&token===this.epoch)this.submit(blob,captured,'browser',card)},'image/jpeg',.85);
+    const streamToken=this.options.captureToken();
+    canvas.toBlob(blob=>{if(blob&&this.stream&&token===this.epoch)this.submit(blob,captured,'browser',card,streamToken)},'image/jpeg',.85);
   }
-  async submit(blob,captured,source,card) {
+  async submit(blob,captured,source,card,streamToken=this.options.captureToken()) {
     while(this.sending){if(source==='browser')return false;await this.inFlight;}
     let finish;this.inFlight=new Promise(resolve=>finish=resolve);this.sending=true;
     try {
-      let r=await this.options.request('/api/vision/frame',{method:'POST',headers:{'Content-Type':blob.type,
-        'X-Captured-At':String(captured),'X-Clock-Offset':String(this.offset),
-        'X-Clock-Uncertainty':String(this.uncertainty),'X-Visual-Source':source},body:blob});
-      if(r.status===429&&source==='photo'){await new Promise(resolve=>setTimeout(resolve,this.interval));r=await this.options.request('/api/vision/frame',{method:'POST',headers:{'Content-Type':blob.type,'X-Captured-At':String(captured),'X-Clock-Offset':String(this.offset),'X-Clock-Uncertainty':String(this.uncertainty),'X-Visual-Source':source},body:blob});}
+      const upload=()=>this.options.request('/api/vision/frame',{method:'POST',headers:{
+        'Content-Type':blob.type,'X-Device-Stream':streamToken,'X-Captured-At':String(captured),
+        'X-Clock-Offset':String(this.offset),'X-Clock-Uncertainty':String(this.uncertainty),
+        'X-Visual-Source':source},body:blob});
+      if(!streamToken||streamToken!==this.options.captureToken())return false;
+      let r=await upload();
+      if(r.status===429&&source==='photo'){
+        await new Promise(resolve=>setTimeout(resolve,this.interval));
+        if(streamToken!==this.options.captureToken())return false;
+        r=await upload();
+      }
+      if(streamToken!==this.options.captureToken())return false;
       if(!r.ok){if(r.status===429){if(source==='photo')card.description.textContent='图片发送过于频繁，请稍后重新选择';return false;}throw Error(await r.text());}
       card.lastCaptured=captured;card.meta.textContent=this.sampleLabel(captured);
       await this.poll(card);return true;
@@ -94,13 +103,16 @@ class JShiVisionChat {
     finally{this.sending=false;finish();}
   }
   async poll(card=this.card) {
+    const token=this.options.captureToken(),epoch=this.epoch;
     try {
       const start=Date.now()/1000,r=await this.options.request('/api/vision',{cache:'no-store'});
       if(!r.ok)return;const data=await r.json(),end=Date.now()/1000;
+      if(token!==this.options.captureToken()||epoch!==this.epoch)return;
       this.interval=(data.sample_seconds||2)*1000;this.offset=data.server_time-(start+end)/2;this.uncertainty=(end-start)/2;
       if(!data.voice_active&&this.stream){this.stop();return;}
       if(!card)return;
       const s=data.environment;
+      if(s?.envelope?.source && s.envelope.source!==(card.pinned?'browser':'photo'))return;
       if(s){this.latestURL=s.image_available?'/api/vision/photo/'+s.frame:'';
         card.description.textContent=s.described_at?s.description:'正在采样，环境描述尚未完成';
         card.description.title=s.described_at?s.description:'';
@@ -125,7 +137,8 @@ class JShiVisionChat {
     card.at=Date.now();const url=URL.createObjectURL(file);this.urls.push(url);
     const img=this.element('img','');img.src=url;img.alt=file.name||'聊天图片';img.onclick=()=>this.view(url);card.photos.appendChild(img);
     card.label.textContent='图片 · '+card.photos.children.length+'张';card.description.textContent='已选图片，可以继续输入文字';
-    await this.poll(card);const done=await this.submit(file,Date.now()/1000,'photo',card);
+    const streamToken=this.options.captureToken(),captured=Date.now()/1000;
+    await this.poll(card);const done=await this.submit(file,captured,'photo',card,streamToken);
     // A cloud result may arrive later; update this same card rather than adding messages.
     if(done)this.pollTimer=setInterval(()=>this.poll(card),3000);
     return done;
@@ -141,9 +154,20 @@ if(typeof module!=='undefined')module.exports=JShiVisionChat;
 else {
   visualChat=new JShiVisionChat({document,mediaDevices:navigator.mediaDevices,request:(...a)=>fetch(...a),
     pin:card=>{$('vision-dock').replaceChildren(card);$('vision-dock').hidden=false},
-    ensureVoice:async()=>{inputMode('vision');return startVoice()},notice:log,
+    captureToken:()=>captureToken,ensureVoice:async()=>{inputMode('vision');return startVoice()},notice:log,
     insert:card=>{if($('empty'))$('empty').remove();$('log').appendChild(card);while($('log').children.length>100)$('log').firstChild.remove()},
     state:active=>{$('camera-toggle').textContent=active?'观察中':'开始视频';$('camera-toggle').ariaPressed=String(active)}});
+  // The observation page operates the camera in the tab that owns the microphone.
+  if(typeof BroadcastChannel==='function'){
+    const controls=new BroadcastChannel('jshi-desktop-vision');
+    controls.onmessage=async({data})=>{
+      if(!ready||!captureId||data?.capture!==captureId)return;
+      if(data.action==='start')await visualChat.start();
+      else if(data.action==='stop')visualChat.stop();
+      else if(data.action==='photo'&&data.file instanceof Blob)await visualChat.attachPhoto(data.file);
+    };
+    window.addEventListener('pagehide',()=>controls.close(),{once:true});
+  }
   $('attach-photo').onclick=()=>$('photo-file').click();
   $('photo-file').onchange=()=>{const file=$('photo-file').files[0];if(file)visualChat.attachPhoto(file);$('photo-file').value='';};
   $('camera-toggle').onclick=()=>visualChat.stream||visualChat.starting?visualChat.stop():visualChat.start();

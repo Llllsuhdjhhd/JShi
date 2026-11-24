@@ -15,6 +15,8 @@ from weakref import WeakSet
 
 from aiohttp import web
 
+from .capture import CaptureSource
+
 
 @dataclass
 class PhoneListener:
@@ -56,13 +58,10 @@ class PhoneListener:
         return f'https://{host}:{self.port}/'
 
 
-PHONE_SOCKETS = web.AppKey('phone_sockets', WeakSet)
-
-
 # Only audio transport and playback control cross the device boundary.
 PHONE_CONTROLS = {'speech_start', 'speech_end', 'played', 'stop', 'end', 'audio_clock'}
 EVENT_FIELDS = {
-    'ready': (), 'notice': ('text',), 'reply': ('reply_id', 'paused'),
+    'ready': ('stream',), 'notice': ('text',), 'reply': ('reply_id', 'paused'),
     'audio': ('reply_id', 'segment', 'rate', 'pcm'), 'audio_end': ('reply_id',),
     'segment_end': ('reply_id', 'segment'),
     **{kind: ('reply_id', 'permit_seq', 'reason_id', 'cleared')
@@ -70,11 +69,11 @@ EVENT_FIELDS = {
 }
 
 
-def create_device_app(code, connection, submit_frame, vision_config, voice_busy):
+def create_device_app(code, connection, submit_frame, vision_config, *, captures, voice_busy):
     cookie_name = 'jshi_phone'
     signing_key = secrets.token_bytes(32)
     attempts = deque()
-    active = None
+    sockets = WeakSet()
     uploading = set()
     max_bytes = vision_config.max_image_bytes if vision_config else 1024
     app = web.Application(client_max_size=max(max_bytes + 1, 4096))
@@ -112,38 +111,34 @@ def create_device_app(code, connection, submit_frame, vision_config, voice_busy)
                             httponly=True, samesite='Strict', path='/')
         return response
 
+    def source(request):
+        owner = request.cookies[cookie_name]
+        return CaptureSource('phone', hashlib.sha256(owner.encode()).hexdigest()[:16])
+
     async def info(request):
         is_paired = paired(request)
         state = 'available'
         if is_paired and voice_busy():
-            state = 'this_device' if active and active[0] == request.cookies[cookie_name] else 'in_use'
+            state = 'this_device' if captures.active and captures.active.source == source(request) else 'in_use'
         return web.json_response({'paired': is_paired, 'server_time': time(), 'voice_state': state,
             'min_interval': vision_config.sample_seconds if vision_config else None},
             headers={'Cache-Control': 'no-store'})
 
     async def voice(request):
-        nonlocal active
         authorize(request)
         if request.query:
             raise web.HTTPBadRequest(text='识别和播报使用主机设置')
-        stream = secrets.token_urlsafe(24)
-        owner = request.cookies[cookie_name]
-        device_id = hashlib.sha256(owner.encode()).hexdigest()[:16]
-
         async def forward(ws, event):
-            nonlocal active
             kind = event['type']
             if kind == 'notice' and not event.get('device_notice'):
                 return
             if kind not in EVENT_FIELDS:
                 return
             message = {k: event[k] for k in EVENT_FIELDS[kind] if k in event}
-            if kind == 'ready':
-                active = (owner, stream, ws, device_id)
-                message['stream'] = stream
             await ws.send_json({'type': kind, **message})
         try:
-            return await connection(request, device_send=forward, device_id=device_id)
+            return await connection(request, source=source(request), device_send=forward,
+                                    controls=PHONE_CONTROLS, sockets=sockets)
         except (web.HTTPBadRequest, web.HTTPConflict) as exc:
             # Browsers hide HTTP bodies on a failed WebSocket handshake.
             ws = web.WebSocketResponse()
@@ -151,16 +146,12 @@ def create_device_app(code, connection, submit_frame, vision_config, voice_busy)
             await ws.send_json({'type': 'notice', 'text': exc.text})
             await ws.close()
             return ws
-        finally:
-            if active and active[:2] == (owner, stream):
-                active = None
 
     async def frame(request):
         authorize(request)
-        session = (request.cookies[cookie_name], request.headers.get('X-Device-Stream'))
-        def current():
-            return active is not None and active[:2] == session and not active[2].closed
-        if not current():
+        device = source(request)
+        session = captures.resolve(device, request.headers.get('X-Device-Stream'))
+        if session is None:
             raise web.HTTPConflict(text='本次设备连接已结束')
         if submit_frame is None:
             raise web.HTTPServiceUnavailable(text='主机没有开启视觉')
@@ -173,8 +164,8 @@ def create_device_app(code, connection, submit_frame, vision_config, voice_busy)
             raise web.HTTPTooManyRequests(text='上一帧仍在接收')
         uploading.add(session)
         try:
-            return await submit_frame(request, source=f'phone-{active[3]}-{lens}',
-                                      still_active=current, max_age=5)
+            return await submit_frame(request, source=f'phone-{device.device_id}-{lens}',
+                                      session=session, max_age=5)
         finally:
             uploading.discard(session)
 
@@ -190,8 +181,6 @@ def create_device_app(code, connection, submit_frame, vision_config, voice_busy)
     app.router.add_get('/api/device', info)
     app.router.add_get('/voice', voice)
     app.router.add_post('/api/device/frame', frame)
-    sockets = WeakSet()
-    app[PHONE_SOCKETS] = sockets
 
     async def shutdown(app):
         await asyncio.gather(*(ws.close(code=1001) for ws in tuple(sockets)))
@@ -199,8 +188,8 @@ def create_device_app(code, connection, submit_frame, vision_config, voice_busy)
     return app
 
 
-def install_listener(desktop, config, connection, submit_frame, vision_config, voice_busy):
-    device = create_device_app(config.code, connection, submit_frame, vision_config, voice_busy)
+def install_listener(desktop, config, connection, submit_frame, vision_config, *, captures, voice_busy):
+    device = create_device_app(config.code, connection, submit_frame, vision_config, captures=captures, voice_busy=voice_busy)
     async def serve(app):
         runner = web.AppRunner(device, shutdown_timeout=5)
         await runner.setup()

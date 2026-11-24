@@ -48,6 +48,7 @@ class VisionStore:
                     captured real not null, completed real not null, description text not null,
                     detections text not null, reason text not null, model text not null, described_at real not null,
                     description_frame text not null);
+                create table if not exists live_capture(subject text primary key, capture_id text not null);
                 create table if not exists current(subject text primary key, snapshot text not null);
                 create table if not exists sample_current(subject text primary key, frame text not null);
                 create table if not exists archives(frame text primary key);
@@ -68,6 +69,34 @@ class VisionStore:
                 c.execute("alter table snapshots add column change_degree text not null default 'unknown'")
                 c.execute("alter table snapshots add column change_reason text not null default ''")
 
+            if 'capture_id' not in {r[1] for r in c.execute('pragma table_info(frames)')}:
+                c.execute("alter table frames add column capture_id text not null default ''")
+
+    def set_capture(self, subject, capture_id):
+        """Switch the live view atomically. Historical frames and bindings keep their IDs."""
+        with self.db() as c:
+            c.execute('begin immediate')
+            if capture_id:
+                c.execute('insert or replace into live_capture values(?,?)', (subject, capture_id))
+            else:
+                c.execute('delete from live_capture where subject=?', (subject,))
+            c.execute('delete from current where subject=?', (subject,))
+            c.execute('delete from sample_current where subject=?', (subject,))
+
+    @staticmethod
+    def _capture_matches(c, subject, capture_id):
+        owner = c.execute('select capture_id from live_capture where subject=?', (subject,)).fetchone()
+        if owner is None:
+            return not capture_id  # Standalone/offline vision processing.
+        return bool(capture_id) and owner[0] == capture_id
+
+    def frame_is_live(self, subject, frame, capture_id):
+        with self.db() as c:
+            return bool(c.execute("""select 1 from frames f
+                join sample_current u on u.subject=f.subject join frames latest on latest.id=u.frame
+                where f.subject=? and f.id=? and f.capture_id=? and latest.capture_id=f.capture_id
+                and latest.source=f.source""", (subject, frame, capture_id)).fetchone())
+
     @contextmanager
     def db(self):
         with sqlite3.connect(self.path, timeout=10) as c:
@@ -87,7 +116,7 @@ class VisionStore:
             image.save(out, "JPEG", quality=82)
         return out.getvalue()
 
-    def add_frame(self, subject, data, captured, source="visual", *, source_time=None, clock_offset=0, clock_uncertainty=0):
+    def add_frame(self, subject, data, captured, source="visual", *, capture_id="", source_time=None, clock_offset=0, clock_uncertainty=0):
         if not subject or not source or not isinstance(captured, (int, float)):
             raise ValueError("invalid visual envelope")
         import math
@@ -101,12 +130,20 @@ class VisionStore:
         envelope = MediaEnvelope(source, 'image', captured, time(), frame,
                                  captured if source_time is None else source_time, clock_offset, clock_uncertainty)
         with self.db() as c:
+            c.execute('begin immediate')
+            if not self._capture_matches(c, subject, capture_id):
+                return None
             c.execute("insert or ignore into assets values(?,?,?)", (asset, encoded, len(encoded)))
-            c.execute("insert into frames values(?,?,?,?,?,?)", (frame, subject, source, captured, time(), asset))
+            c.execute("insert into frames(id,subject,source,captured,received,asset,capture_id) values(?,?,?,?,?,?,?)", (frame, subject, source, captured, time(), asset, capture_id))
             c.execute('insert into envelopes values(?,?)', (frame,json.dumps(asdict(envelope))))
             c.execute('''insert into sample_current values(?,?) on conflict(subject) do update set frame=excluded.frame
                 where (select captured from frames where id=excluded.frame) >=
                       (select captured from frames where id=sample_current.frame)''', (subject, frame))
+            # A newly selected lens or attachment starts with its own observation.
+            c.execute("""delete from current where subject=? and snapshot in (
+                select s.id from snapshots s join frames f on f.id=s.frame
+                join sample_current u on u.subject=s.subject join frames newest on newest.id=u.frame
+                where s.subject=? and f.source != newest.source)""", (subject, subject))
         return frame
 
     def image(self, frame, subject):
@@ -145,9 +182,17 @@ class VisionStore:
             raise ValueError('invalid environment change degree')
         sid = uuid4().hex
         with self.db() as c:
-            f = c.execute("select captured from frames where id=? and subject=?", (frame, subject)).fetchone()
+            c.execute('begin immediate')
+            f = c.execute("select captured,source,capture_id from frames where id=? and subject=?", (frame, subject)).fetchone()
             if f is None:
                 raise KeyError("photo unavailable")
+            if make_current:
+                if not self._capture_matches(c, subject, f['capture_id']):
+                    return None
+                selected = c.execute("""select f.source from sample_current u join frames f on f.id=u.frame
+                    where u.subject=?""", (subject,)).fetchone()
+                if selected and selected[0] != f['source']:
+                    return None
             description_frame = frame
             described_at = f[0] if described_at is None else described_at
             latest = c.execute("select s.* from current u join snapshots s on s.id=u.snapshot where u.subject=?", (subject,)).fetchone()

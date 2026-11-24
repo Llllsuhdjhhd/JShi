@@ -223,6 +223,7 @@ def test_visual_route_state_and_manual_correction_are_same_origin(store):
     import asyncio
     from types import SimpleNamespace
     from aiohttp import web
+    from jshi.app.capture import CaptureSources
     from jshi.vision.web import install_vision
     config=replace(store.config, face_enabled=True, cloud_enabled=False)
     service=VisionService(store,config)
@@ -236,7 +237,7 @@ def test_visual_route_state_and_manual_correction_are_same_origin(store):
     async def run():
         app=web.Application()
         async def deliver(*args):pass
-        install_vision(app,process,'stone',deliver)
+        install_vision(app,process,'stone',deliver,captures=CaptureSources())
         routes={r.resource.canonical:r.handler for r in app.router.routes() if r.method!='HEAD'}
         def request(payload=None,origin='http://localhost'):
             async def read():return payload

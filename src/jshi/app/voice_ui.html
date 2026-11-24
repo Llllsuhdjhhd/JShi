@@ -358,7 +358,7 @@ $('mode-vision').onclick=async()=>{inputMode('vision');await visualChat?.start()
 fetch('/status').then(r=>r.json()).then(s=>{$('mode-vision').hidden=true});
 inputMode('text');
 refreshPanels();
-let ws, mic, captureContext, outputContext, capture, ready = false;
+let ws, mic, captureContext, outputContext, capture, ready = false, captureToken = '', captureId = '';
 let replyId = '', paused = false, queue = [], playing = null, source = null;
 let permitSeq = 0; const holdReasons = new Set(), nextHolds = new Set();
 const speechLevel = 0.02, sustainFrames = 4;
@@ -988,7 +988,7 @@ function message(m) {
     for(const id of m.input_ids){const row=inputRows.get(id);if(row){row.p.style.outline='';row.meta.textContent=m.label+' · 手动关联';row.who.textContent=displayedSpeaker({label:m.label,method:'manual_annotation',status:'recognized'})+'：';row.identityView={label:m.label,source:'人工',state:'确定',reason:'用户手动关联'};refreshIdentityDetails(row);row.p.classList.remove('selected');row.button.textContent='选择声音';}}
     selectedInputs.clear();selectionChanged();$('enroll-status').textContent='已关联 '+m.label+'：本次选择 '+m.clips+' 段，累计已保存 '+(m.reference_count ?? 1)+' 段（最多10段）；比对采用平均匹配分。兼容录音保留 '+m.seconds+' 秒。'+(m.min_similarity!=null ? '样本最低相似度 '+m.min_similarity+'（仅供参考）。' : '')+(m.warning || '');return;
   }
-  if (m.type==='ready') { try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true;refreshTextPeople();if(window.refreshVisionAvailability)window.refreshVisionAvailability();voiceButton(true,'对话中'); $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '')+(m.speaker_split==='enabled'?' · 本地多人分段已启用':'');if(m.speaker_split_error)log(m.speaker_split_error);
+  if (m.type==='ready') { captureToken=m.stream;captureId=m.capture_id; try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true;refreshTextPeople();if(window.refreshVisionAvailability)window.refreshVisionAvailability();voiceButton(true,'对话中'); $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '')+(m.speaker_split==='enabled'?' · 本地多人分段已启用':'');if(m.speaker_split_error)log(m.speaker_split_error);
     $('match-threshold').disabled=m.match_threshold==null;
     if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);$('match-status').textContent='单句确认至少 '+Number(m.single_confirmation_threshold ?? Math.max(.65,m.match_threshold)).toFixed(2)+'，与第二候选须相差 '+m.match_margin+'；较弱声音先收集多段核对，待定声音不参与姓名竞争。';}
     voiceprintAvailable=m.voiceprint_available!==false;selectionChanged();
@@ -1244,7 +1244,7 @@ async function end() {
 }
 async function closeVoice() {
   if(cancelHandshake){cancelHandshake(false);cancelHandshake=null;}
-  stopVision();inputMode('text');
+  captureToken='';captureId='';stopVision();inputMode('text');
   if(pendingTyped){pendingTyped.badge.textContent='连接已关闭，接收状态待确认';if(!$('typed').value)$('typed').value=pendingTyped.text;pendingTyped=null;textSending=false;$('send-text').disabled=false;}
   $('voice-dock').classList.remove('active');$('voice-hint').textContent='语音已停止，点击「开始对话」重新连接';
   ready=false;voiceButton(false); mainBusy=false;clearTimeout(silenceTimer); clearPlayback();

@@ -62,10 +62,18 @@ class VisionService:
         normalized = self.store.prepare_image(data)
         # Detector state must not cross subjects or physical input sources.
         key = (subject, source)
-        if self.detector is None or self.previous.get('_detector_key') != key:
+        capture_id = (clock or {}).get('capture_id', '')
+        detector_key = (key, capture_id)
+        if self.detector is None or self.previous.get('_detector_key') != detector_key:
+            if self.previous.get(('capture', key)) != capture_id:
+                self.last_online.pop(key, None)
+                self.last_archive.pop(key, None)
+                self.previous.pop(('image', key), None)
+                self.previous.pop(('modules', key), None)
+                self.previous[('capture', key)] = capture_id
             if self.detector is None or '_detector_key' in self.previous:
                 self.detector = YoloDetector(self.config.weights) if self.config.detector == 'yolo' else ChangeDetector()
-            self.previous['_detector_key'] = key
+            self.previous['_detector_key'] = detector_key
         detections, changed = self.detector.detect(normalized)
         current = self.store.latest(subject)
         source_changed = current and current.get('envelope', {}).get('source') != source
@@ -88,6 +96,10 @@ class VisionService:
             # archive or snapshot, even when the periodic archive timer expires.
             return None
         frame = self.store.add_frame(subject, data, captured, source, **(clock or {}))
+        if frame is None:  # The capture ended while this worker was processing the image.
+            return None
+        if source_changed:
+            current = None
         self.previous[('image',key)] = image_signature
         from dataclasses import asdict
         from .evidence import VisualEvidence

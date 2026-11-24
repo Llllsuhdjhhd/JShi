@@ -4232,7 +4232,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         hashlib.sha256(subject_id.encode()).hexdigest()[:16])
     dialogue.import_history(subject_id, process.repository.list_history(subject_id, HistoryKind.FACT, 2000))
     app = web.Application(client_max_size=max(8 * 1024 * 1024, visual.config.max_image_bytes if visual else 0))
-    busy = False
+    from .capture import CaptureSources, DESKTOP
+    captures = CaptureSources()
+    if visual:
+        async def reset_live_capture(app):
+            await asyncio.to_thread(visual.store.set_capture, subject_id, '')
+        app.on_startup.append(reset_live_capture)
     cleanup_stage = ""
     registry_busy = False
     text_write_task = None
@@ -4276,11 +4281,18 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         if environment.get('reason') in {'local_detection', 'sample'}:
             return  # Reused descriptions are display state, not a new cognitive stimulus.
         environment_pending = environment
-        while registry_busy or (busy and active_conversation is None):
+        while registry_busy or (captures.active and active_conversation is None):
             await asyncio.sleep(.1)
         environment, environment_pending = environment_pending, None
         if environment is None:
             return
+        if environment.get('reason') != 'recall_image':
+            session = captures.active
+            if session is None or not session.accepting:
+                return
+            live = await asyncio.to_thread(visual.store.frame_is_live, subject_id, environment['frame'], session.capture_id)
+            if not live or captures.active is not session or not session.accepting:
+                return
         envelope = InputEnvelope(session_id='visual-environment', source='visual_environment',
             parts=(InputPart('text', '【环境观察变化或观察结果，不是人物发言】\n' + environment['description']),
                    InputPart('image', reference=environment['frame'], media_type='image/jpeg')),
@@ -4573,7 +4585,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 headers={'Cache-Control': 'no-store'})
         if request.headers.get('Origin', '') != f'http://{request.host}':
             raise web.HTTPForbidden(text='登记操作需要同源请求')
-        if busy or registry_busy:
+        if captures.active or registry_busy:
             raise web.HTTPConflict(text='请先结束语音对话，再登记或修改姓名')
         registry_busy = True
         try:
@@ -4671,7 +4683,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         from jshi.voice.segmentation import segment_settings
         memory_backend = getattr(process.memory, '_backend', process.memory)
         memory_info = getattr(memory_backend, 'runtime_info', None)
-        return web.json_response({"busy": busy, "cleanup_stage": cleanup_stage, "asr": getattr(local, 'backend', 'local') if local is not None else config.asr_backend,
+        return web.json_response({"busy": captures.active is not None, "cleanup_stage": cleanup_stage, "asr": getattr(local, 'backend', 'local') if local is not None else config.asr_backend,
             'memory': memory_info() if callable(memory_info) else None,
             'text_scene_writing': text_write_task is not None and not text_write_task.done(),
             'text_scene_write_error': text_write_error,
@@ -4742,10 +4754,10 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         from jshi.subject.cognition_runtime import runtime_for
         if request.headers.get('Origin', '') != f'http://{request.host}':
             raise web.HTTPForbidden(text='需要同源请求')
-        if busy or registry_busy or active_conversation is not None:
+        if captures.active or registry_busy or active_conversation is not None:
             return web.json_response({'reply': ''})
         payload = await request.json()
-        if busy or registry_busy or active_conversation is not None:
+        if captures.active or registry_busy or active_conversation is not None:
             return web.json_response({'reply': ''})
         owner = str(payload.get('object_id') or '')
         person = process.profiles.get(owner)
@@ -4819,7 +4831,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             runtime_for(process, subject_id).interrupt()
             while initiative_processing:
                 await asyncio.sleep(.025)
-        if busy or registry_busy:
+        if captures.active or registry_busy:
             raise web.HTTPConflict(text='正在处理其他会话。语音连接时请在当前页面发送文字；或结束语音后再试。')
         try:
             payload = await request.json()
@@ -4837,7 +4849,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             raise web.HTTPBadRequest(text='请输入1–2000个字')
         if profile is None or profile.status == 'rejected' or profile.source == 'voice_scene':
             raise web.HTTPBadRequest(text='请先选择一个有效人物')
-        if busy or registry_busy:
+        if captures.active or registry_busy:
             raise web.HTTPConflict(text='正在处理其他会话，请稍后再发送')
         registry_busy = True
         text_interactions[profile.object_id] = monotonic()
@@ -5013,12 +5025,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             model_status_sink = None
             registry_busy = False
 
-    async def connection(request, *, device_send=None, device_id=None):
-        nonlocal busy, cleanup_stage, active_conversation
+    async def connection(request, *, source=DESKTOP, device_send=None, controls=None, sockets=None):
+        nonlocal cleanup_stage, active_conversation
         origin = request.headers.get("Origin", "")
         if origin != f"{request.scheme}://{request.host}":
             raise web.HTTPForbidden(text="voice connection requires same origin")
-        if busy or registry_busy:
+        if captures.active or registry_busy:
             raise web.HTTPConflict(text="已有一个语音会话，请先结束它。")
         backend = request.query.get("asr", getattr(local, 'backend', 'local') if local is not None else config.asr_backend)
         if backend not in ASR_BACKENDS:
@@ -5047,7 +5059,6 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             raise web.HTTPBadRequest(text='Qwen请使用diarization模式；云端voiceprint仅用于火山')
         if config.separation_backend != 'off' and backend != 'qwen' and not config.api_key:
             raise web.HTTPBadRequest(text='当前后端分离音轨转写需要JSHI_VOICE_API_KEY')
-        busy = True
         cleanup_stage = ""
         ws = web.WebSocketResponse(max_msg_size=128 * 1024, heartbeat=20)
         conversation = None
@@ -5066,11 +5077,15 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         from jshi.voice.capture import PcmCapture
         capture_source = PcmCapture()
         audio = SessionAudio(archive=recent_audio)
+        capture = captures.acquire(source, audio.capture_id)
+        start_visual = None
         try:
             await ws.prepare(request)
-            if device_send:
-                from .phone_device import PHONE_SOCKETS, PHONE_CONTROLS
-                request.app[PHONE_SOCKETS].add(ws)
+            if sockets is not None:
+                sockets.add(ws)
+            if visual:
+                start_visual = asyncio.create_task(asyncio.to_thread(visual.store.set_capture, subject_id, capture.capture_id))
+                await asyncio.shield(start_visual)
             async with ClientSession(timeout=ClientTimeout(total=None, sock_connect=15, sock_read=60)) as http:
                 cloud = VolcVoice(replace(config, asr_backend=backend), http)
                 speakers = use_local.speakers if use_local else (online_speakers or (local.speakers if local else None))
@@ -5110,9 +5125,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     utterance_material=config.utterance_material,
                     session_id=request.query.get("session") or None)
                 active_conversation = conversation
-                if device_send:
-                    conversation.record('capture_device', {'source': 'phone', 'device_id': device_id,
-                        'session_id': conversation.session_id, 'capture_id': audio.capture_id})
+                conversation.record('capture_device', {'source': source.kind, 'device_id': source.device_id,
+                    'session_id': conversation.session_id, 'capture_id': capture.capture_id})
                 if use_local is not None:
                     use_local.reset_session()
                     conversation.speech_active = getattr(getattr(use_local, 'detector', None), 'speech_active', lambda: False)
@@ -5328,7 +5342,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     receiver = asyncio.create_task(receive())
                 from jshi.voice.diagnostics import watch_event_loop
                 loop_watch = asyncio.create_task(watch_event_loop(conversation.record))
-                await conversation.emit("ready", session_id=conversation.session_id, identity_mode="local" if use_local else config.identity_mode,
+                capture.accepting = True
+                await conversation.emit("ready", stream=capture.token, capture_id=capture.capture_id, session_id=conversation.session_id, identity_mode="local" if use_local else config.identity_mode,
                     continuous_speaker_analysis=('disabled' if config.continuous_analysis == 'off' else
                         ('shadow' if config.continuous_analysis == 'shadow' else 'enabled') if audio_timeline else 'unavailable'),
                     independent_transcription='enabled' if recovery_intake else
@@ -5375,7 +5390,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     elif message.type == WSMsgType.TEXT:
                         payload = message.json()
                         kind = payload.get("type")
-                        if device_send and kind not in PHONE_CONTROLS:
+                        if controls is not None and kind not in controls:
                             continue
                         if kind == 'audio_clock':
                             row = {'at_ms': round(time()*1000), 'session_id': conversation.session_id,
@@ -5503,6 +5518,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         elif kind == "played":
                             await conversation.acknowledge(payload)
                         elif kind == "end":
+                            capture.accepting = False
                             if asr is not None:
                                 await asr.finish()
                                 if asr.wait_for_final:
@@ -5518,6 +5534,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             if not ws.closed:
                 await ws.send_json({"type": "notice", "text": f"语音连接失败：{type(exc).__name__}: {exc}"})
         finally:
+            capture.accepting = False
             def closing(stage):
                 nonlocal cleanup_stage
                 cleanup_stage = stage
@@ -5551,14 +5568,31 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                         await action()
                     except Exception:
                         logging.getLogger(__name__).exception('Voice cleanup failed: %s', stage)
+            async def finish_session():
+                nonlocal active_conversation
+                try:
+                    await cleanup()
+                finally:
+                    try:
+                        if start_visual is not None:
+                            # A disconnected HTTP handler may have stopped awaiting this worker.
+                            await start_visual
+                            await asyncio.to_thread(visual.store.set_capture, subject_id, '')
+                    finally:
+                        if sockets is not None:
+                            sockets.discard(ws)
+                        active_conversation = None
+                        captures.release(capture)
+                        closing("")
+
+            # Closing the WebSocket can cancel its request handler. The source slot
+            # stays occupied until the visual transaction and all audio cleanup finish.
+            finish = asyncio.create_task(finish_session())
             try:
-                await cleanup()
-            finally:
-                if device_send and ws.prepared:
-                    request.app[PHONE_SOCKETS].discard(ws)
-                active_conversation = None
-                busy = False
-                cleanup_stage = ""
+                await asyncio.shield(finish)
+            except asyncio.CancelledError:
+                await asyncio.shield(finish)
+                raise
         return ws
 
     app.router.add_get("/", page)
@@ -5613,11 +5647,11 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     submit_frame = None
     if getattr(process, 'vision', None):
         from jshi.vision.web import install_vision
-        submit_frame = install_vision(app, process, subject_id, deliver_environment, voice_active=lambda: active_conversation is not None)
+        submit_frame = install_vision(app, process, subject_id, deliver_environment, captures=captures)
     if phone_listener is not None:
         from .phone_device import install_listener
         install_listener(app, phone_listener, connection, submit_frame, visual.config if visual else None,
-                         voice_busy=lambda: busy or registry_busy)
+                         captures=captures, voice_busy=lambda: captures.active is not None or registry_busy)
     return app
 
 

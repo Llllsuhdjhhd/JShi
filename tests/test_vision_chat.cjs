@@ -15,7 +15,7 @@ async function main(){
   const mediaDevices={getUserMedia:()=>{calls++;return new Promise(resolve=>release=resolve)}};
   let data={sample_seconds:2,server_time:Date.now()/1000,voice_active:true,
     environment:{image_available:true,frame:'first',description:'有人在门边',described_at:20},errors:[]};
-  const chat=new VisionChat({document,mediaDevices,ensureVoice:async()=>true,
+  const chat=new VisionChat({document,mediaDevices,captureToken:()=>'desktop-1',ensureVoice:async()=>true,
     pin:card=>pinned.push(card),insert:card=>cards.push(card),request:async()=>response(data),notice(){},state(){}});
   chat.tick=()=>{};
   const first=chat.start(),second=chat.start();
@@ -55,6 +55,7 @@ async function main(){
   let finish,uploads=[];
   chat.options.request=async(url,options)=>{
     if(!options?.method)return response(data);
+    assert.equal(options.headers['X-Device-Stream'],'desktop-1');
     uploads.push(options.headers['X-Visual-Source']);
     if(uploads.length===1)await new Promise(resolve=>finish=resolve);
     return response(data);
