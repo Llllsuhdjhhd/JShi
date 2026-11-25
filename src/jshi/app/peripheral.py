@@ -11,7 +11,7 @@ from jshi.voice.playback_echo import PlaybackEcho
 
 
 class Peripheral:
-    def __init__(self, source: CaptureSource, socket):
+    def __init__(self, source: CaptureSource, socket, *, playback=False):
         self.source = source
         self.socket = socket
         self.session = None
@@ -21,32 +21,57 @@ class Peripheral:
         self.audio_ready = False
         self.camera_token = ''
         self.echo = None
+        self.playback = playback
+        self.stopping = False
 
-    async def attach(self, session, controller, *, echo=False):
+    async def attach(self, session, controller):
         if self.socket.closed or self.session is not None:
             raise RuntimeError('手机来源暂不可用，请重新选择')
-        self.echo = PlaybackEcho() if echo else None
         self.session, self.controller = session, controller
+        self.stopping = False
         self.queue = asyncio.Queue(maxsize=12)
         self.pump = asyncio.create_task(self.read_controller())
         await self.socket.send_json({'type':'start', 'stream':session.token})
+
+    async def deliver(self, event, controller):
+        """Keep the transcript on the controller and render audio only on its bound phone."""
+        kind = event['type']
+        if kind in {'reply','audio','segment_end','audio_end','pause','resume','stop','block_next','clear_block'}:
+            if self.stopping or self.session is None or self.controller is not controller or not self.session.accepting:
+                return
+            payload = {k:event[k] for k in ('type','reply_id','segment','rate','pcm','paused','permit_seq','reason_id','cleared')
+                       if k in event}
+            await self.socket.send_json({'type':'playback','stream':self.session.token,'event':payload})
+            if kind == 'audio':
+                return
+        await controller.send_json(event)
 
     async def read_controller(self):
         try:
             async for message in self.controller:
                 # PCM and microphone activity may only come from the selected peripheral.
                 if message.type == WSMsgType.BINARY:
-                    data = message.data
-                    if self.echo and len(data) == 644 and data.startswith(PlaybackEcho.tag):
-                        self.echo.reference(data[4:])
                     continue
-                if message.type == WSMsgType.TEXT and message.json().get('type') in (
-                        'speech_start','speech_end','audio_clock'):
-                    continue
+                if message.type == WSMsgType.TEXT:
+                    kind = message.json().get('type')
+                    if kind in {'speech_start','speech_end','audio_clock','played'}:
+                        continue
+                    if kind == 'end':
+                        await self.standby()
                 await self.queue.put(message)
         finally:
             if self.session is not None:
+                await self.standby()
                 await self.queue.put(None)
+
+    async def standby(self):
+        if self.stopping:
+            return
+        self.stopping = True
+        self.audio_ready = False
+        if not self.socket.closed:
+            with suppress(ConnectionError):
+                await self.socket.send_json({'type':'standby'})
 
     async def messages(self):
         while (message := await self.queue.get()) is not None:
@@ -59,7 +84,7 @@ class Peripheral:
 
     async def incoming(self, message):
         session = self.session
-        if not session or not session.accepting:
+        if self.stopping or not session or not session.accepting:
             return
         if message.type == WSMsgType.TEXT:
             event = message.json()
@@ -67,7 +92,18 @@ class Peripheral:
                 return
             kind = event.get('type')
             if kind == 'started':
+                if not self.audio_ready and event.get('echo_reference') is True:
+                    self.echo = PlaybackEcho()
                 self.audio_ready = True
+                return
+            if kind == 'played':
+                if (not self.audio_ready or not isinstance(event.get('reply_id'), str)
+                        or type(event.get('segment')) is not int or event['segment'] < 0
+                        or event.get('phase') not in {'started','completed'}):
+                    return
+                await self.controller.send_json({k:event[k] for k in ('reply_id','segment','phase','browser_at_ms')
+                                                 if k in event} | {'type':'phone_played'})
+                await self.queue.put(message)
                 return
             if kind == 'preview_signal':
                 if self.camera_token and event.get('camera') == self.camera_token:
@@ -90,6 +126,10 @@ class Peripheral:
         elif message.type != WSMsgType.BINARY:
             return
         if not self.audio_ready:
+            return
+        if message.type == WSMsgType.BINARY and len(message.data) != 640:
+            if self.echo and len(message.data) == 644 and message.data.startswith(PlaybackEcho.tag):
+                self.echo.reference(message.data[4:])
             return
         activity = None
         if self.echo and message.type == WSMsgType.BINARY and len(message.data) == 640:
@@ -122,6 +162,4 @@ class Peripheral:
         self.pump.cancel()
         await asyncio.gather(self.pump, return_exceptions=True)
         self.controller = self.queue = self.pump = None
-        if not self.socket.closed:
-            with suppress(ConnectionError):
-                await self.socket.send_json({'type':'standby'})
+        await self.standby()

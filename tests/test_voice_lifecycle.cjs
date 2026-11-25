@@ -62,8 +62,8 @@ async function main(){
   await call('refreshSources()');
   const remote=call('startVoice()');await flush();
   assert.equal(new URL(sockets[0].url).searchParams.get('source'),phone);
-  assert.equal(new URL(sockets[0].url).searchParams.get('echo'),'1');
-  sockets[0].onmessage({data:JSON.stringify({type:'ready'})});
+  assert.equal(call('outputContext==null'),true);
+  sockets[0].onmessage({data:JSON.stringify({type:'ready',output_device:'phone'})});
   assert.equal(await remote,true);assert.equal(acquisitions,0);
   await call('end()');sockets.length=0;
   select.value='';await select.onchange();

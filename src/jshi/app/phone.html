@@ -28,10 +28,10 @@ footer button{font-size:14px;min-width:74px}#gate,#settings{background:#1a201cf5
 <div id="stage" hidden><video id="sensor" muted playsinline autoplay disablepictureinpicture aria-hidden="true"></video><canvas id="preview" width="640" height="360" aria-label="完整取景与遮蔽预览"></canvas></div>
 <header><span id="state" role="status">未连接</span><button id="options" aria-expanded="false" aria-controls="settings" hidden>设置</button></header>
 <section id="gate"><h1>匠石采集设备</h1><p id="detail">正在连接主机…</p><form id="pair" hidden><label for="code">主机配对码</label><input id="code" required pattern="[0-9]{8}" maxlength="8" inputmode="numeric" autocomplete="one-time-code"><button class="primary">配对并连接</button></form><button id="connect" class="primary" hidden>启用手机设备</button></section>
-<footer id="toolbar" hidden><button id="mute" aria-pressed="false">麦克风</button><button id="camera">摄像头</button><button id="switchLens">翻转镜头</button></footer>
+<footer id="toolbar" hidden><button id="unlockAudio" hidden>启用手机声音</button><button id="mute" aria-pressed="false">麦克风</button><button id="camera">摄像头</button><button id="switchLens">翻转镜头</button></footer>
 <div id="notice" role="status"></div>
 <section id="settings" hidden><label>发送分辨率<select id="resolution"><option value="640">640 px</option><option value="1280" selected>1280 px</option><option value="1920">1920 px</option></select></label>
 <label>识别采样间隔<select id="interval"><option value=".5">0.5 秒</option><option value="1">1 秒</option><option value="2" selected>2 秒</option><option value="5">5 秒</option><option value="10">10 秒</option></select></label>
 <div id="frameTools" hidden><small id="camState"></small><p id="camHint"></p><button id="mask" aria-pressed="false">画遮蔽区</button> <button id="undo">撤销遮蔽</button> <button id="sendFrame">恢复发送</button></div>
 <small id="network"></small><p><button id="disconnect">断开设备</button></p></section>
-</main><script src="/phone_camera.js"></script><script src="/device_preview.js"></script><script src="/phone.js"></script></body></html>
+</main><script src="/phone_camera.js"></script><script src="/device_preview.js"></script><script src="/phone_playback.js"></script><script src="/phone.js"></script></body></html>

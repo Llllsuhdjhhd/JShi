@@ -1,11 +1,11 @@
-"""Remove this desktop player's sound from a paired phone microphone."""
+"""Remove rendered reply audio from a paired phone microphone."""
 from array import array
 from collections import deque
 from time import monotonic
 
 
 class PlaybackEcho:
-    # Both browser worklets produce mono, little-endian 16 kHz PCM in 20 ms frames.
+    # Both phone worklets produce mono, little-endian 16 kHz PCM in 20 ms frames.
     tag = b'JREF'
     samples = 320
     silence = bytes(samples * 2)

@@ -22,6 +22,7 @@ function render(){
   ui('connect').disabled=!!device;
   ui('detail').textContent=info?.paired?'启用后可在电脑的“来源”里选择这部 iPhone。':'输入主机显示的八位配对码。';
   ui('state').textContent=device?.stream?(muted?'麦克风静音':'采集中'):online?'已连接 · 待采集':device?'连接中':'未连接';
+  ui('unlockAudio').hidden=!device?.stream || device.ctx.state==='running';
   ui('mute').textContent=muted?'麦克风已静音':device?.stream?'麦克风开':'麦克风待用';ui('mute').setAttribute('aria-pressed',String(!muted));
   camera.render();
 }
@@ -35,6 +36,9 @@ function timing(s,data){
   if(+select.value<s.minInterval)select.value=Array.from(select.options).find(o=>!o.disabled).value;
 }
 function stopMic(s){
+  s.player?.reset();s.player=null;
+  if(s.reference){s.reference.port.onmessage=null;s.reference.disconnect();s.reference=null;}
+  s.speaker?.disconnect();s.speaker=null;
   s.worklet?.disconnect();s.input?.disconnect();s.silent?.disconnect();
   if(s.worklet)s.worklet.port.onmessage=null;
   s.mic?.getTracks().forEach(t=>t.stop());s.mic=s.worklet=s.input=s.silent=null;
@@ -69,19 +73,34 @@ async function startMic(s,token){
   send(s,{type:'device_status',text:'正在开启 iPhone 麦克风'});
   try{
     if(!s.ctx||s.ctx.state==='closed')s.ctx=new AudioContext({latencyHint:'interactive'});
+    s.player=new PhonePlayback(s.ctx,event=>{
+      if(device===s&&s.stream===token)send(s,{...event,browser_at_ms:Date.now()+(s.offset||0)*1000});
+    });
     const module=s.module??=s.ctx.audioWorklet.addModule('/voice_capture.js');
     const mic=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:false,autoGainControl:true},video:false});
     if(s!==device||token!==s.stream){mic.getTracks().forEach(t=>t.stop());return;}
     s.mic=mic;await Promise.all([module,s.ctx.resume()]);
     if(s!==device||token!==s.stream)return;
     const track=mic.getAudioTracks()[0];track.enabled=!muted;track.onended=()=>{if(s.stream===token)closeDevice('麦克风已断开');};
+    const reference=track.getSettings?.().echoCancellation!==true;
+    if(reference){
+      s.speaker=s.ctx.createGain();s.speaker.connect(s.ctx.destination);s.player.destination=s.speaker;
+      s.reference=new AudioWorkletNode(s.ctx,'voice-capture',{processorOptions:{frameMs:20}});
+      s.speaker.connect(s.reference);s.reference.connect(s.ctx.destination);
+      s.reference.port.onmessage=({data})=>{
+        if(device!==s||s.stream!==token||!data.level||s.ws.readyState!==WebSocket.OPEN||s.ws.bufferedAmount>8000)return;
+        const packet=new Uint8Array(4+data.pcm.byteLength);
+        packet.set([74,82,69,70]);packet.set(new Uint8Array(data.pcm),4);s.ws.send(packet);
+      };
+    }
     s.input=s.ctx.createMediaStreamSource(mic);
     s.worklet=new AudioWorkletNode(s.ctx,'voice-capture',{processorOptions:{frameMs:20}});
     s.silent=s.ctx.createGain();s.silent.gain.value=0;
     Object.assign(s,{frames:0,speech:'',loud:0,quiet:0,startAt:performance.now(),startAudio:s.ctx.currentTime});
-    send(s,{type:'started'});s.worklet.port.onmessage=({data})=>pcm(s,token,data);
+    send(s,{type:'started',echo_reference:reference});s.player.enabled=true;s.player.pump();
+    s.worklet.port.onmessage=({data})=>pcm(s,token,data);
     s.input.connect(s.worklet).connect(s.silent).connect(s.ctx.destination);
-    send(s,{type:'device_status',text:muted?'iPhone 麦克风已静音':'正在使用 iPhone 麦克风',muted});
+    send(s,{type:'device_status',text:muted?'iPhone 麦克风已静音 · 手机播报':'iPhone 收音 · 手机播报',muted});render();
   }catch(e){if(device===s&&s.stream===token){send(s,{type:'device_status',text:'手机麦克风未能开启：'+e.message});closeDevice('无法开启麦克风：'+e.message);}}
 }
 function connect(context){
@@ -91,9 +110,10 @@ function connect(context){
   try{
     // Unlock iOS audio in the initiating tap. The microphone is acquired on desktop demand.
     s.ctx=context||new AudioContext({latencyHint:'interactive'});s.ctx.resume().catch(()=>{});
+    s.ctx.onstatechange=()=>{if(device===s){s.player?.pump();render();}};
     s.module=s.ctx.audioWorklet.addModule('/voice_capture.js');s.module.catch(()=>{});
     s.reportCamera=(text,sending)=>send(s,{type:'device_video',camera:s.camera,text,sending});
-    s.ws=new WebSocket('wss://'+location.host+'/device-link');
+    s.ws=new WebSocket('wss://'+location.host+'/device-link?playback=1');
     s.deadline=setTimeout(()=>{if(device===s)closeDevice('连接超时，请重试',true);},8000);
     timing(s,info);notice('');render();
     s.ws.onmessage=({data})=>{
@@ -103,6 +123,7 @@ function connect(context){
         if(s.minInterval!=null)camera.open();
         s.ping=setInterval(async()=>{try{const t=await clock();if(device===s)timing(s,t);}catch{}},5000);
       }else if(m.type==='start'){startMic(s,m.stream);}
+      else if(m.type==='playback'&&m.stream===s.stream){s.player?.handle(m.event);}
       else if(m.type==='standby'){standby(s);}
       else if(m.type==='camera'&&m.stream===s.stream){
         s.camera=m.camera;s.videoState=null;camera.request(!!m.camera);
@@ -124,6 +145,7 @@ ui('pair').onsubmit=async e=>{
   finally{if(context&&device?.ctx!==context)context.close().catch(()=>{});}
 };
 ui('connect').onclick=()=>{retries=0;connect();};ui('disconnect').onclick=()=>closeDevice();
+ui('unlockAudio').onclick=()=>device?.ctx.resume().catch(()=>notice('手机音频尚未启用，请再点一次'));
 ui('mute').onclick=()=>{muted=!muted;device?.mic?.getAudioTracks().forEach(t=>{t.enabled=!muted;});
   send(device,{type:'device_status',text:muted?'iPhone 麦克风已静音':'iPhone 麦克风已打开',muted});render();};
 ui('options').onclick=()=>{const p=ui('settings');p.hidden=!p.hidden;ui('options').setAttribute('aria-expanded',String(!p.hidden));};

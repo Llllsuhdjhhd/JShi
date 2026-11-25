@@ -92,7 +92,7 @@ def test_paired_device_audio_camera_reconnect_and_shutdown(process, tmp_path):
                     await asyncio.sleep(.01)
                 pytest.fail('采集会话没有释放')
 
-            async with phone.ws_connect(root+'/device-link', headers=origin, ssl=trust) as sensor:
+            async with phone.ws_connect(root+'/device-link?playback=1', headers=origin, ssl=trust) as sensor:
                 available = await sensor.receive_json()
                 device_id = available['device_id']
                 devices = await (await desktop.get('/api/capture-sources')).json()
@@ -106,7 +106,7 @@ def test_paired_device_audio_camera_reconnect_and_shutdown(process, tmp_path):
                 await wait_available()
                 frames.clear()
 
-                async with desktop.ws_connect('/voice?echo=1&source='+device_id, headers=local_origin) as ws:
+                async with desktop.ws_connect('/voice?source='+device_id, headers=local_origin) as ws:
                     ready = await ws.receive_json()
                     assert ready['type']=='ready' and 'asr' in ready
                     stream = (await sensor.receive_json())['stream']
@@ -138,16 +138,29 @@ def test_paired_device_audio_camera_reconnect_and_shutdown(process, tmp_path):
                     await ws.send_bytes(bytes([1])*640)
                     await ws.send_bytes(b'JREF' + bytes([7])*640)
                     await sensor.send_bytes(bytes([2])*640)
-                    await sensor.send_json({'type':'started','stream':stream})
+                    await sensor.send_json({'type':'started','stream':stream,'echo_reference':True})
+                    await sensor.send_bytes(b'JREF'+bytes([7])*640)
                     await sensor.send_bytes(bytes(640))
                     events = []
                     while not any(e['type']=='audio_end' for e in events):
                         events.append(await asyncio.wait_for(ws.receive_json(),5))
-                    assert any(e['type']=='audio' and e['pcm'] for e in events)
+                    assert not any(e['type']=='audio' for e in events)
+                    playback = []
+                    while not playback or playback[-1]['type'] != 'audio_end':
+                        packet = await asyncio.wait_for(sensor.receive_json(), 5)
+                        assert packet['stream'] == stream and packet['type'] == 'playback'
+                        playback.append(packet['event'])
+                    assert any(e['type']=='audio' and e['pcm'] for e in playback)
+                    assert all('text' not in e and 'items' not in e for e in playback)
                     assert recordings == [bytes(640)]
                     rid = next(e['reply_id'] for e in events if e['type']=='reply')
+                    await ws.send_json({'type':'played','reply_id':rid,'segment':0,'phase':'completed'})
                     for phase in ('started','completed'):
-                        await ws.send_json({'type':'played','reply_id':rid,'segment':0,'phase':phase})
+                        await sensor.send_json({'type':'played','stream':stream,'reply_id':rid,'segment':0,'phase':phase})
+                        while True:
+                            receipt = await asyncio.wait_for(ws.receive_json(), 5)
+                            if receipt['type']=='phone_played': break
+                        assert receipt['reply_id']==rid and receipt['phase']==phase
                     await ws.send_json({'type':'end'})
                 assert (await sensor.receive_json())['type']=='standby'
                 await wait_available()

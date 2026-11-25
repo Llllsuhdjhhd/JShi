@@ -119,7 +119,7 @@ def create_device_app(code, devices, submit_frame, vision_config, *, captures):
         if device.device_id in devices:
             raise web.HTTPConflict(text='该手机已有设备页面在线')
         ws = web.WebSocketResponse(max_msg_size=32768, heartbeat=15)
-        peer = Peripheral(device, ws)
+        peer = Peripheral(device, ws, playback=request.query.get('playback') == '1')
         devices[device.device_id] = peer
         try:
             await ws.prepare(request)
@@ -159,7 +159,7 @@ def create_device_app(code, devices, submit_frame, vision_config, *, captures):
             uploading.discard(session)
 
     assets = {'/': 'phone.html', '/phone.js': 'phone.js', '/device_preview.js':'device_preview.js', '/phone_camera.js': 'phone_camera.js',
-              '/voice_capture.js': 'voice_capture.js'}
+              '/voice_capture.js': 'voice_capture.js', '/phone_playback.js':'phone_playback.js'}
     async def asset(request):
         return web.FileResponse(Path(__file__).with_name(assets[request.path]),
             headers={'Cache-Control': 'no-cache', 'Referrer-Policy': 'no-referrer',

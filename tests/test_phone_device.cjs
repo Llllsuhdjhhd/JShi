@@ -3,8 +3,30 @@ const fs = require('node:fs'), path = require('node:path'), vm = require('node:v
 const src = name => fs.readFileSync(path.join(__dirname,'../src/jshi/app',name),'utf8');
 const box = vm.createContext({atob, performance, setTimeout, clearTimeout, console});
 vm.runInContext(src('phone_camera.js') + '\nglobalThis.Camera = PhoneCamera;', box);
+vm.runInContext(src('phone_playback.js') + '\nglobalThis.Player = PhonePlayback;', box);
 
 async function main() {
+  const receipts=[],sources=[];
+  const audio={currentTime:0,state:'running',destination:{},createBuffer(_channels,n,rate){
+    return {duration:n/rate,getChannelData:()=>new Float32Array(n)};
+  },createBufferSource(){
+    const node={connect(){},disconnect(){},start(at,offset){Object.assign(this,{at,offset});},stop(){this.stopped=true;}};
+    sources.push(node);return node;
+  }};
+  const player=new box.Player(audio,e=>receipts.push([e.phase,e.segment]));
+  const event=(type,fields={})=>player.handle({type,reply_id:'reply',...fields});
+  event('reply');const chunk={rate:16000,pcm:Buffer.alloc(3200).toString('base64')};
+  event('audio',{...chunk,segment:0});assert.equal(sources.length,0);
+  player.enabled=true;player.pump();event('audio',{...chunk,segment:1});
+  assert.equal(sources[1].at,.1);assert.deepEqual(receipts,[['started',0]]);
+  event('segment_end',{segment:0});event('segment_end',{segment:1});
+  audio.currentTime=.03;event('pause',{permit_seq:2,reason_id:'speech'});
+  assert.ok(sources.every(n=>n.stopped));event('resume',{permit_seq:1});assert.equal(sources.length,2);
+  audio.currentTime=.10;event('resume',{permit_seq:3,cleared:['speech']});
+  assert.equal(sources[2].offset,.03);audio.currentTime=.18;sources[2].onended();
+  audio.currentTime=.30;sources[3].onended();
+  assert.deepEqual(receipts,[['started',0],['completed',0],['started',1],['completed',1]]);
+  event('stop');event('audio',{...chunk,segment:2});assert.equal(sources.length,4);
   let coords;
   box.paintMask({fillRect(...args){coords=args;}}, {x:.125,y:.22,w:.43,h:.42}, 101,101);
   assert.deepEqual(coords,[12,22,45,43], 'mask expands to cover partial edge pixels');

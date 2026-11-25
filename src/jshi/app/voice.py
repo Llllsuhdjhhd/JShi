@@ -5079,6 +5079,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         peer = devices.get(device_id)
         if device_id and (not peer or not peer.socket.prepared or peer.socket.closed):
             raise web.HTTPConflict(text='所选手机尚未连接，请先在手机上启用设备')
+        if peer and not peer.playback:
+            socket = web.WebSocketResponse()
+            await socket.prepare(request)
+            reason = '请刷新 iPhone 采集页并重新启用设备，以在手机上播报'
+            await socket.close(code=1008, message=reason.encode())
+            return socket
         source = peer.source if peer else DESKTOP
         backend = request.query.get("asr", getattr(local, 'backend', 'local') if local is not None else config.asr_backend)
         if backend not in ASR_BACKENDS:
@@ -5172,7 +5178,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 if tts_backend == 'mlx':
                     from jshi.voice.mlx import MlxTTS
                     speech = MlxTTS(config, http)
-                conversation = VoiceConversation(process, subject_id, speech, ws.send_json, jev=jev,
+                async def send_event(event):
+                    if peer:
+                        await peer.deliver(event, ws)
+                    else:
+                        await ws.send_json(event)
+                conversation = VoiceConversation(process, subject_id, speech, send_event, jev=jev,
                     timeout_s=config.jev_timeout_s, local_speakers=speakers, input_pause_s=config.input_pause_s, sample_source=audio,
                     candidate_timeout_s=config.candidate_timeout_s, input_max_batch_s=config.input_max_batch_s,
                     input_batch_chars=config.input_batch_chars,
@@ -5401,8 +5412,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 loop_watch = asyncio.create_task(watch_event_loop(conversation.record))
                 capture.accepting = True
                 if peer:
-                    await peer.attach(capture, ws, echo=request.query.get('echo') == '1')
-                await conversation.emit("ready", stream=capture.controller_token if peer else capture.token, capture_id=capture.capture_id, session_id=conversation.session_id, identity_mode="local" if use_local or backend == "mlx" else config.identity_mode,
+                    await peer.attach(capture, ws)
+                await conversation.emit("ready", output_device="phone" if peer else "desktop", stream=capture.controller_token if peer else capture.token, capture_id=capture.capture_id, session_id=conversation.session_id, identity_mode="local" if use_local or backend == "mlx" else config.identity_mode,
                     continuous_speaker_analysis=('disabled' if config.continuous_analysis == 'off' else
                         ('shadow' if config.continuous_analysis == 'shadow' else 'enabled') if audio_timeline else 'unavailable'),
                     independent_transcription='enabled' if recovery_intake else
