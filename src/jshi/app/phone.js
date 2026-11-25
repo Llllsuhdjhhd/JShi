@@ -28,7 +28,8 @@ function render(){
 }
 function timing(s,data){
   Object.assign(s,{offset:data.offset,uncertainty:data.uncertainty,minInterval:data.min_interval});
-  ui('network').textContent='主机往返 '+data.rtt+' ms';
+  ui('network').textContent='主机往返 '+data.rtt+' ms'+
+    (s.stream && s.referenceFrames ? ' · 已发送 '+(s.referenceFrames*.02).toFixed(1)+' 秒播报参考' : '');
   const select=ui('interval');
   if(s.minInterval!=null&&!Array.from(select.options).some(o=>+o.value>=s.minInterval))
     select.add(new Option(s.minInterval+' 秒',String(s.minInterval)));
@@ -37,7 +38,6 @@ function timing(s,data){
 }
 function stopMic(s){
   s.player?.reset();s.player=null;
-  if(s.reference){s.reference.port.onmessage=null;s.reference.disconnect();s.reference=null;}
   s.speaker?.disconnect();s.speaker=null;
   s.worklet?.disconnect();s.input?.disconnect();s.silent?.disconnect();
   if(s.worklet)s.worklet.port.onmessage=null;
@@ -57,12 +57,8 @@ function closeDevice(reason='',retry=false){
 function pcm(s,token,frame){
   if(device!==s||s.stream!==token||s.ws.readyState!==WebSocket.OPEN)return;
   if(s.ws.bufferedAmount>16000){closeDevice('网络拥堵，正在重连',true);return;}
-  const level=muted?0:frame.level;
-  if(level>=.02){
-    s.quiet=0;s.loud++;
-    if(!s.speech){s.speech='short';send(s,{type:'speech_start',level:'short'});}
-    else if(s.speech==='short'&&s.loud>=20){s.speech='sustained';send(s,{type:'speech_start',level:'sustained'});}
-  }else if(s.speech&&++s.quiet>=10){send(s,{type:'speech_end',level:s.speech});s.speech='';s.loud=0;}
+  // The host derives interruption activity from the cleaned microphone PCM.
+  if(frame.reference){s.ws.send(frame.reference);s.referenceFrames++;}
   if(muted)new Uint8Array(frame.pcm).fill(0);
   s.ws.send(frame.pcm);
   if(++s.frames%250===0)send(s,{type:'audio_clock',page_lag_ms:Math.round(performance.now()-s.startAt-s.frames*20),
@@ -76,28 +72,20 @@ async function startMic(s,token){
     s.player=new PhonePlayback(s.ctx,event=>{
       if(device===s&&s.stream===token)send(s,{...event,browser_at_ms:Date.now()+(s.offset||0)*1000});
     });
-    const module=s.module??=s.ctx.audioWorklet.addModule('/voice_capture.js');
+    const module=s.module??=s.ctx.audioWorklet.addModule('/voice_capture.js?duplex=1');
     const mic=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:false,autoGainControl:true},video:false});
     if(s!==device||token!==s.stream){mic.getTracks().forEach(t=>t.stop());return;}
     s.mic=mic;await Promise.all([module,s.ctx.resume()]);
     if(s!==device||token!==s.stream)return;
     const track=mic.getAudioTracks()[0];track.enabled=!muted;track.onended=()=>{if(s.stream===token)closeDevice('麦克风已断开');};
-    const reference=track.getSettings?.().echoCancellation!==true;
-    if(reference){
-      s.speaker=s.ctx.createGain();s.speaker.connect(s.ctx.destination);s.player.destination=s.speaker;
-      s.reference=new AudioWorkletNode(s.ctx,'voice-capture',{processorOptions:{frameMs:20}});
-      s.speaker.connect(s.reference);s.reference.connect(s.ctx.destination);
-      s.reference.port.onmessage=({data})=>{
-        if(device!==s||s.stream!==token||!data.level||s.ws.readyState!==WebSocket.OPEN||s.ws.bufferedAmount>8000)return;
-        const packet=new Uint8Array(4+data.pcm.byteLength);
-        packet.set([74,82,69,70]);packet.set(new Uint8Array(data.pcm),4);s.ws.send(packet);
-      };
-    }
+    s.speaker=s.ctx.createGain();s.speaker.connect(s.ctx.destination);s.player.destination=s.speaker;
     s.input=s.ctx.createMediaStreamSource(mic);
-    s.worklet=new AudioWorkletNode(s.ctx,'voice-capture',{processorOptions:{frameMs:20}});
+    s.worklet=new AudioWorkletNode(s.ctx,'voice-capture',{numberOfInputs:2,
+      processorOptions:{frameMs:20,playbackReference:true}});
+    s.speaker.connect(s.worklet,0,1);
     s.silent=s.ctx.createGain();s.silent.gain.value=0;
-    Object.assign(s,{frames:0,speech:'',loud:0,quiet:0,startAt:performance.now(),startAudio:s.ctx.currentTime});
-    send(s,{type:'started',echo_reference:reference});s.player.enabled=true;s.player.pump();
+    Object.assign(s,{frames:0,referenceFrames:0,startAt:performance.now(),startAudio:s.ctx.currentTime});
+    send(s,{type:'started',echo_reference:true});s.player.enabled=true;s.player.pump();
     s.worklet.port.onmessage=({data})=>pcm(s,token,data);
     s.input.connect(s.worklet).connect(s.silent).connect(s.ctx.destination);
     send(s,{type:'device_status',text:muted?'iPhone 麦克风已静音 · 手机播报':'iPhone 收音 · 手机播报',muted});render();
@@ -111,7 +99,7 @@ function connect(context){
     // Unlock iOS audio in the initiating tap. The microphone is acquired on desktop demand.
     s.ctx=context||new AudioContext({latencyHint:'interactive'});s.ctx.resume().catch(()=>{});
     s.ctx.onstatechange=()=>{if(device===s){s.player?.pump();render();}};
-    s.module=s.ctx.audioWorklet.addModule('/voice_capture.js');s.module.catch(()=>{});
+    s.module=s.ctx.audioWorklet.addModule('/voice_capture.js?duplex=1');s.module.catch(()=>{});
     s.reportCamera=(text,sending)=>send(s,{type:'device_video',camera:s.camera,text,sending});
     s.ws=new WebSocket('wss://'+location.host+'/device-link?playback=1');
     s.deadline=setTimeout(()=>{if(device===s)closeDevice('连接超时，请重试',true);},8000);

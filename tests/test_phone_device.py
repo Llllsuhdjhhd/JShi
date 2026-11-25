@@ -1,7 +1,7 @@
 """The device and desktop listeners share one production voice conversation."""
 import asyncio
 from io import BytesIO
-import shutil
+import os
 import ssl
 from types import SimpleNamespace
 from time import time
@@ -19,7 +19,6 @@ from tests.test_voice import FakeCloud, process
 from tests.test_voice_transport import Local
 
 
-@pytest.mark.skipif(not shutil.which('openssl'), reason='OpenSSL is required for the local iPhone CA')
 def test_paired_device_audio_camera_reconnect_and_shutdown(process, tmp_path):
     from PIL import Image
 
@@ -42,7 +41,8 @@ def test_paired_device_audio_camera_reconnect_and_shutdown(process, tmp_path):
     listener = PhoneListener.from_args(args)
     cert, key, ca = local_certificate(tmp_path/'phone-tls', args.phone)
     assert sorted(p.name for p in ca.parent.iterdir()) == ['iphone-ca.cer', 'server.key', 'server.pem']
-    assert not key.stat().st_mode & 0o077
+    if os.name != "nt":  # Windows protects files using ACLs.
+        assert not key.stat().st_mode & 0o077
     trust = ssl.create_default_context(cadata=ca.read_bytes())
     root = listener.url.rstrip('/')
     origin = {'Origin':root}
@@ -205,7 +205,7 @@ def test_new_source_uses_the_same_exclusive_capture_slot():
     assert inputs.resolve(cameras[0], second.token) is second
 
 
-def test_phone_echo_preserves_near_speech_and_removes_delayed_desktop_output():
+def test_phone_echo_preserves_near_speech_and_removes_delayed_phone_playback():
     np = pytest.importorskip('numpy')
     from jshi.voice.playback_echo import PlaybackEcho
 
@@ -228,9 +228,23 @@ def test_phone_echo_preserves_near_speech_and_removes_delayed_desktop_output():
     output = np.frombuffer(cleaned, '<i2').astype(float)
     def rms(x):
         return np.sqrt(np.mean(x*x))
+    assert rms(output[3200:14400]) < .2 * rms(reflected[3200:14400])
     assert rms(output[40000:62000]) < .18 * rms(reflected[40000:62000])
     # With a second speaker present, their utterance remains correlated, even with DSP frame delay.
     near_only = near[66000:76000]
     candidate = output[66000:76800]
     peak = np.max(np.correlate(candidate, near_only, 'valid')) / np.dot(near_only, near_only)
     assert peak > .5
+
+
+def test_native_aec_already_removed_reply_preserves_unrelated_speech():
+    import numpy as np
+    from jshi.voice.playback_echo import PlaybackEcho
+
+    rng = np.random.default_rng(384)
+    echo = PlaybackEcho()
+    for _ in range(70):
+        far = rng.normal(0, 2200, 320).astype('<i2').tobytes()
+        near = rng.normal(0, 1200, 320).astype('<i2').tobytes()
+        echo.reference(far)
+        assert echo.clean(near) == near

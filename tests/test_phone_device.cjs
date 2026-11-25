@@ -52,3 +52,36 @@ async function main() {
   console.log('Phone: masked pixels, cancelled uploads, desktop camera control and local privacy override passed');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});
+
+// A native AEC flag is permission to use the OS filter, not proof the room is echo-free.
+async function checkPhoneDuplex(){
+  const sent=[],links=[];
+  const track={getSettings:()=>({echoCancellation:true}),stop(){}};
+  class AudioNode {
+    constructor(){this.gain={};}
+    connect(target,output=0,input=0){links.push([this,target,input]);return target;}
+    disconnect(){}
+  }
+  const micSource=new AudioNode(),destination=new AudioNode();
+  const ctx={state:'running',currentTime:0,destination,resume:async()=>{},createGain:()=>new AudioNode(),
+    createMediaStreamSource:()=>micSource,audioWorklet:{addModule:async()=>{}}};
+  const element={classList:{toggle(){}},setAttribute(){}};
+  const scope=vm.createContext({performance,atob, WebSocket:{OPEN:1},document:{getElementById:()=>element,addEventListener(){}},
+    window:{addEventListener(){}},fetch:async()=>({ok:true,json:async()=>({server_time:0})}),
+    DevicePreview:class{},PhoneCamera:class{render(){}},navigator:{mediaDevices:{getUserMedia:async()=>({
+      getTracks:()=>[track],getAudioTracks:()=>[track]})}},AudioWorkletNode:class extends AudioNode{
+      constructor(ctx,name,opts){super();this.options=opts;this.port={};}
+    },ctx,socket:{readyState:1,bufferedAmount:0,send:v=>sent.push(v)}});
+  vm.runInContext(src('phone_playback.js')+'\n'+src('phone.js'),scope);
+  await vm.runInContext("device={ctx,ws:socket};startMic(device,'test')",scope);
+  const s=vm.runInContext('device',scope);
+  assert.ok(sent.filter(x=>typeof x==='string').map(JSON.parse).find(e=>e.type==='started').echo_reference);
+  assert.equal(s.worklet.options.numberOfInputs,2);
+  assert.ok(links.some(([from,to,i])=>from===s.speaker && to===s.worklet && i===1));
+  assert.ok(links.some(([from,to,i])=>from===micSource && to===s.worklet && i===0));
+  assert.equal(s.player.destination,s.speaker);
+  const pcm=new ArrayBuffer(640),reference=new ArrayBuffer(644);
+  s.worklet.port.onmessage({data:{pcm,reference,level:.5}});
+  assert.deepEqual(sent.slice(-2),[reference,pcm]);
+}
+checkPhoneDuplex().catch(e=>{console.error(e);process.exitCode=1;});

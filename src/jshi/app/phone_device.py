@@ -49,7 +49,7 @@ class PhoneListener:
                 cert, key, ca = local_certificate(args.data_dir/'phone-tls', str(address))
             except (OSError, ValueError) as exc:
                 raise SystemExit(str(exc)) from exc
-            print(f'首次连接请将公开证书 {ca} 隔空投送到 iPhone，安装并开启完全信任。')
+            print(f'首次连接请将公开证书 {ca} 传到 iPhone，安装并开启完全信任。')
         tls.load_cert_chain(cert, key)
         return cls(str(address), args.phone_port, tls, f'{secrets.randbelow(10**8):08d}')
 

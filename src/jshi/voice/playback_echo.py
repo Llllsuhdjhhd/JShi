@@ -5,7 +5,7 @@ from time import monotonic
 
 
 class PlaybackEcho:
-    # Both phone worklets produce mono, little-endian 16 kHz PCM in 20 ms frames.
+    # The paired microphone and playback inputs use mono, little-endian 16 kHz PCM in 20 ms frames.
     tag = b'JREF'
     samples = 320
     silence = bytes(samples * 2)
@@ -13,9 +13,11 @@ class PlaybackEcho:
     def __init__(self):
         try:
             from pyaec import Aec
+            from .acoustic_path import AcousticPath
         except (ImportError, OSError, AttributeError) as exc:
             raise RuntimeError('手机播报回声处理未就绪，请在主机安装当前版本的 jshi[vision]') from exc
         self.filter = Aec(self.samples, 6400, 16000, True)
+        self.path = AcousticPath(self.samples, 6400)
         self.frames = deque(maxlen=4)
         self.last_reference = None
         self.tail = 0
@@ -37,16 +39,17 @@ class PlaybackEcho:
         if self.last_reference is not None and monotonic() - self.last_reference > .12:
             self.frames.clear()
         reference = self.frames.popleft() if self.frames else self.silence
-        if pcm == self.silence:
-            return pcm  # Muting the phone must produce silence even during playback.
         if reference != self.silence:
-            self.tail = 20  # 400 ms for the acoustic path after playback stops
+            self.tail = 22  # 400 ms room response plus the 40 ms observation window
         elif self.tail:
             self.tail -= 1
         else:
             return pcm
         samples = self.filter.cancel_echo(array('h', pcm), array('h', reference))
-        return array('h', samples).tobytes()
+        direct = self.path.clean(pcm, reference)
+        if pcm == self.silence:
+            return pcm
+        return direct if direct is not None else array('h', samples).tobytes()
 
     def activity(self, pcm):
         """Use the cleaned phone signal for the same short/sustained speech controls."""

@@ -8,3 +8,6 @@
 *.gif binary
 *.pdf binary
 *.db binary
+
+/jshi.cmd text eol=crlf
+/model-desk.cmd text eol=crlf

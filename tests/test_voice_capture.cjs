@@ -32,3 +32,30 @@ console.log('Voice capture: 16 kHz PCM and stereo channel selection passed');
   assert.equal(blocks.length,50);
   assert.ok(blocks.every(b=>b.pcm.byteLength===640 && b.level===.25));
 }
+
+// Feed the microphone and speaker on the same render clock. A reference can
+// start mid-packet and cross render quanta at either iPhone hardware rate.
+for(const rate of [44100,48000]){
+  const blocks=[];
+  const env=vm.createContext({sampleRate:rate, AudioWorkletProcessor:class {
+    constructor(){this.port={postMessage:m=>blocks.push(m)};}
+  }, registerProcessor:(_,cls)=>{env.Capture=cls;}, ArrayBuffer, DataView, Math});
+  vm.runInContext(code,env);
+  const processor=new env.Capture({processorOptions:{frameMs:20,playbackReference:true}});
+  const gate=i=>i>=rate*.025 && i<rate*.065;
+  for(let i=0;i<rate/10;i+=128){
+    const n=Math.min(128,rate/10-i);
+    const far=Float32Array.from({length:n},(_,j)=>gate(i+j)?-.5:0);
+    const mic=Float32Array.from(far,x=>-.5*x);
+    processor.process([[mic],[far]]);
+  }
+  assert.equal(blocks.length,5);
+  assert.deepEqual(blocks.map(b=>!!b.reference),[false,true,true,true,false]);
+  for(const {pcm,reference} of blocks.filter(b=>b.reference)){
+    const far=new DataView(reference),mic=new DataView(pcm);
+    assert.equal(far.byteLength,644);
+    assert.equal(far.getUint32(0),0x4a524546);
+    for(let i=0;i<320;i++)
+      assert.ok(Math.abs(far.getInt16(4+i*2,true)+2*mic.getInt16(i*2,true))<=1);
+  }
+}

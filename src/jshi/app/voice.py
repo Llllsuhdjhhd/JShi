@@ -5795,6 +5795,10 @@ def run_voice(process, identities, args) -> None:
         print('正在准备本地记忆检索模型，准备完成后开放对话入口…')
         prepare()
     print(f"语音入口：http://127.0.0.1:{args.port}（选择 LARK A2，输出为电脑默认扬声器）")
+    # A Windows launcher can request the same graceful exit as console Ctrl+C.
+    import signal
+    if hasattr(signal, 'SIGBREAK'):
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)
     web.run_app(create_app(process, subject_id, config, jev, local, local_tts, online_speakers,
         speaker_models=models, trial_root=args.data_dir/'voice_trials'/'current', phone_listener=phone_listener), host="127.0.0.1", port=args.port)
 
