@@ -23,7 +23,7 @@ $('start').onclick=()=>control('start');
 $('stop').onclick=()=>control('stop');
 $('file').onchange=()=>{const file=$('file').files[0];if(file)control('photo',file);$('file').value=''};
 function captureState(capture){
- desktopCapture=capture?.kind==='desktop'?capture.id:'';
+ desktopCapture=capture?.id||'';
  $('start').disabled=$('stop').disabled=$('file').disabled=!desktopCapture||!controls;
  $('capture-hint').textContent=!capture?'连接设备后可查看当前画面。':desktopCapture&&controls?
    '这些操作使用同一浏览器中已连接的交谈页面采集画面。':'请在当前采集设备上操作摄像头。';

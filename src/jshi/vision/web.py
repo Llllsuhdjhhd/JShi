@@ -41,17 +41,21 @@ def install_vision(app, process, subject_id, deliver, *, captures):
 
     async def submit(request):
         same_origin(request)
-        session = captures.resolve(DESKTOP, request.headers.get('X-Device-Stream'))
+        source = request.headers.get('X-Visual-Source', 'browser')
+        token = request.headers.get('X-Device-Stream')
+        session = captures.resolve(DESKTOP, token)
+        # A manually attached photo is an explicit desktop action in this conversation.
+        if source == 'photo' and captures.active and captures.active.controller_token == token:
+            session = captures.active
         if session is None:
             raise web.HTTPConflict(text='只有当前语音连接可以发送画面')
-        source = request.headers.get('X-Visual-Source', 'browser')
         if source not in {'browser', 'photo'}:
             raise web.HTTPBadRequest(text='未知桌面画面来源')
         return await accept_frame(request, source=source, session=session)
 
-    async def accept_frame(request, *, source, session, max_age=None):
+    async def accept_frame(request, *, source, session, max_age=None, channel_active=lambda: True):
         nonlocal last_session
-        if session is not captures.active or not session.accepting:
+        if session is not captures.active or not session.accepting or not channel_active():
             raise web.HTTPConflict(text='采集会话已结束')
         if session is not last_session:
             last_sample.clear()
@@ -73,13 +77,13 @@ def install_vision(app, process, subject_id, deliver, *, captures):
             data = await request.read()
             if len(data) > vision.config.max_image_bytes:
                 raise ValueError('图片过大')
-            if session is not captures.active or not session.accepting:
+            if session is not captures.active or not session.accepting or not channel_active():
                 raise web.HTTPConflict(text='采集会话已结束')
             if max_age is not None and time() - captured > max_age + min(uncertainty, 1):
                 raise web.HTTPRequestTimeout(text='跳过过期的手机画面')
             await asyncio.to_thread(vision.submit, subject_id, data, captured, source,
                 clock={'capture_id':session.capture_id, 'source_time':source_time,'clock_offset':offset,'clock_uncertainty':uncertainty})
-            if session is not captures.active or not session.accepting:
+            if session is not captures.active or not session.accepting or not channel_active():
                 raise web.HTTPConflict(text='采集会话已结束')
             last_sample[source] = started
         except (ValueError, RuntimeError) as exc:

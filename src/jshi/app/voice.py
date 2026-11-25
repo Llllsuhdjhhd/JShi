@@ -4270,6 +4270,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     app = web.Application(client_max_size=max(8 * 1024 * 1024, visual.config.max_image_bytes if visual else 0))
     from .capture import CaptureSources, DESKTOP
     captures = CaptureSources()
+    devices = {}
     if visual:
         async def reset_live_capture(app):
             await asyncio.to_thread(visual.store.set_capture, subject_id, '')
@@ -4724,7 +4725,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         from jshi.voice.segmentation import segment_settings
         memory_backend = getattr(process.memory, '_backend', process.memory)
         memory_info = getattr(memory_backend, 'runtime_info', None)
-        return web.json_response({"busy": captures.active is not None, "cleanup_stage": cleanup_stage, "asr": getattr(local, 'backend', 'local') if local is not None else config.asr_backend,
+        return web.json_response({"phones":online_devices(), "busy": captures.active is not None, "cleanup_stage": cleanup_stage, "asr": getattr(local, 'backend', 'local') if local is not None else config.asr_backend,
             'memory': memory_info() if callable(memory_info) else None,
             'text_scene_writing': text_write_task is not None and not text_write_task.done(),
             'text_scene_write_error': text_write_error,
@@ -5067,13 +5068,18 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             model_status_sink = None
             registry_busy = False
 
-    async def connection(request, *, source=DESKTOP, device_send=None, controls=None, sockets=None):
+    async def connection(request):
         nonlocal cleanup_stage, active_conversation
         origin = request.headers.get("Origin", "")
         if origin != f"{request.scheme}://{request.host}":
             raise web.HTTPForbidden(text="voice connection requires same origin")
         if captures.active or registry_busy:
             raise web.HTTPConflict(text="已有一个语音会话，请先结束它。")
+        device_id = request.query.get('source', '')
+        peer = devices.get(device_id)
+        if device_id and (not peer or not peer.socket.prepared or peer.socket.closed):
+            raise web.HTTPConflict(text='所选手机尚未连接，请先在手机上启用设备')
+        source = peer.source if peer else DESKTOP
         backend = request.query.get("asr", getattr(local, 'backend', 'local') if local is not None else config.asr_backend)
         if backend not in ASR_BACKENDS:
             raise web.HTTPBadRequest(text="未知语音识别后端")
@@ -5125,8 +5131,6 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         start_visual = None
         try:
             await ws.prepare(request)
-            if sockets is not None:
-                sockets.add(ws)
             if visual:
                 start_visual = asyncio.create_task(asyncio.to_thread(visual.store.set_capture, subject_id, capture.capture_id))
                 await asyncio.shield(start_visual)
@@ -5164,12 +5168,11 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     (use_local.refiner.transcribe_source if backend == 'qwen' else cloud.transcribe_source) if config.separation_backend == 'pyannote' else None,
                     timeout_s=config.separation_timeout_s,
                     transcribe_many=use_local.refiner.transcribe_sources if backend == 'qwen' and config.separation_backend == 'pyannote' else None)
-                send_event = (lambda event: device_send(ws, event)) if device_send else ws.send_json
                 speech = local_tts if tts_backend == 'local' else cloud
                 if tts_backend == 'mlx':
                     from jshi.voice.mlx import MlxTTS
                     speech = MlxTTS(config, http)
-                conversation = VoiceConversation(process, subject_id, speech, send_event, jev=jev,
+                conversation = VoiceConversation(process, subject_id, speech, ws.send_json, jev=jev,
                     timeout_s=config.jev_timeout_s, local_speakers=speakers, input_pause_s=config.input_pause_s, sample_source=audio,
                     candidate_timeout_s=config.candidate_timeout_s, input_max_batch_s=config.input_max_batch_s,
                     input_batch_chars=config.input_batch_chars,
@@ -5397,7 +5400,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 from jshi.voice.diagnostics import watch_event_loop
                 loop_watch = asyncio.create_task(watch_event_loop(conversation.record))
                 capture.accepting = True
-                await conversation.emit("ready", stream=capture.token, capture_id=capture.capture_id, session_id=conversation.session_id, identity_mode="local" if use_local or backend == "mlx" else config.identity_mode,
+                if peer:
+                    await peer.attach(capture, ws)
+                await conversation.emit("ready", stream=capture.controller_token if peer else capture.token, capture_id=capture.capture_id, session_id=conversation.session_id, identity_mode="local" if use_local or backend == "mlx" else config.identity_mode,
                     continuous_speaker_analysis=('disabled' if config.continuous_analysis == 'off' else
                         ('shadow' if config.continuous_analysis == 'shadow' else 'enabled') if audio_timeline else 'unavailable'),
                     independent_transcription='enabled' if recovery_intake else
@@ -5417,7 +5422,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     asr=describe_asr(backend, config, use_local),
                     tts="本机 MLX Vivian" if tts_backend == "mlx" else "本地固定音色" if tts_backend == 'local' else ("火山双向流式合成" if config.tts_transport == 'websocket' else "在线 SSE 合成"))
                 intake_lag_reported = False
-                async for message in ws:
+                async for message in (peer.messages() if peer else ws):
                     if message.type == WSMsgType.BINARY:
                         if len(message.data) > 32000 or len(message.data) % 2:
                             raise ValueError("invalid microphone PCM frame")
@@ -5444,7 +5449,13 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                     elif message.type == WSMsgType.TEXT:
                         payload = message.json()
                         kind = payload.get("type")
-                        if controls is not None and kind not in controls:
+                        if kind == 'preview_signal' and peer:
+                            if peer.camera_token and payload.get('camera') == peer.camera_token:
+                                await peer.socket.send_json({'type':'preview_signal','camera':peer.camera_token,
+                                    'id':payload.get('id'),'sdp':payload.get('sdp')})
+                            continue
+                        if kind == 'device_camera' and peer:
+                            await peer.camera(payload.get('enabled') is True)
                             continue
                         if kind == 'audio_clock':
                             row = {'at_ms': round(time()*1000), 'session_id': conversation.session_id,
@@ -5626,7 +5637,11 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             async def finish_session():
                 nonlocal active_conversation
                 try:
-                    await cleanup()
+                    try:
+                        if peer:
+                            await peer.detach(capture)
+                    finally:
+                        await cleanup()
                 finally:
                     try:
                         if start_visual is not None:
@@ -5634,8 +5649,6 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                             await start_visual
                             await asyncio.to_thread(visual.store.set_capture, subject_id, '')
                     finally:
-                        if sockets is not None:
-                            sockets.discard(ws)
                         active_conversation = None
                         captures.release(capture)
                         closing("")
@@ -5663,6 +5676,9 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     app.router.add_get("/voice_capture.js", worklet)
     app.router.add_get("/status", status)
     app.router.add_get('/vision_chat.js', vision_chat_script)
+    async def preview_script(request):
+        return web.FileResponse(Path(__file__).with_name('device_preview.js'))
+    app.router.add_get('/device_preview.js', preview_script)
     app.router.add_get('/text-people', text_people)
     app.router.add_post('/tool-results', initiative_results)
     app.router.add_get('/person-links',person_links)
@@ -5685,6 +5701,14 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
     app.router.add_post('/initiative-results', initiative_results)
     from jshi.app.web_data import register_data_routes
     register_data_routes(app, process, subject_id)
+    def online_devices():
+        return [peer.source.device_id for peer in devices.values() if peer.socket.prepared and not peer.socket.closed]
+
+    async def capture_sources(request):
+        phones = online_devices()
+        return web.json_response({'enabled':phone_listener is not None, 'phones':phones},
+                                 headers={'Cache-Control':'no-store'})
+    app.router.add_get('/api/capture-sources', capture_sources)
     app.router.add_get("/voice", connection)
     app.router.add_get('/voice-enroll', enrollment_page)
     app.router.add_get('/voice-registry', registry)
@@ -5705,8 +5729,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         submit_frame = install_vision(app, process, subject_id, deliver_environment, captures=captures)
     if phone_listener is not None:
         from .phone_device import install_listener
-        install_listener(app, phone_listener, connection, submit_frame, visual.config if visual else None,
-                         captures=captures, voice_busy=lambda: captures.active is not None or registry_busy)
+        install_listener(app, phone_listener, devices, submit_frame, visual.config if visual else None,
+                         captures=captures)
     return app
 
 

@@ -1,199 +1,132 @@
 'use strict';
-const ui = id => document.getElementById(id);
-const notice = message => {ui('notice').textContent = message;};
-let session = null, info = null, wantMuted = false, retries = 0, retryTimer;
-const camera = new PhoneCamera(ui, () => session, notice);
+const ui=id=>document.getElementById(id);
+const notice=text=>{ui('notice').textContent=text;};
+let device=null, info=null, muted=false, reconnect, retries=0;
+const preview=new DevicePreview(event=>send(device,event));
+const camera=new PhoneCamera(ui,()=>device,notice,preview);
 
-async function readInfo(signal) {
-  const start = Date.now();
-  const res = await fetch('/api/device',{cache:'no-store',signal});
-  if (!res.ok) throw new Error('无法读取主机状态');
-  const result = await res.json(), end = Date.now();
-  return {...result, offset:result.server_time-(start+end)/2000, uncertainty:(end-start)/2000,
-    rtt:Math.max(0,end-start)};
+function send(s,event){
+  if(s?.ws?.readyState===WebSocket.OPEN)s.ws.send(JSON.stringify({...event,stream:s.stream}));
 }
-function showPairing() {
-  ui('pair').hidden = Boolean(info?.paired);
-  ui('connect').hidden = !info?.paired;
-  ui('detail').textContent = info?.paired ? '主机已配对，连接后即可说话。' : '输入匠石主机启动时显示的 8 位配对码。';
+async function clock(){
+  const start=Date.now(), res=await fetch('/api/device',{cache:'no-store'});
+  if(!res.ok)throw Error('无法读取主机状态');
+  const data=await res.json(),end=Date.now();
+  return {...data,offset:data.server_time-(start+end)/2000,uncertainty:(end-start)/2000,rtt:end-start};
 }
-async function setup() {
-  try {
-    info = await readInfo(); showPairing();
-    ui('limits').textContent = info.min_interval == null ? '主机当前仅提供语音。' :
-      '主机允许的最短采样间隔为 '+info.min_interval+' 秒。';
-    for (const o of ui('interval').options) o.disabled = +o.value < info.min_interval;
-    if (info.min_interval != null && ![...ui('interval').options].some(o=>+o.value >= info.min_interval))
-      ui('interval').add(new Option(info.min_interval+' 秒',String(info.min_interval)));
-    if (+ui('interval').value < info.min_interval)
-      ui('interval').value = [...ui('interval').options].find(o=>!o.disabled).value;
-  } catch(e) {
-    notice(e.message); ui('detail').textContent = '检查与主机的网络连接后重新载入。';
-  }
+function render(){
+  const online=!!device?.online;
+  ui('app').classList.toggle('online',online);ui('gate').hidden=online;
+  ui('options').hidden=ui('toolbar').hidden=!online;
+  ui('pair').hidden=!!info?.paired;ui('connect').hidden=!info?.paired;
+  ui('connect').disabled=!!device;
+  ui('detail').textContent=info?.paired?'启用后可在电脑的“来源”里选择这部 iPhone。':'输入主机显示的八位配对码。';
+  ui('state').textContent=device?.stream?(muted?'麦克风静音':'采集中'):online?'已连接 · 待采集':device?'连接中':'未连接';
+  ui('mute').textContent=muted?'麦克风已静音':device?.stream?'麦克风开':'麦克风待用';ui('mute').setAttribute('aria-pressed',String(!muted));
+  camera.render();
 }
-ui('pair').onsubmit = async e => {
-  e.preventDefault();
-  try {
-    const response = await fetch('/pair',{method:'POST',body:ui('code').value.trim()});
-    if (!response.ok) throw new Error(await response.text());
-    ui('code').value = ''; notice(''); await setup();
-  } catch(error) {notice(error.message);}
-};
-function send(s, payload) {
-  if (s.ws?.readyState === WebSocket.OPEN) s.ws.send(JSON.stringify(payload));
+function timing(s,data){
+  Object.assign(s,{offset:data.offset,uncertainty:data.uncertainty,minInterval:data.min_interval});
+  ui('network').textContent='主机往返 '+data.rtt+' ms';
+  const select=ui('interval');
+  if(s.minInterval!=null&&!Array.from(select.options).some(o=>+o.value>=s.minInterval))
+    select.add(new Option(s.minInterval+' 秒',String(s.minInterval)));
+  for(const o of select.options)o.disabled=+o.value<s.minInterval;
+  if(+select.value<s.minInterval)select.value=Array.from(select.options).find(o=>!o.disabled).value;
 }
-function shutdown(reason='', retry=false) {
-  clearTimeout(retryTimer);
-  const old = session;
-  session = null;
-  camera.close();
-  if (old) {
-    old.abort.abort(); clearTimeout(old.deadline); clearInterval(old.ping);
-    if (old.ws) {
-      old.ws.onclose = old.ws.onmessage = old.ws.onerror = null;
-      send(old,{type:'end'}); old.ws.close();
-    }
-    old.playback?.clear();
-    if (old.worklet) {old.worklet.port.onmessage = null; old.worklet.disconnect();}
-    old.input?.disconnect(); old.silent?.disconnect();
-    old.mic?.getTracks().forEach(t=>{t.onended = null; t.stop();});
-    if (old.ctx) {
-      old.ctx.onstatechange = null;
-      if (old.ctx.state !== 'closed') old.ctx.close().catch(()=>{});
-    }
-  }
-  ui('network').textContent = '未连接'; ui('state').textContent = '连接主机';
-  ui('level').value = 0; ui('mute').disabled = ui('stopReply').disabled = true;
-  ui('connect').textContent = '连接匠石'; ui('detail').textContent = '点“连接匠石”开启麦克风。';
-  if (reason) notice(reason);
-  if (retry && retries < 3 && !document.hidden) {
-    const delay = 1000 * 2 ** retries++;
-    ui('detail').textContent = '连接中断，正在准备重连…';
-    ui('connect').textContent = '取消重连';
-    retryTimer = setTimeout(()=>{retryTimer = null; connect(true);},delay);
-  } else retryTimer = null;
+function stopMic(s){
+  s.worklet?.disconnect();s.input?.disconnect();s.silent?.disconnect();
+  if(s.worklet)s.worklet.port.onmessage=null;
+  s.mic?.getTracks().forEach(t=>t.stop());s.mic=s.worklet=s.input=s.silent=null;
 }
-function capture(s, frame) {
-  if (!s.stream || s !== session || s.ws.readyState !== WebSocket.OPEN) return;
-  if (s.ws.bufferedAmount > 16000) {
-    shutdown('声音上传积压，正在重新建立实时连接。',true); return;
-  }
-  const level = wantMuted ? 0 : frame.level;
-  if (++s.frames % 5 === 0) ui('level').value = level;
-  if (level >= .02) {
-    s.quiet = 0; s.loud++;
-    if (!s.speech) {s.speech = 'short'; send(s,{type:'speech_start',level:s.speech});}
-    else if (s.speech === 'short' && s.loud >= 20) {
-      s.speech = 'sustained'; send(s,{type:'speech_start',level:s.speech});
-    }
-  } else if (s.speech && ++s.quiet >= 10) {
-    send(s,{type:'speech_end',level:s.speech}); s.speech = ''; s.loud = 0;
-  }
-  if (wantMuted) new Uint8Array(frame.pcm).fill(0);
+function standby(s){
+  s.stream='';s.camera='';camera.pause();stopMic(s);render();
+}
+function closeDevice(reason='',retry=false){
+  clearTimeout(reconnect);
+  const s=device;device=null;camera.close();ui('settings').hidden=true;ui('options').setAttribute('aria-expanded','false');
+  if(s){clearTimeout(s.deadline);clearInterval(s.ping);stopMic(s);if(s.ws){s.ws.onclose=null;s.ws.close();}
+    s.ctx?.close().catch(()=>{});}
+  render();notice(reason);
+  if(retry&&!document.hidden&&retries<4)reconnect=setTimeout(connect,500*2**retries++);
+}
+function pcm(s,token,frame){
+  if(device!==s||s.stream!==token||s.ws.readyState!==WebSocket.OPEN)return;
+  if(s.ws.bufferedAmount>16000){closeDevice('网络拥堵，正在重连',true);return;}
+  const level=muted?0:frame.level;
+  if(level>=.02){
+    s.quiet=0;s.loud++;
+    if(!s.speech){s.speech='short';send(s,{type:'speech_start',level:'short'});}
+    else if(s.speech==='short'&&s.loud>=20){s.speech='sustained';send(s,{type:'speech_start',level:'sustained'});}
+  }else if(s.speech&&++s.quiet>=10){send(s,{type:'speech_end',level:s.speech});s.speech='';s.loud=0;}
+  if(muted)new Uint8Array(frame.pcm).fill(0);
   s.ws.send(frame.pcm);
-  if (s.frames === 1) {s.firstAt = performance.now(); s.firstAudioTime = s.ctx.currentTime;}
-  if (s.frames % 250 === 0) {
-    const elapsed = performance.now()-s.firstAt;
-    send(s,{type:'audio_clock',page_lag_ms:Math.round(elapsed-(s.frames-1)*20),
-      context_lag_ms:Math.round(elapsed-(s.ctx.currentTime-s.firstAudioTime)*1000),buffered:s.ws.bufferedAmount});
-  }
+  if(++s.frames%250===0)send(s,{type:'audio_clock',page_lag_ms:Math.round(performance.now()-s.startAt-s.frames*20),
+    context_lag_ms:Math.round(performance.now()-s.startAt-(s.ctx.currentTime-s.startAudio)*1000),buffered:s.ws.bufferedAmount});
 }
-async function connect(automatic=false) {
-  if (session) return;
-  if (!automatic) {retries = 0; notice('');}
-  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
-    notice('请在 Safari 中使用受信任的 HTTPS 手机入口。'); return;
-  }
-  const s = {abort:new AbortController(), frames:0, loud:0, quiet:0, speech:'',
-    congested:()=>!s.stream || s.ws.bufferedAmount > 1280};
-  session = s;
-  ui('state').textContent = '正在连接'; ui('detail').textContent = '正在准备麦克风和声音播放…';
-  ui('connect').textContent = '取消连接';
-  s.deadline = setTimeout(()=>{if (session === s) shutdown('连接超时，请检查主机或麦克风权限。');},45000);
-  try {
-    s.ctx = new AudioContext({latencyHint:'interactive'});
-    // Unlock output within the tap; a permission prompt can consume user activation on iOS.
-    const unlocked = s.ctx.resume();
-    const micReady = navigator.mediaDevices.getUserMedia({video:false,audio:{
-      channelCount:1, echoCancellation:true, noiseSuppression:false, autoGainControl:true
-    }}).then(mic=>{
-      if (session !== s) {mic.getTracks().forEach(t=>t.stop()); return;}
-      s.mic = mic;
-      for (const track of mic.getAudioTracks()) {
-        track.enabled = !wantMuted;
-        track.onended = ()=>{if (session === s) shutdown('麦克风已中断，点连接可恢复。');};
-      }
-    });
-    const [, , state] = await Promise.all([unlocked, micReady, readInfo(s.abort.signal),
-      s.ctx.audioWorklet.addModule('/voice_capture.js')]);
-    if (session !== s) return;
-    info = state;
-    while (info.voice_state === 'this_device' && session === s) {
-      ui('detail').textContent = '主机正在收尾上一次连接…';
-      await new Promise(resolve=>setTimeout(resolve,300));
-      if (session !== s) return;
-      info = await readInfo(s.abort.signal);
-    }
-    if (session !== s) return;
-    if (info.voice_state === 'in_use') throw new Error('主机正在使用另一条语音连接，请先结束该连接。');
-    if (!info.paired) {shutdown(); showPairing(); return;}
-    s.offset = info.offset; s.uncertainty = info.uncertainty; s.minInterval = info.min_interval;
-    s.input = s.ctx.createMediaStreamSource(s.mic);
-    s.worklet = new AudioWorkletNode(s.ctx,'voice-capture',{processorOptions:{frameMs:20}});
-    s.silent = s.ctx.createGain(); s.silent.gain.value = 0;
+async function startMic(s,token){
+  stopMic(s);s.stream=token;render();
+  send(s,{type:'device_status',text:'正在开启 iPhone 麦克风'});
+  try{
+    if(!s.ctx||s.ctx.state==='closed')s.ctx=new AudioContext({latencyHint:'interactive'});
+    const module=s.module??=s.ctx.audioWorklet.addModule('/voice_capture.js');
+    const mic=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:false,autoGainControl:true},video:false});
+    if(s!==device||token!==s.stream){mic.getTracks().forEach(t=>t.stop());return;}
+    s.mic=mic;await Promise.all([module,s.ctx.resume()]);
+    if(s!==device||token!==s.stream)return;
+    const track=mic.getAudioTracks()[0];track.enabled=!muted;track.onended=()=>{if(s.stream===token)closeDevice('麦克风已断开');};
+    s.input=s.ctx.createMediaStreamSource(mic);
+    s.worklet=new AudioWorkletNode(s.ctx,'voice-capture',{processorOptions:{frameMs:20}});
+    s.silent=s.ctx.createGain();s.silent.gain.value=0;
+    Object.assign(s,{frames:0,speech:'',loud:0,quiet:0,startAt:performance.now(),startAudio:s.ctx.currentTime});
+    send(s,{type:'started'});s.worklet.port.onmessage=({data})=>pcm(s,token,data);
     s.input.connect(s.worklet).connect(s.silent).connect(s.ctx.destination);
-    s.worklet.port.onmessage = ({data})=>capture(s,data);
-    s.playback = new PhonePlayback(s.ctx,payload=>send(s,payload));
-    s.ctx.onstatechange = ()=>{
-      if (session !== s) return;
-      if (s.ctx.state === 'running') s.playback.play();
-      else if (s.stream && s.ctx.state !== 'closed') shutdown('系统中断了声音，点连接可恢复。');
-    };
-    s.ws = new WebSocket('wss://'+location.host+'/voice');
-    s.ws.onmessage = e=>{
-      if (session !== s) return;
-      const m = JSON.parse(e.data);
-      if (m.type === 'ready') {
-        clearTimeout(s.deadline); retries = 0; notice('');
-        s.stream = m.stream; camera.render();
-        ui('connect').textContent = '断开连接'; ui('state').textContent = '已连接匠石';
-        ui('detail').textContent = '可以直接说话，回复会从手机播放。';
-        ui('mute').disabled = ui('stopReply').disabled = false;
-        ui('network').textContent = '往返 '+info.rtt+' ms';
-        s.ping = setInterval(async()=>{
-          if (s.pinging) return;
-          s.pinging = true;
-          try {
-            const current = await readInfo(s.abort.signal);
-            if (session === s) {
-              s.offset = current.offset; s.uncertainty = current.uncertainty;
-              ui('network').textContent = '往返 '+current.rtt+' ms';
-            }
-          } catch {} finally {s.pinging = false;}
-        },5000);
-      } else if (m.type === 'notice') {s.lastNotice = m.text; notice(m.text);}
-      else s.playback.receive(m);
-    };
-    s.ws.onclose = ()=>{if (session === s) shutdown(s.lastNotice || '连接已关闭，请检查网络及主机语音会话。', Boolean(s.stream) || automatic);};
-  } catch(e) {
-    if (session === s) shutdown('连接失败：'+e.message);
-  }
+    send(s,{type:'device_status',text:muted?'iPhone 麦克风已静音':'正在使用 iPhone 麦克风',muted});
+  }catch(e){if(device===s&&s.stream===token){send(s,{type:'device_status',text:'手机麦克风未能开启：'+e.message});closeDevice('无法开启麦克风：'+e.message);}}
 }
-ui('connect').onclick = ()=>{
-  if (session || retryTimer) {shutdown(); return;}
-  connect();
+function connect(context){
+  clearTimeout(reconnect);if(device||!info?.paired)return;
+  if(!navigator.mediaDevices||!window.isSecureContext){notice('请使用受信任的 HTTPS 手机入口');return;}
+  const s=device={stream:'',camera:'',congested:()=>!s.stream||s.ws.bufferedAmount>1280};
+  try{
+    // Unlock iOS audio in the initiating tap. The microphone is acquired on desktop demand.
+    s.ctx=context||new AudioContext({latencyHint:'interactive'});s.ctx.resume().catch(()=>{});
+    s.module=s.ctx.audioWorklet.addModule('/voice_capture.js');s.module.catch(()=>{});
+    s.reportCamera=(text,sending)=>send(s,{type:'device_video',camera:s.camera,text,sending});
+    s.ws=new WebSocket('wss://'+location.host+'/device-link');
+    s.deadline=setTimeout(()=>{if(device===s)closeDevice('连接超时，请重试',true);},8000);
+    timing(s,info);notice('');render();
+    s.ws.onmessage=({data})=>{
+      if(device!==s)return;const m=JSON.parse(data);
+      if(m.type==='available'){
+        clearTimeout(s.deadline);s.online=true;retries=0;render();
+        if(s.minInterval!=null)camera.open();
+        s.ping=setInterval(async()=>{try{const t=await clock();if(device===s)timing(s,t);}catch{}},5000);
+      }else if(m.type==='start'){startMic(s,m.stream);}
+      else if(m.type==='standby'){standby(s);}
+      else if(m.type==='camera'&&m.stream===s.stream){
+        s.camera=m.camera;s.videoState=null;camera.request(!!m.camera);
+      }else if(m.type==='preview_signal'&&m.camera===s.camera)preview.accept(m);
+    };
+    s.ws.onclose=()=>{if(device===s)closeDevice('设备连接已断开',s.online);};
+  }catch(e){closeDevice('未能连接：'+e.message);}
+}
+ui('pair').onsubmit=async e=>{
+  e.preventDefault();
+  let context;
+  try{
+    context=new AudioContext({latencyHint:'interactive'});context.resume().catch(()=>{});
+    const r=await fetch('/pair',{method:'POST',body:ui('code').value.trim()});
+    if(!r.ok)throw Error(await r.text());
+    info=await clock();ui('code').value='';render();
+    if(!document.hidden)connect(context);
+  }catch(err){notice(err.message);}
+  finally{if(context&&device?.ctx!==context)context.close().catch(()=>{});}
 };
-ui('mute').onclick = ()=>{
-  wantMuted = !wantMuted;
-  session?.mic?.getAudioTracks().forEach(t=>{t.enabled = !wantMuted;});
-  ui('mute').setAttribute('aria-pressed',String(wantMuted));
-  ui('mute').textContent = wantMuted ? '打开麦克风' : '麦克风静音';
-};
-ui('stopReply').onclick = ()=>{
-  if (session?.stream) {session.playback.clear(); send(session,{type:'stop'});}
-};
-window.addEventListener('pagehide',()=>shutdown());
-document.addEventListener('visibilitychange',()=>{
-  if (document.hidden && (session || retryTimer)) shutdown('页面已转入后台，返回后点连接即可恢复。');
-});
-setup();
+ui('connect').onclick=()=>{retries=0;connect();};ui('disconnect').onclick=()=>closeDevice();
+ui('mute').onclick=()=>{muted=!muted;device?.mic?.getAudioTracks().forEach(t=>{t.enabled=!muted;});
+  send(device,{type:'device_status',text:muted?'iPhone 麦克风已静音':'iPhone 麦克风已打开',muted});render();};
+ui('options').onclick=()=>{const p=ui('settings');p.hidden=!p.hidden;ui('options').setAttribute('aria-expanded',String(!p.hidden));};
+window.addEventListener('pagehide',()=>closeDevice());
+document.addEventListener('visibilitychange',()=>{if(document.hidden)closeDevice('返回前台后可重新启用设备');});
+clock().then(v=>{info=v;render();}).catch(e=>notice(e.message));

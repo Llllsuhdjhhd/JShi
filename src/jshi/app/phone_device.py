@@ -11,11 +11,12 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, time
-from weakref import WeakSet
+from contextlib import suppress
 
 from aiohttp import web
 
 from .capture import CaptureSource
+from .peripheral import Peripheral
 
 
 @dataclass
@@ -58,22 +59,10 @@ class PhoneListener:
         return f'https://{host}:{self.port}/'
 
 
-# Only audio transport and playback control cross the device boundary.
-PHONE_CONTROLS = {'speech_start', 'speech_end', 'played', 'stop', 'end', 'audio_clock'}
-EVENT_FIELDS = {
-    'ready': ('stream',), 'notice': ('text',), 'reply': ('reply_id', 'paused'),
-    'audio': ('reply_id', 'segment', 'rate', 'pcm'), 'audio_end': ('reply_id',),
-    'segment_end': ('reply_id', 'segment'),
-    **{kind: ('reply_id', 'permit_seq', 'reason_id', 'cleared')
-       for kind in ('pause', 'resume', 'stop', 'block_next', 'clear_block')},
-}
-
-
-def create_device_app(code, connection, submit_frame, vision_config, *, captures, voice_busy):
+def create_device_app(code, devices, submit_frame, vision_config, *, captures):
     cookie_name = 'jshi_phone'
     signing_key = secrets.token_bytes(32)
     attempts = deque()
-    sockets = WeakSet()
     uploading = set()
     max_bytes = vision_config.max_image_bytes if vision_config else 1024
     app = web.Application(client_max_size=max(max_bytes + 1, 4096))
@@ -118,40 +107,40 @@ def create_device_app(code, connection, submit_frame, vision_config, *, captures
     async def info(request):
         is_paired = paired(request)
         state = 'available'
-        if is_paired and voice_busy():
+        if is_paired and captures.active:
             state = 'this_device' if captures.active and captures.active.source == source(request) else 'in_use'
         return web.json_response({'paired': is_paired, 'server_time': time(), 'voice_state': state,
             'min_interval': vision_config.sample_seconds if vision_config else None},
             headers={'Cache-Control': 'no-store'})
 
-    async def voice(request):
+    async def peripheral(request):
         authorize(request)
-        if request.query:
-            raise web.HTTPBadRequest(text='识别和播报使用主机设置')
-        async def forward(ws, event):
-            kind = event['type']
-            if kind == 'notice' and not event.get('device_notice'):
-                return
-            if kind not in EVENT_FIELDS:
-                return
-            message = {k: event[k] for k in EVENT_FIELDS[kind] if k in event}
-            await ws.send_json({'type': kind, **message})
+        device = source(request)
+        if device.device_id in devices:
+            raise web.HTTPConflict(text='该手机已有设备页面在线')
+        ws = web.WebSocketResponse(max_msg_size=32768, heartbeat=15)
+        peer = Peripheral(device, ws)
+        devices[device.device_id] = peer
         try:
-            return await connection(request, source=source(request), device_send=forward,
-                                    controls=PHONE_CONTROLS, sockets=sockets)
-        except (web.HTTPBadRequest, web.HTTPConflict) as exc:
-            # Browsers hide HTTP bodies on a failed WebSocket handshake.
-            ws = web.WebSocketResponse()
             await ws.prepare(request)
-            await ws.send_json({'type': 'notice', 'text': exc.text})
-            await ws.close()
-            return ws
+            await ws.send_json({'type':'available', 'device_id':device.device_id})
+            async for message in ws:
+                await peer.incoming(message)
+        finally:
+            devices.pop(device.device_id, None)
+            with suppress(ConnectionError):
+                await peer.lost()
+        return ws
 
     async def frame(request):
         authorize(request)
         device = source(request)
         session = captures.resolve(device, request.headers.get('X-Device-Stream'))
-        if session is None:
+        peer = devices.get(device.device_id)
+        camera_token = request.headers.get('X-Device-Camera', '')
+        def camera_active():
+            return bool(peer and camera_token and peer.camera_token == camera_token and peer.session is session)
+        if session is None or not camera_active():
             raise web.HTTPConflict(text='本次设备连接已结束')
         if submit_frame is None:
             raise web.HTTPServiceUnavailable(text='主机没有开启视觉')
@@ -165,12 +154,12 @@ def create_device_app(code, connection, submit_frame, vision_config, *, captures
         uploading.add(session)
         try:
             return await submit_frame(request, source=f'phone-{device.device_id}-{lens}',
-                                      session=session, max_age=5)
+                                      session=session, max_age=5, channel_active=camera_active)
         finally:
             uploading.discard(session)
 
-    assets = {'/': 'phone.html', '/phone.js': 'phone.js', '/phone_camera.js': 'phone_camera.js',
-              '/phone_playback.js': 'phone_playback.js', '/voice_capture.js': 'voice_capture.js'}
+    assets = {'/': 'phone.html', '/phone.js': 'phone.js', '/device_preview.js':'device_preview.js', '/phone_camera.js': 'phone_camera.js',
+              '/voice_capture.js': 'voice_capture.js'}
     async def asset(request):
         return web.FileResponse(Path(__file__).with_name(assets[request.path]),
             headers={'Cache-Control': 'no-cache', 'Referrer-Policy': 'no-referrer',
@@ -179,17 +168,17 @@ def create_device_app(code, connection, submit_frame, vision_config, *, captures
         app.router.add_get(path, asset)
     app.router.add_post('/pair', pair)
     app.router.add_get('/api/device', info)
-    app.router.add_get('/voice', voice)
+    app.router.add_get('/device-link', peripheral)
     app.router.add_post('/api/device/frame', frame)
 
     async def shutdown(app):
-        await asyncio.gather(*(ws.close(code=1001) for ws in tuple(sockets)))
+        await asyncio.gather(*(peer.socket.close(code=1001) for peer in tuple(devices.values())))
     app.on_shutdown.append(shutdown)
     return app
 
 
-def install_listener(desktop, config, connection, submit_frame, vision_config, *, captures, voice_busy):
-    device = create_device_app(config.code, connection, submit_frame, vision_config, captures=captures, voice_busy=voice_busy)
+def install_listener(desktop, config, devices, submit_frame, vision_config, *, captures):
+    device = create_device_app(config.code, devices, submit_frame, vision_config, captures=captures)
     async def serve(app):
         runner = web.AppRunner(device, shutdown_timeout=5)
         await runner.setup()

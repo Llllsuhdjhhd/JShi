@@ -17,6 +17,7 @@ class CaptureSession:
     source: CaptureSource
     capture_id: str
     token: str = field(default_factory=lambda: token_urlsafe(24), repr=False)
+    controller_token: str = field(default_factory=lambda: token_urlsafe(24), repr=False)
     accepting: bool = False
 
 

@@ -37,8 +37,15 @@ class JShiVisionChat {
     if(pinned&&this.options.pin)this.options.pin(card);else this.options.insert(card);
     return {node:card,label,body,video,description,meta,status,pinned,copyLabel};
   }
+  get active(){return !!(this.stream||this.remote);}
+  deviceState(m){
+    if(!this.remote||!this.card)return;
+    this.card.label.textContent=m.text;
+    if(!m.sending){this.preview?.close();this.card.video.srcObject=null;}
+  }
+  handlePreview(m){if(this.remote)this.preview?.answer(m,this.card.video);}
   start() {
-    if(this.stream)return Promise.resolve(true);
+    if(this.active)return Promise.resolve(true);
     if(this.starting)return this.starting;
     const token=++this.epoch;
     const run=this.openCamera(token);this.starting=run;
@@ -48,24 +55,35 @@ class JShiVisionChat {
   async openCamera(token) {
     try {
       if(!await this.options.ensureVoice()||token!==this.epoch)return false;
-      const stream=await this.options.mediaDevices.getUserMedia({video:true,audio:false});
-      if(token!==this.epoch){stream.getTracks().forEach(t=>t.stop());return false;}
-      this.stream=stream;this.latestURL='';this.card=this.makeCard('正在观察',true);
+      this.remote=this.options.remoteSource?.()||'';
+      if(!this.remote){
+        const stream=await this.options.mediaDevices.getUserMedia({video:true,audio:false});
+        if(token!==this.epoch){stream.getTracks().forEach(t=>t.stop());return false;}
+        this.stream=stream;
+      }
+      this.latestURL='';this.card=this.makeCard('正在观察',true);
       const stop=this.element('button','','停止画面');stop.type='button';stop.onclick=()=>this.stop();
       this.card.node.children[0].appendChild(stop);
-      this.card.video.srcObject=stream;this.card.video.onclick=()=>this.viewCamera();
-      await this.card.video.play();
+      this.card.video.onclick=()=>this.viewCamera();
+      if(this.remote){
+        this.preview=new DevicePreview(this.options.send);
+        this.options.send({type:'device_camera',enabled:true});
+      }else{
+        this.card.video.srcObject=this.stream;
+        await this.card.video.play();
+      }
       if(token!==this.epoch)return false;
       await this.poll();
       if(token!==this.epoch)return false;
-      this.timer=setInterval(()=>this.tick(),this.interval);
+      if(!this.remote)this.timer=setInterval(()=>this.tick(),this.interval);
       this.pollTimer=setInterval(()=>this.poll(),3000);this.tick();this.options.state(true);
       return true;
     }catch(e){if(token===this.epoch){this.stop();this.options.notice('摄像头未能开启：'+e.message);}return false;}
   }
   stop() {
     ++this.epoch;this.starting=null;clearInterval(this.timer);clearInterval(this.pollTimer);this.timer=this.pollTimer=null;
-    const wasActive=!!this.stream;
+    const wasActive=this.active;
+    if(this.remote){this.options.send({type:'device_camera',enabled:false});this.preview?.close();this.remote='';}
     if(this.stream)this.stream.getTracks().forEach(t=>t.stop());this.stream=null;
     if(this.card&&wasActive){this.card.video.srcObject=null;this.card.video.hidden=true;this.card.label.textContent='画面已停止';
       if(this.latestURL){const img=this.element('img','media-preview');img.src=this.latestURL;img.alt='最后一次采样画面';img.onclick=()=>this.viewCamera();this.card.body.insertBefore(img,this.card.video);}}
@@ -109,11 +127,13 @@ class JShiVisionChat {
       if(!r.ok)return;const data=await r.json(),end=Date.now()/1000;
       if(token!==this.options.captureToken()||epoch!==this.epoch)return;
       this.interval=(data.sample_seconds||2)*1000;this.offset=data.server_time-(start+end)/2;this.uncertainty=(end-start)/2;
-      if(!data.voice_active&&this.stream){this.stop();return;}
+      if(!data.voice_active&&this.active){this.stop();return;}
       if(!card)return;
       const s=data.environment;
-      if(s?.envelope?.source && s.envelope.source!==(card.pinned?'browser':'photo'))return;
+      const source=s?.envelope?.source;
+      if(source && !(card.pinned&&this.remote?source.startsWith('phone-'+this.remote+'-'):source===(card.pinned?'browser':'photo')))return;
       if(s){this.latestURL=s.image_available?'/api/vision/photo/'+s.frame:'';
+        if(this.remote&&card.pinned&&this.latestURL)card.video.poster=this.latestURL;
         card.description.textContent=s.described_at?s.description:'正在采样，环境描述尚未完成';
         card.description.title=s.described_at?s.description:'';
         const stale=!!s.description_frame&&s.description_frame!==s.frame;
@@ -154,7 +174,7 @@ if(typeof module!=='undefined')module.exports=JShiVisionChat;
 else {
   visualChat=new JShiVisionChat({document,mediaDevices:navigator.mediaDevices,request:(...a)=>fetch(...a),
     pin:card=>{$('vision-dock').replaceChildren(card);$('vision-dock').hidden=false},
-    captureToken:()=>captureToken,ensureVoice:async()=>{inputMode('vision');return startVoice()},notice:log,
+    remoteSource:()=>selectedSource,send, captureToken:()=>captureToken,ensureVoice:async()=>{inputMode('vision');return startVoice()},notice:log,
     insert:card=>{if($('empty'))$('empty').remove();$('log').appendChild(card);while($('log').children.length>100)$('log').firstChild.remove()},
     state:active=>{$('camera-toggle').textContent=active?'观察中':'开始视频';$('camera-toggle').ariaPressed=String(active)}});
   // The observation page operates the camera in the tab that owns the microphone.
@@ -170,7 +190,7 @@ else {
   }
   $('attach-photo').onclick=()=>$('photo-file').click();
   $('photo-file').onchange=()=>{const file=$('photo-file').files[0];if(file)visualChat.attachPhoto(file);$('photo-file').value='';};
-  $('camera-toggle').onclick=()=>visualChat.stream||visualChat.starting?visualChat.stop():visualChat.start();
+  $('camera-toggle').onclick=()=>visualChat.active||visualChat.starting?visualChat.stop():visualChat.start();
   $('close-media').onclick=()=>$('media-view').close();
   $('media-view').onclose=()=>{$('media-video').srcObject=null;};
   $('typed').addEventListener('paste',e=>{const file=[...(e.clipboardData?.files||[])].find(f=>f.type.startsWith('image/'));if(file){e.preventDefault();visualChat.attachPhoto(file);}});

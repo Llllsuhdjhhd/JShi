@@ -124,6 +124,8 @@
   .conversation:has(#vision-dock [data-display=hidden]) .message-region{flex:1}
   @media(max-width:700px){#vision-dock{min-height:200px}#vision-dock:has([data-display=normal]){min-height:260px}#vision-dock .media-message{padding:8px}#vision-dock .media-header{gap:4px}#vision-dock .media-body{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto;gap:8px}#vision-dock .media-copy{max-height:100px;padding:10px 12px}#vision-dock .media-copy-label{margin-bottom:4px}#vision-dock .media-meta{margin-top:6px;padding-top:5px;font-size:10px}#vision-dock .media-description{font-size:12px}#vision-dock:has([data-display=hidden]){min-height:0}}
 .recording-settings{border:1px solid #e1e6ef;border-radius:14px;background:#fff;padding:18px 20px}.recording-settings>summary{cursor:pointer;font-weight:600}.recording-body{padding-top:16px}.recording-row{display:flex;align-items:center;justify-content:space-between;gap:16px}.recording-row strong{font-size:14px}.recording-row .tip{margin:6px 0;color:#738097}.recording-link{flex-shrink:0;background:#edf3ff;color:#2763c8;border:1px solid #dbe6ff;border-radius:9px;padding:8px 13px;text-decoration:none;font-size:13px}.recording-context{margin-top:18px;padding-top:15px;border-top:1px solid #edf0f5}.recording-context label{display:flex;align-items:center;gap:7px}.recording-context .tip{margin:7px 0;color:#738097}
+#source-picker:not([hidden]){display:inline-flex;align-items:center;gap:5px;margin:0;color:var(--muted);white-space:nowrap}
+#capture-source{width:auto;max-width:11em;padding:6px 4px;font-size:13px}
 </style>
 <style>
   #log .training-label{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px;padding-top:7px;border-top:1px solid #dfe7f3;white-space:normal;font-size:11px;color:#7a879a}
@@ -141,6 +143,7 @@
 <main>
   <header class="page-header"><h1><span class="brand-mark" aria-hidden="true">匠</span>和匠石说话</h1>
     <div class="header-actions">
+      <label id="source-picker" hidden>来源 <select id="capture-source" aria-label="采集来源"><option value="">本机</option></select></label>
       <button id="start" class="secondary" aria-pressed="false">开始对话</button><button id="camera-toggle" class="secondary" aria-pressed="false" hidden>开始视频</button><button id="end" hidden disabled>结束</button><button id="stop" hidden disabled>停止播放</button><button id="retry-write" class="secondary" hidden>重试写场</button>
       <details class="help-popup"><summary aria-label="使用提示" title="使用提示">?</summary><div class="help-bubble">
         <p>选择 LARK A2 麦克风，说话即可。声音通过电脑默认扬声器播放。</p>
@@ -993,6 +996,9 @@ function message(m) {
     for(const id of m.input_ids){const row=inputRows.get(id);if(row){row.p.style.outline='';row.meta.textContent=m.label+' · 手动关联';row.who.textContent=displayedSpeaker({label:m.label,method:'manual_annotation',status:'recognized'})+'：';row.identityView={label:m.label,source:'人工',state:'确定',reason:'用户手动关联'};refreshIdentityDetails(row);row.p.classList.remove('selected');row.button.textContent='选择声音';}}
     selectedInputs.clear();selectionChanged();$('enroll-status').textContent='已关联 '+m.label+'：本次选择 '+m.clips+' 段，累计已保存 '+(m.reference_count ?? 1)+' 段（最多10段）；比对采用平均匹配分。兼容录音保留 '+m.seconds+' 秒。'+(m.min_similarity!=null ? '样本最低相似度 '+m.min_similarity+'（仅供参考）。' : '')+(m.warning || '');return;
   }
+  if(m.type==='device_status'){if(m.text)$('status').textContent=m.text;return;}
+  if(m.type==='device_video'){visualChat?.deviceState(m);return;}
+  if(m.type==='preview_signal'){visualChat?.handlePreview(m);return;}
   if (m.type==='ready') { captureToken=m.stream;captureId=m.capture_id; try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true;refreshTextPeople();if(window.refreshVisionAvailability)window.refreshVisionAvailability();voiceButton(true,'对话中'); $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '')+(m.speaker_split==='enabled'?' · 本地多人分段已启用':'');if(m.speaker_split_error)log(m.speaker_split_error);
     $('match-threshold').disabled=m.match_threshold==null;
     if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);$('match-status').textContent='单句确认至少 '+Number(m.single_confirmation_threshold ?? Math.max(.65,m.match_threshold)).toFixed(2)+'，与第二候选须相差 '+m.match_margin+'；较弱声音先收集多段核对，待定声音不参与姓名竞争。';}
@@ -1405,6 +1411,45 @@ $('test').onclick=async()=>{
   } catch(e) {log('试听失败：'+e.message);}
   finally {if(stream) stream.getTracks().forEach(t=>t.stop()); if(testContext) await testContext.close(); $('test').textContent='录制 5 秒试听'; $('test').disabled=false; $('start').disabled=false;}
 };
+let selectedSource='', sourceListKey='';
+try{selectedSource=localStorage.getItem('jshi.capture-source')||'';}catch{}
+async function refreshSources(){
+  const response=await fetch('/api/capture-sources',{cache:'no-store'});
+  if(!response.ok)throw Error('无法读取设备来源');
+  const state=await response.json(), select=$('capture-source');
+  if(!Array.isArray(state.phones))return;
+  $('source-picker').hidden=false;
+  select.title=state.enabled?'选择麦克风与摄像头的来源':'本次启动仅启用了本机来源';
+  const key=JSON.stringify([selectedSource,...state.phones]);
+  if(sourceListKey===key)return state.phones;
+  sourceListKey=key;
+  const choices=[new Option('本机','')];
+  for(const id of state.phones)choices.push(new Option('iPhone · '+id.slice(-4),id));
+  if(!state.phones.length||selectedSource&&!state.phones.includes(selectedSource)){
+    const offline=new Option(state.enabled?'iPhone · 未连接':'iPhone · 入口未启用',selectedSource&&!state.phones.includes(selectedSource)?selectedSource:'offline');
+    offline.disabled=true;choices.push(offline);
+  }
+  select.replaceChildren(...choices);select.value=selectedSource;
+  return state.phones;
+}
+$('capture-source').onchange=async()=>{
+  const select=$('capture-source'), next=select.value;
+  if(select.selectedOptions[0]?.disabled)return;
+  const wasActive=ready||!!connectionPromise, wasVideo=visualChat?.active||!!visualChat?.starting;
+  select.disabled=true;
+  try{
+    if(next){const online=await refreshSources();if(!online?.includes(next))throw Error('iPhone 已离线，请先在手机端连接');}
+    if(wasActive)await end();
+    selectedSource=next;select.value=next;
+    try{localStorage.setItem('jshi.capture-source',next)}catch{}
+    if(wasVideo)await visualChat.start();else if(wasActive)await startVoice();
+  }catch(e){$('status').textContent=e.message;}
+  finally{select.disabled=false;}
+};
+$('capture-source').onfocus=()=>refreshSources().catch(()=>{});
+refreshSources().catch(()=>{});
+const sourceRefresh=setInterval(()=>{if(!document.hidden)refreshSources().catch(()=>{});},2500);
+window.addEventListener('pagehide',()=>clearInterval(sourceRefresh));
 async function connectVoice(token) {
   permitSeq=0;holdReasons.clear();nextHolds.clear();
   if(selectedMode!=='vision')inputMode('voice');
@@ -1424,6 +1469,8 @@ async function connectVoice(token) {
     if(token!==connectionEpoch)return false;
     if(settings.busy)throw new Error(settings.cleanup_stage?'上一轮仍在保存，请稍后再试':'另一页面正在使用语音；本页仍可文字输入');
     settlingVoice=false;
+    const peripheral=selectedSource;
+    if(peripheral&&!settings.phones?.includes(peripheral))throw Error('所选 iPhone 未连接，请在手机上启用设备或更换来源');
     const asr=$('asr').value || settings.asr;
     if(asr==='online' && !settings.online_available) throw new Error('在线识别尚未配置 JSHI_VOICE_API_KEY，请配置后重启服务');
     if(asr==='bailian' && !settings.bailian_available) throw new Error('百炼尚未配置 JSHI_BAILIAN_ASR_API_KEY 或 DASHSCOPE_API_KEY，请配置后重启服务');
@@ -1435,23 +1482,25 @@ async function connectVoice(token) {
     if(tts==='local'&&!settings.tts_backends?.local) throw new Error('本地播报未加载，请用本地播报配置启动服务');
     outputContext = new AudioContext(); await outputContext.resume();
     if(token!==connectionEpoch)return false;
-    const acquiredMic=await navigator.mediaDevices.getUserMedia({audio:{
-      deviceId:$('device').value ? {exact:$('device').value} : undefined,
-      // Voiceprint enrollment uses the same constraints; browser noise suppression reshapes the spectrum.
-      echoCancellation:true, noiseSuppression:false, autoGainControl:true, channelCount:{ideal:2}
-    }});
-    if(token!==connectionEpoch){acquiredMic.getTracks().forEach(t=>t.stop());return false;}
-    mic=acquiredMic;
-    // A capture-only context without a speaker sink: a stalling output device must not slow microphone capture.
-    captureContext=new AudioContext({sinkId:{type:'none'}}); await captureContext.audioWorklet.addModule('/voice_capture.js');
-    if(token!==connectionEpoch)return false;
-    capture=new AudioWorkletNode(captureContext,'voice-capture');
-    capture.port.postMessage({channel:$('channel').value});
-    captureContext.createMediaStreamSource(mic).connect(capture);
-    // The worklet emits silence, so connecting it never routes the mic to speakers.
-    const mute=captureContext.createGain(); mute.gain.value=0; capture.connect(mute).connect(captureContext.destination);
+    if(!peripheral){
+      const acquiredMic=await navigator.mediaDevices.getUserMedia({audio:{
+        deviceId:$('device').value ? {exact:$('device').value} : undefined,
+        // Voiceprint enrollment uses the same constraints; browser noise suppression reshapes the spectrum.
+        echoCancellation:true, noiseSuppression:false, autoGainControl:true, channelCount:{ideal:2}
+      }});
+      if(token!==connectionEpoch){acquiredMic.getTracks().forEach(t=>t.stop());return false;}
+      mic=acquiredMic;
+      // A capture-only context without a speaker sink: a stalling output device must not slow microphone capture.
+      captureContext=new AudioContext({sinkId:{type:'none'}}); await captureContext.audioWorklet.addModule('/voice_capture.js');
+      if(token!==connectionEpoch)return false;
+      capture=new AudioWorkletNode(captureContext,'voice-capture');
+      capture.port.postMessage({channel:$('channel').value});
+      captureContext.createMediaStreamSource(mic).connect(capture);
+      // The worklet emits silence, so connecting it never routes the mic to speakers.
+      const mute=captureContext.createGain(); mute.gain.value=0; capture.connect(mute).connect(captureContext.destination);
+    }
     let resumeSession='';try{resumeSession=sessionStorage.getItem('jshi.voice.session')||'';}catch{}
-    ws=new WebSocket('ws://'+location.host+'/voice?asr='+encodeURIComponent(asr)+'&tts='+encodeURIComponent(tts||'')+'&speaker_model='+encodeURIComponent($('speaker-model').value)+'&session='+encodeURIComponent(resumeSession)); ws.binaryType='arraybuffer';
+    ws=new WebSocket('ws://'+location.host+'/voice?asr='+encodeURIComponent(asr)+'&tts='+encodeURIComponent(tts||'')+'&speaker_model='+encodeURIComponent($('speaker-model').value)+'&session='+encodeURIComponent(resumeSession)+(peripheral?'&source='+encodeURIComponent(peripheral):'')); ws.binaryType='arraybuffer';
     const activeWs=ws;
     let completeHandshake;
     const handshake=new Promise(resolve=>{completeHandshake=resolve;});
@@ -1459,9 +1508,9 @@ async function connectVoice(token) {
     const deadlineTimer=setTimeout(()=>completeHandshake(false),20000);
     ws.onmessage=e=>{if(ws!==activeWs||token!==connectionEpoch)return;try{const payload=JSON.parse(e.data);message(payload);if(payload.type==='ready')completeHandshake(true);}catch(err){log('播放消息异常：'+err.message);}};
     ws.onerror=()=>log('连接失败，请检查本地语音服务。');
-    ws.onclose=e=>{completeHandshake(false);if(ws===activeWs){ready=false;log('语音连接已关闭（'+e.code+(e.reason?'：'+e.reason:'')+'）。');end();}};
+    ws.onclose=e=>{completeHandshake(false);if(ws===activeWs){ready=false;log('语音连接已关闭（'+e.code+(e.reason?'：'+e.reason:'')+'）。');end().then(()=>{if(peripheral&&e.reason)$('status').textContent=e.reason;});}};
     let clock=null;
-    capture.port.onmessage=({data})=>{
+    if(capture)capture.port.onmessage=({data})=>{
       $('level').value=data.level;
       if(!ready || !ws || ws.readyState!==WebSocket.OPEN) {
         speechLevelSent = ''; speechFrames = 0; speechQuiet = 0;
@@ -1492,12 +1541,18 @@ async function connectVoice(token) {
           context_lag_ms:Math.round(elapsed-(captureContext.currentTime-clock.context)*1000),buffered:ws.bufferedAmount});
       }
     };
-    await captureContext.resume(); if(token!==connectionEpoch){clearTimeout(deadlineTimer);return false;} $('end').disabled=false; $('stop').disabled=false; $('device').disabled=true; $('channel').disabled=true;
+    if(captureContext)await captureContext.resume(); if(token!==connectionEpoch){clearTimeout(deadlineTimer);return false;} $('end').disabled=false; $('stop').disabled=false; $('device').disabled=true; $('channel').disabled=true;
     $('speaker-model').disabled=true;
     $('status').textContent='正在连接语音服务';
     const connected=await handshake;clearTimeout(deadlineTimer);if(cancelHandshake===completeHandshake)cancelHandshake=null;
     if(token!==connectionEpoch)return false;
-    if(!connected)throw new Error('语音未能连接，请检查声音服务后重试');
+    if(!connected){
+      if(peripheral){
+        const available=await refreshSources();
+        if(!available?.includes(peripheral))throw Error('所选 iPhone 已离线，请重新连接手机');
+      }
+      throw Error('语音未能连接，请检查声音服务后重试');
+    }
     return true;
   }catch(e){if(token===connectionEpoch){await end();$('status').textContent=e.message;log('无法开始：'+e.message);}return false;}
 }
@@ -1512,6 +1567,7 @@ function startVoice(){
 function voiceButton(active,label){$('start').disabled=false;$('start').textContent=label||(active?'对话中':'开始对话');$('start').ariaPressed=String(active);}
 $('start').onclick=()=>ready||connectionPromise?end():startVoice();
 </script>
+<script src="/device_preview.js"></script>
 <script src="/vision_chat.js"></script>
 <script src="/model_settings.js?v=20261105-effort"></script>
 </html>
