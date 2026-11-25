@@ -106,7 +106,7 @@ def test_paired_device_audio_camera_reconnect_and_shutdown(process, tmp_path):
                 await wait_available()
                 frames.clear()
 
-                async with desktop.ws_connect('/voice?source='+device_id, headers=local_origin) as ws:
+                async with desktop.ws_connect('/voice?echo=1&source='+device_id, headers=local_origin) as ws:
                     ready = await ws.receive_json()
                     assert ready['type']=='ready' and 'asr' in ready
                     stream = (await sensor.receive_json())['stream']
@@ -136,6 +136,7 @@ def test_paired_device_audio_camera_reconnect_and_shutdown(process, tmp_path):
                     assert await desktop_frame(ready['stream'], 'photo') == 202
 
                     await ws.send_bytes(bytes([1])*640)
+                    await ws.send_bytes(b'JREF' + bytes([7])*640)
                     await sensor.send_bytes(bytes([2])*640)
                     await sensor.send_json({'type':'started','stream':stream})
                     await sensor.send_bytes(bytes(640))
@@ -189,3 +190,34 @@ def test_new_source_uses_the_same_exclusive_capture_slot():
     inputs.release(first)
     assert inputs.resolve(cameras[0], first.token) is None
     assert inputs.resolve(cameras[0], second.token) is second
+
+
+def test_phone_echo_preserves_near_speech_and_removes_delayed_desktop_output():
+    np = pytest.importorskip('numpy')
+    from jshi.voice.playback_echo import PlaybackEcho
+
+    rng = np.random.default_rng(15)
+    rate = 16_000
+    total = rate * 7
+    def speech(length):
+        return np.convolve(rng.normal(0, 4400, length), np.ones(3) / 3, 'same').astype('<i2')
+    reference = speech(total)
+    reflected = .55 * np.roll(reference, 830) + .16 * np.roll(reference, 1050)
+    near = np.zeros(total)
+    near[64000:80000] = speech(rate)
+    mic = (near + reflected).astype('<i2')
+    echo = PlaybackEcho()
+    assert echo.clean(mic[:320].tobytes()) == mic[:320].tobytes()
+    cleaned = bytearray()
+    for i in range(0, total, 320):
+        echo.reference(reference[i:i+320].tobytes())
+        cleaned.extend(echo.clean(mic[i:i+320].tobytes()))
+    output = np.frombuffer(cleaned, '<i2').astype(float)
+    def rms(x):
+        return np.sqrt(np.mean(x*x))
+    assert rms(output[40000:62000]) < .18 * rms(reflected[40000:62000])
+    # With a second speaker present, their utterance remains correlated, even with DSP frame delay.
+    near_only = near[66000:76000]
+    candidate = output[66000:76800]
+    peak = np.max(np.correlate(candidate, near_only, 'valid')) / np.dot(near_only, near_only)
+    assert peak > .5

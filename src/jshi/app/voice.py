@@ -5401,7 +5401,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 loop_watch = asyncio.create_task(watch_event_loop(conversation.record))
                 capture.accepting = True
                 if peer:
-                    await peer.attach(capture, ws)
+                    await peer.attach(capture, ws, echo=request.query.get('echo') == '1')
                 await conversation.emit("ready", stream=capture.controller_token if peer else capture.token, capture_id=capture.capture_id, session_id=conversation.session_id, identity_mode="local" if use_local or backend == "mlx" else config.identity_mode,
                     continuous_speaker_analysis=('disabled' if config.continuous_analysis == 'off' else
                         ('shadow' if config.continuous_analysis == 'shadow' else 'enabled') if audio_timeline else 'unavailable'),
@@ -5598,7 +5598,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         except Exception as exc:
             logging.getLogger(__name__).exception("Voice connection failed")
             if not ws.closed:
-                await ws.send_json({"type": "notice", "text": f"语音连接失败：{type(exc).__name__}: {exc}"})
+                await ws.send_json({"type": "device_status", "text": f"语音连接失败：{type(exc).__name__}: {exc}"})
         finally:
             capture.accepting = False
             def closing(stage):

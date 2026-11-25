@@ -276,13 +276,13 @@ class VisionStore:
             current = c.execute('select s.* from current u join snapshots s on s.id=u.snapshot where u.subject=?', (subject,)).fetchone()
             sample = c.execute('select f.id,f.captured from sample_current u join frames f on f.id=u.frame where u.subject=?', (subject,)).fetchone()
             if not sample or (current and current['frame'] == sample['id']):
-                return self._snapshot_row(c, current) if current else None
+                return self._sample_row(c, current) if current else None
             frame = sample['id']
             description = current['description'] if current else '尚未完成线上环境描述。'
             existing = c.execute('select * from snapshots where subject=? and frame=? and description=? and reason=? order by completed desc limit 1',
                                  (subject, frame, description, 'sample')).fetchone()
             if existing:
-                return self._snapshot_row(c, existing)
+                return self._sample_row(c, existing)
             sid = uuid4().hex
             c.execute('insert into snapshots(id,subject,frame,captured,completed,description,detections,reason,model,described_at,description_frame) values(?,?,?,?,?,?,?,?,?,?,?)', (
                 sid, subject, frame, sample['captured'], time(), description, '[]', 'sample', 'local',
@@ -290,7 +290,18 @@ class VisionStore:
                 current['description_frame'] if current else frame))
             if current:
                 c.execute('update snapshots set change_degree=?,change_reason=? where id=?', (current['change_degree'], current['change_reason'], sid))
-            return self._snapshot_row(c, c.execute('select * from snapshots where id=?', (sid,)).fetchone())
+            return self._sample_row(c, c.execute('select * from snapshots where id=?', (sid,)).fetchone())
+
+    def _sample_row(self, c, row):
+        result = self._snapshot_row(c, row)
+        model = row['model'] if row['described_at'] else ''
+        if model == 'local':  # Local sampling can carry an earlier model's description.
+            basis = c.execute('''select s.model from completed_current u join snapshots s on s.id=u.snapshot
+                where u.subject=? and s.frame=? and s.described_at=? and s.description=?''',
+                (row['subject'], row['description_frame'], row['described_at'], row['description'])).fetchone()
+            model = basis['model'] if basis else ''
+        result['description_model'] = model
+        return result
 
     def latest_completed(self, subject):
         """Read the last interpreted photo and its own evidence in one read transaction."""

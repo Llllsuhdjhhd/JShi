@@ -594,6 +594,10 @@ def test_cloud_description_merges_with_newer_local_positions(store):
     completed = store.latest_completed('stone')
     assert completed['frame'] == completed['description_frame'] == cloud_frame
     assert completed['description'] == cloud['description'] and not completed['detections']
+    assert store.latest_sample('stone')['description_model'] == 'cloud'
+    store.add_frame('stone', image('yellow'), time())
+    carried = store.latest_sample('stone')
+    assert carried['model'] == 'local' and carried['description_model'] == 'cloud'
     # Reopen an old database with only the composite display record.
     with store.db() as c:
         c.execute('delete from completed_current')
@@ -874,6 +878,7 @@ def test_sampling_without_description_and_late_frame(store):
     store.add_frame('stone',image('blue'),time()-10)
     sample=store.latest_sample('stone')
     assert sample['frame']==latest and sample['described_at']==0
+    assert sample['description_model']==''
     store.config=replace(store.config,rolling_bytes=1,retention_seconds=.001)
     store.cleanup()
     assert store.image(latest,'stone')

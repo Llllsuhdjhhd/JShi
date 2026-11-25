@@ -21,13 +21,16 @@ def services():
             'deepseek':{'label':'D','protocol':'chat','thinking_supported':True,'paid':True,'endpoint':'https://example.test/v1','api_key':'secret'}}
 
 
-def test_vision_defaults_to_local_qwen_and_switches_strategy_with_route(tmp_path):
+def test_vision_defaults_to_local_qwen_and_switches_strategy_with_route(tmp_path, monkeypatch):
     from jshi.app.model_settings import MLX_MODEL
     from jshi.vision import VisionConfig, VisionService, VisionStore
     from jshi.vision.model import observation_format
 
     cfg = VisionConfig()
     runtime = process(tmp_path)
+    # Installing a later route (e.g. REMS) must not rebind the image transport.
+    provider = SimpleNamespace(_get_model=lambda task: 'memory', complete=lambda *args, **kw: '')
+    runtime.memory = SimpleNamespace(_backend=SimpleNamespace(_pipeline=SimpleNamespace(llm=provider)))
     vision = runtime.vision = VisionService(VisionStore(tmp_path/'vision', cfg), cfg)
     try:
         settings = ModelSettings(tmp_path, runtime, None)
@@ -35,6 +38,9 @@ def test_vision_defaults_to_local_qwen_and_switches_strategy_with_route(tmp_path
         assert vision.local_model and row['current'] == MLX_MODEL
         assert row['effective_timeout_s'] == cfg.timeout_seconds
         provider = settings.routes['vision'].chain[0]
+        monkeypatch.setattr(provider,'chat',lambda *a,**kw: ModelResponse(text='本机读图',model=MLX_MODEL))
+        actual=vision.model.transport({'messages':[],'max_tokens':100})
+        assert actual['model']==MLX_MODEL and actual['choices'][0]['message']['content']=='本机读图'
         request = provider._payload([], response_format='json_object')
         assert json.loads(request.data)['response_format'] == observation_format()
         assert 'Authorization' not in request.headers

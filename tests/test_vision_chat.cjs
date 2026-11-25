@@ -14,7 +14,7 @@ async function main(){
   let cards=[],pinned=[],calls=0,stops=0,release;
   const mediaDevices={getUserMedia:()=>{calls++;return new Promise(resolve=>release=resolve)}};
   let data={sample_seconds:2,server_time:Date.now()/1000,voice_active:true,
-    environment:{image_available:true,frame:'first',description:'有人在门边',described_at:20},errors:[]};
+    environment:{image_available:true,frame:'first',description:'有人在门边',description_model:'observed-model',described_at:20},errors:[]};
   const chat=new VisionChat({document,mediaDevices,captureToken:()=>'desktop-1',ensureVoice:async()=>true,
     pin:card=>pinned.push(card),insert:card=>cards.push(card),request:async()=>response(data),notice(){},state(){}});
   chat.tick=()=>{};
@@ -29,6 +29,7 @@ async function main(){
   data.environment.description_frame='first';await chat.poll();
   assert.match(chat.card.copyLabel.textContent,/新画面待更新/);
   assert.match(chat.card.meta.textContent,/描述依据/);
+  assert.match(chat.card.meta.textContent,/observed-model/);
   assert.match(chat.card.meta.textContent,/暂用上次描述/);
   data.environment.description_frame=data.environment.frame;await chat.poll();
   assert.equal(chat.card.copyLabel.textContent,'画面描述');

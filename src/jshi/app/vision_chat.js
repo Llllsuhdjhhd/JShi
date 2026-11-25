@@ -138,8 +138,9 @@ class JShiVisionChat {
         card.description.title=s.described_at?s.description:'';
         const stale=!!s.description_frame&&s.description_frame!==s.frame;
         if(card.copyLabel)card.copyLabel.textContent=stale?'画面描述 · 新画面待更新':'画面描述';
-        const basis=s.described_at?' · 描述依据 '+new Date(s.described_at*1000).toLocaleTimeString('zh-CN',{hour12:false}):' · 尚无描述';
-        if(card.pinned)card.meta.textContent=this.sampleLabel(card.lastCaptured||s.captured)+basis+(stale?' · 暂用上次描述':'');else if(s.described_at)card.meta.textContent='描述依据 '+new Date(s.described_at*1000).toLocaleTimeString('zh-CN',{hour12:false});}
+        const basis=s.described_at?'描述依据 '+new Date(s.described_at*1000).toLocaleTimeString('zh-CN',{hour12:false}):'尚无描述';
+        const model=s.description_model?' · '+s.description_model:'';
+        if(card.pinned)card.meta.textContent=this.sampleLabel(card.lastCaptured||s.captured)+' · '+basis+model+(stale?' · 暂用上次描述':'');else if(s.described_at)card.meta.textContent=basis+model;}
       const latestError=data.errors?.[0];
       const error=(!s?.described_at||Number(latestError?.at||0)>s.described_at)?latestError?.message||'':'';
       card.status.hidden=!error;card.status.textContent='';

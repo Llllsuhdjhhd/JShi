@@ -102,15 +102,15 @@ class ModelSettings:
             if getattr(visual.config, 'local_mlx', False):
                 initial = ProviderModel({'protocol':'mlx','label':'本机 MLX','endpoint':visual.config.endpoint},
                                         MLX_MODEL, 'off', timeout=visual.config.timeout_seconds, route='vision')
-            route=RoutedModel(initial)
-            visual.model.route = route
-            self.routes['vision']=route
+            vision_route = RoutedModel(initial)
+            visual.model.route = vision_route
+            self.routes['vision'] = vision_route
             def send(payload):
                 options = ({'response_format': payload['response_format']['type']}
                            if payload.get('response_format') else {})
-                result=route.chat(payload['messages'],payload.get('max_tokens'), **options)
+                result=vision_route.chat(payload['messages'],payload.get('max_tokens'), **options)
                 return {'model':result.model, 'choices':[{'message':{'content':result.text},
-                                                         'finish_reason':result.metadata.get('finish_reason')}]}
+                                                         'finish_reason':(result.metadata or {}).get('finish_reason')}]}
             visual.model.transport=send
         # Memory services share this provider object; route its complete method
         # so existing JSON parsing and all retained service references stay intact.

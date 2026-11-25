@@ -175,18 +175,21 @@ assert.equal(vm.runInContext('legacyRow.modelUi.button.textContent',ctx),'模型
 console.log('Model progress: phase fallback and terminal failure passed');
 
 vm.runInContext(`var visibleStatus=log('本条','input');modelProgress(visibleStatus,'主认知 · 模型思考');message({type:'model_status',call_id:'side-test',state:'calling',purpose:'主认知',model:'deepseek-v4-flash'});`,ctx);
-assert.notEqual(vm.runInContext('visibleStatus.modelUi.panel.hidden',ctx),true);
+assert.equal(vm.runInContext('visibleStatus.modelUi.panel.hidden',ctx),true);
+vm.runInContext('visibleStatus.inputDetails.toggle.onclick()',ctx);
+assert.equal(vm.runInContext('visibleStatus.modelUi.panel.hidden',ctx),false);
 assert.match(vm.runInContext('visibleStatus.modelUi.panelBody.textContent',ctx),/主认知 · 进行中/);
 assert.doesNotMatch(vm.runInContext('visibleStatus.modelUi.panelBody.textContent',ctx),/deepseek-v4-flash|模型思考/);
 assert.match(vm.runInContext('visibleStatus.modelUi.records.textContent',ctx),/deepseek-v4-flash/);
 vm.runInContext(`var newerStatus=log('下一条','input');message({type:'model_status',call_id:'side-test',state:'completed',purpose:'主认知',model:'deepseek-v4-flash',elapsed_ms:1200})`,ctx);
 assert.equal(vm.runInContext('visibleStatus.modelUi.panel.hidden',ctx),true);
-assert.notEqual(vm.runInContext('newerStatus.modelUi.panel.hidden',ctx),true);
+assert.equal(vm.runInContext('newerStatus.modelUi.panel.hidden',ctx),true);
 console.log('Visible latest-input status panel: model/stage and previous panel hiding passed');
 // Full timeline is preserved; bottom-positioned input moves the panel upward.
 vm.runInContext(`var longStatus=log('过程测试','input');modelProgress(longStatus,'JEV 判断');modelProgress(longStatus,'主认知 · 模型思考');modelProgress(longStatus,'已完成',true);`,ctx);
 assert.match(vm.runInContext('longStatus.modelUi.panelBody.textContent',ctx),/接话判断[\s\S]*主认知[\s\S]*本轮完成/);
 vm.runInContext(`window.innerHeight=800;$('log').getBoundingClientRect=()=>({left:520});messageScroll.getBoundingClientRect=()=>({left:520});longStatus.getBoundingClientRect=()=>({left:600,top:730});longStatus.modelUi.panel.scrollHeight=500;positionModelPanel();`,ctx);
+assert.equal(vm.runInContext('longStatus.modelUi.panel.hidden',ctx),false);
 assert.equal(vm.runInContext('longStatus.modelUi.panel.style.top',ctx),'284px');
 assert.equal(vm.runInContext('longStatus.modelUi.panel.style.width',ctx),'440px');
 assert.ok(24+parseFloat(vm.runInContext('longStatus.modelUi.panel.style.width',ctx))<520);
@@ -224,7 +227,7 @@ assert.equal(node('conversation').hidden,false);
 assert.equal(vm.runInContext(`latestModelInput.modelUi.panel.hidden`,ctx),true);
 node('close-inspector').onclick();
 vm.runInContext(`positionModelPanel()`,ctx);
-assert.equal(vm.runInContext(`latestModelInput.modelUi.panel.hidden`,ctx),false);
+assert.equal(vm.runInContext(`latestModelInput.modelUi.panel.hidden`,ctx),true);
 console.log('Inline training: candidate default, saved check, relabel, failure and preserved conversation passed');
 
 // Weak voiceprint ranking only preselects the dataset label. JEV uncertainty stays visible.

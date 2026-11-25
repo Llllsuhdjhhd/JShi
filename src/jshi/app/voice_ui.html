@@ -15,6 +15,7 @@
   .help-popup>summary::marker{content:""}.help-popup>summary::-webkit-details-marker{display:none}.help-popup>summary:hover,.help-popup[open]>summary{background:#edf4ff;color:var(--accent)}
   .help-bubble{position:absolute;right:0;top:calc(100% + 9px);z-index:5;width:min(320px,calc(100vw - 40px));background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:0 8px 32px #20283814;color:#626975;font-size:12px;line-height:1.7}
   .help-bubble p{margin:0 0 8px}.help-bubble p:last-child{margin:0}
+  #connection-history{max-height:min(50vh,24rem);overflow:auto}
   .state-row{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;padding:12px 0 14px;margin-bottom:10px;border-bottom:1px solid #f0f1f3}
   .judge-popup>summary{width:auto;height:auto;padding:3px 7px;font-size:11px}.judge-popup .help-bubble{right:auto;left:0}
   .view-toggle{display:grid;place-items:center;padding:7px;margin:0;background:transparent;color:#747b88;border-radius:8px}
@@ -157,6 +158,7 @@
     </nav></div></header>
   <div class="state-row" aria-label="当前状态">
     <span id="status" role="status" aria-live="polite">尚未连接</span>
+    <details class="help-popup judge-popup"><summary>连接详情</summary><div class="help-bubble" id="connection-history">尚无连接记录</div></details>
     <span id="speaker">说话人待确认</span>
     <details class="help-popup judge-popup"><summary title="查看本次接话判断">接话判断</summary><div class="help-bubble" id="judge">尚无接话判断。</div></details>
 
@@ -367,6 +369,7 @@ fetch('/status').then(r=>r.json()).then(s=>{$('mode-vision').hidden=true});
 inputMode('text');
 refreshPanels();
 let ws, mic, captureContext, outputContext, capture, ready = false, captureToken = '', captureId = '';
+let playbackBus=null, playbackTap=null;
 let replyId = '', paused = false, queue = [], playing = null, source = null;
 let permitSeq = 0; const holdReasons = new Set(), nextHolds = new Set();
 const speechLevel = 0.02, sustainFrames = 4;
@@ -721,9 +724,9 @@ function modelNotice(row,text){
 function positionModelPanel(){
   if(!latestModelInput)return;
   const ui=latestModelInput.modelUi,rect=(ui.panel.parentElement||latestModelInput).getBoundingClientRect();
-  ui.panel.hidden=panelVisibility.inspector;
-  const conversationLeft=Math.min(messageScroll.getBoundingClientRect().left,$('log').getBoundingClientRect().left);
+  const conversationLeft=$('log').getBoundingClientRect().left;
   const space=conversationLeft-48;
+  ui.panel.hidden=panelVisibility.inspector || (space<180 && ui.extra.hidden);
   const viewportHeight=window.innerHeight||768,maxHeight=Math.max(80,viewportHeight-32);
   ui.panel.style.maxHeight=maxHeight+'px';
   if(space>=180){
@@ -742,6 +745,13 @@ window.addEventListener('jshi-model-info',event=>{
  try{localStorage.setItem('jshi.showModelInfo',String(modelInfoVisible));}catch{}
  document.querySelectorAll('#log .model-info details').forEach(detail=>detail.open=modelInfoVisible);
 });
+function connectionNote(text){
+  const history=$('connection-history'),row=document.createElement('p');
+  if(!history.children.length)history.textContent='';
+  row.textContent=new Date().toLocaleTimeString('zh-CN',{hour12:false})+'　'+text;
+  history.appendChild(row);
+  if(history.children.length>24)history.firstChild.remove();
+}
 function log(text, kind='notice', atMs=null) {
   // Also recognize model notices from a server that has not yet restarted.
   if(kind==='notice' && /：正在调用(?:可能计费的百炼模型|付费DeepSeek)（/.test(text))kind='model-info';
@@ -792,7 +802,7 @@ function inputDetails(p){
   if(p.inputDetails)return p.inputDetails;
   const extra=document.createElement('div');extra.className='input-extra';extra.hidden=true;
   const toggle=document.createElement('button');toggle.className='input-toggle';toggle.textContent='详情';toggle.ariaExpanded='false';
-  toggle.onclick=()=>{extra.hidden=!extra.hidden;toggle.textContent=extra.hidden?'详情':'隐藏';toggle.ariaExpanded=String(!extra.hidden);};
+  toggle.onclick=()=>{extra.hidden=!extra.hidden;toggle.textContent=extra.hidden?'详情':'隐藏';toggle.ariaExpanded=String(!extra.hidden);if(p===latestModelInput)positionModelPanel();};
   p.appendChild(extra);p.appendChild(toggle);p.inputDetails={extra,toggle};return p.inputDetails;
 }
 function typedDetails(p,label){
@@ -857,7 +867,7 @@ function play() {
   const buffer = outputContext.createBuffer(1,item.samples.length, item.rate);
   buffer.copyToChannel(item.samples,0);
   source = outputContext.createBufferSource(); source.buffer = buffer;
-  source.connect(outputContext.destination);
+  source.connect(playbackBus || outputContext.destination);
   item.startedAt = outputContext.currentTime;
   source.onended = () => {
     if (rid !== replyId) return;
@@ -996,10 +1006,10 @@ function message(m) {
     for(const id of m.input_ids){const row=inputRows.get(id);if(row){row.p.style.outline='';row.meta.textContent=m.label+' · 手动关联';row.who.textContent=displayedSpeaker({label:m.label,method:'manual_annotation',status:'recognized'})+'：';row.identityView={label:m.label,source:'人工',state:'确定',reason:'用户手动关联'};refreshIdentityDetails(row);row.p.classList.remove('selected');row.button.textContent='选择声音';}}
     selectedInputs.clear();selectionChanged();$('enroll-status').textContent='已关联 '+m.label+'：本次选择 '+m.clips+' 段，累计已保存 '+(m.reference_count ?? 1)+' 段（最多10段）；比对采用平均匹配分。兼容录音保留 '+m.seconds+' 秒。'+(m.min_similarity!=null ? '样本最低相似度 '+m.min_similarity+'（仅供参考）。' : '')+(m.warning || '');return;
   }
-  if(m.type==='device_status'){if(m.text)$('status').textContent=m.text;return;}
+  if(m.type==='device_status'){if(m.text){$('status').textContent=m.text;connectionNote(m.text);}return;}
   if(m.type==='device_video'){visualChat?.deviceState(m);return;}
   if(m.type==='preview_signal'){visualChat?.handlePreview(m);return;}
-  if (m.type==='ready') { captureToken=m.stream;captureId=m.capture_id; try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true;refreshTextPeople();if(window.refreshVisionAvailability)window.refreshVisionAvailability();voiceButton(true,'对话中'); $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '')+(m.speaker_split==='enabled'?' · 本地多人分段已启用':'');if(m.speaker_split_error)log(m.speaker_split_error);
+  if (m.type==='ready') { captureToken=m.stream;captureId=m.capture_id; try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true;refreshTextPeople();if(window.refreshVisionAvailability)window.refreshVisionAvailability();voiceButton(true,'对话中'); $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '')+(m.speaker_split==='enabled'?' · 本地多人分段已启用':'');connectionNote($('backend').textContent);if(m.speaker_split_error)connectionNote(m.speaker_split_error);
     $('match-threshold').disabled=m.match_threshold==null;
     if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);$('match-status').textContent='单句确认至少 '+Number(m.single_confirmation_threshold ?? Math.max(.65,m.match_threshold)).toFixed(2)+'，与第二候选须相差 '+m.match_margin+'；较弱声音先收集多段核对，待定声音不参与姓名竞争。';}
     voiceprintAvailable=m.voiceprint_available!==false;selectionChanged();
@@ -1008,8 +1018,8 @@ function message(m) {
     $('compare-status').textContent=m.comparison_available ? '对照样本保存在本机；请选择姓名和录音。' : '当前服务尚未加载对照功能，重启语音服务后可用。';
     $('known-names').replaceChildren();for(const name of m.names || [])$('known-names').appendChild(new Option(name,name));
     $('typed').disabled=false;$('send-text').disabled=false;
-    if(m.acoustic_turn==='enabled')log('本地声音断句辅助已开启：未完发言会等待续句，播放中插话优先判断。','notice');
-    else if(m.acoustic_turn==='unavailable')log('本地声音断句辅助暂不可用，本次沿用在线识别。','notice');
+    if(m.acoustic_turn==='enabled')connectionNote('本地声音断句辅助已开启');
+    else if(m.acoustic_turn==='unavailable')connectionNote('本地声音断句辅助暂不可用，本次沿用在线识别。');
   }
   else if(m.type==='rename_prompt'){
     const ask=$('rename-ask'),words=document.createElement('span');words.textContent=m.text+' ';
@@ -1261,6 +1271,8 @@ async function closeVoice() {
   ready=false;voiceButton(false); mainBusy=false;clearTimeout(silenceTimer); clearPlayback();
   $('match-threshold').disabled=true;
   const oldWs=ws, oldCapture=captureContext, oldOutput=outputContext;
+  if(playbackTap){playbackTap.port.onmessage=null;playbackTap.disconnect();playbackTap=null;}
+  if(playbackBus){playbackBus.disconnect();playbackBus=null;}
   settlingVoice=!!oldWs;
   ws=null; captureContext=outputContext=null;
   selectionChanged();
@@ -1414,6 +1426,14 @@ $('test').onclick=async()=>{
 let selectedSource='', sourceListKey='';
 try{selectedSource=localStorage.getItem('jshi.capture-source')||'';}catch{}
 if(launchParams.has('source'))selectedSource=launchParams.get('source');
+function rememberSource(value){
+  selectedSource=value;
+  try{localStorage.setItem('jshi.capture-source',value);}catch{}
+  if(launchParams.has('source')){
+    launchParams.set('source',value);
+    history.replaceState(history.state,'',location.pathname+'?'+launchParams+location.hash);
+  }
+}
 function showSources(phones,unavailable){
   const select=$('capture-source');
   const key=JSON.stringify([selectedSource,phones,unavailable]);
@@ -1423,7 +1443,9 @@ function showSources(phones,unavailable){
   for(const id of phones)choices.push(new Option('iPhone · '+id.slice(-4),id));
   if(!phones.length||selectedSource&&!phones.includes(selectedSource)){
     const missing=selectedSource&&!phones.includes(selectedSource);
-    const offline=new Option((missing?'iPhone · '+selectedSource.slice(-4):'iPhone')+' · '+unavailable,missing?selectedSource:'offline');
+    const name=missing&&selectedSource!=='phone'?'iPhone · '+selectedSource.slice(-4):'iPhone';
+    const label=selectedSource==='phone'&&phones.length?'请选择一部 iPhone':name+' · '+unavailable;
+    const offline=new Option(label,missing?selectedSource:'offline');
     offline.disabled=true;choices.push(offline);
   }
   select.replaceChildren(...choices);select.value=selectedSource;
@@ -1434,6 +1456,7 @@ async function refreshSources(){
     if(!response.ok)throw Error();
     const state=await response.json();
     if(!Array.isArray(state.phones))throw Error();
+    if(selectedSource==='phone'&&state.phones.length===1)rememberSource(state.phones[0]);
     showSources(state.phones,state.enabled?'未连接':'入口未启用');
     return state.phones;
   }catch{
@@ -1449,12 +1472,7 @@ $('capture-source').onchange=async()=>{
   try{
     if(next){const online=await refreshSources();if(!online?.includes(next))throw Error('iPhone 已离线，请先在手机端连接');}
     if(wasActive)await end();
-    selectedSource=next;select.value=next;
-    try{localStorage.setItem('jshi.capture-source',next)}catch{}
-    if(launchParams.has('source')){
-      launchParams.set('source',next);
-      history.replaceState(history.state,'',location.pathname+'?'+launchParams+location.hash);
-    }
+    rememberSource(next);select.value=next;
     if(wasVideo)await visualChat.start();else if(wasActive)await startVoice();
   }catch(e){$('status').textContent=e.message;}
   finally{select.value=selectedSource;select.disabled=false;}
@@ -1482,8 +1500,10 @@ async function connectVoice(token) {
     if(token!==connectionEpoch)return false;
     if(settings.busy)throw new Error(settings.cleanup_stage?'上一轮仍在保存，请稍后再试':'另一页面正在使用语音；本页仍可文字输入');
     settlingVoice=false;
+    const onlinePhones=selectedSource==='phone'?await refreshSources():settings.phones;
+    if(selectedSource==='phone')throw Error(onlinePhones?.length?'请先在“来源”里选择一部 iPhone':'请先在 iPhone 上启用采集设备');
     const peripheral=selectedSource;
-    if(peripheral&&!settings.phones?.includes(peripheral))throw Error('所选 iPhone 未连接，请在手机上启用设备或更换来源');
+    if(peripheral&&!onlinePhones?.includes(peripheral))throw Error('所选 iPhone 未连接，请在手机上启用设备或更换来源');
     const asr=$('asr').value || settings.asr;
     if(asr==='online' && !settings.online_available) throw new Error('在线识别尚未配置 JSHI_VOICE_API_KEY，请配置后重启服务');
     if(asr==='bailian' && !settings.bailian_available) throw new Error('百炼尚未配置 JSHI_BAILIAN_ASR_API_KEY 或 DASHSCOPE_API_KEY，请配置后重启服务');
@@ -1495,7 +1515,20 @@ async function connectVoice(token) {
     if(tts==='local'&&!settings.tts_backends?.local) throw new Error('本地播报未加载，请用本地播报配置启动服务');
     outputContext = new AudioContext(); await outputContext.resume();
     if(token!==connectionEpoch)return false;
-    if(!peripheral){
+    if(peripheral){
+      // Tap only this page's rendered reply. The worklet's own output is silent.
+      await outputContext.audioWorklet.addModule('/voice_capture.js');
+      if(token!==connectionEpoch)return false;
+      playbackBus=outputContext.createGain();
+      playbackBus.connect(outputContext.destination);
+      playbackTap=new AudioWorkletNode(outputContext,'voice-capture',{processorOptions:{frameMs:20}});
+      playbackBus.connect(playbackTap);playbackTap.connect(outputContext.destination);
+      playbackTap.port.onmessage=({data})=>{
+        if(token!==connectionEpoch||!ready||ws?.readyState!==WebSocket.OPEN||ws.bufferedAmount>16000)return;
+        const packet=new Uint8Array(4+data.pcm.byteLength);
+        packet.set([74,82,69,70]);packet.set(new Uint8Array(data.pcm),4);ws.send(packet);
+      };
+    }else{
       const acquiredMic=await navigator.mediaDevices.getUserMedia({audio:{
         deviceId:$('device').value ? {exact:$('device').value} : undefined,
         // Voiceprint enrollment uses the same constraints; browser noise suppression reshapes the spectrum.
@@ -1519,15 +1552,15 @@ async function connectVoice(token) {
       const mute=captureContext.createGain(); mute.gain.value=0; capture.connect(mute).connect(captureContext.destination);
     }
     let resumeSession='';try{resumeSession=sessionStorage.getItem('jshi.voice.session')||'';}catch{}
-    ws=new WebSocket('ws://'+location.host+'/voice?asr='+encodeURIComponent(asr)+'&tts='+encodeURIComponent(tts||'')+'&speaker_model='+encodeURIComponent($('speaker-model').value)+'&session='+encodeURIComponent(resumeSession)+(peripheral?'&source='+encodeURIComponent(peripheral):'')); ws.binaryType='arraybuffer';
+    ws=new WebSocket('ws://'+location.host+'/voice?asr='+encodeURIComponent(asr)+'&tts='+encodeURIComponent(tts||'')+'&speaker_model='+encodeURIComponent($('speaker-model').value)+'&session='+encodeURIComponent(resumeSession)+(peripheral?'&echo=1&source='+encodeURIComponent(peripheral):'')); ws.binaryType='arraybuffer';
     const activeWs=ws;
     let completeHandshake;
     const handshake=new Promise(resolve=>{completeHandshake=resolve;});
     cancelHandshake=completeHandshake;
     const deadlineTimer=setTimeout(()=>completeHandshake(false),20000);
     ws.onmessage=e=>{if(ws!==activeWs||token!==connectionEpoch)return;try{const payload=JSON.parse(e.data);message(payload);if(payload.type==='ready')completeHandshake(true);}catch(err){log('播放消息异常：'+err.message);}};
-    ws.onerror=()=>log('连接失败，请检查本地语音服务。');
-    ws.onclose=e=>{completeHandshake(false);if(ws===activeWs){ready=false;log('语音连接已关闭（'+e.code+(e.reason?'：'+e.reason:'')+'）。');end().then(()=>{if(peripheral&&e.reason)$('status').textContent=e.reason;});}};
+    ws.onerror=()=>connectionNote('连接失败，请检查本地语音服务。');
+    ws.onclose=e=>{completeHandshake(false);if(ws===activeWs){ready=false;connectionNote('语音连接已关闭（'+e.code+(e.reason?'：'+e.reason:'')+'）。');end().then(()=>{if(peripheral&&e.reason)$('status').textContent=e.reason;});}};
     let clock=null;
     if(capture)capture.port.onmessage=({data})=>{
       $('level').value=data.level;
@@ -1573,7 +1606,7 @@ async function connectVoice(token) {
       throw Error('语音未能连接，请检查声音服务后重试');
     }
     return true;
-  }catch(e){if(token===connectionEpoch){await end();$('status').textContent=e.message;log('无法开始：'+e.message);}return false;}
+  }catch(e){if(token===connectionEpoch){await end();$('status').textContent=e.message;connectionNote('无法开始：'+e.message);}return false;}
 }
 function startVoice(){
   if(ready&&ws?.readyState===WebSocket.OPEN)return Promise.resolve(true);

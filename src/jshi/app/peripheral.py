@@ -1,11 +1,13 @@
 """A connected peripheral supplies media to a desktop-owned conversation."""
 import asyncio
+import json
 from contextlib import suppress
 from secrets import token_urlsafe
 
-from aiohttp import WSMsgType
+from aiohttp import WSMessage, WSMsgType
 
 from .capture import CaptureSource
+from jshi.voice.playback_echo import PlaybackEcho
 
 
 class Peripheral:
@@ -18,10 +20,12 @@ class Peripheral:
         self.pump = None
         self.audio_ready = False
         self.camera_token = ''
+        self.echo = None
 
-    async def attach(self, session, controller):
+    async def attach(self, session, controller, *, echo=False):
         if self.socket.closed or self.session is not None:
             raise RuntimeError('手机来源暂不可用，请重新选择')
+        self.echo = PlaybackEcho() if echo else None
         self.session, self.controller = session, controller
         self.queue = asyncio.Queue(maxsize=12)
         self.pump = asyncio.create_task(self.read_controller())
@@ -32,6 +36,9 @@ class Peripheral:
             async for message in self.controller:
                 # PCM and microphone activity may only come from the selected peripheral.
                 if message.type == WSMsgType.BINARY:
+                    data = message.data
+                    if self.echo and len(data) == 644 and data.startswith(PlaybackEcho.tag):
+                        self.echo.reference(data[4:])
                     continue
                 if message.type == WSMsgType.TEXT and message.json().get('type') in (
                         'speech_start','speech_end','audio_clock'):
@@ -78,13 +85,22 @@ class Peripheral:
                 return
             if kind not in {'speech_start','speech_end','audio_clock'}:
                 return
+            if self.echo and kind in {'speech_start','speech_end'}:
+                return
         elif message.type != WSMsgType.BINARY:
             return
         if not self.audio_ready:
             return
-        if self.queue.full():
+        activity = None
+        if self.echo and message.type == WSMsgType.BINARY and len(message.data) == 640:
+            pcm = self.echo.clean(message.data)
+            activity = self.echo.activity(pcm)
+            message = WSMessage(WSMsgType.BINARY, pcm, '')
+        if self.queue.qsize() + 1 + bool(activity) > self.queue.maxsize:
             await self.lost('手机声音传输积压，本次采集已停止')
         else:
+            if activity:
+                self.queue.put_nowait(WSMessage(WSMsgType.TEXT, json.dumps(activity), ''))
             self.queue.put_nowait(message)
 
     async def lost(self, reason='手机来源已断开，本次采集已停止'):
@@ -101,6 +117,7 @@ class Peripheral:
             return
         self.session = None
         self.audio_ready = False
+        self.echo = None
         self.camera_token = ''
         self.pump.cancel()
         await asyncio.gather(self.pump, return_exceptions=True)
