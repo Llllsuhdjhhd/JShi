@@ -1,5 +1,7 @@
 # 测试入口
 
+转移开发电脑时，测试代码和累计场景资料的复制范围见 [Windows 迁移到 Mac](../doc/Windows迁移到Mac.md)。`test_runs/`、`work/` 和 `.jshi/entry_test_assets/` 中的本机资料不会随 Git clone 自动恢复。
+
 场景录音库及按时间回放：见 [使用说明](../doc/场景录音与回放测试.md)。新增离线验证为 `tests/test_entry_cases.py`；真实模型回放须明确配置适配器，不能与模拟回归结论混用。
 
 自动化测试使用 pytest，默认从 src 加载项目代码：
