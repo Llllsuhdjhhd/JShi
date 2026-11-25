@@ -4552,7 +4552,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         trial = SpeakerTrial(trial_root, speaker_models)
 
     async def page(request):
-        return web.FileResponse(Path(__file__).with_name("voice_ui.html"))
+        return web.FileResponse(Path(__file__).with_name("voice_ui.html"), headers={"Cache-Control": "no-cache"})
 
     async def recent_audio_page(request):
         return web.FileResponse(Path(__file__).with_name('recent_audio.html'))

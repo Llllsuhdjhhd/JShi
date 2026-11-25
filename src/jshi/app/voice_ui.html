@@ -143,10 +143,10 @@
 <main>
   <header class="page-header"><h1><span class="brand-mark" aria-hidden="true">匠</span>和匠石说话</h1>
     <div class="header-actions">
-      <label id="source-picker" hidden>来源 <select id="capture-source" aria-label="采集来源"><option value="">本机</option></select></label>
+      <label id="source-picker">来源 <select id="capture-source" aria-label="采集来源"><option disabled selected>正在读取来源…</option></select></label>
       <button id="start" class="secondary" aria-pressed="false">开始对话</button><button id="camera-toggle" class="secondary" aria-pressed="false" hidden>开始视频</button><button id="end" hidden disabled>结束</button><button id="stop" hidden disabled>停止播放</button><button id="retry-write" class="secondary" hidden>重试写场</button>
       <details class="help-popup"><summary aria-label="使用提示" title="使用提示">?</summary><div class="help-bubble">
-        <p>选择 LARK A2 麦克风，说话即可。声音通过电脑默认扬声器播放。</p>
+        <p>使用 LARK A2 等电脑麦克风时，来源选“本机”。使用手机时选在线的 iPhone。点“开始对话”或“开始视频”即可采集，回复从电脑播放。</p>
         <p>说“我是 lux”可关联姓名，也可以选中发言手动登记声纹。</p>
         <p>检测到声音不会自动停播；由 JEV 结合内容与现场判断是否接话。</p>
         <p>最新消息在下方；翻看旧消息时，可点击圆形下箭头回到最新消息。录音时间和身份依据可展开“输入详情”查看。</p>
@@ -1413,24 +1413,33 @@ $('test').onclick=async()=>{
 };
 let selectedSource='', sourceListKey='';
 try{selectedSource=localStorage.getItem('jshi.capture-source')||'';}catch{}
-async function refreshSources(){
-  const response=await fetch('/api/capture-sources',{cache:'no-store'});
-  if(!response.ok)throw Error('无法读取设备来源');
-  const state=await response.json(), select=$('capture-source');
-  if(!Array.isArray(state.phones))return;
-  $('source-picker').hidden=false;
-  select.title=state.enabled?'选择麦克风与摄像头的来源':'本次启动仅启用了本机来源';
-  const key=JSON.stringify([selectedSource,...state.phones]);
-  if(sourceListKey===key)return state.phones;
+if(launchParams.has('source'))selectedSource=launchParams.get('source');
+function showSources(phones,unavailable){
+  const select=$('capture-source');
+  const key=JSON.stringify([selectedSource,phones,unavailable]);
+  if(sourceListKey===key)return;
   sourceListKey=key;
   const choices=[new Option('本机','')];
-  for(const id of state.phones)choices.push(new Option('iPhone · '+id.slice(-4),id));
-  if(!state.phones.length||selectedSource&&!state.phones.includes(selectedSource)){
-    const offline=new Option(state.enabled?'iPhone · 未连接':'iPhone · 入口未启用',selectedSource&&!state.phones.includes(selectedSource)?selectedSource:'offline');
+  for(const id of phones)choices.push(new Option('iPhone · '+id.slice(-4),id));
+  if(!phones.length||selectedSource&&!phones.includes(selectedSource)){
+    const missing=selectedSource&&!phones.includes(selectedSource);
+    const offline=new Option((missing?'iPhone · '+selectedSource.slice(-4):'iPhone')+' · '+unavailable,missing?selectedSource:'offline');
     offline.disabled=true;choices.push(offline);
   }
   select.replaceChildren(...choices);select.value=selectedSource;
-  return state.phones;
+}
+async function refreshSources(){
+  try{
+    const response=await fetch('/api/capture-sources',{cache:'no-store'});
+    if(!response.ok)throw Error();
+    const state=await response.json();
+    if(!Array.isArray(state.phones))throw Error();
+    showSources(state.phones,state.enabled?'未连接':'入口未启用');
+    return state.phones;
+  }catch{
+    showSources([],'连接状态未知');
+    throw Error('无法读取手机连接状态，请检查匠石服务');
+  }
 }
 $('capture-source').onchange=async()=>{
   const select=$('capture-source'), next=select.value;
@@ -1442,9 +1451,13 @@ $('capture-source').onchange=async()=>{
     if(wasActive)await end();
     selectedSource=next;select.value=next;
     try{localStorage.setItem('jshi.capture-source',next)}catch{}
+    if(launchParams.has('source')){
+      launchParams.set('source',next);
+      history.replaceState(history.state,'',location.pathname+'?'+launchParams+location.hash);
+    }
     if(wasVideo)await visualChat.start();else if(wasActive)await startVoice();
   }catch(e){$('status').textContent=e.message;}
-  finally{select.disabled=false;}
+  finally{select.value=selectedSource;select.disabled=false;}
 };
 $('capture-source').onfocus=()=>refreshSources().catch(()=>{});
 refreshSources().catch(()=>{});
@@ -1487,7 +1500,13 @@ async function connectVoice(token) {
         deviceId:$('device').value ? {exact:$('device').value} : undefined,
         // Voiceprint enrollment uses the same constraints; browser noise suppression reshapes the spectrum.
         echoCancellation:true, noiseSuppression:false, autoGainControl:true, channelCount:{ideal:2}
-      }});
+      }}).catch(error=>{
+        if(['NotFoundError','OverconstrainedError'].includes(error.name)){
+          const hint=settings.phones?.length?'要用已连接的 iPhone，请在上方“来源”选择它。':'请连接麦克风，或连接 iPhone 后在上方“来源”选择它。';
+          throw Error('当前来源是本机，找不到所选麦克风。'+hint);
+        }
+        throw error;
+      });
       if(token!==connectionEpoch){acquiredMic.getTracks().forEach(t=>t.stop());return false;}
       mic=acquiredMic;
       // A capture-only context without a speaker sink: a stalling output device must not slow microphone capture.
