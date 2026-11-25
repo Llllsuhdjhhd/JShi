@@ -23,7 +23,7 @@ class PhoneCamera {
     };
     ui('undo').onclick = () => { this.needsConfirmation=true;this.pause(); this.masks.pop(); this.saveMasks(); this.render(); };
     ui('sendFrame').onclick = () => {
-      if (this.sending){this.needsConfirmation=true;this.pause();}
+      if (this.sending || this.pendingSend){this.needsConfirmation=true;this.pause();}
       else this.resume();
       this.render();
     };
@@ -62,8 +62,7 @@ class PhoneCamera {
   resume(){
     const s=this.session();
     if(!this.stream||!this.shape||!s?.camera)return;
-    this.drawing=false;this.drag=null;this.needsConfirmation=false;this.sending=true;this.nextAt=0;
-    this.preview?.publish(this.canvas,s.camera);
+    this.drawing=false;this.drag=null;this.needsConfirmation=false;this.pendingSend=true;
   }
   point(e) {
     const box = this.canvas.getBoundingClientRect();
@@ -90,8 +89,13 @@ class PhoneCamera {
       const track = stream.getVideoTracks()[0];
       this.actualLens = track.getSettings().facingMode || this.lens;
       track.onended = () => {this.close(); this.notice('摄像头已中断，请重新打开。');};
-      // Keep the inline video laid out under the opaque preview on WebKit.
-      track.onmute = () => {this.pause(); this.render();};
+      // A temporary hardware interruption keeps the existing send request.
+      track.onmute = () => {
+        const requested = this.sending || this.pendingSend;
+        this.pause();
+        this.pendingSend = requested;
+        this.render();
+      };
       this.video.srcObject = stream;
       this.render();
       this.watchdog = setTimeout(()=>{
@@ -134,14 +138,19 @@ class PhoneCamera {
     ui('stage').hidden = !this.stream; ui('camEmpty').hidden = Boolean(this.stream);
     ui('camState').textContent = this.opening ? '正在打开' : !this.stream ? '已关闭' :
       (this.actualLens === 'user' ? '前置' : '后置') + (this.sending ? ' · 传送中' : ' · 仅预览');
-    const state=this.sending?'正在观察':this.opening?'正在打开 iPhone 镜头':!this.stream?'iPhone 摄像头已关闭':'iPhone 仅预览 · 等待恢复发送';
+    let state;
+    if (this.sending) state = '正在观察';
+    else if (this.opening) state = '正在打开 iPhone 镜头';
+    else if (!this.stream) state = 'iPhone 摄像头已关闭，请在手机上打开';
+    else if (this.pendingSend || !this.shape) state = '正在等待 iPhone 的下一帧画面';
+    else state = 'iPhone 仅预览 · 请在手机「设置」中点「开始传画面」';
     if(s?.camera&&s.videoState!==state){s.videoState=state;s.reportCamera?.(state,this.sending);}
     ui('mask').setAttribute('aria-pressed',String(Boolean(this.drawing)));
     ui('undo').disabled = !this.masks.length;
     ui('sendFrame').disabled = !s?.camera || !this.shape || !!this.drag;
-    ui('sendFrame').textContent = this.sending ? '暂停传画面' : '开始传画面';
+    ui('sendFrame').textContent = this.sending || this.pendingSend ? '暂停传画面' : '开始传画面';
     ui('camHint').textContent = this.drawing ? '在画面上拖动，框住需要遮蔽的区域。' :
-      this.sending ? '正在发送预览中可见的画面。' : '确认镜头和遮蔽范围后，点“开始传画面”。';
+      this.sending ? '正在发送预览中可见的画面。' : this.pendingSend ? '正在等待镜头画面，收到下一帧后继续发送。' : '确认镜头和遮蔽范围后，点“开始传画面”。';
   }
   draw() {
     const v = this.video, c = this.canvas, s = this.session();
@@ -165,7 +174,13 @@ class PhoneCamera {
     this.ctx.fillStyle = '#000';
     for (const r of this.masks) paintMask(this.ctx,r,w,h);
     if (this.drag) paintMask(this.ctx,maskRect(this.drag.start,this.drag.end),w,h);
-    if(this.pendingSend){this.pendingSend=false;this.resume();this.render();}
+    if (fresh && this.pendingSend && s.camera) {
+      this.pendingSend = false;
+      this.sending = true;
+      this.nextAt = 0;
+      this.preview?.publish(c, s.camera);
+      this.render();
+    }
     if (fresh && this.sending && !this.upload && !s.congested() && performance.now() >= this.nextAt)
       this.send(captured,s);
   }

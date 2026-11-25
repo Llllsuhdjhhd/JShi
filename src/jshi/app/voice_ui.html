@@ -244,7 +244,11 @@
     <small id="backend">尚未连接语音后端</small>
   </details>
   </aside></div><div id="data-pane" hidden><iframe id="data-frame" title="保存数据与调试工作台"></iframe></div></section></div></main><dialog id="media-view"><button id="close-media" type="button" class="secondary">关闭</button><video id="media-video" muted playsinline hidden></video><img id="media-large" alt="查看聊天图片"><p id="media-caption"></p></dialog>
-<script type="module" src="/avatar/character.mjs"></script>
+<script type="module">
+  import('/avatar/character.mjs').catch(() => {
+    document.getElementById('avatar-status').textContent = '人物资源未能载入，请刷新页面。';
+  });
+</script>
 <script>
 const $ = id => document.getElementById(id);
 const launchParams = new URLSearchParams(location.search);

@@ -38,17 +38,51 @@ async function main() {
   camera.pause(); finish({}); await encoding;
   assert.equal(requests,0,'old unmasked JPEG cannot leave the device after a mask edit');
 
-  const state={online:true,camera:'capture-a'};
-  let pendingPreview,stopped=0;
-  Object.assign(camera,{session:()=>state, shape:'portrait', stream:{}, render(){},
-    preview:{publish(canvas,token){pendingPreview=token;}, close(){pendingPreview=null;stopped++;}}});
-  camera.request(true);assert.equal(pendingPreview,'capture-a');
-  camera.request(false);assert.equal(pendingPreview,null);assert.equal(camera.sending,false);
-  camera.needsConfirmation=true;camera.request(true);
-  assert.equal(camera.sending,false,'a desktop request cannot resume an edited mask');
-  camera.resume();assert.equal(camera.sending,true);
-  camera.blocked=true;camera.request(true);assert.equal(camera.sending,false);
-  assert(stopped>0);
+  const state = {online:true, camera:'capture-a', minInterval:1, congested:()=>false};
+  const events = [], nodes = new Map();
+  const track = {muted:false, getSettings:()=>({deviceId:'back'}), stop(){}};
+  const stream = {getTracks:()=>[track], getVideoTracks:()=>[track]};
+  const paint = {drawImage(){events.push('draw');}, fillRect(){events.push('mask');}, clearRect(){}};
+  const ui = id => {
+    if (!nodes.has(id)) nodes.set(id, {style:{setProperty(){}}, options:[], setAttribute(){}});
+    return nodes.get(id);
+  };
+  ui('resolution').value='640';
+  ui('preview').getContext=()=>paint;
+  Object.assign(ui('sensor'), {currentTime:1,readyState:2,videoWidth:640,videoHeight:480,
+    play:async()=>{},pause(){},requestVideoFrameCallback(){},cancelVideoFrameCallback(){}});
+  box.screen = {orientation:{angle:0}};
+  box.window = {innerHeight:800,innerWidth:400};
+  box.navigator = {mediaDevices:{getUserMedia:async()=>stream}};
+  const capture = new box.Camera(ui,()=>state,assert.fail,{
+    publish(_canvas,token){events.push(token);}, close(){events.push('close');}
+  });
+  capture.send=()=>events.push('upload');
+  await capture.open();
+  try {
+    capture.masks=[{x:0,y:0,w:0.2,h:0.2}];
+    const frame=()=>{ui('sensor').currentTime+=1;capture.draw();};
+    capture.request(true);frame();
+    assert.deepEqual(events.slice(-4),['draw','mask','capture-a','upload']);
+    track.muted=true;track.onmute();frame();
+    assert.equal(capture.sending,false);
+    assert.equal(capture.pendingSend,true);
+    track.muted=false;events.length=0;
+    ui('sensor').currentTime-=1;
+    capture.draw();
+    assert.ok(!events.includes('capture-a'), 'do not republish the pre-interruption frame');
+    frame();
+    assert.deepEqual(events.slice(-4),['draw','mask','capture-a','upload']);
+    track.muted=true;track.onmute();ui('sendFrame').onclick();
+    track.muted=false;frame();capture.request(true);frame();
+    assert.equal(capture.sending,false,'manual pause survives unmute and a desktop request');
+    ui('sendFrame').onclick();frame();assert.equal(capture.sending,true);
+    track.muted=true;track.onmute();box.screen.orientation.angle=90;track.muted=false;frame();
+    assert.equal(capture.sending,false,'changed orientation needs new mask confirmation');
+    ui('sendFrame').onclick();capture.request(false);frame();
+    assert.equal(capture.sending,false,'a canceled request cannot restart on the next frame');
+    capture.blocked=true;capture.request(true);frame();assert.equal(capture.sending,false);
+  } finally {capture.close();}
   console.log('Phone: masked pixels, cancelled uploads, desktop camera control and local privacy override passed');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

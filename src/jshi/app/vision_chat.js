@@ -35,7 +35,7 @@ class JShiVisionChat {
     const meta=this.element('div','media-meta'),status=this.element('div','media-meta');status.hidden=true;copy.appendChild(description);copy.appendChild(meta);copy.appendChild(status);
     body.appendChild(video);body.appendChild(copy);card.appendChild(header);card.appendChild(body);
     if(pinned&&this.options.pin)this.options.pin(card);else this.options.insert(card);
-    return {node:card,label,body,video,description,meta,status,pinned,copyLabel};
+    return {node:card,label,body,video,description,meta,status,pinned,copyLabel,openedAt:Date.now()/1000};
   }
   get active(){return !!(this.stream||this.remote);}
   deviceState(m){
@@ -142,7 +142,9 @@ class JShiVisionChat {
         const model=s.description_model?' · '+s.description_model:'';
         if(card.pinned)card.meta.textContent=this.sampleLabel(card.lastCaptured||s.captured)+' · '+basis+model+(stale?' · 暂用上次描述':'');else if(s.described_at)card.meta.textContent=basis+model;}
       const latestError=data.errors?.[0];
-      const error=(!s?.described_at||Number(latestError?.at||0)>s.described_at)?latestError?.message||'':'';
+      const currentError = latestError && latestError.at >= card.openedAt + this.offset
+        && (!s?.described_at || latestError.at > s.described_at);
+      const error = currentError ? latestError.message : '';
       card.status.hidden=!error;card.status.textContent='';
       if(error){const reason=error.includes('API_KEY')?'视觉模型未配置':error.includes('未返回有效描述')?'模型未返回描述':'环境更新失败';
         card.status.textContent=s?.described_at?'最近更新失败，沿用已有描述（'+reason+'）':reason+'，尚无成功的环境描述';card.status.title=error;}

@@ -13,8 +13,9 @@ const response=data=>({ok:true,json:async()=>data});
 async function main(){
   let cards=[],pinned=[],calls=0,stops=0,release;
   const mediaDevices={getUserMedia:()=>{calls++;return new Promise(resolve=>release=resolve)}};
-  let data={sample_seconds:2,server_time:Date.now()/1000,voice_active:true,
-    environment:{image_available:true,frame:'first',description:'有人在门边',description_model:'observed-model',described_at:20},errors:[]};
+  const now = Date.now()/1000;
+  let data={sample_seconds:2,server_time:now,voice_active:true,
+    environment:{image_available:true,frame:'first',description:'有人在门边',description_model:'observed-model',described_at:now+1},errors:[]};
   const chat=new VisionChat({document,mediaDevices,captureToken:()=>'desktop-1',ensureVoice:async()=>true,
     pin:card=>pinned.push(card),insert:card=>cards.push(card),request:async()=>response(data),notice(){},state(){}});
   chat.tick=()=>{};
@@ -36,12 +37,17 @@ async function main(){
   assert.equal(cards.length,0);assert.equal(pinned.length,1);assert.equal(pinned[0].dataset.display,'compact');
   pinned[0].children[0].children.find(x=>x.textContent==='隐藏画面').onclick();
   assert.equal(pinned[0].dataset.display,'hidden');
-  data.errors=[{at:1,message:'JSHI_VISION_API_KEY'}];await chat.poll();
+  const environment=data.environment;
+  data.environment=null;
+  data.errors=[{at:now-3600,message:'视觉描述被输出长度限制截断'}];await chat.poll();
+  assert.equal(chat.card.status.hidden,true,'a previous observation error must stay off the new card');
+  data.environment=environment;
+  data.errors=[{at:now-1,message:'JSHI_VISION_API_KEY'}];await chat.poll();
   assert.equal(chat.card.description.textContent,'有人在门边');
-  data.errors=[{at:30,message:'JSHI_VISION_API_KEY'}];await chat.poll();
+  data.errors=[{at:now+2,message:'JSHI_VISION_API_KEY'}];await chat.poll();
   assert.equal(chat.card.description.textContent,'有人在门边');assert.match(chat.card.status.textContent,/沿用已有描述/);
   data.errors=[];await chat.poll();assert.equal(chat.card.status.hidden,true);
-  data.errors=[{at:30,message:'视觉模型未返回有效描述'}];await chat.poll();assert.equal(chat.card.description.textContent,'有人在门边');assert.match(chat.card.status.textContent,/模型未返回描述/);
+  data.errors=[{at:now+2,message:'视觉模型未返回有效描述'}];await chat.poll();assert.equal(chat.card.description.textContent,'有人在门边');assert.match(chat.card.status.textContent,/模型未返回描述/);
   chat.stop();const size=chat.card.body.children.length;chat.stop();
   assert.equal(stops,1);assert.equal(chat.card.body.children.length,size);
   const canceled=chat.start();await Promise.resolve();chat.stop();
