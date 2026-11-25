@@ -66,6 +66,7 @@ class InputEnvelope:
     tool_event_ids: tuple[str, ...] = ()  # Internal references, never user utterances.
     entry_timing: dict = field(default_factory=dict)  # Observability only; never a model instruction.
     visual_context_fixed: bool = False  # Also freeze the absence of a completed observation.
+    screen_avatar: bool = False  # This conversation has a visible, loaded face.
 
     def __post_init__(self) -> None:
         if not self.speaker.object_id and self.speaker.status == "unknown":

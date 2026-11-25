@@ -77,6 +77,16 @@ def test_unknown_audio_converses_without_using_device_owner(process):
     assert "动作" in _experience_text(planned[0]) or _experience_text(planned[0]) == ""
 
 
+def test_visible_screen_face_reaches_the_subjects_own_cognition(process):
+    from jshi.models.prompt import SCREEN_AVATAR_RULE, build_system
+
+    e, ids = envelope(process)
+    visible = replace(e, screen_avatar=True)
+    process.experience("stone", e.text, envelope=visible, resolved_speaker=ids.candidate(e.speaker))
+    main = next(r for r in process.cognition.requests if r.purpose == 'subject_activity')
+    assert SCREEN_AVATAR_RULE in build_system(main)
+
+
 def test_final_and_matching_envelope_required(process):
     e, ids = envelope(process)
     with pytest.raises(ValueError):

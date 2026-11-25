@@ -1,0 +1,5 @@
+# 匠石屏幕形象使用的第三方资源
+
+- 人物控制及渲染使用 `@met4citizen/talkinghead@1.8.2` 与 `three@0.186.0`，均采用 MIT 许可。两者由 esbuild 0.25.12 打包为本地 ES 模块 `vendor/talkinghead.mjs`，入口导出 TalkingHead 类。许可全文在同目录的 `TalkingHead-LICENSE` 和 `Three-LICENSE`。[TalkingHead](https://github.com/met4citizen/TalkingHead) · [Three.js](https://github.com/mrdoob/three.js)
+- `vendor/mpfb.glb.gz` 来自 TalkingHead 的 MPFB 示例人物。上游将该模型以 CC0 发布。此副本缩小贴图并重新打包为 gzip，保留网格、骨骼与面部形变。角色模型可从匠石本地的 `/avatar/mpfb.glb` 载入。[原始模型及版本](https://github.com/met4citizen/TalkingHead/blob/1563de184c19b310de4b636664d5835e2c74dbba/avatars/mpfb.glb) · [上游资源说明](https://github.com/met4citizen/TalkingHead/blob/1563de184c19b310de4b636664d5835e2c74dbba/README.md) · [CC0](https://creativecommons.org/publicdomain/zero/1.0/)
+- `audio/headaudio.mjs`、`audio/headworklet.mjs` 和 `audio/model-en-mixed.bin` 来自 HeadAudio 同一版本。前两项为压缩后的程序，最后一项是用于实时识别嘴型的英语训练权重。许可全文在 `audio/LICENSE`。[HeadAudio 源码及权重版本](https://github.com/met4citizen/HeadAudio/tree/9f7654914559cf3beaf731117d2efa91958ef640)

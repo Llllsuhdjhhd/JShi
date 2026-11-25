@@ -60,3 +60,21 @@ sources.at(-1).onended();
 assert.equal(sent.filter(x=>x.reply_id==='two' && x.phase==='completed').length,1);
 assert.equal(node('status').textContent,'已连接，正在听');
 console.log('Voice player: pause/resume, chunk completion, stale audio passed');
+
+const mouthEvents = [];
+context.window.jshiAvatar = {mouth: value => mouthEvents.push(value)};
+vm.runInContext(`
+  replyId = 'speaking'; paused = false; phoneSpeaking = false;
+  const shape = (reply, value) => message({type:'phone_viseme', reply_id:reply, shape:value});
+  phoneOutput = false; shape('speaking', 7);
+  phoneOutput = true; shape('speaking', 8);
+  message({type:'phone_played',reply_id:'speaking',segment:0,phase:'started'});
+  shape('retired', 9); shape('speaking', 2);
+  pause(); shape('speaking', 10);
+  paused = false; shape('speaking', 4);
+  message({type:'phone_played',reply_id:'speaking',segment:0,phase:'completed'});
+  shape('speaking', 8);
+  phoneOutput = false; phoneSpeaking = true; shape('speaking', 7);
+`,context);
+assert.deepEqual(mouthEvents,[2,-1,4,-1]);
+console.log('Screen mouth follows only the playing phone reply and closes on pause and completion');

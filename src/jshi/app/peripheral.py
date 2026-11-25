@@ -86,6 +86,7 @@ class Peripheral:
         session = self.session
         if self.stopping or not session or not session.accepting:
             return
+        cue = None
         if message.type == WSMsgType.TEXT:
             event = message.json()
             if event.get('stream') != session.token:
@@ -95,6 +96,12 @@ class Peripheral:
                 if not self.audio_ready and event.get('echo_reference') is True:
                     self.echo = PlaybackEcho()
                 self.audio_ready = True
+                return
+            if kind == 'viseme':
+                shape, reply = event.get('shape'), event.get('reply_id')
+                if (self.playback and self.audio_ready and type(shape) is int and -1 <= shape < 14
+                        and isinstance(reply, str) and 0 < len(reply) <= 128):
+                    await self.controller.send_json({'type': 'phone_viseme', 'shape': shape, 'reply_id': reply})
                 return
             if kind == 'played':
                 if (not self.audio_ready or not isinstance(event.get('reply_id'), str)
@@ -123,6 +130,8 @@ class Peripheral:
                 return
             if self.echo and kind in {'speech_start','speech_end'}:
                 return
+            if kind in {'speech_start','speech_end'}:
+                cue = event
         elif message.type != WSMsgType.BINARY:
             return
         if not self.audio_ready:
@@ -135,10 +144,13 @@ class Peripheral:
         if self.echo and message.type == WSMsgType.BINARY and len(message.data) == 640:
             pcm = self.echo.clean(message.data)
             activity = self.echo.activity(pcm)
+            cue = activity
             message = WSMessage(WSMsgType.BINARY, pcm, '')
         if self.queue.qsize() + 1 + bool(activity) > self.queue.maxsize:
             await self.lost('手机声音传输积压，本次采集已停止')
         else:
+            if cue:
+                await self.controller.send_json({'type': 'phone_listening', 'active': cue['type'] == 'speech_start'})
             if activity:
                 self.queue.put_nowait(WSMessage(WSMsgType.TEXT, json.dumps(activity), ''))
             self.queue.put_nowait(message)

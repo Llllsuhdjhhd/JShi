@@ -37,6 +37,7 @@ function timing(s,data){
   if(+select.value<s.minInterval)select.value=Array.from(select.options).find(o=>!o.disabled).value;
 }
 function stopMic(s){
+  s.releaseMouth?.();s.releaseMouth=null;
   s.player?.reset();s.player=null;
   s.speaker?.disconnect();s.speaker=null;
   s.worklet?.disconnect();s.input?.disconnect();s.silent?.disconnect();
@@ -79,6 +80,16 @@ async function startMic(s,token){
     if(s!==device||token!==s.stream)return;
     const track=mic.getAudioTracks()[0];track.enabled=!muted;track.onended=()=>{if(s.stream===token)closeDevice('麦克风已断开');};
     s.speaker=s.ctx.createGain();s.speaker.connect(s.ctx.destination);s.player.destination=s.speaker;
+    const bus = s.speaker;
+    import('/avatar/audio/playback.mjs').then(({observePlayback}) => {
+      if (s.speaker !== bus || s.stream !== token) return;
+      s.releaseMouth = observePlayback(bus, shape => {
+        const player = s.player;
+        if (s.stream === token && player?.reply && !player.paused && device === s) {
+          send(s,{type:'viseme',reply_id:player.reply,shape});
+        }
+      }, () => send(s,{type:'device_status',text:'手机口型分析不可用'}));
+    }).catch(() => send(s,{type:'device_status',text:'手机口型组件载入失败'}));
     s.input=s.ctx.createMediaStreamSource(mic);
     s.worklet=new AudioWorkletNode(s.ctx,'voice-capture',{numberOfInputs:2,
       processorOptions:{frameMs:20,playbackReference:true}});

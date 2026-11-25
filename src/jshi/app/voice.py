@@ -56,6 +56,7 @@ class VoiceConversation:
     def __init__(self, process, subject_id: str, cloud, send, *, jev=None, timeout_s=3.0, local_speakers=None, input_pause_s=VOICE_INPUT_PAUSE_MS / 1000, sample_source=None, candidate_timeout_s=1.2, session_id=None, input_max_batch_s=12.0, input_batch_chars=20, scene_idle_s=15.0, scene_batch_inputs=6, scene_batch_chars=800, scene_max_wait_s=30.0, environment_idle_s=VISUAL_TURN_IDLE_SECONDS, personal_speakers=None, audio_preparer=None, utterance_material=False) -> None:
         self.process, self.subject_id, self.cloud, self.send = process, subject_id, cloud, send
         self.utterance_material = utterance_material
+        self.screen_avatar = False
         self.personal_speakers = personal_speakers
         from jshi.voice.sources import SpeakerAudioPreparer
         self.audio_preparer = audio_preparer or SpeakerAudioPreparer()
@@ -3586,7 +3587,7 @@ class VoiceConversation:
             self.tool_notice_deliveries[turn_key] = tuple(envelope.tool_event_ids)
         self.reply_input_ids[turn_key] = [u.input_id for u in envelope.current_utterances]
         self.answer_status[turn_key] = 'running'
-        envelope = replace(envelope, delivery_context='\n'.join(filter(None,
+        envelope = replace(envelope, screen_avatar=self.screen_avatar, delivery_context='\n'.join(filter(None,
             (envelope.delivery_context, self._answer_handling_context()))))
         while len(self.reply_input_ids) > 32:
             old_key = next(iter(self.reply_input_ids))
@@ -4821,7 +4822,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             speaker=SpeakerEvidence('tool-recipient' if ids else 'initiative',
                 object_id=owner if ids else 'scene:'+subject_id, label=person.label if ids else '现场',
                 status='recognized' if ids else 'unknown', method='tool_recipient' if ids else 'voice_scene'),
-            cognition_mode=mode, tool_event_ids=tuple(ids),
+            cognition_mode=mode, tool_event_ids=tuple(ids), screen_avatar=payload.get('screen_avatar') is True,
             delivery_context=dialogue.note(subject_id), wake_context=
             ('沿当前交谈交代结果。' if active and ids else
              '交谈间隙收到新的现场事件，结合当前交谈判断是否值得接话；没有人提出新请求。' if active else
@@ -4847,7 +4848,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             reply = result.response_plan.verbal_text()
             if reply:
                 dialogue.plan(subject_id, result.activity.id, 'web-text', [reply], shown=True, hide_until_played=False, owner=owner)
-            return web.json_response({'reply': reply, 'label': person.label, 'activity_id': result.activity.id})
+            return web.json_response({'reply': reply, 'label': person.label, 'activity_id': result.activity.id,
+                                      'actions': [i.text for i in result.response_plan.items if i.channel == 'embodied']})
         except TurnCancelled:
             return web.json_response({'reply': ''})
         except Exception:
@@ -4913,7 +4915,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 saved_name=state.context(subject_id,profile.object_id)['reported_name']
                 if saved_name: evidence=replace(evidence,label=saved_name)
 
-            envelope = InputEnvelope(session_id='web-text', source='web_text',
+            envelope = InputEnvelope(session_id='web-text', source='web_text', screen_avatar=payload.get('screen_avatar') is True,
                 parts=(InputPart('text', text),), speaker=evidence,
                 entry_timing={'received_mono':received_mono, 'received_at_ms':received_at_ms,
                               'source':'web_text'})
@@ -5057,6 +5059,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
             record_text_jev_delivery(result, envelope)
             reply = result.action_text or ''
             return web.json_response({'reply': reply, 'mode': result.response_plan.mode,
+                'actions': [i.text for i in result.response_plan.items if i.channel == 'embodied'],
                 'scene_write': 'none' if getattr(result,'route','main') in {'self_reply','control'} else 'background',
                 'route':getattr(result,'route','main'),
                 'jev_fallback':bool(result.timing and result.timing.end_to_end.get('jev_fallback')),
@@ -5489,6 +5492,8 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                             conversation.dialogue.displayed(str(payload.get('reply_id', '')))
                             conversation.record('voice_reply_displayed', {'reply_id':str(payload.get('reply_id','')),
                                 'browser_at_ms':payload.get('browser_at_ms'), 'received_at_ms':time()*1000})
+                        elif kind == 'avatar_display':
+                            conversation.screen_avatar = payload.get('visible') is True
                         elif kind == "speech_start":
                             settings = getattr(process, 'model_settings', None)
                             if settings is not None:
@@ -5674,6 +5679,12 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
                 raise
         return ws
 
+    async def avatar_model(request):
+        return web.FileResponse(Path(__file__).with_name('avatar') / 'vendor' / 'mpfb.glb.gz',
+                                headers={'Content-Type': 'model/gltf-binary', 'Content-Encoding': 'gzip'})
+
+    app.router.add_get('/avatar/mpfb.glb', avatar_model)
+    app.router.add_static('/avatar/', Path(__file__).with_name('avatar'))
     app.router.add_get("/", page)
     from .entry_tests import register as register_entry_tests
     register_entry_tests(app, process.repository.path.parent/'entry_test_assets', recent_audio)

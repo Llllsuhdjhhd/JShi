@@ -118,6 +118,7 @@ class ModelRequest:
     thinking_off: bool = False
     # Host-only round-trip mapping; never serialized as prompt material.
     person_name_codes: tuple[tuple[str, str], ...] = ()
+    screen_avatar: bool = False
 
 
 @dataclass(frozen=True)

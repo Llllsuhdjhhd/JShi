@@ -161,6 +161,14 @@ def test_paired_device_audio_camera_reconnect_and_shutdown(process, tmp_path):
                             receipt = await asyncio.wait_for(ws.receive_json(), 5)
                             if receipt['type']=='phone_played': break
                         assert receipt['reply_id']==rid and receipt['phase']==phase
+                        if phase == 'started':
+                            for token, shape in [('old-session', 8), (stream, 20), (stream, 3)]:
+                                await sensor.send_json({'type':'viseme','stream':token,'reply_id':rid,'shape':shape})
+                            while True:
+                                event = await asyncio.wait_for(ws.receive_json(), 5)
+                                if event['type'] == 'phone_viseme':
+                                    assert event == {'type':'phone_viseme','shape':3,'reply_id':rid}
+                                    break
                     await ws.send_json({'type':'end'})
                 assert (await sensor.receive_json())['type']=='standby'
                 await wait_available()

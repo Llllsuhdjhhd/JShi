@@ -164,6 +164,7 @@ def create_device_app(code, devices, submit_frame, vision_config, *, captures):
         return web.FileResponse(Path(__file__).with_name(assets[request.path]),
             headers={'Cache-Control': 'no-cache', 'Referrer-Policy': 'no-referrer',
                      'X-Content-Type-Options': 'nosniff'})
+    app.router.add_static('/avatar/audio/', Path(__file__).with_name('avatar') / 'audio')
     for path in assets:
         app.router.add_get(path, asset)
     app.router.add_post('/pair', pair)

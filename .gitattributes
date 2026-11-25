@@ -11,3 +11,6 @@
 
 /jshi.cmd text eol=crlf
 /model-desk.cmd text eol=crlf
+
+/src/jshi/app/avatar/audio/*.bin binary
+/src/jshi/app/avatar/vendor/*.gz binary

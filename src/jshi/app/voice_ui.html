@@ -140,6 +140,11 @@
   #log .input-person:focus-visible{outline:2px solid #8bb7f3;outline-offset:3px}
   #log .identity-evidence{white-space:pre-line;font-size:12px;color:#526882;background:#f7faff;border-left:2px solid #aac6eb;padding:10px 12px;margin-top:12px;border-radius:5px}
   #log .model-live-body{font-size:12px;line-height:2.1}
+  .avatar-stage{position:relative;flex:0 0 clamp(132px,24dvh,255px);min-height:0;overflow:hidden;border-radius:16px;background:radial-gradient(ellipse at 50% 28%,#f6f3ef,#e5e2df)}
+  #avatar-view{position:absolute;inset:0}#avatar-view canvas{display:block}
+  #avatar-status{position:absolute;inset:auto 8px 5px;text-align:center;font-size:12px;color:#4a4c54;pointer-events:none}
+  .conversation:has(#vision-dock:not([hidden])) .avatar-stage{flex-basis:clamp(88px,14dvh,150px)}
+  @media(max-height:620px){.avatar-stage{flex-basis:100px}}
 </style>
 <main>
   <header class="page-header"><h1><span class="brand-mark" aria-hidden="true">匠</span>和匠石说话</h1>
@@ -153,6 +158,7 @@
         <p>最新消息在下方；翻看旧消息时，可点击圆形下箭头回到最新消息。录音时间和身份依据可展开“输入详情”查看。</p>
       </div></details>
     <nav class="view-controls" aria-label="面板显示">
+      <button id="toggle-avatar" class="view-toggle" aria-controls="avatar-stage" aria-pressed="true">人物形象</button>
       <button id="toggle-conversation" class="view-toggle" aria-label="隐藏对话区" aria-controls="conversation" aria-expanded="true" aria-pressed="false" title="隐藏对话区"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path d="M5 7h2v10H5z" fill="currentColor" stroke="none"/></svg></button>
       <button id="toggle-inspector" class="view-toggle" aria-label="打开设置与调试" aria-controls="debug-workspace" aria-expanded="false" title="设置与调试"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 10h16M4 15h16M4 20h16"/></svg>设置与调试</button>
     </nav></div></header>
@@ -165,6 +171,7 @@
   </div>
   <p id="layout-empty" class="layout-empty" hidden>对话与检查面板已隐藏，点击右上角图标恢复。</p>
   <div class="workspace" id="workspace"><section class="conversation" id="conversation" aria-label="对话">
+  <section id="avatar-stage" class="avatar-stage" aria-label="匠石的屏幕形象"><div id="avatar-view"></div><span id="avatar-status" role="status">正在载入形象…</span></section>
   <div id="vision-dock" hidden aria-label="实时画面"></div>
   <div class="flow-status" aria-live="polite"><span id="flow-input"></span><span id="flow-main"></span><span id="flow-write"></span></div>
   <div class="message-region"><div class="message-scroll" id="message-scroll" tabindex="0" aria-label="聊天记录"><div id="live"></div><section id="log" aria-live="polite"><div class="empty" id="empty"><strong>在这里，和匠石聊聊</strong><span>开启语音，或在下方切换文字输入</span></div></section><p id="rename-ask" hidden></p></div><button id="jump-latest" type="button" aria-label="回到最新消息" title="回到最新消息" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M5 13l7 7 7-7"/></svg></button></div>
@@ -237,6 +244,7 @@
     <small id="backend">尚未连接语音后端</small>
   </details>
   </aside></div><div id="data-pane" hidden><iframe id="data-frame" title="保存数据与调试工作台"></iframe></div></section></div></main><dialog id="media-view"><button id="close-media" type="button" class="secondary">关闭</button><video id="media-video" muted playsinline hidden></video><img id="media-large" alt="查看聊天图片"><p id="media-caption"></p></dialog>
+<script type="module" src="/avatar/character.mjs"></script>
 <script>
 const $ = id => document.getElementById(id);
 const launchParams = new URLSearchParams(location.search);
@@ -374,6 +382,25 @@ let replyId = '', paused = false, queue = [], playing = null, source = null;
 let permitSeq = 0; const holdReasons = new Set(), nextHolds = new Set();
 const speechLevel = 0.02, sustainFrames = 4;
 let speechFrames = 0, speechLevelSent = '', speechQuiet = 0;
+let playbackBus = null, releaseMouth = null;
+function attachPlaybackMouth(context) {
+  const bus = context.createGain();
+  bus.connect(context.destination);
+  playbackBus = bus;
+  import('/avatar/audio/playback.mjs').then(({observePlayback}) => {
+    if (playbackBus !== bus) return;
+    releaseMouth = observePlayback(bus, shape => {
+      if (!phoneOutput && playing && !paused) window.jshiAvatar?.mouth(shape);
+    }, error => log('本机口型分析未能启动：'+error.message, 'notice'));
+  }).catch(error => log('本机口型组件载入失败：'+error.message, 'notice'));
+}
+$('toggle-avatar').onclick = () => {
+  const stage = $('avatar-stage');
+  stage.hidden = !stage.hidden;
+  $('toggle-avatar').setAttribute('aria-pressed', String(!stage.hidden));
+};
+function avatarVisible() { return window.jshiAvatar?.visible() === true; }
+window.addEventListener('avatar-display', () => { if (ready) send({type:'avatar_display',visible:avatarVisible()}); });
 let audioDone = true, mainBusy = false;
 let mainSource='', outcomeHint='', mainStage='';
 const phaseNames={collect:'收集发言',prepare:'准备输入材料',jev:'JEV 判断',judged:'JEV 判断已结束',queued:'等待进入主流程',resolve:'主流程 · 识别对象与落位',assemble:'主流程 · 组装人物、回忆与工具材料',cognition:'主认知 · 模型思考',action:'主流程 · 处理语言与动作'};
@@ -387,6 +414,7 @@ const replyRows=new Map(), actionRows=new Map();
 function actionKey(key){return JSON.stringify(key||[]);}
 function showActions(actions,after=null){
   const text=(actions||[]).filter(x=>x&&x.trim()!=='无动作').join('；');if(!text)return null;
+  window.jshiAvatar?.action(actions);
   const row=log('动作：'+text,'action');if(after&&after.isConnected)after.after(row);return row;
 }
 let startedSegments = new Set(), endedSegments = new Set(), finishedSegments = new Set();
@@ -867,17 +895,18 @@ function play() {
   const buffer = outputContext.createBuffer(1,item.samples.length, item.rate);
   buffer.copyToChannel(item.samples,0);
   source = outputContext.createBufferSource(); source.buffer = buffer;
-  source.connect(outputContext.destination);
+  source.connect(playbackBus || outputContext.destination);
   item.startedAt = outputContext.currentTime;
   source.onended = () => {
     if (rid !== replyId) return;
-    playing = null; source = null; complete(item.segment); play(); refreshStatus();
+    playing = null; source = null; complete(item.segment); play(); if (!playing) window.jshiAvatar?.mouth(-1); refreshStatus();
   };
   source.start();
   if (!startedSegments.has(item.segment)) { startedSegments.add(item.segment); ack(item.segment,'started'); }
   $('status').textContent='匠石正在说话';
 }
 function pause() {
+  window.jshiAvatar?.mouth(-1);
   paused = true;
   if (source && playing) {
     const consumed = Math.floor((outputContext.currentTime-playing.startedAt)*playing.rate);
@@ -891,6 +920,7 @@ function pause() {
   $('status').textContent='正在听你说';
 }
 function clearPlayback() {
+  window.jshiAvatar?.mouth(-1);
   if (replyId) { invalidReplies.add(replyId); if(invalidReplies.size>100) invalidReplies.delete(invalidReplies.values().next().value); }
   if(source) { source.onended=null; source.stop(); source.disconnect(); }
   source=null; phoneSpeaking=false; playing=null; queue=[]; replyId=''; paused=false;
@@ -1009,7 +1039,7 @@ function message(m) {
   if(m.type==='device_status'){if(m.text){$('status').textContent=m.text;connectionNote(m.text);}return;}
   if(m.type==='device_video'){visualChat?.deviceState(m);return;}
   if(m.type==='preview_signal'){visualChat?.handlePreview(m);return;}
-  if (m.type==='ready') { if(phoneOutput)connectionNote('收音和播报均使用所选 iPhone');captureToken=m.stream;captureId=m.capture_id; try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true;refreshTextPeople();if(window.refreshVisionAvailability)window.refreshVisionAvailability();voiceButton(true,'对话中'); $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '')+(m.speaker_split==='enabled'?' · 本地多人分段已启用':'');connectionNote($('backend').textContent);if(m.speaker_split_error)connectionNote(m.speaker_split_error);
+  if (m.type==='ready') { if(phoneOutput)connectionNote('收音和播报均使用所选 iPhone');captureToken=m.stream;captureId=m.capture_id; try{if(m.session_id)sessionStorage.setItem('jshi.voice.session',m.session_id);}catch{} savedReferences.clear();for(const row of m.saved_references || [])savedReferences.set(row.object_id,row);renderSavedReferences();ready=true;send({type:'avatar_display',visible:avatarVisible()});refreshTextPeople();if(window.refreshVisionAvailability)window.refreshVisionAvailability();voiceButton(true,'对话中'); $('voice-dock').classList.add('active');$('voice-hint').textContent='正在聆听，可以直接说话；也可切换文字补充。';$('status').textContent='已连接，可以说话'; $('backend').textContent=(m.asr || '')+' · '+(m.tts || '')+(m.speaker_split==='enabled'?' · 本地多人分段已启用':'');connectionNote($('backend').textContent);if(m.speaker_split_error)connectionNote(m.speaker_split_error);
     $('match-threshold').disabled=m.match_threshold==null;
     if(m.match_threshold!=null){$('match-threshold').value=m.single_confirmation_threshold ?? m.match_threshold;$('match-value').textContent=Number(m.single_confirmation_threshold ?? m.match_threshold).toFixed(2);$('match-status').textContent='单句确认至少 '+Number(m.single_confirmation_threshold ?? Math.max(.65,m.match_threshold)).toFixed(2)+'，与第二候选须相差 '+m.match_margin+'；较弱声音先收集多段核对，待定声音不参与姓名竞争。';}
     voiceprintAvailable=m.voiceprint_available!==false;selectionChanged();
@@ -1220,11 +1250,15 @@ function message(m) {
     requestAnimationFrame(()=>send({type:'reply_displayed',reply_id:displayedReply,browser_at_ms:Date.now()}));
     if(m.turn_key){const key=actionKey(m.turn_key);replyRows.set(key,lastRow);const action=actionRows.get(key);if(action&&action.isConnected)lastRow.after(action);while(replyRows.size>64)replyRows.delete(replyRows.keys().next().value);}
   }
+  else if(m.type==='phone_listening' && phoneOutput) window.jshiAvatar?.listen(m.active);
+  else if(m.type==='phone_viseme' && phoneOutput && m.reply_id===replyId && phoneSpeaking && !paused) {
+    window.jshiAvatar?.mouth(m.shape);
+  }
   else if(m.type==='phone_played' && phoneOutput && m.reply_id===replyId){
     if(m.phase==='started'){
       phoneSpeaking=true;startedSegments.add(m.segment);showPlaybackClock(replyId,'started',m.browser_at_ms);
     }else if(m.phase==='completed'){
-      phoneSpeaking=false;finishedSegments.add(m.segment);finishPlaybackClock(m.browser_at_ms);
+      window.jshiAvatar?.mouth(-1);phoneSpeaking=false;finishedSegments.add(m.segment);finishPlaybackClock(m.browser_at_ms);
     }
     refreshStatus();
   }
@@ -1279,6 +1313,8 @@ async function closeVoice() {
   ready=false;voiceButton(false); mainBusy=false;clearTimeout(silenceTimer); clearPlayback();
   $('match-threshold').disabled=true;
   const oldWs=ws, oldCapture=captureContext, oldOutput=outputContext;
+  window.jshiAvatar?.reset();
+  releaseMouth?.(); releaseMouth=null; playbackBus?.disconnect(); playbackBus=null;
   phoneOutput=false;phoneSpeaking=false;
   settlingVoice=!!oldWs;
   ws=null; captureContext=outputContext=null;
@@ -1324,8 +1360,8 @@ setInterval(async()=>{
  if(initiativePolling||textSending||document.hidden||ready||$('text-dock').hidden||(ws&&ws.readyState===WebSocket.OPEN)||$('typed').value.trim()||!$('text-person').value)return;
  const owner=$('text-person').value;initiativePolling=true;
  try{
-  const response=await fetch('/initiative-results',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({object_id:owner})});
-  if(response.ok){const data=await response.json();if(data.reply&&owner===$('text-person').value)log('匠石：'+data.reply,'reply',Date.now());}
+  const response=await fetch('/initiative-results',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({object_id:owner,screen_avatar:avatarVisible()})});
+  if(response.ok){const data=await response.json();if(owner===$('text-person').value){const row=data.reply?log('匠石：'+data.reply,'reply',Date.now()):null;showActions(data.actions,row);}}
  }catch{}finally{initiativePolling=false;}
 },1000);
 
@@ -1351,7 +1387,7 @@ $('composer').onsubmit=async event=>{
  const viaVoice=ready&&ws&&ws.readyState===WebSocket.OPEN;
  textSending=true;$('send-text').disabled=true;
  // Send before building the message/details panel: layout must not hold up input.
- const payload={text,object_id,client_submitted_at_ms:submitted,client_sent_at_ms:Date.now(),client_prepare_ms:performance.now()-submitMono,client_buffered_bytes:viaVoice?ws.bufferedAmount:0};
+ const payload={text,object_id,screen_avatar:avatarVisible(),client_submitted_at_ms:submitted,client_sent_at_ms:Date.now(),client_prepare_ms:performance.now()-submitMono,client_buffered_bytes:viaVoice?ws.bufferedAmount:0};
  const textRequest=viaVoice?null:fetch('/text-input',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/x-ndjson'},body:JSON.stringify(payload)});
  if(viaVoice)send({type:'text',...payload});
  const actor=Array.from($('text-person').options).find(p=>p.value===object_id)?.textContent||speakerLabels.get(object_id)||'对方';
@@ -1524,6 +1560,7 @@ async function connectVoice(token) {
     if(!peripheral){
       outputContext=new AudioContext(); await outputContext.resume();
       if(token!==connectionEpoch)return false;
+      attachPlaybackMouth(outputContext);
       const acquiredMic=await navigator.mediaDevices.getUserMedia({audio:{
         deviceId:$('device').value ? {exact:$('device').value} : undefined,
         // Voiceprint enrollment uses the same constraints; browser noise suppression reshapes the spectrum.
@@ -1579,14 +1616,14 @@ async function connectVoice(token) {
       }
       if(data.level >= speechLevel){
         speechQuiet = 0; speechFrames++;
-        if(!speechLevelSent){ speechLevelSent = 'short'; send({type:'speech_start', level:'short'}); }
+        if(!speechLevelSent){ window.jshiAvatar?.listen(true); speechLevelSent = 'short'; send({type:'speech_start', level:'short'}); }
         else if(speechLevelSent === 'short' && speechFrames >= sustainFrames){
           speechLevelSent = 'sustained'; send({type:'speech_start', level:'sustained'});
         }
       } else if(speechLevelSent){
         speechQuiet++;
         if(speechQuiet >= 2){
-          send({type:'speech_end', level: speechLevelSent});
+          window.jshiAvatar?.listen(false); send({type:'speech_end', level: speechLevelSent});
           speechLevelSent = ''; speechFrames = 0; speechQuiet = 0;
         }
       }

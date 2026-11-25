@@ -246,6 +246,7 @@ class AssembledCurrentState:
     preparation_context: str = ''
     light_finalize: bool = False
     on_reconsider: Callable | None = None
+    screen_avatar: bool = False
 
 
 @dataclass(frozen=True)
@@ -994,7 +995,8 @@ class SubjectProcess:
         if envelope and envelope.source == "initiative":
             current = replace(current, input_items=(), input_text="", speaker=None)
         modes = tuple(dict.fromkeys(str(mode).strip() for mode in processing_modes if str(mode).strip()))
-        current = replace(current, processing_modes=modes or ("interaction",))
+        current = replace(current, processing_modes=modes or ("interaction",),
+                          screen_avatar=bool(envelope and envelope.screen_avatar))
         if observed_environment and self.vision:
             from jshi.vision.store import description_current, image_current
             valid_description = description_current(observed_environment, datetime.now().timestamp())
@@ -2208,6 +2210,7 @@ class SubjectProcess:
             purpose="subject_activity",
             preparation_context=current.preparation_context,
             light_finalize=current.light_finalize,
+            screen_avatar=current.screen_avatar,
             thinking_off=self._prompt_profile(current).level == 3,
             input_text=current.input_text,
             subject_state=current.subject_state,

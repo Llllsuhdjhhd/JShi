@@ -213,6 +213,8 @@ def build_system(request: ModelRequest) -> str:
     if request.purpose == 'subject_activity' or request.purpose.startswith('voice_jev'):
         capability = '\n\n【当前部署的身份与能力】\n' + DEPLOYMENT_CAPABILITIES
     if request.purpose == 'subject_activity':
+        if request.screen_avatar:
+            capability += '\n' + SCREEN_AVATAR_RULE
         capability += '\n\n' + RESULT_EVIDENCE_RULE
     # The minute-level time changes every turn; keeping it last lets the fixed rules hit the prefix cache.
     now_label = _now_label(request.now) if _is_cognition(request) else ''
@@ -225,6 +227,12 @@ REPLY_LANGUAGE_RULE = (
     '按原话区分本次翻译和持续交谈，直到约定结束或对方另有要求。'
 )
 
+
+SCREEN_AVATAR_RULE = (
+    '当前网页可显示匠石的面部动作。结合现场和自己的态度，需要时在动作项原样选一个：'
+    '屏幕注视、屏幕点头、屏幕摇头、屏幕微笑、屏幕关切、屏幕疑惑、屏幕平静。安静倾听时也可选，平时可省略面部动作。'
+    '语言照常由你决定，嘴型随实际播报。'
+)
 
 DEPLOYMENT_CAPABILITIES = (
     '匠石目前的载体是电脑，能通过电脑以及连接的外设进行听、说，自身不具备物理意义上的移动、操控等能力。'

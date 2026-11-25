@@ -14,3 +14,14 @@ def test_live_request_includes_current_deployment_boundary_once(purpose):
 def test_unrelated_request_has_no_injected_robot_identity():
     request=ModelRequest(purpose='transcription',input_text='文本',subject_state=SubjectState('test','测试','任务'))
     assert DEPLOYMENT_CAPABILITIES not in build_system(request)
+
+
+def test_screen_actions_only_reach_current_visible_web_main_cognition():
+    from dataclasses import replace
+    from jshi.models.prompt import SCREEN_AVATAR_RULE
+
+    request = ModelRequest('subject_activity', '听你说', SubjectState('stone', '匠石', '对话'))
+    assert SCREEN_AVATAR_RULE not in build_system(request)
+    shown = replace(request, screen_avatar=True)
+    assert build_system(shown).count(SCREEN_AVATAR_RULE) == 1
+    assert SCREEN_AVATAR_RULE not in build_system(replace(shown, purpose='voice_jev'))
