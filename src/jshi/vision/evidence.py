@@ -40,8 +40,3 @@ class EvidenceModules:
         with ThreadPoolExecutor(max_workers=min(4, len(self.modules))) as pool:
             jobs = [pool.submit(run, name, module) for name, module in self.modules.items()]
             return [job.result() for job in jobs]
-
-
-def environment_experience_interface():
-    # Reserved, deliberately no environment matching or experience retrieval.
-    return {'status': 'not_implemented', 'references': []}

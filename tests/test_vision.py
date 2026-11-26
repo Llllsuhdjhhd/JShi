@@ -332,12 +332,21 @@ def test_change_grade_controls_photo_retention_and_selected_recall_numbering(sto
     result = process._recall_media(replace(state, fragments=fragments, main_image='include'))
     assert len(result.input_parts) == 1
     assert result.input_parts[0]['label'] == '图片1'
-    assert result.input_parts[0]['image_url'].startswith('data:image/jpeg;base64,')
+    assert result.input_parts[0]['role'] == 'memory_overview'
     assert '图片' not in result.fragments[0].content
     assert all('图片1' in f.content for f in result.fragments[1:])
     from jshi.models.base import ModelRequest, _chat_payload
+    from jshi.vision.main_media import MainImageGate
+    gate = MainImageGate()
+    args = dict(subject='stone',context='test',allowed=False,recalled_allowed=True,store=store)
+    recalled = process._recall_media(replace(state, fragments=fragments, main_image='omit'))
+    parts,tokens,refs = gate.prepare(recalled.input_parts, **args)
+    assert not refs
+    gate.commit('stone','test',tokens)
+    assert gate.prepare(recalled.input_parts, **args)[0] == parts
+    assert '回忆画面' in parts[0]['label']
     request = ModelRequest('subject_activity', '文字回忆中引用图片1', state.subject_state,
-                           input_parts=result.input_parts)
+                           input_parts=parts)
     content = json.loads(_chat_payload('test', request))['messages'][1]['content']
     assert '图片1' in content[-2]['text']
     assert content[-1]['type'] == 'image_url'
@@ -1140,3 +1149,107 @@ def test_late_inference_never_enters_next_capture(store, local_model):
     finally:
         release.set()
         service.close()
+
+def test_visual_focus_survives_original_expiry_and_recall(store, process):
+    from jshi.assembly.port import AssemblyFragment
+    from jshi.vision.main_media import MainImageGate
+    from types import SimpleNamespace
+    from PIL import Image
+    original = BytesIO()
+    Image.new('RGB',(1200,800),'red').save(original,format='JPEG')
+    frame = store.add_frame('stone',original.getvalue(),time()-30)
+    first = store.publish('stone',frame,'书在桌边',change_degree='high')
+    assert store.bind('stone','yesterday',first['id'])
+    assert store.save_focus('stone',first['id'],'编号',[0,0,.5,.5],'yesterday')
+    live = snapshot(store,'blue')
+    store.config=replace(store.config,retention_seconds=1)
+    store.cleanup()
+    process.vision=SimpleNamespace(config=replace(store.config,cognition_images=True),store=store)
+    state = process.assemble_current_state('stone','昨天书的编号是什么')
+    frag = AssemblyFragment(source='memory',id='memory:book',kind='fact',content='以前的书',source_ids=('yesterday',))
+    recalled=process._recall_media(replace(state,fragments=(frag,),input_parts=({'kind':'image','reference':live['frame']},)))
+    parts,_,refs=MainImageGate().prepare(recalled.input_parts,subject='stone',context='now',allowed=True,
+                                        recalled_allowed=True,store=store)
+    assert [p['role'] for p in parts]==['current','memory_overview','memory_crop']
+    assert refs==(live['frame'],)
+    assert Image.open(BytesIO(store.image(frame,'stone'))).width==512
+    assert Image.open(BytesIO(store.memory_view('stone',frame,'编号',[0,0,.5,.5]))).size==(600,400)
+    with pytest.raises(KeyError):
+        store.memory_view('other',frame,'编号',[0,0,.5,.5])
+
+
+def test_scene_evidence_and_focus_actions_are_bound_to_the_observed_frame(store):
+    from jshi.vision.scene import scene_history
+    start = time()-10
+    store.set_capture('stone','camera-a')
+    first = store.add_frame('stone',image(),start,'browser',capture_id='camera-a')
+    seen = store.publish('stone',first,'桌旁有背影',model='test')
+    service=VisionService(store,store.config,Model(),Detector())
+    try:
+        assert not service.remember_scene_action('stone',seen,'保留视觉焦点 0 0 .5 .5 书名',['turn-1'],'看书名')
+        store.record_main_images('stone',['turn-1'],[first])
+        assert service.remember_scene_action('stone',seen,'保留视觉焦点 0 0 .5 .5 书名',['turn-1'],'看书名')
+        assert not service.remember_scene_action('stone',seen,'保留视觉焦点 -1 0 .5 .5 书名',['turn-1'],'看书名')
+        action='记录地点 工作室｜书架｜工作室的书架在窗边'
+        assert not service.remember_scene_action('stone',seen,action,['turn-2'],'可能在客厅')
+        assert service.remember_scene_action('stone',seen,action,['turn-2'],'工作室的书架在窗边')
+        next_frame=store.add_frame('stone',image('blue'),start+2,'browser',capture_id='camera-a')
+        newer=store.publish('stone',next_frame,'画面转向书页',model='test')
+        assert newer['environment_experience']['references'][0]['observation']=='工作室的书架在窗边'
+        assert [x['frame'] for x in scene_history(store,'stone',next_frame)]==[first]
+        prior = store.prior_observation('stone', first)
+        assert prior['frame'] == first
+        assert store.prior_observation('other', first) is None
+        prior_action = '保留前帧焦点 0 0 .5 .5 封面'
+        assert not service.remember_scene_action('stone', prior, prior_action, ['turn-3'], '刚才的封面')
+        assert service.remember_scene_action('stone', prior, prior_action, ['turn-3'], '刚才的封面', presented_prior=True)
+        assert '封面' in dict(store.focus_targets('stone', first))
+        assert store.focus_targets('stone', next_frame) == []
+        store.set_capture('stone','camera-b')
+        other=store.add_frame('stone',image('green'),start+5,'browser',capture_id='camera-b')
+        fresh=store.publish('stone',other,'另一画面',model='test')
+        assert not fresh['environment_experience']['references']
+        assert scene_history(store,'stone',other)==[]
+    finally:
+        service.close()
+
+
+def test_place_layout_is_only_a_candidate_across_named_visits(store):
+    layout = [{'class':'door','box':[0,0,.2,.8]}, {'class':'desk','box':[.7,.4,1,1]}]
+    now = time()
+    for i in range(3):
+        cap = f'visit-{i}'
+        store.set_capture('stone',cap)
+        frame = store.add_frame('stone',image(),now-(2-i)*86400,'browser',capture_id=cap)
+        shot = store.publish('stone',frame,'左门右桌',detections=layout)
+        if i<2:
+            assert shot['environment_experience']['status']=='unknown'
+            store.record_place('stone',frame,'工作室','桌','工作室的桌在右边',cap,layout)
+    guess = shot['environment_experience']
+    assert (guess['status'],guess['place'],guess['visits'])==('candidate','工作室',2)
+    assert guess['references']==[]
+
+
+def test_wire_budget_and_followup_recall(store,process):
+    from types import SimpleNamespace
+    from jshi.vision.main_media import MainImageGate
+    from jshi.models.base import model_user_content
+    shot=snapshot(store)
+    assert store.bind('stone','book',shot['id'])
+    overview={'kind':'image','role':'memory_overview','reference':shot['frame'],
+              'time_label':'昨天','label':'图片1'}
+    store.config=replace(store.config,main_image_bytes=1,cognition_images=True)
+    args=dict(subject='stone',context='camera',allowed=False,recalled_allowed=True,store=store)
+    sent=[]
+    parts,_,_=MainImageGate().prepare([overview],delivered_overviews=sent,**args)
+    content=model_user_content(SimpleNamespace(input_parts=parts),'现在的提问')
+    assert not sent and all(b['type']=='text' for b in content)
+    assert '图片预算已满' in content[-1]['text']
+    assert store.save_focus('stone',shot['id'],'编号',[0,0,.5,1],'book')
+    process.vision=SimpleNamespace(store=store,config=store.config)
+    current=replace(process.assemble_current_state('stone','那个编号呢'),media_context='camera',fragments=())
+    key=('stone','camera',getattr(current.speaker,'object_id',''))
+    process._main_images.remember_recall(key,overview)
+    assert [p['role'] for p in process._recall_media(current).input_parts]==['memory_overview','memory_crop']
+    process._main_images.reset('stone','camera')
+    assert not process._recall_media(current).input_parts

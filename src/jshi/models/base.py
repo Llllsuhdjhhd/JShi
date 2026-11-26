@@ -32,6 +32,21 @@ def _transient_chat_error(exc: BaseException) -> bool:
     return isinstance(exc, (TimeoutError, ConnectionError, ssl.SSLError))
 
 
+class ImageInputUnsupported(RuntimeError):
+    """The provider explicitly refused image input before producing any output."""
+
+
+def rejects_image_input(request, status, detail):
+    payload = request.data or b''
+    if status not in (400,415,422) or not any(field in payload for field in (b'"image_url"', b'"inlineData"')):
+        return False
+    detail = detail.lower()
+    return any(phrase in detail for phrase in (
+        'does not support image', 'does not support vision', 'image input is not supported',
+        'image inputs are not supported', 'image_url is not supported', 'only supports text',
+        '不支持图片输入', '不支持图像输入'))
+
+
 def _urlopen_chat(http_request: Request, timeout: float = 60):
     """打开对话请求。连接被中途掐断时隔一会儿再试，避免一次抖动就整轮失败。"""
     for attempt in range(_CHAT_ATTEMPTS):
@@ -39,6 +54,11 @@ def _urlopen_chat(http_request: Request, timeout: float = 60):
             return urlopen(http_request, timeout=timeout)
         except Exception as exc:
             if isinstance(exc, HTTPError):
+                if exc.code in (400, 415, 422) and exc.fp is not None and b'"image_url"' in (http_request.data or b''):
+                    detail = exc.read(8192).decode('utf-8',errors='replace')
+                    if rejects_image_input(http_request, exc.code, detail):
+                        exc.close()
+                        raise ImageInputUnsupported('当前模型不接受图片输入') from None
                 exc.close()
             if not _transient_chat_error(exc) or attempt + 1 >= _CHAT_ATTEMPTS:
                 raise
@@ -587,6 +607,18 @@ def deepseek_json_output(request: ModelRequest, model: str) -> bool:
     })
 
 
+def model_user_content(request, text):
+    blocks = [{'type':'text','text':text}]
+    for part in request.input_parts:
+        if part.get('kind') == 'image' and part.get('image_url'):
+            if part.get('label'):
+                blocks.append({'type':'text','text':part['label']})
+            blocks.append({'type':'image_url','image_url':{'url':part['image_url']}})
+        elif part.get('kind') == 'media_status':
+            blocks.append({'type':'text','text':part['text']})
+    return blocks if len(blocks)>1 else text
+
+
 def _chat_payload(
     model: str,
     request: ModelRequest,
@@ -610,14 +642,7 @@ def _chat_payload(
         ],
         **model_thinking_fields(thinking, reasoning_effort),
     }
-    images = [p for p in request.input_parts if p.get('kind') == 'image' and p.get('image_url')]
-    if images:
-        content = [{'type':'text', 'text':build_user(request)}]
-        for image in images:
-            if image.get('label'):
-                content.append({'type':'text', 'text':image['label']+'（关联历史事件的照片，以照片时间为准）'})
-            content.append({'type':'image_url', 'image_url':{'url':image['image_url']}})
-        body['messages'][1]['content'] = content
+    body['messages'][1]['content'] = model_user_content(request, body['messages'][1]['content'])
     if deepseek_json_output(request, model):
         response_format = response_format or 'json_object'
         # Keep existing budgets for other skills, especially thinking requests.

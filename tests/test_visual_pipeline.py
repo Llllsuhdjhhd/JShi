@@ -72,7 +72,7 @@ def test_local_only_collects_independent_evidence_and_failure_does_not_hide_resu
         assert rows['face']['status'] == 'not_run'
         assert value['described_at'] == 0
         assert all(r['frame'] == value['frame'] for r in rows.values())
-        assert value['environment_experience']['status'] == 'not_implemented'
+        assert value['environment_experience'] == {'status':'unknown','references':[]}
     finally: service.close()
 
 
@@ -148,7 +148,10 @@ def test_actual_cognition_request_uses_jev_gate_and_failure_does_not_commit(stor
         def __init__(self): self.requests = []; self.fail = False
         def generate(self,request):
             self.requests.append(request)
-            if self.fail: raise RuntimeError('failed')
+            if self.fail=='text-only' and any(p.get('kind')=='image' for p in request.input_parts):
+                from jshi.models.base import ImageInputUnsupported
+                raise ImageInputUnsupported('images unsupported')
+            if self.fail is True: raise RuntimeError('failed')
             return ModelResponse(model='fake',text='你好')
     process = SubjectProcess.__new__(SubjectProcess)
     process.vision = SimpleNamespace(store=store,config=replace(store.config,cognition_images=True))
@@ -171,6 +174,10 @@ def test_actual_cognition_request_uses_jev_gate_and_failure_does_not_commit(stor
                 media_context='session', media_source_ids=('fact',), visual_snapshot=observation,main_image='include')
     process.cognition.fail = True
     with pytest.raises(RuntimeError): process._cognize_once(current,(),activity_id='failed')
+    process.cognition.fail = 'text-only'
+    process._cognize_once(current,(),activity_id='text-only')
+    assert process.cognition.requests[-1].input_parts[0]['kind']=='media_status'
+    assert not store.was_presented('stone',('fact',),frame)
     process.cognition.fail = False
     process._cognize_once(current,(),activity_id='success')
     assert len(process.cognition.requests[-1].input_parts) == 1

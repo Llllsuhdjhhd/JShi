@@ -1,5 +1,6 @@
 """SQLite transactions keep snapshots and compressed media references atomic."""
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
+from .scene import retain_view, encoded_view, place_experience, layout_signature
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -38,6 +39,12 @@ class VisionStore:
             c.execute('pragma auto_vacuum=full')
             c.executescript('''
                 create table if not exists assets(id text primary key, data blob not null, size integer not null);
+                create table if not exists visual_views(subject text not null,frame text not null,
+                    target text not null,region text not null,asset text not null,
+                    primary key(subject,frame,target,region));
+                create table if not exists place_facts(subject text not null,place text not null,
+                    feature text not null,observation text not null,frame text not null,capture text not null,
+                    captured real not null,basis text not null,primary key(subject,place,feature,basis));
                 create table if not exists evidence(frame text not null, module text not null, data text not null,
                     primary key(frame,module));
                 create table if not exists media_sources(subject text not null, source_id text not null,
@@ -65,6 +72,12 @@ class VisionStore:
                 create table if not exists envelopes(frame text primary key, metadata text not null);
                 create index if not exists frames_subject_time on frames(subject,captured);
             ''')
+            if 'source' not in {r[1] for r in c.execute('pragma table_info(place_facts)')}:
+                c.execute("alter table place_facts add column source text not null default ''")
+            if 'layout' not in {r[1] for r in c.execute('pragma table_info(place_facts)')}:
+                c.execute("alter table place_facts add column layout text not null default '[]'")
+            c.execute('create index if not exists place_by_visit on place_facts(subject,capture,source,captured)')
+            c.execute('create index if not exists place_by_name on place_facts(subject,place,captured)')
             columns = {r[1] for r in c.execute('pragma table_info(snapshots)')}
             if 'change_degree' not in columns:
                 c.execute("alter table snapshots add column change_degree text not null default 'unknown'")
@@ -119,7 +132,7 @@ class VisionStore:
 
     @contextmanager
     def db(self):
-        with sqlite3.connect(self.path, timeout=10) as c:
+        with closing(sqlite3.connect(self.path, timeout=10)) as c, c:
             c.row_factory = sqlite3.Row
             yield c
 
@@ -174,6 +187,61 @@ class VisionStore:
         if row is None:
             raise KeyError("photo unavailable")
         return bytes(row[0])
+
+    def memory_view(self, subject, frame, target='', region=None):
+        with self.db() as c:
+            row = c.execute("""select a.data from visual_views v join assets a on a.id=v.asset
+                where v.subject=? and v.frame=? and target=? and region=?""",
+                (subject, frame, target, json.dumps(region, separators=(',', ':')))).fetchone()
+        if row:
+            return bytes(row[0])
+        if target:
+            raise KeyError('焦点图不可用')
+        return encoded_view(self.image(frame, subject), side=self.config.overview_side)  # pre-migration retained photo
+
+    def focus_targets(self, subject, frame):
+        with self.db() as c:
+            return [(r[0], json.loads(r[1])) for r in c.execute(
+                "select target,region from visual_views where subject=? and frame=? and target!='' order by target,region",
+                (subject, frame))]
+
+    def prior_observation(self, subject, frame):
+        with self.db() as c:
+            row = c.execute("""select * from snapshots where subject=? and frame=? and description_frame=frame
+                and described_at>0 and reason not in ('recall_image','observation_result')
+                order by completed desc limit 1""", (subject,frame)).fetchone()
+            return self._snapshot_row(c,row) if row else None
+
+    def was_presented(self, subject, sources, frame):
+        with self.db() as c:
+            return any(c.execute("""select 1 from media_sources m join snapshots s on s.id=m.snapshot
+                where m.subject=? and m.source_id=? and s.frame=? and s.reason='main_image'""",
+                (subject,source,frame)).fetchone() for source in sources)
+
+    def save_focus(self, subject, snapshot, target, box, source_id):
+        if not target.strip() or len(target)>80 or not source_id:
+            return False
+        with self.db() as c:
+            c.execute('begin immediate')
+            row = c.execute('select frame,description_frame from snapshots where subject=? and id=?',
+                            (subject,snapshot)).fetchone()
+            if not row or row[0]!=row[1]:
+                return False
+            if not retain_view(c, subject, row[0], '', None, self.config):
+                return False
+            if not retain_view(c, subject, row[0], target, box, self.config):
+                c.rollback()
+                return False
+            c.execute("insert or ignore into bindings values(?,?,?,1)",
+                      (subject,source_id+':focus:'+row[0],snapshot))
+            c.execute('insert or ignore into media_sources values(?,?,?)',(subject,source_id,snapshot))
+            return True
+
+    def record_place(self, subject, frame, place, feature, observation, basis, detections=()):
+        with self.db() as c:
+            c.execute("""insert or ignore into place_facts
+                select subject,?,?,?,id,capture_id,captured,?,source,? from frames
+                where subject=? and id=?""", (place,feature,observation,basis,json.dumps(layout_signature(detections)),subject,frame))
 
     def add_evidence(self, subject, frame, rows):
         self.frame(frame, subject)
@@ -257,7 +325,7 @@ class VisionStore:
         result['image_available'] = bool(c.execute("select 1 from frames where id=? and subject=?", (row['frame'], row['subject'])).fetchone())
         result['detections'] = json.loads(result['detections'])
         result['analysis'] = [json.loads(r[0]) for r in c.execute('select data from evidence where frame=? order by module', (row['frame'],))]
-        result['environment_experience'] = {'status':'not_implemented', 'references':[]}
+        result['environment_experience'] = place_experience(c,row['subject'],row['frame'],result['detections'])
         envelope = c.execute('select metadata from envelopes where frame=?', (result['frame'],)).fetchone()
         result['envelope'] = json.loads(envelope[0]) if envelope else None
         return result
@@ -324,12 +392,8 @@ class VisionStore:
             s = c.execute("select frame,description_frame,change_degree from snapshots where id=? and subject=?", (sid, subject)).fetchone()
             if s is None:
                 return False
-            pinned = {r[0] for r in c.execute('''select distinct f.asset from frames f join snapshots s
-                on s.description_frame=f.id where s.id in
-                (select snapshot from bindings where retain_photo=1 union select snapshot from events where retain_photo=1)''')}
-            wanted = {r[0] for r in c.execute('select asset from frames where id=?', (s[1],))}
-            sizes = {r[0]:r[1] for r in c.execute('select id,size from assets')}
-            retained = (photo_candidate or s[2] in ('medium', 'high')) and bool(wanted) and (wanted <= pinned or sum(sizes[a] for a in pinned | wanted) <= self.config.memory_bytes)
+            retained = (photo_candidate or s[2] in ('medium', 'high')) and retain_view(
+                c, subject, s[1], '', None, self.config)
             c.execute("insert or ignore into bindings values(?,?,?,?)", (subject, source_id, sid, int(retained)))
         return retained
 
@@ -428,7 +492,7 @@ class VisionStore:
     def discard_frame(self, subject, frame):
         with self.db() as c:
             c.execute("delete from frames where subject=? and id=? and id not in (select frame from snapshots union select frame from sample_current union select frame from archives union select frame from inflight)", (subject, frame))
-            c.execute("delete from assets where id not in (select asset from frames)")
+            c.execute("delete from assets where id not in (select asset from frames union select asset from visual_views)")
             c.execute('delete from envelopes where frame not in (select id from frames)')
             c.execute('delete from evidence where frame not in (select id from frames)')
 
@@ -450,11 +514,31 @@ class VisionStore:
                 (select snapshot from current union select snapshot from bindings where retain_photo=1 union select snapshot from events where retain_photo=1)'''))
             protected.update(r[0] for r in c.execute('select frame from inflight'))
             protected.update(r[0] for r in c.execute('select frame from sample_current'))
+            # Migrate a bounded number of older retained photos per sweep.
+            for old in c.execute("""select distinct f.subject,f.id from frames f join snapshots s
+                    on s.description_frame=f.id where f.captured<? and s.id in
+                    (select snapshot from bindings where retain_photo=1 union select snapshot from events where retain_photo=1)
+                    and not exists(select 1 from visual_views v where v.frame=f.id and v.target='') limit 4""",
+                    (time()-self.config.retention_seconds,)).fetchall():
+                retain_view(c,old['subject'],old['id'],'',None,self.config)
+            # Keep the frame metadata and its durable overview after rolling pixels expire.
+            c.execute("""update frames set asset=(select v.asset from visual_views v
+                where v.frame=frames.id and v.subject=frames.subject and v.target='')
+                where captured<? and id not in (select frame from inflight union select frame from sample_current)
+                and exists(select 1 from visual_views v where v.frame=frames.id and v.target='')""",
+                (time()-self.config.retention_seconds,))
             rows = list(c.execute("select f.id,f.captured,a.size from frames f join assets a on a.id=f.asset order by f.captured desc"))
+            live = {r[0] for r in c.execute("select frame from inflight union select frame from sample_current")}
+            summaries = dict(c.execute("select frame,asset from visual_views where target=''"))
             used = 0
             keep = set(protected)
             for r in rows:
                 if r['id'] in protected:
+                    if r['id'] not in live and r['id'] in summaries:
+                        if used + r['size'] > self.config.rolling_bytes:
+                            c.execute('update frames set asset=? where id=?',(summaries[r['id']],r['id']))
+                        else:
+                            used += r['size']
                     continue
                 if time() - r['captured'] <= self.config.retention_seconds and used + r['size'] <= self.config.rolling_bytes:
                     used += r['size']
@@ -462,7 +546,8 @@ class VisionStore:
             for r in rows:
                 if r['id'] not in keep:
                     c.execute("delete from frames where id=?", (r['id'],))
-            c.execute("delete from assets where id not in (select asset from frames)")
+            c.execute('delete from visual_views where frame not in (select id from frames)')
+            c.execute("delete from assets where id not in (select asset from frames union select asset from visual_views)")
             c.execute('delete from envelopes where frame not in (select id from frames)')
             c.execute('delete from archives where frame not in (select id from frames)')
             c.execute('''delete from snapshots where frame not in (select id from frames) and

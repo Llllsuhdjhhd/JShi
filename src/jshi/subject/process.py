@@ -880,7 +880,7 @@ class SubjectProcess:
                 observed_environment = self.vision.store.snapshot(envelope.visual_snapshot_id, subject_id)
             elif not (envelope and envelope.visual_context_fixed):
                 observed_environment = self.vision.store.latest_completed(subject_id)
-        if observed_environment and self.vision:
+        if observed_environment and self.vision and observed_environment.get('reason') != 'recall_image':
             retained = self.vision.store.bind(subject_id, fact.id, observed_environment['id'])
             if not retained and observed_environment.get('change_degree') in ('medium', 'high'):
                 self.vision.store.error(subject_id, '记忆照片预算已满或媒体不可用，本轮未新增照片关联')
@@ -997,7 +997,15 @@ class SubjectProcess:
         modes = tuple(dict.fromkeys(str(mode).strip() for mode in processing_modes if str(mode).strip()))
         current = replace(current, processing_modes=modes or ("interaction",),
                           screen_avatar=bool(envelope and envelope.screen_avatar))
-        if observed_environment and self.vision:
+        if observed_environment and self.vision and observed_environment.get('reason') == 'recall_image':
+            # The result of an explicit reread is history even if the picture is seconds old.
+            when = datetime.fromtimestamp(observed_environment['captured']).astimezone().strftime('%Y-%m-%d %H:%M')
+            parts = tuple(p for p in current.input_parts if p.get('kind') != 'image')
+            remembered = {'kind':'image','role':'memory_overview','reference':observed_environment['frame'],
+                          'label':'重新查看的照片','time_label':when}
+            current = replace(current, input_parts=(*parts, remembered), visual_snapshot=None,
+                              transport_context=(current.transport_context+'\n'+observed_environment['description']).strip())
+        elif observed_environment and self.vision:
             from jshi.vision.store import description_current, image_current
             valid_description = description_current(observed_environment, datetime.now().timestamp())
             note = "以下是视觉环境材料，不是人物发言；观察时间可能早于本轮。\n" + self.vision.store.render(observed_environment, tuple((object_codes or {}).items()))
@@ -1009,6 +1017,33 @@ class SubjectProcess:
             if not valid_image:
                 current = replace(current, input_parts=tuple(p for p in current.input_parts
                     if p.get('kind') != 'image' or p.get('reference') != observed_environment.get('frame')))
+            if valid_image and observed_environment.get('reason') not in ('recall_image','observation_result'):
+                from jshi.vision.scene import scene_history, participant_context
+                frame = observed_environment['frame']
+                recent = scene_history(self.vision.store, subject_id, frame)
+                for presence in participant_context(recent, observed_environment, (object_codes or {}).items()):
+                    note += '\n' + presence
+                source = (observed_environment.get('envelope') or {}).get('source','')
+                viewpoint = '手机摄像头' if source.startswith('phone-') else {'browser':'本机摄像头','photo':'选取的照片'}.get(source)
+                if viewpoint:
+                    note += '\n观察视角：' + viewpoint
+                if recent:
+                    old = recent[0]
+                    age = round(observed_environment['captured'] - old['captured'])
+                    note += f"\n同一视角约{age}秒前的观察：{old['description']}。两次采样之间的过程未知。"
+                    if any(word in text for word in ('刚才','之前','从哪','变了','移到')):
+                        note += '\n若焦点在随附的前帧，用“保留前帧焦点 x1 y1 x2 y2 目标”，坐标仅对应前帧。'
+                        current = replace(current,input_parts=(*current.input_parts,
+                            {'kind':'image','reference':old['frame'],'role':'recent',
+                             'label':f'同一视角约{age}秒前的比较图'}))
+                experience = observed_environment.get('environment_experience', {})
+                if experience.get('status') == 'candidate':
+                    note += f"\n布局和以前的{experience['place']}相似，地点待核实。"
+                for fact in experience.get('references',()):
+                    note += f"\n地点记录（当时的陈述）：{fact['place']}，{fact['feature']}：{fact['observation']}"
+                note += ('\n若本轮实见画面且需要记住清晰局部，可用 embodied 动作“保留视觉焦点 x1 y1 x2 y2 目标”，'
+                         '四个坐标为当前图中从左上到右下的0到1比例。'
+                         '本轮有人明确陈述地点和布局时，可用“记录地点 地点｜特征｜原话”。')
             current = replace(current, visual_snapshot=observed_environment if valid_image else None,
                               transport_context=(current.transport_context + '\n' + note).strip())
         if envelope is not None:
@@ -1593,6 +1628,23 @@ class SubjectProcess:
     def _apply_visual_associations(self, subject_id, current, response, *, allowed=True):
         visible = []
         for item in response.response_plan.items:
+            if item.channel == 'embodied' and item.text.startswith('回看照片 '):
+                if allowed and self.vision:
+                    self.vision.request_action(subject_id, item.text)
+                continue
+            if item.channel == 'embodied' and item.text.startswith('保留前帧焦点 '):
+                prior = (response.metadata or {}).get('presented_prior_frame')
+                if allowed and self.vision and prior:
+                    snapshot = self.vision.store.prior_observation(subject_id,prior)
+                    if snapshot:
+                        self.vision.remember_scene_action(subject_id,snapshot,item.text,current.media_source_ids,
+                                                         current.input_text,presented_prior=True)
+                continue
+            if item.channel == 'embodied' and item.text.startswith(('保留视觉焦点 ', '记录地点 ')):
+                if allowed and self.vision and current.visual_snapshot:
+                    self.vision.remember_scene_action(subject_id, current.visual_snapshot, item.text,
+                        current.media_source_ids, current.input_text)
+                continue
             match = re.fullmatch(r'关联面孔\s+(F\d+)\s+(P\d+)[：:]\s*(\S.*)', item.text.strip()) if item.channel == 'embodied' else None
             if not match:
                 visible.append(item)
@@ -2112,37 +2164,55 @@ class SubjectProcess:
         except Exception:
             logger.exception("step input persist failed")
 
-    def _recall_media(self, current):
+    def _recall_media(self, current, photo_refs=None):
         if not self.vision:
             return current
-        import base64
+        from datetime import datetime
         memory = [f for f in current.fragments if f.source == 'memory']
-        if not memory:
-            return current
         subject = current.subject_state.subject_id
+        recall_key = (subject, current.media_context, getattr(current.speaker,'object_id',''))
         store = self.vision.store
         associations = store.associated_many(subject, [(f.source_ids, f.id.removeprefix('memory:')) for f in memory], images_only=True)
         numbers, images, enriched = {}, [], {}
-        enabled = current.main_image == 'include' and getattr(getattr(self.vision, 'config', store.config), 'cognition_images', False)
+        enabled = self.vision.config.cognition_images
+        # Reserve a representative picture for distinct selected memories before adding details.
         for fragment, snapshots in zip(memory, associations):
-            notes = []
-            for snapshot in snapshots:
-                frame = snapshot['frame']
-                if frame not in numbers:
-                    number = len(numbers) + 1
-                    try:
-                        data = store.image(frame, subject) if enabled else None
-                    except KeyError:
-                        continue
-                    numbers[frame] = number
-                    if data is not None:
-                        images.append({'kind':'image', 'reference':frame, 'label':f'图片{number}',
-                            'image_url':'data:image/jpeg;base64,'+base64.b64encode(data).decode()})
-                number = numbers[frame]
-                notes.append(f"关联历史图片{number}；拍摄时间 {snapshot['captured']}；" +
-                    ('原图由本轮带图与去重规则检查后提供，不能仅凭此引用声称已看图。' if enabled else f'本轮未提供原图；可用动作“回看照片 {frame}：观察问题”查看。'))
-            if notes:
-                enriched[fragment.id] = replace(fragment, content=fragment.content+'\n'+'\n'.join(notes))
+            if not snapshots:
+                continue
+            snapshot = snapshots[-1]
+            frame = snapshot['frame']
+            if frame not in numbers and len(numbers) >= self.vision.config.recall_photo_limit:
+                enriched[fragment.id] = replace(fragment, content=fragment.content+'\n本轮仅载入文字，历史图片超出张数预算。')
+                continue
+            number = numbers.setdefault(frame, len(numbers)+1)
+            label = f'图片{number}'
+            when = datetime.fromtimestamp(snapshot['captured']).astimezone().strftime('%Y-%m-%d %H:%M')
+            alias = f'R{number}'
+            if photo_refs is not None:
+                photo_refs[alias] = frame
+            note = f'关联历史{label}，画面记录时间 {when}。可用 embodied 动作“回看照片 {alias}：问题”进一步查看。'
+            if enabled and not any(p['reference']==frame for p in images):
+                images.append({'kind':'image','role':'memory_overview','reference':frame,
+                               'label':label,'time_label':when})
+            if not enabled:
+                note += '本轮未提供原图。'
+            enriched[fragment.id] = replace(fragment, content=fragment.content+'\n'+note)
+        if (not memory and enabled and current.media_context and
+                re.search(r'那张照片|那张图|那行字|那个编号|刚才回忆',current.input_text)):
+            previous = self._main_images.recall_followup(recall_key)
+            if previous:
+                images.append(previous)
+                if photo_refs is not None:
+                    photo_refs['R1'] = previous['reference']
+        for overview in tuple(images):
+            targets = store.focus_targets(subject, overview['reference'])
+            matches = [(target, box) for target,box in targets if target in current.input_text]
+            if not matches and len(targets)==1 and any(word in current.input_text for word in ('局部','细看','那行','编号','看清')):
+                matches = targets
+            if len(matches)==1:
+                target,box = matches[0]
+                images.append({**overview,'role':'memory_crop','label':overview['label']+'的局部 '+target,
+                               'target':target,'region':box})
         return replace(current, fragments=tuple(enriched.get(f.id, f) for f in current.fragments),
                        input_parts=(*current.input_parts, *images))
 
@@ -2160,17 +2230,20 @@ class SubjectProcess:
         ``response_plan`` 一旦完整且 mode=respond 就先回调 ``on_reply``(提前开口),
         其余段(活跃区/打分)继续收、最终返回完整 ``ModelResponse``。
         """
-        current = self._recall_media(current)
+        photo_refs = {}
+        current = self._recall_media(current, photo_refs)
         media_context = current.media_context or self._media_context
         media_tokens, media_references = (), ()
+        delivered_overviews, delivered_recent = [], []
         if self.vision:
             parts = list(current.input_parts)
-            if current.visual_snapshot and not any(p.get('kind') == 'image' for p in parts):
-                parts.append({'kind':'image', 'reference':current.visual_snapshot['frame']})
+            if current.visual_snapshot and not any(p.get('kind') == 'image' and p.get('reference') == current.visual_snapshot['frame'] and p.get('role','current')=='current' for p in parts):
+                parts.insert(0, {'kind':'image', 'reference':current.visual_snapshot['frame']})
             parts, media_tokens, media_references = self._main_images.prepare(
                 parts, subject=current.subject_state.subject_id, context=media_context,
                 allowed=current.main_image == 'include' and self.vision.config.cognition_images,
-                store=self.vision.store, force=current.force_image_review)
+                store=self.vision.store, force=current.force_image_review, recalled_allowed=self.vision.config.cognition_images,
+                delivered_overviews=delivered_overviews, delivered_recent=delivered_recent)
             current = replace(current, input_parts=parts)
         speaker = None
         if current.speaker is not None:
@@ -2279,17 +2352,28 @@ class SubjectProcess:
         from .cancellation import invoke
         try:
             from .preparation import NeedDeep
-            try:
-                response = invoke(self.cognition, request, on_reply=on_reply)
-            except NeedDeep:
-                if not request.light_finalize:
-                    raise
-                if current.on_reconsider:
-                    current.on_reconsider()
-                request = replace(request, preparation_context='', light_finalize=False)
+            from jshi.models.base import ImageInputUnsupported
+            while True:
+                try:
+                    response = invoke(self.cognition, request, on_reply=on_reply)
+                    break
+                except NeedDeep:
+                    if not request.light_finalize:
+                        raise
+                    if current.on_reconsider:
+                        current.on_reconsider()
+                    request = replace(request, preparation_context='', light_finalize=False)
+                except ImageInputUnsupported:
+                    if not any(p.get('kind')=='image' for p in request.input_parts):
+                        raise
+                    text_parts = tuple(p for p in request.input_parts if p.get('kind')!='image')
+                    request = replace(request, input_parts=(*text_parts, {
+                        'kind':'media_status','text':'当前主认知模型不支持图片，本轮只有文字材料。'}))
+                    media_references,media_tokens = (),()
+                    delivered_overviews.clear()
+                    delivered_recent.clear()
                 self._record_step_input(request, self.cognition,
                     subject_id=current.subject_state.subject_id, activity_id=activity_id)
-                response = invoke(self.cognition, request, on_reply=on_reply)
             from .cancellation import check
             check()
         except Exception as exc:
@@ -2305,6 +2389,10 @@ class SubjectProcess:
                 response = replace(response, memory_ratings=ratings)
             except Exception:
                 logger.exception('recall working set completion failed')
+        if self.vision and current.media_context:
+            # Only retain a reference to pixels actually delivered on this turn.
+            key = (current.subject_state.subject_id, current.media_context, getattr(current.speaker,'object_id',''))
+            self._main_images.remember_recall(key, delivered_overviews[0] if len(delivered_overviews) == 1 else None)
         if self.vision and media_tokens:
             self._main_images.commit(current.subject_state.subject_id, media_context, media_tokens)
             try:
@@ -2321,6 +2409,22 @@ class SubjectProcess:
                 # The first verbal plan may already have streamed. Never replace
                 # it with a second, unplayed answer or claim its results delivered.
                 response = replace(response, tool_intent=intent, tool_handling=(), tool_consumed=())
+        metadata = dict(response.metadata or {})
+        metadata.pop('presented_prior_frame', None)
+        if len(delivered_recent)==1:
+            metadata['presented_prior_frame'] = delivered_recent[0]['reference']
+        if metadata != (response.metadata or {}):
+            response = replace(response, metadata=metadata)
+        if photo_refs:
+            items = []
+            for item in response.response_plan.items:
+                match = re.fullmatch(r'回看照片 (R[0-9]+)[：:]\s*(.+)', item.text.strip())
+                if item.channel == 'embodied' and match:
+                    if match[1] not in photo_refs:
+                        continue
+                    item = replace(item, text=f'回看照片 {photo_refs[match[1]]}：{match[2]}')
+                items.append(item)
+            response = replace(response, response_plan=replace(response.response_plan, items=tuple(items)))
         return response
 
     def _wood_write_user_text(

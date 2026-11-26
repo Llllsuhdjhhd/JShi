@@ -24,6 +24,10 @@ class VisionConfig:
     rolling_bytes: int = 256 * 1024 * 1024
     memory_bytes: int = 512 * 1024 * 1024
     retention_seconds: float = 86400
+    overview_side: int = 512
+    recall_photo_limit: int = 4
+    main_image_bytes: int = 8 * 1024 * 1024
+    recent_scene_seconds: int = 30
     max_image_bytes: int = 8 * 1024 * 1024
     timeout_seconds: float = 45
     max_calls_per_hour: int = 120
@@ -45,7 +49,7 @@ class VisionConfig:
         if self.detector not in {"change", "yolo"}:
             raise ValueError("vision detector must be change or yolo")
         for name in ("sample_seconds", "local_refresh_seconds", "archive_seconds", "cooldown_seconds", "refresh_seconds",
-                     "rolling_bytes", "memory_bytes", "retention_seconds", "max_image_bytes", "timeout_seconds", "max_calls_per_hour", "portrait_limit", "face_min_size", "face_identity_limit"):
+                     "rolling_bytes", "memory_bytes", "retention_seconds", "overview_side", "main_image_bytes", "recall_photo_limit", "recent_scene_seconds", "max_image_bytes", "timeout_seconds", "max_calls_per_hour", "portrait_limit", "face_min_size", "face_identity_limit"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"vision {name} must be positive")
         if not 0 < self.face_match_threshold < 1 or not 0 <= self.face_match_gap < 1 or not 0 < self.portrait_similarity_limit <= 1:

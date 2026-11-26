@@ -12,7 +12,7 @@ from urllib.request import Request
 
 from jshi.models.http_pool import urlopen
 
-from .base import ModelResponse, deepseek_json_output
+from .base import ModelResponse, deepseek_json_output, model_user_content, rejects_image_input, ImageInputUnsupported
 from .prompt import build_system, build_user
 
 
@@ -149,6 +149,9 @@ class ProviderModel:
             return urlopen(request, timeout=self.timeout)
         except HTTPError as exc:
             detail = exc.read(8192).decode('utf8',errors='replace').lower()
+            if rejects_image_input(request,exc.code,detail):
+                exc.close()
+                raise ImageInputUnsupported('当前模型不接受图片输入') from None
             try:
                 parsed=json.loads(detail)
                 error=parsed.get('error',parsed)
@@ -207,12 +210,8 @@ class ProviderModel:
             'finish_reason': finish, 'response_format': response_format})
 
     def _messages(self, request):
-        content = [{'type':'text','text':build_user(request)}]
-        for p in request.input_parts:
-            if p.get('kind')=='image' and p.get('image_url'):
-                if p.get('label'): content.append({'type':'text','text':p['label']+'（关联历史事件的照片，以照片时间为准）'})
-                content.append({'type':'image_url','image_url':{'url':p['image_url']}})
-        return [{'role':'system','content':build_system(request)},{'role':'user','content':content if len(content)>1 else content[0]['text']}]
+        content = model_user_content(request, build_user(request))
+        return [{'role':'system','content':build_system(request)}, {'role':'user','content':content}]
 
     def generate(self, request):
         if getattr(request, 'light_finalize', False):
@@ -395,7 +394,7 @@ class RoutedModel:
             }
 
     def _retryable(self, exc):
-        return isinstance(exc,ProviderFailure) and exc.retryable or isinstance(exc,(TimeoutError,ConnectionError,URLError))
+        return isinstance(exc,ProviderFailure) and exc.retryable or isinstance(exc,(TimeoutError,ConnectionError,URLError,ImageInputUnsupported))
 
     def chat(self, messages, max_tokens=None, *, response_format=None):
         chain = self._snapshot()

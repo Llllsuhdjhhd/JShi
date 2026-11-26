@@ -285,7 +285,12 @@ class VisionService:
                     self.online_future = None
 
     def recall_image(self, subject, frame, question):
-        image = self.store.image(frame, subject)
+        crops = [(target,box) for target,box in self.store.focus_targets(subject,frame) if target in question]
+        if len(crops) == 1:
+            target,box = crops[0]
+            image = self.store.memory_view(subject,frame,target,box)
+        else:
+            image = self.store.image(frame, subject)
         if not self.config.cloud_enabled:
             raise RuntimeError('视觉大模型调用已关闭')
         if not self.local_model and not self.store.claim_call(subject):
@@ -315,6 +320,31 @@ class VisionService:
         if available.count(face) != 1:
             raise ValueError('face is missing or ambiguous in the referenced observation')
         return self.faces.bind(subject, face, object_id, basis=basis)
+
+    def remember_scene_action(self, subject, snapshot, action, sources, utterance, *, presented_prior=False):
+        """Bind the action to the decision's own frame, even if another frame arrived."""
+        frame = snapshot['frame']
+        if not sources or snapshot.get('reason') in ('recall_image','observation_result'):
+            return False
+        if action.startswith(('保留视觉焦点 ', '保留前帧焦点 ')):
+            fields = action.split(maxsplit=5)
+            if len(fields)!=6:
+                return False
+            if not presented_prior and not self.store.was_presented(subject, sources, frame):
+                return False
+            try:
+                box = [float(v) for v in fields[1:5]]
+                return self.store.save_focus(subject, snapshot['id'], fields[5], box, sources[0])
+            except (KeyError, ValueError):
+                return False
+        fields = action.removeprefix('记录地点 ').split('｜')
+        if len(fields)!=3 or any(not f.strip() or len(f)>160 for f in fields):
+            return False
+        place,feature,quote = fields
+        if quote not in utterance or place not in quote or feature not in quote:
+            return False
+        self.store.record_place(subject, frame, place, feature, quote, sources[0],snapshot.get('detections',()))
+        return True
 
     def request_action(self, subject, action):
         import re
