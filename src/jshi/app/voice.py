@@ -4601,7 +4601,7 @@ def create_app(process, subject_id: str, config: VoiceConfig, jev=None, local=No
         return web.FileResponse(Path(__file__).with_name("voice_capture.js"))
 
     async def vision_chat_script(request):
-        return web.FileResponse(Path(__file__).with_name('vision_chat.js'))
+        return web.FileResponse(Path(__file__).with_name('vision_chat.js'), headers={'Cache-Control': 'no-cache'})
 
     async def enrollment_page(request):
         return web.FileResponse(Path(__file__).with_name('voice_enroll.html'))

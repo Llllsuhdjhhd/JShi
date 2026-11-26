@@ -16,7 +16,8 @@ async function main(){
   const now = Date.now()/1000;
   let data={sample_seconds:2,server_time:now,voice_active:true,
     environment:{image_available:true,frame:'first',description:'有人在门边',description_model:'observed-model',described_at:now+1},errors:[]};
-  const chat=new VisionChat({document,mediaDevices,captureToken:()=>'desktop-1',ensureVoice:async()=>true,
+  data.capture={id:'capture-1',kind:'desktop'};
+  const chat=new VisionChat({document,mediaDevices,captureToken:()=>'desktop-1',captureId:()=>'capture-1',ensureVoice:async()=>true,
     pin:card=>pinned.push(card),insert:card=>cards.push(card),request:async()=>response(data),notice(){},state(){}});
   chat.tick=()=>{};
   const first=chat.start(),second=chat.start();
@@ -71,7 +72,34 @@ async function main(){
   const chosen=chat.submit(photo,2,'photo',chat.photoCard);
   await Promise.resolve();assert.deepEqual(uploads,['browser']);finish();
   await Promise.all([camera,chosen]);assert.deepEqual(uploads,['browser','photo']);
-  chat.dispose();
+
+  try {
+    const start=chat.start();await Promise.resolve();
+    release({getTracks:()=>[{stop:()=>stops++}]});assert.equal(await start,true);
+    let frameResponse={ok:false,status:409,text:async()=>'只有当前语音连接可以发送画面'};
+    chat.options.request=async(url,options)=>options?.method?frameResponse:response(data);
+    assert.equal(await chat.submit(photo,3,'browser',chat.card),false);
+    assert.equal(chat.active,true,'a rejected frame must not stop the preview while the same capture is active');
+    assert.match(chat.card.uploadStatus.textContent,/正在重试/);
+    frameResponse=response({accepted:true});
+    assert.equal(await chat.submit(photo,4,'browser',chat.card),true);
+    assert.equal(chat.card.uploadStatus.hidden,true);
+
+    data.capture={id:'capture-2',kind:'desktop'};
+    await chat.poll();
+    assert.equal(chat.active,false);
+    assert.match(chat.card.description.textContent,/会话已切换/);
+
+    data.capture={id:'capture-1',kind:'desktop'};
+    const restart=chat.start();await Promise.resolve();
+    release({getTracks:()=>[{stop:()=>stops++}]});assert.equal(await restart,true);
+    data.voice_active=false;data.capture=null;
+    await chat.poll();
+    assert.equal(chat.active,false);
+    assert.match(chat.card.description.textContent,/语音连接已结束/);
+  } finally {
+    chat.dispose();
+  }
   console.log('Vision chat: one camera card, cancellation, compact display, photo grouping and upload ordering passed');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
